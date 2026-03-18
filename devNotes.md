@@ -166,6 +166,9 @@ cargo run -p homecore --release
 
 # Run the virtual device
 cargo run -p virtual-device -- --broker 127.0.0.1 --port 1883 --id plugin.virtual
+
+# Run the http-poller (requires a config file — see http-poller.example.toml)
+cargo run -p http-poller -- --config plugins/examples/http-poller/http-poller.toml
 ```
 
 ---
@@ -181,6 +184,7 @@ cargo test -p hc-auth
 cargo test -p hc-core
 cargo test -p hc-api
 cargo test -p hc-topic-map
+cargo test -p http-poller
 
 # Run a specific test by name (partial match works)
 cargo test -p hc-core repeat_until
@@ -204,12 +208,13 @@ cargo test --workspace -- --test-threads=1
 | Crate | Tests | What they cover |
 |---|---|---|
 | `hc-auth` | 11 | Password hashing (5), JWT issue/validate/expire/tamper/role (6) |
-| `hc-core` | 7 | Rule engine trigger matching (4), executor RepeatUntil/Delay (3) |
-| `hc-api` | 15 | Event log ring buffer (8), WebSocket auth (7) |
+| `hc-core` | 12 | Rule engine trigger matching (4), executor RepeatUntil/Delay (3), CallService (5) |
+| `hc-api` | 22 | Event log ring buffer (8), WebSocket auth (7), scope enforcement (7) |
 | `hc-topic-map` | 4 | Pattern matching and transforms |
+| `http-poller` | 19 | Path extraction (6), field_map (2), JSON↔Dynamic bridge (7), Rhai transform (4) |
 | `homecore` (integration) | 1 | Full stack: virtual device → MQTT → rule fires → command |
 
-Total: **38 tests**
+Total: **69 tests**
 
 ---
 
@@ -300,6 +305,85 @@ source .env.dev
 TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"admin\",\"password\":\"$HC_ADMIN_PASS\"}" | jq -r .token)
+```
+
+---
+
+## Scope-based access control
+
+Every protected API route enforces a scope before the handler body runs.  The scope check is a zero-cost Axum extractor: if the JWT lacks the required scope the request is rejected with HTTP 403 before any database or MQTT work happens.
+
+### Roles and their scopes
+
+| Role       | Scopes granted |
+|------------|----------------|
+| `Admin`    | All scopes including `users:write`, `plugins:write` |
+| `User`     | All read + write scopes except `users:write`, `plugins:write`, `areas:write` |
+| `ReadOnly` | All `*:read` scopes only |
+
+### Scope → endpoint mapping
+
+| Scope               | Endpoints |
+|---------------------|-----------|
+| `devices:read`      | `GET /devices`, `GET /devices/{id}`, `GET /devices/{id}/history`, `GET /events` |
+| `devices:write`     | `PATCH /devices/{id}/state` |
+| `automations:read`  | `GET /automations`, `GET /automations/{id}`, `POST /automations/{id}/test`, `GET /automations/export` |
+| `automations:write` | `POST /automations`, `PUT /automations/{id}`, `PATCH /automations/{id}`, `DELETE /automations/{id}`, `POST /automations/import` |
+| `areas:read`        | `GET /areas` |
+| `areas:write`       | `POST /areas`, `PUT /areas/{id}/devices` |
+| `scenes:read`       | `GET /scenes` |
+| `scenes:write`      | `POST /scenes`, `POST /scenes/{id}/activate` |
+| `plugins:read`      | `GET /plugins` |
+| `plugins:write`     | `DELETE /plugins/{id}` |
+
+Public routes (`/health`, `/auth/login`, `/webhooks/{path}`, `/events/stream`) require no token.
+
+### How it works in code
+
+`auth_middleware.rs` defines a `scope_extractor!` macro that generates a typed guard for each scope.  Adding the guard as a handler parameter is all that's needed:
+
+```rust
+// Requires "devices:read" — 403 if the token lacks this scope
+pub async fn list_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    // ...
+}
+```
+
+The `require_auth` middleware runs first (validates the JWT, injects `Claims` into extensions).  The scope extractor runs next (reads claims from extensions, checks the scope).
+
+### Creating users for different roles (curl)
+
+```sh
+# Create a read-only reporting user
+curl -s -X POST http://localhost:8080/api/v1/auth/users \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"dashboard","password":"secret","role":"ReadOnly"}' | jq
+
+# Create an automation-managing user (User role — can read/write automations but not manage users)
+curl -s -X POST http://localhost:8080/api/v1/auth/users \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"automation-mgr","password":"secret","role":"User"}' | jq
+```
+
+### Testing scope enforcement
+
+```sh
+# Get a ReadOnly token
+RO_TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"dashboard","password":"secret"}' | jq -r .token)
+
+# This succeeds (devices:read is granted to ReadOnly)
+curl -s -H "Authorization: Bearer $RO_TOKEN" http://localhost:8080/api/v1/devices | jq
+
+# This returns 403 (devices:write not granted to ReadOnly)
+curl -s -X PATCH http://localhost:8080/api/v1/devices/light.living_room/state \
+  -H "Authorization: Bearer $RO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"on":true}'
+# → {"error":"scope 'devices:write' required"}
 ```
 
 ---
@@ -893,6 +977,310 @@ websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
 # Check compiler output on save (requires cargo-watch: cargo install cargo-watch)
 cargo watch -x "check --workspace"
 ```
+
+---
+
+## http-poller — polling HTTP endpoints as HomeCore devices
+
+The `http-poller` plugin turns any JSON HTTP endpoint into a HomeCore device.  It runs as a separate process, connects to the MQTT broker, and periodically publishes the fetched data as device state.  Rules, history, WebSocket events, and the REST API all treat it like any other device.
+
+**Typical use cases:**
+- Weather APIs (OpenWeatherMap, weather station REST endpoints)
+- Local devices with HTTP status pages (NAS, UPS, inverter, router)
+- Cloud services that don't support push notifications
+- Custom sensors with a `/data` endpoint (ESP32, Raspberry Pi, etc.)
+
+---
+
+### Quick start
+
+```sh
+# 1. Copy the example config and edit it
+cp plugins/examples/http-poller/http-poller.example.toml http-poller.toml
+$EDITOR http-poller.toml
+
+# 2. Make sure the HomeCore server is running (Terminal 1)
+cargo run -p homecore
+
+# 3. Start the poller (Terminal 2)
+cargo run -p http-poller -- --config http-poller.toml
+```
+
+Alternatively, use the environment variable:
+```sh
+HC_CONFIG=/etc/homecore/poller.toml cargo run -p http-poller
+```
+
+On startup you will see one log line per registered device:
+```
+INFO http_poller  config="http-poller.toml" pollers=2 plugin_id="plugin.http-poller" http-poller starting
+INFO plugin_sdk_rs  device_id="sensor.outdoor_weather" Device registered
+INFO http_poller  device_id="sensor.outdoor_weather" url="https://..." interval_secs=300 mapping="field_map" Poller started
+```
+
+Devices start `offline` and transition to `online` on the first successful poll.
+
+---
+
+### Config file structure
+
+The config file has two sections: `[plugin]` for the MQTT connection, and one `[[poller]]` block per device.
+
+```toml
+[plugin]
+id          = "plugin.http-poller"   # must be unique across all plugins
+broker_host = "127.0.0.1"
+broker_port = 1883
+password    = ""                     # set if broker ACL is enabled
+
+[[poller]]
+device_id     = "sensor.my_device"  # HomeCore device ID
+name          = "My Device"         # human-readable label
+url           = "http://..."        # URL to fetch
+interval_secs = 30                  # seconds between polls (default: 30)
+timeout_secs  = 10                  # per-request HTTP timeout (default: 10)
+
+[poller.headers]                     # optional — for API keys, auth tokens
+"Authorization" = "Bearer my-token"
+"X-API-Key"     = "abc123"
+
+[poller.capabilities]                # optional device schema for frontends
+temperature = { type = "number", unit = "°C" }
+humidity    = { type = "integer", unit = "%" }
+```
+
+---
+
+### Response mapping — three modes
+
+#### Mode 1: `field_map` (dot-notation path extraction)
+
+Maps target attribute names to paths inside the JSON response.  Supports nested objects with `.` and array indexing with `[n]`.  Missing paths emit a warning and are omitted from the state — they don't fail the poll.
+
+```toml
+[poller.field_map]
+temperature  = "main.temp"                  # response["main"]["temp"]
+humidity     = "main.humidity"              # response["main"]["humidity"]
+description  = "weather[0].description"    # response["weather"][0]["description"]
+deep_value   = "sensors[2].readings[0].v"  # nested arrays + objects
+```
+
+#### Mode 2: `transform` (Rhai script)
+
+A script evaluated with `response` in scope.  Must return a Rhai map (`#{ ... }`).  Use this when `field_map` isn't expressive enough: arithmetic, conditionals, percentage calculations, string manipulation.
+
+```toml
+transform = """
+    let temp_k = response["temperature_kelvin"].to_float();
+    let disk   = response["storage"]["used"].to_float()
+                 / response["storage"]["total"].to_float() * 100.0;
+    #{
+        "temp_c":        temp_k - 273.15,
+        "disk_used_pct": disk,
+        "status":        if disk > 90.0 { "critical" } else { "ok" },
+    }
+"""
+```
+
+`transform` takes precedence over `field_map` if both are set.  Scripts are validated at startup — a syntax error fails fast before any polls run.
+
+#### Mode 3: raw passthrough
+
+No `field_map` and no `transform`: the full parsed JSON response body is published directly as device state.  Use this when the endpoint already returns a flat attribute map.
+
+```toml
+[[poller]]
+device_id     = "sensor.custom"
+name          = "Custom Sensor"
+url           = "http://192.168.1.200/state"
+interval_secs = 15
+# no field_map, no transform → raw passthrough
+```
+
+---
+
+### Worked example — OpenWeatherMap
+
+```toml
+[plugin]
+id          = "plugin.http-poller"
+broker_host = "127.0.0.1"
+broker_port = 1883
+
+[[poller]]
+device_id     = "sensor.outdoor_weather"
+name          = "Outdoor Weather"
+url           = "https://api.openweathermap.org/data/2.5/weather?q=London,UK&units=metric&appid=YOUR_KEY"
+interval_secs = 300
+timeout_secs  = 10
+
+[poller.capabilities]
+temperature = { type = "number", unit = "°C" }
+humidity    = { type = "integer", unit = "%" }
+description = { type = "string" }
+wind_speed  = { type = "number", unit = "m/s" }
+
+[poller.field_map]
+temperature = "main.temp"
+humidity    = "main.humidity"
+description = "weather[0].description"
+wind_speed  = "wind.speed"
+```
+
+After one poll, the device appears in the API:
+
+```sh
+curl -s http://localhost:8080/api/v1/devices/sensor.outdoor_weather \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+```json
+{
+  "device_id": "sensor.outdoor_weather",
+  "name": "Outdoor Weather",
+  "available": true,
+  "attributes": {
+    "temperature": 18.3,
+    "humidity": 62,
+    "description": "light rain",
+    "wind_speed": 4.1
+  }
+}
+```
+
+---
+
+### Worked example — complex transform (NAS status)
+
+When the response structure needs reshaping or arithmetic before it makes sense as device state:
+
+```toml
+[[poller]]
+device_id     = "sensor.nas_status"
+name          = "NAS Status"
+url           = "http://192.168.1.100:5000/api/v2/system"
+interval_secs = 30
+
+[poller.headers]
+"X-API-Key" = "nas-api-key"
+
+[poller.capabilities]
+cpu_temp_c      = { type = "number", unit = "°C" }
+disk_used_pct   = { type = "number", unit = "%" }
+memory_used_pct = { type = "number", unit = "%" }
+uptime_hours    = { type = "number" }
+
+transform = """
+    let disk_pct = response["storage"]["used_bytes"].to_float()
+                   / response["storage"]["total_bytes"].to_float() * 100.0;
+    let mem_pct  = response["memory"]["used_mb"].to_float()
+                   / response["memory"]["total_mb"].to_float() * 100.0;
+    #{
+        "cpu_temp_c":      response["cpu"]["temperature"],
+        "disk_used_pct":   disk_pct,
+        "memory_used_pct": mem_pct,
+        "uptime_hours":    response["uptime_seconds"].to_float() / 3600.0,
+    }
+"""
+```
+
+---
+
+### Writing a rule that reacts to polled data
+
+Once the device is online, rules work exactly like any other device.
+
+**Example — alert when NAS disk is nearly full:**
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "NAS disk alert",
+    "enabled": true,
+    "priority": 10,
+    "trigger": {
+      "type": "DeviceStateChanged",
+      "device_id": "sensor.nas_status",
+      "attribute": "disk_used_pct"
+    },
+    "conditions": [
+      {
+        "type": "DeviceState",
+        "device_id": "sensor.nas_status",
+        "attribute": "disk_used_pct",
+        "op": "Gt",
+        "value": 85
+      }
+    ],
+    "actions": [
+      {
+        "type": "CallService",
+        "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+        "method": "POST",
+        "body": { "text": "NAS disk above 85% — clean up soon" }
+      }
+    ]
+  }' | jq
+```
+
+**Example — turn on a light when it gets cold outside:**
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Cold weather lamp",
+    "enabled": true,
+    "priority": 5,
+    "trigger": {
+      "type": "DeviceStateChanged",
+      "device_id": "sensor.outdoor_weather",
+      "attribute": "temperature"
+    },
+    "conditions": [
+      {
+        "type": "DeviceState",
+        "device_id": "sensor.outdoor_weather",
+        "attribute": "temperature",
+        "op": "Lt",
+        "value": 5
+      }
+    ],
+    "actions": [
+      {
+        "type": "SetDeviceState",
+        "device_id": "light.living_room_main",
+        "state": { "on": true, "brightness": 180, "color_temp": 2700 }
+      }
+    ]
+  }' | jq
+```
+
+---
+
+### Availability and offline handling
+
+Each device starts `offline` when the poller starts.  After the first successful poll it goes `online`.  If a poll fails (network error, HTTP 4xx/5xx, invalid JSON), it goes `offline` and logs a warning.  It recovers automatically on the next successful poll — no restart needed.
+
+Watch availability changes in the event stream:
+```sh
+websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=device_availability_changed"
+```
+
+---
+
+### Where the code lives
+
+| File | What it contains |
+|---|---|
+| `plugins/examples/http-poller/src/config.rs` | `AppConfig`, `PluginSection`, `PollerConfig` — all TOML types |
+| `plugins/examples/http-poller/src/poller.rs` | Poll loop, field_map extraction, Rhai transform, JSON↔Dynamic bridge |
+| `plugins/examples/http-poller/src/main.rs` | Startup: config load, validation, MQTT connect, task spawning |
+| `plugins/examples/http-poller/http-poller.example.toml` | Fully annotated config reference with 5 real-world examples |
+| `plugins/plugin-sdk-rs/src/lib.rs` | `DevicePublisher::set_available` (added alongside this feature) |
 
 ---
 

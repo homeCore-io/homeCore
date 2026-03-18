@@ -29,6 +29,18 @@ impl DevicePublisher {
             .await
             .context("publish_state failed")
     }
+
+    /// Publish `"online"` or `"offline"` to the device's availability topic (retained).
+    /// Mirrors [`PluginClient::set_available`] for use from spawned tasks that hold
+    /// only a [`DevicePublisher`] handle.
+    pub async fn set_available(&self, device_id: &str, available: bool) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/availability");
+        let payload = if available { "online" } else { "offline" };
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())
+            .await
+            .context("DevicePublisher::set_available failed")
+    }
 }
 
 /// Connection configuration for a plugin.

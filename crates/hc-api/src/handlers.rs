@@ -13,6 +13,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::auth_middleware::{
+    AreasRead, AreasWrite, AutomationsRead, AutomationsWrite, DevicesRead, DevicesWrite,
+    PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
+};
 use crate::AppState;
 
 // ---------- Health ----------
@@ -23,7 +27,7 @@ pub async fn health() -> impl IntoResponse {
 
 // ---------- Devices ----------
 
-pub async fn list_devices(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn list_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
     match s.store.list_devices().await {
         Ok(devices) => (StatusCode::OK, Json(json!(devices))),
         Err(e) => (
@@ -35,6 +39,7 @@ pub async fn list_devices(State(s): State<AppState>) -> impl IntoResponse {
 
 pub async fn get_device(
     State(s): State<AppState>,
+    _: DevicesRead,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match s.store.get_device(&id).await {
@@ -46,6 +51,7 @@ pub async fn get_device(
 
 pub async fn command_device(
     State(s): State<AppState>,
+    _: DevicesWrite,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -62,6 +68,7 @@ pub async fn command_device(
 
 pub async fn device_history(
     State(s): State<AppState>,
+    _: DevicesRead,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let from = chrono::Utc::now() - chrono::Duration::hours(24);
@@ -78,7 +85,7 @@ pub async fn device_history(
 
 // ---------- Areas ----------
 
-pub async fn list_areas(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {
     match s.store.list_areas().await {
         Ok(areas) => (StatusCode::OK, Json(json!(areas))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
@@ -92,6 +99,7 @@ pub struct CreateAreaBody {
 
 pub async fn create_area(
     State(s): State<AppState>,
+    _: AreasWrite,
     Json(body): Json<CreateAreaBody>,
 ) -> impl IntoResponse {
     let area = Area { id: Uuid::new_v4(), name: body.name, device_ids: vec![] };
@@ -103,7 +111,7 @@ pub async fn create_area(
 
 // ---------- Automations (Rules) ----------
 
-pub async fn list_automations(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn list_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
     match s.store.list_rules().await {
         Ok(rules) => (StatusCode::OK, Json(json!(rules))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
@@ -112,6 +120,7 @@ pub async fn list_automations(State(s): State<AppState>) -> impl IntoResponse {
 
 pub async fn create_automation(
     State(s): State<AppState>,
+    _: AutomationsWrite,
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
     rule.id = Uuid::new_v4();
@@ -130,6 +139,7 @@ pub async fn create_automation(
 
 pub async fn get_automation(
     State(s): State<AppState>,
+    _: AutomationsRead,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     match s.store.get_rule(id).await {
@@ -141,6 +151,7 @@ pub async fn get_automation(
 
 pub async fn update_automation(
     State(s): State<AppState>,
+    _: AutomationsWrite,
     Path(id): Path<Uuid>,
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
@@ -163,6 +174,7 @@ pub async fn update_automation(
 
 pub async fn delete_automation(
     State(s): State<AppState>,
+    _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     match s.store.delete_rule(id).await {
@@ -180,7 +192,7 @@ pub async fn delete_automation(
 
 // ---------- Scenes ----------
 
-pub async fn list_scenes(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn list_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoResponse {
     match s.store.list_scenes().await {
         Ok(scenes) => (StatusCode::OK, Json(json!(scenes))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
@@ -189,6 +201,7 @@ pub async fn list_scenes(State(s): State<AppState>) -> impl IntoResponse {
 
 pub async fn create_scene(
     State(s): State<AppState>,
+    _: ScenesWrite,
     Json(mut scene): Json<Scene>,
 ) -> impl IntoResponse {
     scene.id = Uuid::new_v4();
@@ -200,6 +213,7 @@ pub async fn create_scene(
 
 pub async fn activate_scene(
     State(s): State<AppState>,
+    _: ScenesWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let scene = match s.store.get_scene(id).await {
@@ -236,6 +250,7 @@ pub async fn activate_scene(
 /// which actions *would* fire — without executing them.
 pub async fn test_automation(
     State(s): State<AppState>,
+    _: AutomationsRead,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let rule = match s.store.get_rule(id).await {
@@ -323,7 +338,7 @@ fn compare_values(
 
 /// `GET /api/v1/automations/export`
 /// Returns all rules as a JSON array (ready to re-import).
-pub async fn export_automations(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn export_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
     match s.store.list_rules().await {
         Ok(rules) => (StatusCode::OK, Json(json!(rules))),
         Err(e) => (
@@ -337,6 +352,7 @@ pub async fn export_automations(State(s): State<AppState>) -> impl IntoResponse 
 /// Accepts a JSON array of rules; assigns fresh UUIDs and saves them all.
 pub async fn import_automations(
     State(s): State<AppState>,
+    _: AutomationsWrite,
     Json(rules): Json<Vec<Rule>>,
 ) -> impl IntoResponse {
     let mut saved = Vec::with_capacity(rules.len());
@@ -362,7 +378,7 @@ pub async fn import_automations(
 
 // ---------- Plugins ----------
 
-pub async fn list_plugins(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
     let map = s.plugins.read().await;
     let list: Vec<_> = map.values().cloned().collect();
     (StatusCode::OK, Json(json!(list)))
@@ -370,6 +386,7 @@ pub async fn list_plugins(State(s): State<AppState>) -> impl IntoResponse {
 
 pub async fn deregister_plugin(
     State(s): State<AppState>,
+    _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let mut map = s.plugins.write().await;
@@ -386,6 +403,7 @@ pub async fn deregister_plugin(
 /// Body: `["device_id_1", "device_id_2", ...]`
 pub async fn set_area_devices(
     State(s): State<AppState>,
+    _: AreasWrite,
     Path(id): Path<Uuid>,
     Json(device_ids): Json<Vec<String>>,
 ) -> impl IntoResponse {
@@ -413,6 +431,7 @@ pub struct PatchAutomationBody {
 /// Allows partial update of `enabled` and/or `priority` without replacing the whole rule.
 pub async fn patch_automation(
     State(s): State<AppState>,
+    _: AutomationsWrite,
     Path(id): Path<Uuid>,
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
@@ -473,6 +492,7 @@ pub async fn receive_webhook(
 /// - `device_id` — only events for this device
 pub async fn list_events(
     State(s): State<AppState>,
+    _: DevicesRead,
     axum::extract::Query(query): axum::extract::Query<crate::event_log::EventLogQuery>,
 ) -> impl IntoResponse {
     let entries = s.event_log.query(&query);
