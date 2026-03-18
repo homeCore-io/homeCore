@@ -2,11 +2,12 @@
 
 use anyhow::{anyhow, Result};
 use hc_mqtt_client::PublishHandle;
+use hc_notify::NotificationService;
 use hc_scripting::ScriptRuntime;
 use hc_state::StateStore;
 use hc_types::rule::Action;
 use serde_json::Value as JsonValue;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::{info, warn};
 
 /// Shared HTTP client — initialised once, reused for every `CallService` action.
@@ -27,9 +28,10 @@ pub async fn execute_actions(
     actions: Vec<Action>,
     publish: Option<PublishHandle>,
     state: StateStore,
+    notify: Option<Arc<NotificationService>>,
 ) -> Result<()> {
     for action in actions {
-        execute_one(action, publish.clone(), state.clone()).await?;
+        execute_one(action, publish.clone(), state.clone(), notify.clone()).await?;
     }
     Ok(())
 }
@@ -38,6 +40,7 @@ async fn execute_one(
     action: Action,
     publish: Option<PublishHandle>,
     state: StateStore,
+    notify: Option<Arc<NotificationService>>,
 ) -> Result<()> {
     match action {
         Action::Delay { duration_ms } => {
@@ -50,7 +53,8 @@ async fn execute_one(
                 .map(|a| {
                     let p = publish.clone();
                     let s = state.clone();
-                    tokio::spawn(run_single_action(a, p, s))
+                    let n = notify.clone();
+                    tokio::spawn(run_single_action(a, p, s, n))
                 })
                 .collect();
             for h in handles {
@@ -58,7 +62,7 @@ async fn execute_one(
             }
         }
 
-        other => run_single_action(other, publish, state).await?,
+        other => run_single_action(other, publish, state, notify).await?,
     }
     Ok(())
 }
@@ -67,6 +71,7 @@ async fn run_single_action(
     action: Action,
     publish: Option<PublishHandle>,
     state: StateStore,
+    notify: Option<Arc<NotificationService>>,
 ) -> Result<()> {
     match action {
         Action::Delay { duration_ms } => {
@@ -75,7 +80,7 @@ async fn run_single_action(
 
         Action::Parallel { actions } => {
             for a in actions {
-                Box::pin(run_single_action(a, publish.clone(), state.clone())).await?;
+                Box::pin(run_single_action(a, publish.clone(), state.clone(), notify.clone())).await?;
             }
         }
 
@@ -96,7 +101,7 @@ async fn run_single_action(
                     break;
                 }
                 for a in &actions {
-                    Box::pin(run_single_action(a.clone(), publish.clone(), state.clone())).await?;
+                    Box::pin(run_single_action(a.clone(), publish.clone(), state.clone(), notify.clone())).await?;
                 }
                 if delay > 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
@@ -204,8 +209,20 @@ async fn run_single_action(
             .await??;
         }
 
-        Action::Notify { channel, message } => {
-            info!(channel, "NOTIFY: {message}");
+        Action::Notify { channel, message, title } => {
+            let title = title.as_deref().unwrap_or("HomeCore Alert");
+            match &notify {
+                Some(svc) => {
+                    if let Err(e) = svc.notify(&channel, title, &message).await {
+                        warn!(channel, error = %e, "Notification failed");
+                    } else {
+                        info!(channel, "Notification sent");
+                    }
+                }
+                None => {
+                    warn!(channel, "Notify action fired but no NotificationService configured");
+                }
+            }
         }
     }
     Ok(())
@@ -235,7 +252,7 @@ mod tests {
             max_iterations: Some(10),
             interval_ms: None,
         };
-        execute_actions(vec![action], None, store).await.unwrap();
+        execute_actions(vec![action], None, store, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -249,13 +266,13 @@ mod tests {
             interval_ms: None,
         };
         // Should complete without hanging.
-        execute_actions(vec![action], None, store).await.unwrap();
+        execute_actions(vec![action], None, store, None).await.unwrap();
     }
 
     #[tokio::test]
     async fn delay_action_completes() {
         let store = dummy_store().await;
-        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, store).await.unwrap();
+        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, store, None).await.unwrap();
     }
 
     // ---- CallService tests ----
@@ -285,7 +302,7 @@ mod tests {
             retries: None,
             response_event: None,
         };
-        execute_actions(vec![action], None, store).await.unwrap();
+        execute_actions(vec![action], None, store, None).await.unwrap();
         mock.assert_async().await;
     }
 
@@ -295,7 +312,7 @@ mod tests {
         server.mock("GET", "/gone").with_status(404).create_async().await;
 
         let store = dummy_store().await;
-        let result = execute_actions(vec![call_service(&format!("{}/gone", server.url()), "GET")], None, store).await;
+        let result = execute_actions(vec![call_service(&format!("{}/gone", server.url()), "GET")], None, store, None).await;
         assert!(result.is_err());
     }
 
@@ -315,7 +332,7 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        execute_actions(vec![action], None, store).await.unwrap();
+        execute_actions(vec![action], None, store, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -334,7 +351,7 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        let result = execute_actions(vec![action], None, store).await;
+        let result = execute_actions(vec![action], None, store, None).await;
         assert!(result.is_err());
     }
 
@@ -345,6 +362,7 @@ mod tests {
             vec![call_service("http://localhost/x", "CONNECT")],
             None,
             store,
+            None,
         )
         .await;
         assert!(result.is_err());

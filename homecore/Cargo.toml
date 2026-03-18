@@ -12,6 +12,7 @@ hc-auth        = { path = "../crates/hc-auth" }
 hc-api         = { path = "../crates/hc-api" }
 hc-types       = { path = "../crates/hc-types" }
 hc-topic-map   = { path = "../crates/hc-topic-map" }
+hc-notify      = { path = "../crates/hc-notify" }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 toml           = { workspace = true }

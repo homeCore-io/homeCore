@@ -10,9 +10,11 @@ members = [
     "crates/hc-api",
     "crates/hc-auth",
     "crates/hc-scripting",
+    "crates/hc-notify",
     "plugins/plugin-sdk-rs",
     "plugins/examples/virtual-device",
-    "plugins/examples/http-poller", "homecore",
+    "plugins/examples/http-poller",
+    "homecore",
 ]
 
 [workspace.dependencies]

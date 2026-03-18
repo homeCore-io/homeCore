@@ -210,6 +210,7 @@ cargo test --workspace -- --test-threads=1
 | `hc-auth` | 11 | Password hashing (5), JWT issue/validate/expire/tamper/role (6) |
 | `hc-core` | 12 | Rule engine trigger matching (4), executor RepeatUntil/Delay (3), CallService (5) |
 | `hc-api` | 22 | Event log ring buffer (8), WebSocket auth (7), scope enforcement (7) |
+| `hc-notify` | 0 | (providers tested via real SMTP/Pushover; unit tests require network mocking) |
 | `hc-topic-map` | 4 | Pattern matching and transforms |
 | `http-poller` | 19 | Path extraction (6), field_map (2), JSON↔Dynamic bridge (7), Rhai transform (4) |
 | `homecore` (integration) | 1 | Full stack: virtual device → MQTT → rule fires → command |
@@ -855,10 +856,414 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 | `CallService` | `url`, `method`, `body`, `timeout_ms?`, `retries?`, `response_event?` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. `timeout_ms` defaults to 10 000. `retries` retries on network errors and 5xx only (4xx fails immediately); backoff: 500 ms → 1 000 ms → 2 000 ms → 4 000 ms. If `response_event` is set, the response body (JSON) is published to `homecore/events/{response_event}` so downstream rules can react to it. |
 | `FireEvent` | `event_type`, `payload` | Emits a custom event on the internal bus — visible in WS stream and event log. |
 | `RunScript` | `script` | Sandboxed Rhai script. |
-| `Notify` | `channel`, `message` | Currently logs to server stdout. Real delivery channels are a future feature. |
+| `Notify` | `channel`, `message`, `title?` | Delivers via the named channel in `[notify]` config. `title` defaults to `"HomeCore Alert"`. Returns a warning (not an error) if the channel is missing or delivery fails, so the rule sequence continues. |
 | `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
+
+---
+
+## Notification system (`hc-notify`)
+
+Rules send notifications via the `Notify` action.  Each channel is configured once in `homecore.toml` and referenced by name in rules.  A failed delivery logs a warning but never aborts the rule's remaining actions.
+
+---
+
+### `Notify` action fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `channel` | yes | — | Name of the configured channel to use |
+| `message` | yes | — | Body text of the notification |
+| `title` | no | `"HomeCore Alert"` | Subject line / push title |
+
+```json
+{
+  "Notify": {
+    "channel": "phone",
+    "title":   "Motion detected",
+    "message": "Front door sensor triggered at 22:15"
+  }
+}
+```
+
+Multiple `Notify` actions in a single rule deliver to multiple channels in sequence:
+
+```json
+{ "Notify": { "channel": "phone",  "title": "Alert", "message": "Door open" } },
+{ "Notify": { "channel": "alerts", "title": "Alert", "message": "Door open" } }
+```
+
+---
+
+### Email (`type = "email"`)
+
+Uses SMTP with STARTTLS (port 587, default) or implicit TLS (port 465).  Multiple recipients are supported — each receives a separate email.
+
+#### Config fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | yes | — | Channel name used in rules |
+| `type` | yes | — | Must be `"email"` |
+| `smtp_host` | yes | — | SMTP server hostname |
+| `smtp_port` | no | `587` | SMTP port |
+| `username` | yes | — | SMTP auth username (usually your email address) |
+| `password` | yes | — | SMTP auth password |
+| `from` | yes | — | Envelope From address (e.g. `"HomeCore <hc@example.com>"`) |
+| `to` | yes | — | Array of recipient addresses |
+| `starttls` | no | `true` | `true` = STARTTLS (port 587); `false` = implicit TLS (port 465) |
+
+#### Gmail setup
+
+Gmail requires an **App Password** — your regular login password will be rejected.
+
+1. Enable 2-Step Verification on your Google account.
+2. Go to **Google Account → Security → App Passwords**.
+3. Create a new app password (name it "HomeCore").
+4. Use that 16-character password in the config.
+
+```toml
+[[notify.channels]]
+name      = "gmail"
+type      = "email"
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username  = "you@gmail.com"
+password  = "abcd efgh ijkl mnop"   # 16-char app password, spaces optional
+from      = "HomeCore <you@gmail.com>"
+to        = ["you@gmail.com"]
+starttls  = true
+```
+
+#### Outlook / Microsoft 365
+
+```toml
+[[notify.channels]]
+name      = "outlook"
+type      = "email"
+smtp_host = "smtp.office365.com"
+smtp_port = 587
+username  = "you@outlook.com"
+password  = "your-password"
+from      = "HomeCore <you@outlook.com>"
+to        = ["you@outlook.com"]
+starttls  = true
+```
+
+#### Generic SMTP (Mailgun, SendGrid, self-hosted)
+
+```toml
+[[notify.channels]]
+name      = "mailgun"
+type      = "email"
+smtp_host = "smtp.mailgun.org"
+smtp_port = 587
+username  = "postmaster@mg.yourdomain.com"
+password  = "your-mailgun-smtp-password"
+from      = "HomeCore <homecore@mg.yourdomain.com>"
+to        = ["ops@yourdomain.com"]
+starttls  = true
+```
+
+#### Port 465 (implicit TLS)
+
+Some providers or self-hosted servers only support port 465.  Set `starttls = false`:
+
+```toml
+[[notify.channels]]
+name      = "smtps"
+type      = "email"
+smtp_host = "mail.yourdomain.com"
+smtp_port = 465
+username  = "homecore@yourdomain.com"
+password  = "password"
+from      = "HomeCore <homecore@yourdomain.com>"
+to        = ["admin@yourdomain.com"]
+starttls  = false
+```
+
+#### Multiple recipients
+
+```toml
+[[notify.channels]]
+name = "family"
+type = "email"
+# ... smtp fields ...
+to   = ["alice@example.com", "bob@example.com", "carol@example.com"]
+```
+
+Each address receives a separate SMTP transaction.
+
+---
+
+### Pushover (`type = "pushover"`)
+
+Delivers push notifications to iOS and Android via the [Pushover](https://pushover.net) service (one-time $5 per platform).
+
+#### Prerequisites
+
+1. Create a Pushover account at <https://pushover.net>.
+2. Install the Pushover app on your phone.
+3. Note your **User Key** from the Pushover dashboard.
+4. Create an application at <https://pushover.net/apps/build> — note the **API Token**.
+
+#### Config fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | yes | — | Channel name used in rules |
+| `type` | yes | — | Must be `"pushover"` |
+| `api_token` | yes | — | Application API token from pushover.net/apps |
+| `user_key` | yes | — | Your user or group key from pushover.net |
+| `device` | no | all devices | Target a specific device name; omit for all |
+| `priority` | no | `0` | `-2` silent, `-1` quiet, `0` normal, `1` high, `2` emergency |
+
+#### Basic config
+
+```toml
+[[notify.channels]]
+name      = "phone"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"   # from pushover.net/apps
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"   # from pushover.net dashboard
+```
+
+#### Target a specific device
+
+Get your device name from the Pushover app (Settings → Device Name):
+
+```toml
+[[notify.channels]]
+name      = "iphone"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+device    = "Johns-iPhone"
+```
+
+#### Priority levels
+
+| Value | Behaviour |
+|---|---|
+| `-2` | No notification, no sound — message stored silently |
+| `-1` | Quiet — delivered without sound or vibration |
+| `0` | Normal — uses the device's default notification settings |
+| `1` | High — bypasses the user's quiet hours |
+| `2` | Emergency — repeats every 30 s until acknowledged (requires `expire` and `retry` fields via Pushover API directly) |
+
+```toml
+# High-priority channel for critical alerts (bypasses quiet hours)
+[[notify.channels]]
+name      = "urgent"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+priority  = 1
+
+# Silent channel for informational logging to phone
+[[notify.channels]]
+name      = "silent-log"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+priority  = -2
+```
+
+---
+
+### Full config example
+
+A realistic `homecore.toml` notify section with multiple channels for different urgency levels:
+
+```toml
+# Pushover — urgent alerts to phone (bypasses quiet hours)
+[[notify.channels]]
+name      = "urgent"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+priority  = 1
+
+# Pushover — normal alerts to phone
+[[notify.channels]]
+name      = "phone"
+type      = "pushover"
+api_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+priority  = 0
+
+# Email — daily summary / non-urgent notifications
+[[notify.channels]]
+name      = "email"
+type      = "email"
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username  = "homecore@gmail.com"
+password  = "app-password-here"
+from      = "HomeCore <homecore@gmail.com>"
+to        = ["you@gmail.com"]
+starttls  = true
+```
+
+Rules then target the right channel by urgency:
+
+```json
+// Security alert — send to urgent Pushover (bypasses quiet hours)
+{ "Notify": { "channel": "urgent", "title": "Security alert", "message": "Window sensor triggered" } }
+
+// Routine status — send email, no phone buzz
+{ "Notify": { "channel": "email", "title": "Daily summary", "message": "All devices online." } }
+```
+
+---
+
+### Worked example — door left open for 10 minutes
+
+This uses a `TimeOfDay` condition so the rule only fires during sleeping hours, combined with `Delay` + a re-check pattern using `RepeatUntil`:
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":     "Door left open at night",
+    "enabled":  true,
+    "priority": 20,
+    "trigger": {
+      "type":      "DeviceStateChanged",
+      "device_id": "sensor.front_door"
+    },
+    "conditions": [
+      {
+        "type":      "DeviceState",
+        "device_id": "sensor.front_door",
+        "attribute": "open",
+        "op":        "Eq",
+        "value":     true
+      },
+      {
+        "type":  "TimeWindow",
+        "start": "22:00:00",
+        "end":   "07:00:00"
+      }
+    ],
+    "actions": [
+      { "Delay": { "duration_ms": 600000 } },
+      {
+        "Notify": {
+          "channel": "urgent",
+          "title":   "Front door still open",
+          "message": "The front door has been open for 10 minutes"
+        }
+      },
+      {
+        "Notify": {
+          "channel": "email",
+          "title":   "Front door still open",
+          "message": "The front door has been open for 10 minutes"
+        }
+      }
+    ]
+  }' | jq
+```
+
+---
+
+### Worked example — temperature alert with multi-channel delivery
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":     "High temperature alert",
+    "enabled":  true,
+    "priority": 10,
+    "trigger": {
+      "type":      "DeviceStateChanged",
+      "device_id": "sensor.outdoor_weather"
+    },
+    "conditions": [
+      {
+        "type":      "DeviceState",
+        "device_id": "sensor.outdoor_weather",
+        "attribute": "temperature",
+        "op":        "Gt",
+        "value":     35
+      }
+    ],
+    "actions": [
+      {
+        "Parallel": {
+          "actions": [
+            { "Notify": { "channel": "phone",  "title": "High temperature", "message": "Outdoor temp exceeded 35°C" } },
+            { "Notify": { "channel": "email",  "title": "High temperature", "message": "Outdoor temp exceeded 35°C" } }
+          ]
+        }
+      }
+    ]
+  }' | jq
+```
+
+The `Parallel` wrapper sends both notifications concurrently instead of waiting for each in sequence.
+
+---
+
+### Troubleshooting
+
+**Channel not found warning in logs:**
+```
+WARN hc_core::executor channel="phone" Notify action fired but no NotificationService configured
+```
+→ No `[[notify.channels]]` entries in `homecore.toml`, or the server was started before the config was saved.  Restart the server after editing the config.
+
+**Channel name mismatch:**
+```
+WARN hc_core::executor channel="Phone" Notification failed error=Notification channel 'Phone' not configured
+```
+→ Channel names are case-sensitive.  The `name` in config and in the rule must match exactly.
+
+**Gmail authentication failure:**
+→ You are using your Google account password instead of an App Password.  See the Gmail setup instructions above.  Also check that the account has 2-Step Verification enabled (required for App Passwords).
+
+**Pushover 400 error:**
+→ The `api_token` or `user_key` is wrong.  Verify both at <https://pushover.net>.  The API token comes from your application page; the user key comes from the main dashboard.
+
+**SMTP connection refused:**
+→ Check `smtp_host` and `smtp_port`.  Firewalls sometimes block port 587 on home networks — try port 465 with `starttls = false`, or confirm with your ISP/provider.
+
+---
+
+### Adding a new notification provider
+
+1. Create `crates/hc-notify/src/<name>.rs`:
+   - Define a `<Name>Config` struct with `#[derive(Deserialize)]`
+   - Define a `<Name>Channel` struct
+   - Implement `NotifyChannel` (one async `send(&self, title, message)` method)
+
+2. Add a variant to `ProviderConfig` in `crates/hc-notify/src/lib.rs`:
+   ```rust
+   #[derive(Deserialize)]
+   #[serde(tag = "type", rename_all = "lowercase")]
+   pub enum ProviderConfig {
+       Email(EmailConfig),
+       Pushover(PushoverConfig),
+       Slack(SlackConfig),     // ← new
+   }
+   ```
+
+3. Add a build arm in `NotificationService::from_configs`:
+   ```rust
+   ProviderConfig::Slack(sc) => {
+       info!(channel = %name, "Registered Slack notification channel");
+       svc.register(name, SlackChannel::new(sc));
+   }
+   ```
+
+4. Add `pub mod <name>;` and re-export from `lib.rs`.
+
+That's it — config, executor, and rule engine need no changes.
 
 ---
 
@@ -877,6 +1282,7 @@ When Claude (or you) adds a new feature, here is where each piece typically goes
 | New stored entity | `crates/hc-state/src/rule_store.rs` or a new `*_store.rs` file, exposed via `StateStore` in `lib.rs` |
 | New device capability | No code change — capability schema is defined by the plugin at registration time |
 | Config change | `config/homecore.toml` schema + parsing struct in `homecore/src/main.rs` |
+| New notification provider | `crates/hc-notify/src/<name>.rs` + variant in `ProviderConfig` + build arm in `NotificationService::from_configs` |
 
 ---
 

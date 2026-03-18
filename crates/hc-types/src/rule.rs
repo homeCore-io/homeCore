@@ -133,6 +133,9 @@ pub enum Action {
     Notify {
         channel: String,
         message: String,
+        /// Optional title / subject line.  Defaults to `"HomeCore Alert"` if omitted.
+        #[serde(default)]
+        title: Option<String>,
     },
     /// Suspend the action sequence without blocking the async runtime.
     Delay {

@@ -1,9 +1,11 @@
 //! `hc-core` — rule engine, scheduler, and internal event bus.
 
 use anyhow::Result;
+use hc_notify::NotificationService;
 use hc_topic_map::TopicMapper;
 use hc_types::event::Event;
 use hc_types::rule::Rule;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -55,6 +57,7 @@ pub struct Core {
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
     mapper: Option<TopicMapper>,
+    notify: Option<Arc<NotificationService>>,
 }
 
 impl Core {
@@ -63,7 +66,7 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), mapper: None }
+        Self { bus, state, publish, location: LocationConfig::default(), mapper: None, notify: None }
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
@@ -74,6 +77,12 @@ impl Core {
     /// Attach a topic mapper for non-standard device topics (Tasmota, Shelly, etc.).
     pub fn with_mapper(mut self, mapper: TopicMapper) -> Self {
         self.mapper = Some(mapper);
+        self
+    }
+
+    /// Attach a notification service so `Notify` rule actions are delivered.
+    pub fn with_notify(mut self, svc: NotificationService) -> Self {
+        self.notify = Some(Arc::new(svc));
         self
     }
 
@@ -97,6 +106,7 @@ impl Core {
             rules.clone(),
             self.state.clone(),
             self.publish.clone(),
+            self.notify.clone(),
         );
         let rules_handle = engine.rules_handle();
         tokio::spawn(engine.run());

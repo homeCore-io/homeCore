@@ -3,6 +3,7 @@
 use crate::executor::execute_actions;
 use crate::EventBus;
 use anyhow::Result;
+use hc_notify::NotificationService;
 use hc_types::event::Event;
 use hc_types::rule::{CompareOp, Condition, Rule, Trigger};
 use hc_state::StateStore;
@@ -15,6 +16,7 @@ pub struct RuleEngine {
     rules: Arc<RwLock<Vec<Rule>>>,
     state: StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
+    notify: Option<Arc<NotificationService>>,
 }
 
 impl RuleEngine {
@@ -23,12 +25,14 @@ impl RuleEngine {
         rules: Vec<Rule>,
         state: StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
+        notify: Option<Arc<NotificationService>>,
     ) -> Self {
         Self {
             bus,
             rules: Arc::new(RwLock::new(rules)),
             state,
             publish,
+            notify,
         }
     }
 
@@ -99,8 +103,9 @@ impl RuleEngine {
         let bus = self.bus.clone();
         let rule_id = rule.id.to_string();
         let rule_name = rule.name.clone();
+        let notify = self.notify.clone();
         tokio::spawn(async move {
-            if let Err(e) = execute_actions(actions, publish, state).await {
+            if let Err(e) = execute_actions(actions, publish, state, notify).await {
                 warn!(rule = %rule_id, error = %e, "Action execution failed");
             }
             let _ = bus.publish(Event::RuleFired {

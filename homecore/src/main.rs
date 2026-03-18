@@ -4,6 +4,7 @@ use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig};
 use hc_core::{Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
+use hc_notify::{ChannelConfig, NotificationService};
 use hc_state::StateStore;
 use hc_topic_map::{TopicMapEntry, TopicMapper, BUILTIN_TRANSFORMS};
 use serde::Deserialize;
@@ -20,6 +21,14 @@ struct AppConfig {
     topic_map: Vec<TopicMapEntry>,
     #[serde(default)]
     auth: AuthSection,
+    #[serde(default)]
+    notify: NotifySection,
+}
+
+#[derive(Deserialize, Default)]
+struct NotifySection {
+    #[serde(default)]
+    channels: Vec<ChannelConfig>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +154,14 @@ async fn main() -> Result<()> {
             Ok(mapper) => { core = core.with_mapper(mapper); }
             Err(e) => { tracing::warn!(error = %e, "Topic mapper init failed; running without it"); }
         }
+    }
+
+    // Wire notification service if channels are configured.
+    if !config.notify.channels.is_empty() {
+        let count = config.notify.channels.len();
+        let svc = NotificationService::from_configs(config.notify.channels);
+        info!(channels = count, registered = svc.channel_names().len(), "Notification service ready");
+        core = core.with_notify(svc);
     }
 
     let rules_handle = core.start(rules).await?;
