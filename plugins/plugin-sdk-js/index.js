@@ -89,6 +89,20 @@ class PluginBase {
   }
 
   /**
+   * Publish a partial state update (JSON merge-patch, QoS 1, not retained).
+   *
+   * Use this for high-frequency sensors that send diffs rather than full state.
+   *
+   * @param {string} deviceId - Canonical HomeCore device identifier.
+   * @param {object} patch    - Attributes to merge into the current state.
+   */
+  publishStatePartial(deviceId, patch) {
+    const topic   = `homecore/devices/${deviceId}/state/partial`;
+    const payload = JSON.stringify(patch);
+    this._publish(topic, payload, { retain: false, qos: 1 });
+  }
+
+  /**
    * Publish an availability heartbeat (retained, QoS 1).
    *
    * @param {string}  deviceId  - Target device.
@@ -98,6 +112,16 @@ class PluginBase {
     const topic   = `homecore/devices/${deviceId}/availability`;
     const payload = available ? 'online' : 'offline';
     this._publish(topic, payload, { retain: true, qos: 1 });
+  }
+
+  /**
+   * Publish plugin status to ``homecore/plugins/{pluginId}/status`` (retained).
+   *
+   * @param {string} status - One of ``"active"``, ``"degraded"``, ``"offline"``.
+   */
+  publishPluginStatus(status) {
+    const topic = `homecore/plugins/${this.pluginId}/status`;
+    this._publish(topic, status, { retain: true, qos: 1 });
   }
 
   // ---------------------------------------------------------------------------

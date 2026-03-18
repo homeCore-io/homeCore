@@ -10,12 +10,32 @@ device registration, and state publishing.  Subclass it to implement a plugin:
     class MyLightPlugin(PluginBase):
         PLUGIN_ID = "plugin.my_light"
 
+        def on_connect(self):
+            caps = {"on": {"type": "boolean"}, "brightness": {"type": "integer", "minimum": 0, "maximum": 255}}
+            self.register_device("light.01", "My Light", caps)
+            self.publish_availability("light.01", True)
+            self.publish_plugin_status("active")
+
         def on_command(self, device_id: str, payload: dict) -> None:
             print(f"Command for {device_id}: {payload}")
             self.publish_state(device_id, {"on": payload.get("on", False)})
 
     if __name__ == "__main__":
         MyLightPlugin().run()
+
+Configuration
+-------------
+Constructor parameters override environment variables, which override defaults:
+
++---------------------+----------------------+------------+
+| Parameter           | Env var              | Default    |
++=====================+======================+============+
+| ``broker_host``     | ``HC_BROKER_HOST``   | 127.0.0.1  |
++---------------------+----------------------+------------+
+| ``broker_port``     | ``HC_BROKER_PORT``   | 1883       |
++---------------------+----------------------+------------+
+| ``password``        | ``HC_PLUGIN_PASSWORD``| (empty)   |
++---------------------+----------------------+------------+
 """
 
 from __future__ import annotations
@@ -55,16 +75,24 @@ class PluginBase(ABC):
     # ------------------------------------------------------------------
 
     def publish_state(self, device_id: str, state: dict) -> None:
-        """Publish a device state update to the broker.
+        """Publish a full device state update (retained, QoS 1).
 
         :param device_id: The canonical HomeCore device identifier.
         :param state: Dict of attribute names → values.
         """
         topic = f"homecore/devices/{device_id}/state"
-        payload = json.dumps(state)
-        logger.debug("publish_state topic=%s payload=%s", topic, payload)
-        if self._client is not None:
-            self._client.publish(topic, payload, qos=1, retain=True)
+        self._publish(topic, json.dumps(state), qos=1, retain=True)
+
+    def publish_state_partial(self, device_id: str, patch: dict) -> None:
+        """Publish a partial state update (JSON merge-patch, QoS 1, not retained).
+
+        Use this for high-frequency sensors that send diffs rather than full state blobs.
+
+        :param device_id: The canonical HomeCore device identifier.
+        :param patch: Dict of attributes to merge into the current state.
+        """
+        topic = f"homecore/devices/{device_id}/state/partial"
+        self._publish(topic, json.dumps(patch), qos=1, retain=False)
 
     def register_device(
         self,
@@ -90,16 +118,24 @@ class PluginBase(ABC):
                 "capabilities": capabilities,
             }
         )
-        logger.debug("register_device topic=%s", topic)
-        if self._client is not None:
-            self._client.publish(topic, payload, qos=1)
+        self._publish(topic, payload, qos=1)
 
     def publish_availability(self, device_id: str, available: bool) -> None:
-        """Publish an availability heartbeat."""
+        """Publish an availability heartbeat (retained, QoS 1).
+
+        :param device_id: The target device.
+        :param available: ``True`` for ``"online"``, ``False`` for ``"offline"``.
+        """
         topic = f"homecore/devices/{device_id}/availability"
-        payload = "online" if available else "offline"
-        if self._client is not None:
-            self._client.publish(topic, payload, qos=1, retain=True)
+        self._publish(topic, "online" if available else "offline", qos=1, retain=True)
+
+    def publish_plugin_status(self, status: str) -> None:
+        """Publish plugin status to ``homecore/plugins/{plugin_id}/status`` (retained).
+
+        :param status: One of ``"active"``, ``"degraded"``, ``"offline"``.
+        """
+        topic = f"homecore/plugins/{self.PLUGIN_ID}/status"
+        self._publish(topic, status, qos=1, retain=True)
 
     # ------------------------------------------------------------------
     # Subclass hooks
@@ -137,26 +173,49 @@ class PluginBase(ABC):
         def _on_connect(c, userdata, flags, reason_code, properties):
             if reason_code == 0:
                 logger.info("Connected to broker at %s:%s", self.broker_host, self.broker_port)
-                # Subscribe to commands for all of this plugin's devices
-                client.subscribe(f"homecore/devices/+/cmd", qos=1)
+                client.subscribe("homecore/devices/+/cmd", qos=1)
                 self.on_connect()
             else:
                 logger.error("Broker connection refused: reason_code=%s", reason_code)
 
         def _on_message(c, userdata, msg):
-            # Route homecore/devices/{device_id}/cmd → on_command
-            parts = msg.topic.split("/")
-            if len(parts) == 4 and parts[0] == "homecore" and parts[1] == "devices" and parts[3] == "cmd":
-                device_id = parts[2]
-                try:
-                    payload = json.loads(msg.payload)
-                except json.JSONDecodeError:
-                    payload = {"raw": msg.payload.decode(errors="replace")}
-                self.on_command(device_id, payload)
+            self._on_message_handler(msg)
+
+        def _on_disconnect(c, userdata, flags, reason_code, properties):
+            if reason_code != 0:
+                logger.warning("Disconnected from broker (reason_code=%s); will reconnect", reason_code)
 
         client.on_connect = _on_connect
         client.on_message = _on_message
+        client.on_disconnect = _on_disconnect
 
         client.connect(self.broker_host, self.broker_port, keepalive=60)
         logger.info("Plugin %s entering event loop", self.PLUGIN_ID)
         client.loop_forever()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _on_message_handler(self, msg: Any) -> None:
+        """Route an incoming MQTT message.  Extracted for unit-testability."""
+        parts = msg.topic.split("/")
+        if (
+            len(parts) == 4
+            and parts[0] == "homecore"
+            and parts[1] == "devices"
+            and parts[3] == "cmd"
+        ):
+            device_id = parts[2]
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                payload = {"raw": msg.payload.decode(errors="replace")}
+            self.on_command(device_id, payload)
+
+    def _publish(self, topic: str, payload: str, qos: int = 0, retain: bool = False) -> None:
+        if self._client is None:
+            logger.warning("publish called before run(): topic=%s", topic)
+            return
+        logger.debug("publish topic=%s retain=%s", topic, retain)
+        self._client.publish(topic, payload, qos=qos, retain=retain)
