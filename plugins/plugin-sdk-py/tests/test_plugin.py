@@ -91,6 +91,32 @@ class TestPublishMethods(unittest.TestCase):
         _, payload_str = mc.publish.call_args[0][:2]
         self.assertIsNone(json.loads(payload_str)["area"])
 
+    def test_register_device_typed(self):
+        plugin = _make_plugin()
+        mc = _attach_mock_client(plugin)
+        plugin.register_device_typed("light.01", "Test Light", "light", area="living_room")
+
+        mc.publish.assert_called_once()
+        topic, payload_str = mc.publish.call_args[0][:2]
+        payload = json.loads(payload_str)
+
+        self.assertEqual(topic, "homecore/plugins/plugin.test/register")
+        self.assertEqual(payload["device_id"], "light.01")
+        self.assertEqual(payload["plugin_id"], "plugin.test")
+        self.assertEqual(payload["name"], "Test Light")
+        self.assertEqual(payload["device_type"], "light")
+        self.assertEqual(payload["area"], "living_room")
+        self.assertNotIn("capabilities", payload)
+
+    def test_register_device_typed_no_area(self):
+        plugin = _make_plugin()
+        mc = _attach_mock_client(plugin)
+        plugin.register_device_typed("sensor.01", "Temp Sensor", "temperature_sensor")
+        _, payload_str = mc.publish.call_args[0][:2]
+        payload = json.loads(payload_str)
+        self.assertIsNone(payload["area"])
+        self.assertEqual(payload["device_type"], "temperature_sensor")
+
     def test_publish_availability_online(self):
         plugin = _make_plugin()
         mc = _attach_mock_client(plugin)

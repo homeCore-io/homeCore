@@ -120,6 +120,40 @@ class PluginBase(ABC):
         )
         self._publish(topic, payload, qos=1)
 
+    def register_device_typed(
+        self,
+        device_id: str,
+        name: str,
+        device_type: str,
+        area: str | None = None,
+    ) -> None:
+        """Register a device by type name.
+
+        Instead of supplying a full capability schema, provide a ``device_type``
+        string that HomeCore resolves against its built-in device-type catalog.
+        This is the recommended path for well-known device categories.
+
+        Example device types: ``"light"``, ``"light_color"``, ``"switch"``,
+        ``"temperature_sensor"``, ``"power_monitor"``, ``"cover"``, ``"lock"``,
+        ``"climate"``, …
+
+        :param device_id: Stable unique identifier for the device.
+        :param name: Human-readable label.
+        :param device_type: Type name from the device-type catalog.
+        :param area: Optional room/zone assignment.
+        """
+        topic = f"homecore/plugins/{self.PLUGIN_ID}/register"
+        payload = json.dumps(
+            {
+                "device_id": device_id,
+                "plugin_id": self.PLUGIN_ID,
+                "name": name,
+                "area": area,
+                "device_type": device_type,
+            }
+        )
+        self._publish(topic, payload, qos=1)
+
     def publish_availability(self, device_id: str, available: bool) -> None:
         """Publish an availability heartbeat (retained, QoS 1).
 

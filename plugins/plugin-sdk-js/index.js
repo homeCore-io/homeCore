@@ -89,6 +89,27 @@ class PluginBase {
   }
 
   /**
+   * Register a device by type name.
+   *
+   * Instead of providing a full capability schema, supply a `deviceType` string
+   * that HomeCore resolves against its built-in device-type catalog.  This is the
+   * recommended registration path for well-known device categories.
+   *
+   * Example types: `"light"`, `"light_color"`, `"switch"`, `"temperature_sensor"`,
+   * `"power_monitor"`, `"cover"`, `"lock"`, `"climate"`, …
+   *
+   * @param {string}      deviceId   - Stable unique device identifier.
+   * @param {string}      name       - Human-readable label.
+   * @param {string}      deviceType - Type name from the device-type catalog.
+   * @param {string|null} [area]     - Optional room/zone assignment.
+   */
+  registerDeviceTyped(deviceId, name, deviceType, area = null) {
+    const topic   = `homecore/plugins/${this.pluginId}/register`;
+    const payload = JSON.stringify({ device_id: deviceId, plugin_id: this.pluginId, name, area, device_type: deviceType });
+    this._publish(topic, payload, { qos: 1 });
+  }
+
+  /**
    * Publish a partial state update (JSON merge-patch, QoS 1, not retained).
    *
    * Use this for high-frequency sensors that send diffs rather than full state.

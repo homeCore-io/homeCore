@@ -143,6 +143,34 @@ describe('PluginBase', () => {
     expect(payload.area).toBeNull();
   });
 
+  test('registerDeviceTyped publishes device_type instead of capabilities', () => {
+    const plugin = new TestPlugin();
+    plugin.run();
+    plugin.registerDeviceTyped('light.01', 'Test Light', 'light', 'living_room');
+
+    expect(mockClient.publish).toHaveBeenCalledTimes(1);
+    const [topic, payloadStr, opts] = mockClient.publish.mock.calls[0];
+    const payload = JSON.parse(payloadStr);
+
+    expect(topic).toBe('homecore/plugins/plugin.test/register');
+    expect(opts).toEqual({ qos: 1 });
+    expect(payload.device_id).toBe('light.01');
+    expect(payload.plugin_id).toBe('plugin.test');
+    expect(payload.name).toBe('Test Light');
+    expect(payload.device_type).toBe('light');
+    expect(payload.area).toBe('living_room');
+    expect(payload.capabilities).toBeUndefined();
+  });
+
+  test('registerDeviceTyped uses null area when omitted', () => {
+    const plugin = new TestPlugin();
+    plugin.run();
+    plugin.registerDeviceTyped('sensor.01', 'Temp Sensor', 'temperature_sensor');
+    const payload = JSON.parse(mockClient.publish.mock.calls[0][1]);
+    expect(payload.area).toBeNull();
+    expect(payload.device_type).toBe('temperature_sensor');
+  });
+
   test('publishAvailability sends "online" when available=true', () => {
     const plugin = new TestPlugin();
     plugin.run();

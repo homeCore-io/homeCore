@@ -144,6 +144,41 @@ impl PluginClient {
         Ok(())
     }
 
+    /// Register a device by type name.
+    ///
+    /// Instead of providing a full capability schema, supply a `device_type` string
+    /// that HomeCore resolves against its built-in device-type catalog (loaded from
+    /// `config/profiles/examples/device-types.toml`).  This is the recommended
+    /// registration path for well-known device categories.
+    ///
+    /// # Example types
+    /// `"light"`, `"light_color"`, `"switch"`, `"temperature_sensor"`,
+    /// `"power_monitor"`, `"cover"`, `"lock"`, `"climate"`, …
+    pub async fn register_device_typed(
+        &self,
+        device_id: &str,
+        name: &str,
+        device_type: &str,
+        area: Option<&str>,
+    ) -> Result<()> {
+        let topic = format!("homecore/plugins/{}/register", self.config.plugin_id);
+        let mut payload = serde_json::json!({
+            "device_id":   device_id,
+            "plugin_id":   self.config.plugin_id,
+            "name":        name,
+            "device_type": device_type,
+        });
+        if let Some(a) = area {
+            payload["area"] = serde_json::Value::String(a.to_string());
+        }
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(&payload)?)
+            .await
+            .context("register_device_typed failed")?;
+        info!(device_id, device_type, "Device registered (typed)");
+        Ok(())
+    }
+
     /// Return a [`DevicePublisher`] that can publish state concurrently with `run()`.
     ///
     /// Call this **before** `run()` — `run()` consumes `self`, so any handles
