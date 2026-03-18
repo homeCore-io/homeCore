@@ -1,7 +1,7 @@
 use anyhow::Result;
 use hc_api::AppState;
 use hc_auth::{hash_password, JwtService, Role, User};
-use hc_broker::{Broker, BrokerConfig};
+use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::{ChannelConfig, NotificationService};
@@ -16,6 +16,8 @@ use uuid::Uuid;
 #[derive(Deserialize, Default)]
 struct AppConfig {
     #[serde(default)]
+    broker: BrokerSection,
+    #[serde(default)]
     location: LocationSection,
     #[serde(rename = "topic_map", default)]
     topic_map: Vec<TopicMapEntry>,
@@ -23,6 +25,49 @@ struct AppConfig {
     auth: AuthSection,
     #[serde(default)]
     notify: NotifySection,
+}
+
+/// `[broker]` section of homecore.toml.
+#[derive(Deserialize)]
+struct BrokerSection {
+    #[serde(default = "default_broker_host")]
+    host: String,
+    #[serde(default = "default_broker_port")]
+    port: u16,
+    tls_port: Option<u16>,
+    cert_path: Option<String>,
+    key_path: Option<String>,
+    /// Per-client credentials. When any entries are present the broker
+    /// requires authentication on all connections.
+    #[serde(default)]
+    clients: Vec<ClientAclConfig>,
+}
+
+impl Default for BrokerSection {
+    fn default() -> Self {
+        Self {
+            host: default_broker_host(),
+            port: default_broker_port(),
+            tls_port: None,
+            cert_path: None,
+            key_path: None,
+            clients: vec![],
+        }
+    }
+}
+
+fn default_broker_host() -> String { "0.0.0.0".into() }
+fn default_broker_port() -> u16 { 1883 }
+
+/// A single `[[broker.clients]]` entry.
+#[derive(Deserialize, Clone)]
+struct ClientAclConfig {
+    id: String,
+    password: String,
+    #[serde(default)]
+    allow_pub: Vec<String>,
+    #[serde(default)]
+    allow_sub: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -102,11 +147,34 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     // 1. Embedded MQTT broker.
-    Broker::new(BrokerConfig { host: "0.0.0.0".into(), port: 1883, ..Default::default() })
-        .spawn()?;
+    let broker_cfg = BrokerConfig {
+        host:      config.broker.host.clone(),
+        port:      config.broker.port,
+        tls_port:  config.broker.tls_port,
+        cert_path: config.broker.cert_path.clone(),
+        key_path:  config.broker.key_path.clone(),
+        clients:   config.broker.clients.iter().map(|c| ClientAcl {
+            client_id:  c.id.clone(),
+            password:   c.password.clone(),
+            allow_pub:  c.allow_pub.clone(),
+            allow_sub:  c.allow_sub.clone(),
+        }).collect(),
+    };
+    Broker::new(broker_cfg).spawn()?;
 
     // 2. Internal MQTT client.
-    let (mqtt_client, mut mqtt_rx) = MqttClient::new(MqttClientConfig::default());
+    // If broker auth is configured, find the "internal.core" credential and use it.
+    let internal_cred = config.broker.clients.iter()
+        .find(|c| c.id == "internal.core")
+        .cloned();
+    let mqtt_cfg = MqttClientConfig {
+        broker_host: "127.0.0.1".into(),
+        broker_port: config.broker.port,
+        client_id:   "internal.core".into(),
+        username:    internal_cred.as_ref().map(|c| c.id.clone()),
+        password:    internal_cred.as_ref().map(|c| c.password.clone()),
+    };
+    let (mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
     let publish_handle = mqtt_client.publish_handle();
 
     // 3. State store.

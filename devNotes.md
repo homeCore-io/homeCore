@@ -389,6 +389,185 @@ curl -s -X PATCH http://localhost:8080/api/v1/devices/light.living_room/state \
 
 ---
 
+## Broker authentication and TLS
+
+The embedded MQTT broker (rumqttd) supports password authentication and TLS.
+Both are opt-in and configured entirely in `config/homecore.toml`.
+
+---
+
+### Password authentication
+
+When one or more `[[broker.clients]]` entries are present the broker switches
+from open-access to credential-required mode.  Every MQTT client — including
+the internal HomeCore core process and every plugin — must authenticate with
+`username = client_id` and the matching password.
+
+#### Minimal authenticated setup
+
+```toml
+# config/homecore.toml
+
+[broker]
+host = "0.0.0.0"
+port = 1883
+
+# Internal core client — always required when auth is enabled.
+[[broker.clients]]
+id       = "internal.core"
+password = "a-strong-random-password"
+allow_pub = ["homecore/#"]
+allow_sub = ["homecore/#"]
+
+# One entry per plugin.
+[[broker.clients]]
+id       = "plugin.zigbee"
+password = "zigbee-plugin-password"
+allow_pub = ["homecore/devices/zigbee_+/state", "homecore/plugins/zigbee/+"]
+allow_sub = ["homecore/devices/zigbee_+/cmd"]
+
+[[broker.clients]]
+id       = "plugin.http-poller"
+password = "poller-password"
+allow_pub = ["homecore/devices/+/state", "homecore/plugins/http-poller/+"]
+allow_sub = []
+```
+
+The `allow_pub` / `allow_sub` fields are **metadata only** — they are stored
+for documentation and for generating external broker config, but the embedded
+rumqttd broker does not enforce per-topic ACL.  Connection-level credentials
+(username + password) are enforced.
+
+#### Plugin config when auth is enabled
+
+In the plugin's own config file (e.g. `http-poller.toml`) set the password:
+
+```toml
+[plugin]
+id          = "plugin.http-poller"
+broker_host = "127.0.0.1"
+broker_port = 1883
+password    = "poller-password"   # must match [[broker.clients]] entry
+```
+
+For the Rust plugin SDK:
+```rust
+PluginConfig {
+    plugin_id:   "plugin.http-poller".into(),
+    broker_host: "127.0.0.1".into(),
+    broker_port: 1883,
+    password:    "poller-password".into(),
+}
+```
+
+#### What happens when auth is disabled (no `[[broker.clients]]`)
+
+If `clients` is empty the broker allows any client to connect without
+credentials — suitable for local development and trusted networks.  This
+is the default.
+
+---
+
+### TLS
+
+Set `tls_port`, `cert_path`, and `key_path` to open a second listener that
+requires TLS.  The plain-text port remains open alongside it.
+
+```toml
+[broker]
+host      = "0.0.0.0"
+port      = 1883       # plain-text (keep for local plugins on localhost)
+tls_port  = 8883       # TLS (use for remote plugins or across untrusted networks)
+cert_path = "/etc/homecore/broker.crt"
+key_path  = "/etc/homecore/broker.key"
+```
+
+If the certificate or key file does not exist at startup the TLS listener is
+skipped with a warning and only the plain-text port is opened.
+
+#### Generating a self-signed certificate (development)
+
+```sh
+openssl req -x509 -newkey rsa:4096 \
+  -keyout /etc/homecore/broker.key \
+  -out    /etc/homecore/broker.crt \
+  -days   3650 \
+  -nodes \
+  -subj   "/CN=homecore-broker"
+```
+
+For a named host (so clients can verify the hostname):
+```sh
+openssl req -x509 -newkey rsa:4096 \
+  -keyout broker.key \
+  -out    broker.crt \
+  -days   365 -nodes \
+  -subj   "/CN=homecore.local" \
+  -addext "subjectAltName=DNS:homecore.local,IP:192.168.1.10"
+```
+
+#### Production: Let's Encrypt / ACME
+
+Use `certbot` or `acme.sh` to obtain a signed certificate:
+```sh
+certbot certonly --standalone -d homecore.yourdomain.com
+# cert:  /etc/letsencrypt/live/homecore.yourdomain.com/fullchain.pem
+# key:   /etc/letsencrypt/live/homecore.yourdomain.com/privkey.pem
+```
+
+Then set in config:
+```toml
+cert_path = "/etc/letsencrypt/live/homecore.yourdomain.com/fullchain.pem"
+key_path  = "/etc/letsencrypt/live/homecore.yourdomain.com/privkey.pem"
+```
+
+#### Combined auth + TLS example
+
+```toml
+[broker]
+host      = "0.0.0.0"
+port      = 1883
+tls_port  = 8883
+cert_path = "/etc/homecore/broker.crt"
+key_path  = "/etc/homecore/broker.key"
+
+[[broker.clients]]
+id       = "internal.core"
+password = "strong-internal-password"
+allow_pub = ["homecore/#"]
+allow_sub = ["homecore/#"]
+
+[[broker.clients]]
+id       = "plugin.zigbee"
+password = "zigbee-secret"
+allow_pub = ["homecore/devices/zigbee_+/state", "homecore/plugins/zigbee/+"]
+allow_sub = ["homecore/devices/zigbee_+/cmd"]
+```
+
+---
+
+### Topic ACL limitation
+
+The embedded rumqttd 0.19 broker enforces **connection-level** credentials
+(username + password) but does **not** enforce per-topic publish/subscribe
+ACL.  A plugin that authenticates successfully can technically publish to any
+topic.
+
+The `allow_pub` / `allow_sub` fields serve two purposes:
+1. Self-documenting config — makes the intended access pattern clear
+2. Exportable to an external broker config (Mosquitto, EMQX) that _does_
+   enforce topic ACL if strict isolation is required in production
+
+For strict topic ACL in a production deployment, configure an external broker
+and point HomeCore at it:
+```toml
+# Not yet wired — planned for a future release.
+# [broker]
+# external_url = "mqtt://192.168.1.10:1883"
+```
+
+---
+
 ## Working with rules during development
 
 Rules are the core of HomeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
