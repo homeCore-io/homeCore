@@ -1,22 +1,58 @@
 # HomeCore Ecosystem Profile — Shelly Gen1
 #
-# Covers original Shelly firmware devices (Shelly 1, 2, Plug S, Dimmer, etc.)
-# that publish via MQTT using the "shellies/" topic prefix.
+# Covers ALL original Shelly firmware (Gen1) devices using the "shellies/" MQTT
+# topic prefix. One profile file handles every Gen1 model simultaneously — no
+# per-device configuration required.
 #
-# Prerequisites:
-#   - Shelly MQTT enabled: Settings → MQTT → Server = <homecore-host>:1883
-#   - Default MQTT client ID left unchanged (e.g. shellyplug-s-AABBCC)
-#     The client ID becomes the {device} variable in all topic patterns below.
+# ─── Prerequisites ────────────────────────────────────────────────────────────
+#   Device: Settings → MQTT → Server = <homecore-host>:1883
+#   Leave "Client ID" as the default (e.g. shellyplug-s-AABBCC).
+#   The client ID becomes the {device} variable in all topic patterns.
 #
-# Usage:
-#   Copy this file to config/profiles/shelly-gen1.toml to activate it.
-#   Uncomment the topic blocks that match your device model.
-#   A single profile file covers ALL Gen1 Shelly devices simultaneously —
-#   no per-device config needed.
+# ─── Activation ───────────────────────────────────────────────────────────────
+#   Copy to: config/profiles/shelly-gen1.toml
 #
-# Device IDs in HomeCore:
-#   shellies/{device}/... → homecore device "shelly_{device}"
-#   Example: shellyplug-s-AABBCC → shelly_shellyplug-s-AABBCC
+# ─── HomeCore Device IDs ──────────────────────────────────────────────────────
+#   Relay channels (single and multi-relay):
+#     shellies/{device}/relay/N  →  shelly_{device}_relay{N}
+#   Roller/cover channels:
+#     shellies/{device}/roller/N →  shelly_{device}_roller{N}
+#   Dimmer and bulb channels:
+#     shellies/{device}/light/N  →  shelly_{device}_light{N}
+#   RGBW2 color mode:
+#     shellies/{device}/color/N  →  shelly_{device}_color{N}
+#   Sensors (HT, DW, Flood, Smoke, Motion — one device per box):
+#     shellies/{device}/sensor/* →  shelly_{device}
+#   Input lines (Button1, i3, etc.):
+#     shellies/{device}/input/N  →  shelly_{device}_input{N}
+#   Energy meter phases (EM, 3EM):
+#     shellies/{device}/emeter/N →  shelly_{device}_em{N}
+#   Gas valve (controllable part of gas sensor):
+#     shellies/{device}/valve/*  →  shelly_{device}_valve
+#   TRV thermostat:
+#     shellies/{device}/thermostat* →  shelly_{device}_trv
+#   Availability:          shelly_{device}
+#
+# ─── Command payloads ─────────────────────────────────────────────────────────
+#   Relay:    {"on": true}  or  {"on": false}
+#   Dimmer:   {"on": true, "brightness": 75}     (brightness 0–100)
+#   Bulb:     {"on": true, "brightness": 75, "color_temp_k": 4000}
+#   RGBW2:    {"on": true, "red": 255, "green": 128, "blue": 0, "brightness": 100}
+#   Cover:    {"state": "open"} | {"state": "close"} | {"state": "stop"}
+#             {"state": "to:50"} for position control (50% open)
+#   Gas valve:{"valve_state": "open"} or {"valve_state": "close"}
+#   TRV:      {"target_temperature": 21.5}
+#
+# ─── Notes ────────────────────────────────────────────────────────────────────
+#   • Gen1 relay state is "on"/"off" (lowercase strings, NOT "1"/"0").
+#     Commands are case-insensitive — "ON"/"OFF" accepted.
+#   • Power/energy metrics only present on metered models (Plug S, 1PM, 2.5,
+#     EM, 3EM). Non-metered devices skip those topics silently.
+#   • Sensor devices are battery-powered and publish only on wake events.
+#   • Shelly 2/2.5 operates in EITHER relay mode OR roller mode — only
+#     matching topics are published.
+#   • RGBW2 operates in color mode OR white channel mode — only matching
+#     color/* or white/* topics are published.
 
 [ecosystem]
 name        = "shelly-gen1"
@@ -24,92 +60,72 @@ description = "Shelly Gen1 devices (original firmware, shellies/ prefix)"
 prefix      = "shelly_"
 
 
-# ---------------------------------------------------------------------------
-# Shelly Plug / Plug S — single relay + power monitoring
-# Model: SHPLG-1, SHPLG-S, SHPLG-U1
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — RELAY DEVICES
+# Models: Shelly 1, 1PM, 1L, Plug, Plug S, Plug US, Plug E,
+#         2, 2.5, 4Pro, Uni, EM (relay side), 3EM (relay side)
+# ═══════════════════════════════════════════════════════════════════════════════
 
+# Relay on/off state
+# Payload: "on" | "off" | "overpower"
+# {relay} captures the relay index (0, 1, 2, 3).
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/0"
-attribute = "on"                 # scalar payload — wrap as {"on": <value>}
+pattern   = "shellies/{device}/relay/{relay}"
+device_id = "shelly_{device}_relay{relay}"
+attribute = "on"
 
   [ecosystem.state_topics.coerce]
-  on = "01_to_bool"              # "1" → true, "0" → false
+  on = "onoff_to_bool"           # "on" → true, "off"/"overpower" → false
 
+
+# Relay instantaneous power (metered models: Plug S, 1PM, 2.5, EM relay)
+# Payload: float (Watts)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/0/power"
+pattern   = "shellies/{device}/relay/{relay}/power"
+device_id = "shelly_{device}_relay{relay}"
 attribute = "power_w"
 
   [ecosystem.state_topics.coerce]
   power_w = "scalar_float"
 
+
+# Relay cumulative energy (Watt-minutes, resets on reboot)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/0/energy"
-attribute = "energy_wmin"        # Watt-minutes; convert to kWh in rules if needed
+pattern   = "shellies/{device}/relay/{relay}/energy"
+device_id = "shelly_{device}_relay{relay}"
+attribute = "energy_wmin"
 
   [ecosystem.state_topics.coerce]
   energy_wmin = "scalar_float"
 
-[[ecosystem.availability_topics]]
-pattern   = "shellies/{device}/online"
-payload   = "raw_bool"           # payload is literal true or false (not JSON)
 
-[[ecosystem.cmd_topics]]
-source    = "homecore/devices/shelly_{device}/cmd"
-target    = "shellies/{device}/relay/0/command"
-attribute = "on"                 # extract only the "on" attribute from the cmd JSON
-
-  [ecosystem.cmd_topics.coerce]
-  on = "bool_to_01"              # true → "on", false → "off"
-  # Note: Shelly relay/0/command accepts "on", "off", or "toggle"
-
-
-# ---------------------------------------------------------------------------
-# Shelly 1 / Shelly 1PM — single relay
-# Model: SHSW-1, SHSW-PM
-# ---------------------------------------------------------------------------
-# Uncomment if using Shelly 1 / 1PM. Topic structure is identical to Plug above.
-# The blocks above already cover these models — no additional config needed.
-
-
-# ---------------------------------------------------------------------------
-# Shelly 2 / 2.5 — dual relay (each relay is a separate HomeCore device)
-# Model: SHSW-21, SHSW-25
-# ---------------------------------------------------------------------------
-
-# Relay 0
+# Internal device temperature (1PM, 2.5 — thermal protection sensor)
+# Payload: float (°C)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/0"
-device_id = "{device}_relay0"    # override device ID to distinguish relays
-attribute = "on"
+pattern   = "shellies/{device}/temperature"
+device_id = "shelly_{device}_relay0"   # associate with the primary relay device
+attribute = "device_temperature_c"
 
   [ecosystem.state_topics.coerce]
-  on = "01_to_bool"
+  device_temperature_c = "scalar_float"
 
+
+# Overtemperature protection flag
+# Payload: "0" (normal) | "1" (overtemperature shutdown)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/0/power"
-device_id = "{device}_relay0"
-attribute = "power_w"
+pattern   = "shellies/{device}/overtemperature"
+device_id = "shelly_{device}_relay0"
+attribute = "overtemperature"
 
   [ecosystem.state_topics.coerce]
-  power_w = "scalar_float"
+  overtemperature = "01_to_bool"
 
-# Relay 1
-[[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/1"
-device_id = "{device}_relay1"
-attribute = "on"
 
-  [ecosystem.state_topics.coerce]
-  on = "01_to_bool"
-
-[[ecosystem.state_topics]]
-pattern   = "shellies/{device}/relay/1/power"
-device_id = "{device}_relay1"
-attribute = "power_w"
-
-  [ecosystem.state_topics.coerce]
-  power_w = "scalar_float"
+# ─── Relay commands ───────────────────────────────────────────────────────────
+# HomeCore publishes {"on": true} or {"on": false} to the cmd topic.
+# Router extracts the "on" attribute and publishes "ON" or "OFF" to
+# shellies/{device}/relay/{N}/command.
+# Shelly accepts "on", "off", "toggle" (all case-insensitive).
 
 [[ecosystem.cmd_topics]]
 source    = "homecore/devices/shelly_{device}_relay0/cmd"
@@ -117,7 +133,7 @@ target    = "shellies/{device}/relay/0/command"
 attribute = "on"
 
   [ecosystem.cmd_topics.coerce]
-  on = "bool_to_onoff"
+  on = "bool_to_onoff"    # true → "ON", false → "OFF"
 
 [[ecosystem.cmd_topics]]
 source    = "homecore/devices/shelly_{device}_relay1/cmd"
@@ -127,43 +143,206 @@ attribute = "on"
   [ecosystem.cmd_topics.coerce]
   on = "bool_to_onoff"
 
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_relay2/cmd"
+target    = "shellies/{device}/relay/2/command"
+attribute = "on"
 
-# ---------------------------------------------------------------------------
-# Shelly Dimmer / Dimmer 2 — brightness control
-# Model: SHDM-1, SHDM-2
-# ---------------------------------------------------------------------------
-
-[[ecosystem.state_topics]]
-pattern = "shellies/{device}/light/0/status"
-
-  [ecosystem.state_topics.field_map]
-  ison       = "on"
-  brightness = "brightness"
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
 
 [[ecosystem.cmd_topics]]
-source = "homecore/devices/shelly_{device}/cmd"
-target = "shellies/{device}/light/0/set"
+source    = "homecore/devices/shelly_{device}_relay3/cmd"
+target    = "shellies/{device}/relay/3/command"
+attribute = "on"
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — ROLLER / COVER DEVICES
+# Models: Shelly 2 (SHSW-21), Shelly 2.5 (SHSW-25) in roller mode
+# Device IDs: shelly_{device}_roller{roller}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Roller movement state
+# Payload: "open" | "close" | "stop"
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/roller/{roller}"
+device_id = "shelly_{device}_roller{roller}"
+attribute = "state"
+# "state" is passed through as-is (string)
+
+
+# Roller calibrated position
+# Payload: integer 0–100 (% open). Only published after calibration.
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/roller/{roller}/pos"
+device_id = "shelly_{device}_roller{roller}"
+attribute = "position"
+
+  [ecosystem.state_topics.coerce]
+  position = "scalar_int"
+
+
+# Roller instantaneous power (2.5 only)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/roller/{roller}/power"
+device_id = "shelly_{device}_roller{roller}"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+
+# ─── Roller commands ──────────────────────────────────────────────────────────
+# Shelly roller/command accepts: "open" | "close" | "stop" | "to:N" (N = 0–100)
+# HomeCore sends {"state": "open"/"close"/"stop"} or {"state": "to:50"}
+# Router extracts the "state" attribute and publishes its string value.
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_roller0/cmd"
+target    = "shellies/{device}/roller/0/command"
+attribute = "state"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — DIMMER AND WHITE BULB DEVICES
+# Models: Dimmer 1 (SHDM-1), Dimmer 2 (SHDM-2), Bulb RGBW in white mode,
+#         Duo (SHBDUO-1), Vintage (SHVIN-1)
+# Device IDs: shelly_{device}_light{light}
+#
+# Status payload (Dimmer): {"ison":true,"brightness":75,"source":"..."}
+# Status payload (Duo):    {"ison":true,"brightness":75,"temp":4750}
+# brightness is 0–100 (percent); temp is color temperature in Kelvin (2700–6500).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/light/{light}"
+device_id = "shelly_{device}_light{light}"
+
+  [ecosystem.state_topics.field_map]
+  ison       = "on"            # JSON bool — no coercion needed
+  brightness = "brightness"   # 0–100 (percent)
+  temp       = "color_temp_k" # Kelvin, Duo/Bulb only; Dimmer omits this field
+
+
+# Dimmer / metered bulb instantaneous power
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/light/{light}/power"
+device_id = "shelly_{device}_light{light}"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+
+# ─── Dimmer / bulb commands ───────────────────────────────────────────────────
+# Shelly /light/{N}/set accepts:
+#   {"turn": "on"/"off"/"toggle", "brightness": 0–100, "temp": 2700–6500}
+# HomeCore sends: {"on": true, "brightness": 75}
+#                 {"on": true, "brightness": 75, "color_temp_k": 3000}
+# Router renames: on→turn, color_temp_k→temp; applies bool_to_onoff for turn.
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_light0/cmd"
+target    = "shellies/{device}/light/0/set"
 
   [ecosystem.cmd_topics.field_map]
-  on         = "turn"
-  brightness = "brightness"
+  on           = "turn"       # renamed
+  brightness   = "brightness"
+  color_temp_k = "temp"       # renamed; omit this field if not sending color temp
+
+  [ecosystem.cmd_topics.coerce]
+  turn = "bool_to_onoff"      # true → "ON", false → "OFF"
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_light1/cmd"
+target    = "shellies/{device}/light/1/set"
+
+  [ecosystem.cmd_topics.field_map]
+  on           = "turn"
+  brightness   = "brightness"
+  color_temp_k = "temp"
 
   [ecosystem.cmd_topics.coerce]
   turn = "bool_to_onoff"
 
 
-# ---------------------------------------------------------------------------
-# Shelly Door/Window sensor
-# Model: SHDW-1, SHDW-2
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — RGBW2 COLOR MODE
+# Model: Shelly RGBW2 (SHRGBW2) in color mode, Shelly Bulb RGBW (SHBLB-1)
+# Device IDs: shelly_{device}_color{color}
+#
+# Status payload:
+#   {"ison":true,"mode":"color","red":255,"green":0,"blue":128,
+#    "white":0,"gain":100,"effect":0}
+# red/green/blue/white: 0–255; gain: overall brightness 0–100 (mapped to "brightness")
+# ═══════════════════════════════════════════════════════════════════════════════
 
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/sensor/state"
-attribute = "contact"
+pattern   = "shellies/{device}/color/{color}"
+device_id = "shelly_{device}_color{color}"
+
+  [ecosystem.state_topics.field_map]
+  ison  = "on"
+  red   = "red"
+  green = "green"
+  blue  = "blue"
+  white = "white"
+  gain  = "brightness"    # Shelly calls it "gain"; map to "brightness" (0–100)
+
+
+# ─── RGBW2 color commands ─────────────────────────────────────────────────────
+# Shelly /color/{N}/set: {"ison": true, "red": 255, "green": 0, "blue": 128,
+#                          "white": 0, "gain": 100}
+# HomeCore sends: {"on": true, "red": 255, "green": 128, "blue": 0, "brightness": 100}
+# Router renames on→ison, brightness→gain.
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_color0/cmd"
+target    = "shellies/{device}/color/0/set"
+
+  [ecosystem.cmd_topics.field_map]
+  on         = "ison"       # renamed; note: Shelly uses "ison" not "on"
+  red        = "red"
+  green      = "green"
+  blue       = "blue"
+  white      = "white"
+  brightness = "gain"       # renamed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — SENSOR DEVICES (read-only)
+# Models: HT (SHHT-1), Door/Window 1 (SHDW-1), Door/Window 2 (SHDW-2),
+#         Flood (SHWT-1), Smoke (SHSM-01), Motion (SHMOS-01/02),
+#         Gas (SHGS-1)
+# All sensors from one physical device map to: shelly_{device}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Temperature — HT, Door/Window 2, Motion 2
+# Payload: float (°C)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/temperature"
+attribute = "temperature"
 
   [ecosystem.state_topics.coerce]
-  contact = "open_close_to_bool"  # "open" → false, "close" → true
+  temperature = "scalar_float"
 
+
+# Humidity — HT only
+# Payload: float (% relative humidity)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/humidity"
+attribute = "humidity"
+
+  [ecosystem.state_topics.coerce]
+  humidity = "scalar_float"
+
+
+# Battery level — all battery-powered devices
+# Payload: integer (0–100 %)
 [[ecosystem.state_topics]]
 pattern   = "shellies/{device}/sensor/battery"
 attribute = "battery"
@@ -171,6 +350,30 @@ attribute = "battery"
   [ecosystem.state_topics.coerce]
   battery = "scalar_int"
 
+
+# Door/Window contact state
+# Payload: "open" | "closed"
+# "closed" = contact detected (door/window shut) → true
+# "open"   = no contact (door/window ajar) → false
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/state"
+attribute = "contact"
+
+  [ecosystem.state_topics.coerce]
+  contact = "open_close_to_bool"    # "closed" → true, "open" → false
+
+
+# Illuminance / ambient light — Door/Window 2, Motion
+# Payload: integer (lux)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/lux"
+attribute = "illuminance"
+
+  [ecosystem.state_topics.coerce]
+  illuminance = "scalar_int"
+
+
+# Also handles Door/Window 1 illuminance topic name variant
 [[ecosystem.state_topics]]
 pattern   = "shellies/{device}/sensor/illuminance"
 attribute = "illuminance"
@@ -179,28 +382,276 @@ attribute = "illuminance"
   illuminance = "scalar_int"
 
 
-# ---------------------------------------------------------------------------
-# Shelly HT — temperature and humidity sensor
-# Model: SHHT-1
-# ---------------------------------------------------------------------------
-
+# Tilt angle — Door/Window 2
+# Payload: integer (degrees, 0 = horizontal / closed position)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/sensor/temperature"
+pattern   = "shellies/{device}/sensor/tilt"
+attribute = "tilt"
+
+  [ecosystem.state_topics.coerce]
+  tilt = "scalar_int"
+
+
+# Vibration — Door/Window 2, Motion 2
+# Payload: "0" (no vibration) | "1" (vibration detected)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/vibration"
+attribute = "vibration"
+
+  [ecosystem.state_topics.coerce]
+  vibration = "01_to_bool"
+
+
+# Flood / Water detection
+# Payload: JSON boolean true | false
+# serde_json parses "true"/"false" directly as Value::Bool — no coercion needed.
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/flood"
+attribute = "flood"
+
+
+# Smoke detection
+# Payload: JSON boolean true | false
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/smoke"
+attribute = "smoke"
+
+
+# Motion detection
+# Payload: JSON boolean true | false
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/motion"
+attribute = "motion"
+
+
+# Gas status (informational, alarm trigger for rules)
+# Payload: "unknown" | "normal" | "alarm"
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/gas_status"
+attribute = "gas_status"
+# Passed through as string. Use a rule: if gas_status == "alarm" → notify.
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 6 — GAS SENSOR VALVE (controllable)
+# Model: Shelly Gas (SHGS-1)
+# Valve device ID: shelly_{device}_valve   (separate from the sensor device)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Valve state
+# Payload: "open" | "closed"
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/valve/0/state"
+device_id = "shelly_{device}_valve"
+attribute = "valve_state"
+# Passed through as string: "open" or "closed"
+
+
+# ─── Gas valve command ────────────────────────────────────────────────────────
+# Shelly valve/command accepts: "open" | "close"
+# HomeCore sends: {"valve_state": "open"} or {"valve_state": "close"}
+# Separate device_id (_valve) avoids conflict with the sensor cmd pattern.
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_valve/cmd"
+target    = "shellies/{device}/valve/0/command"
+attribute = "valve_state"    # extracts scalar value → publishes "open" or "close"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — ENERGY METERS
+# Models: Shelly EM (SHEM), Shelly 3EM (SHEM-3)
+# Note: EM/3EM also have a relay covered in Section 1.
+# Device IDs: shelly_{device}_em{phase}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Per-phase instantaneous power
+# Payload: float (Watts)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/power"
+device_id = "shelly_{device}_em{phase}"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+
+# Per-phase reactive power
+# Payload: float (VAr)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/reactive_power"
+device_id = "shelly_{device}_em{phase}"
+attribute = "reactive_power_var"
+
+  [ecosystem.state_topics.coerce]
+  reactive_power_var = "scalar_float"
+
+
+# Per-phase voltage
+# Payload: float (V)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/voltage"
+device_id = "shelly_{device}_em{phase}"
+attribute = "voltage"
+
+  [ecosystem.state_topics.coerce]
+  voltage = "scalar_float"
+
+
+# Per-phase current (3EM only)
+# Payload: float (A)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/current"
+device_id = "shelly_{device}_em{phase}"
+attribute = "current_a"
+
+  [ecosystem.state_topics.coerce]
+  current_a = "scalar_float"
+
+
+# Per-phase power factor
+# Payload: float (0.0–1.0)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/pf"
+device_id = "shelly_{device}_em{phase}"
+attribute = "power_factor"
+
+  [ecosystem.state_topics.coerce]
+  power_factor = "scalar_float"
+
+
+# Per-phase cumulative energy (Watt-minutes, counter resets on reboot)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/energy"
+device_id = "shelly_{device}_em{phase}"
+attribute = "energy_wmin"
+
+  [ecosystem.state_topics.coerce]
+  energy_wmin = "scalar_float"
+
+
+# Per-phase total persistent energy (Watt-hours, survives reboot)
+# Payload: float (Wh)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/{phase}/total"
+device_id = "shelly_{device}_em{phase}"
+attribute = "energy_wh"
+
+  [ecosystem.state_topics.coerce]
+  energy_wh = "scalar_float"
+
+
+# Total active power across all phases (3EM, single topic)
+# Payload: float (Watts, sum of phases A+B+C)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/emeter/total_power"
+device_id = "shelly_{device}_em_total"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — TRV (Thermostatic Radiator Valve)
+# Model: Shelly TRV (SHTRV-01)
+# Device ID: shelly_{device}_trv
+# The _trv suffix prevents the cmd pattern from matching non-TRV devices
+# (relay/light/cover/switch cmd topics all use more-specific device IDs).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Current ambient temperature (measured by TRV sensor)
+# Payload: float (°C)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/thermostats/0/temperature"
+device_id = "shelly_{device}_trv"
 attribute = "temperature"
 
   [ecosystem.state_topics.coerce]
   temperature = "scalar_float"
 
+
+# Target set-point temperature (what the TRV is trying to achieve)
+# Payload: float (°C) — also subscribable to set the target
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/sensor/humidity"
-attribute = "humidity"
+pattern   = "shellies/{device}/thermostats/0/target_t/value"
+device_id = "shelly_{device}_trv"
+attribute = "target_temperature"
 
   [ecosystem.state_topics.coerce]
-  humidity = "scalar_float"
+  target_temperature = "scalar_float"
 
+
+# Valve position (how much the radiator valve is open)
+# Payload: integer (0–100 % open)
 [[ecosystem.state_topics]]
-pattern   = "shellies/{device}/sensor/battery"
-attribute = "battery"
+pattern   = "shellies/{device}/thermostats/0/pos"
+device_id = "shelly_{device}_trv"
+attribute = "valve_position"
 
   [ecosystem.state_topics.coerce]
-  battery = "scalar_int"
+  valve_position = "scalar_int"
+
+
+# Window open detection (TRV automatic window-open detection)
+# Payload: "open" | "closed"
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/window"
+device_id = "shelly_{device}_trv"
+attribute = "window_open"
+
+  [ecosystem.state_topics.coerce]
+  window_open = "open_close_to_bool"    # "closed" → true (window shut)
+
+
+# ─── TRV command ──────────────────────────────────────────────────────────────
+# Shelly TRV subscribes to thermostats/0/target_t to set the target temperature.
+# HomeCore sends: {"target_temperature": 21.5}
+# Router extracts the "target_temperature" attribute and publishes the float value.
+# The _trv suffix in the source ensures only TRV devices match — not relay/light/cover.
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_trv/cmd"
+target    = "shellies/{device}/thermostats/0/target_t"
+attribute = "target_temperature"   # extracts scalar float → publishes to target_t topic
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 9 — INPUT / BUTTON STATE (read-only)
+# Models: Button1 (SHBTN-1/2), i3 (SHIX3-1), all devices with input lines
+# Each input line is a separate HomeCore device: shelly_{device}_input{input_id}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Binary input line state
+# Payload: "0" (inactive/open) | "1" (active/closed)
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/input/{input_id}"
+device_id = "shelly_{device}_input{input_id}"
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "01_to_bool"     # "1" → true (active), "0" → false (inactive)
+
+
+# Input event — short/long/double/triple press detection
+# Payload: {"event": "S", "event_cnt": 42}
+# event: "S"=single, "SS"=double, "SSS"=triple, "L"=long press
+# Use a rule triggered on this device's attribute changes for button automations.
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/input_event/{input_id}"
+device_id = "shelly_{device}_input{input_id}"
+# No field_map — passes through the full JSON object as device state
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10 — AVAILABILITY
+# All Gen1 devices publish to: shellies/{device}/online
+# Payload: literal "true" (connected) or "false" (LWT / disconnected)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.availability_topics]]
+pattern = "shellies/{device}/online"
+payload = "raw_bool"
+# Creates/updates the physical device shelly_{device} as available/unavailable.
+# Component devices (shelly_{device}_relay0, _light0, etc.) inherit implicit
+# availability from state updates (last_seen timestamp).

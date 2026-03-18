@@ -54,17 +54,32 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
 
         // --- Numeric conversions ---
 
-        // String  →  integer
+        // String or number  →  integer
+        // Accepts: JSON Number (returned as-is as integer), string digits, float string (truncated).
         "scalar_int" => {
-            let s = as_str(&value, name)?;
-            let n: i64 = s.parse().map_err(|_| anyhow!("scalar_int: cannot parse {s:?} as integer"))?;
-            Ok(Value::Number(n.into()))
+            match &value {
+                Value::Number(n) => {
+                    let i = n.as_i64()
+                        .unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64);
+                    Ok(Value::Number(i.into()))
+                }
+                Value::String(s) => {
+                    // Try integer parse first, then float-then-truncate.
+                    if let Ok(i) = s.parse::<i64>() {
+                        Ok(Value::Number(i.into()))
+                    } else {
+                        let f: f64 = s.parse().map_err(|_| anyhow!("scalar_int: cannot parse {s:?} as integer"))?;
+                        Ok(Value::Number((f as i64).into()))
+                    }
+                }
+                _ => Err(anyhow!("scalar_int: expected string or number, got {value}")),
+            }
         }
 
-        // String  →  float
+        // String or number  →  float
+        // Accepts: JSON Number (returned as-is), string representation of a float.
         "scalar_float" => {
-            let s = as_str(&value, name)?;
-            let f: f64 = s.parse().map_err(|_| anyhow!("scalar_float: cannot parse {s:?} as float"))?;
+            let f = as_f64(&value, name)?;
             Ok(serde_json::Number::from_f64(f)
                 .map(Value::Number)
                 .unwrap_or(Value::Null))
