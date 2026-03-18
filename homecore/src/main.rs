@@ -16,9 +16,13 @@ use uuid::Uuid;
 #[derive(Deserialize, Default)]
 struct AppConfig {
     #[serde(default)]
+    server: ServerSection,
+    #[serde(default)]
     broker: BrokerSection,
     #[serde(default)]
     location: LocationSection,
+    #[serde(default)]
+    storage: StorageSection,
     #[serde(rename = "topic_map", default)]
     topic_map: Vec<TopicMapEntry>,
     #[serde(default)]
@@ -26,6 +30,40 @@ struct AppConfig {
     #[serde(default)]
     notify: NotifySection,
 }
+
+#[derive(Deserialize)]
+struct ServerSection {
+    #[serde(default = "default_server_host")]
+    host: String,
+    #[serde(default = "default_server_port")]
+    port: u16,
+}
+
+impl Default for ServerSection {
+    fn default() -> Self {
+        Self { host: default_server_host(), port: default_server_port() }
+    }
+}
+
+fn default_server_host() -> String { "0.0.0.0".into() }
+fn default_server_port() -> u16 { 8080 }
+
+#[derive(Deserialize)]
+struct StorageSection {
+    #[serde(default = "default_state_db")]
+    state_db_path: String,
+    #[serde(default = "default_history_db")]
+    history_db_path: String,
+}
+
+impl Default for StorageSection {
+    fn default() -> Self {
+        Self { state_db_path: default_state_db(), history_db_path: default_history_db() }
+    }
+}
+
+fn default_state_db() -> String { "/tmp/homecore-state.redb".into() }
+fn default_history_db() -> String { "/tmp/homecore-history.db".into() }
 
 /// `[broker]` section of homecore.toml.
 #[derive(Deserialize)]
@@ -178,7 +216,7 @@ async fn main() -> Result<()> {
     let publish_handle = mqtt_client.publish_handle();
 
     // 3. State store.
-    let store = StateStore::open("/tmp/homecore-state.redb", "/tmp/homecore-history.db").await?;
+    let store = StateStore::open(&config.storage.state_db_path, &config.storage.history_db_path).await?;
 
     // 4. Event bus — the shared backbone all crates communicate through.
     let bus = EventBus::new(1024);
@@ -276,7 +314,7 @@ async fn main() -> Result<()> {
 
     // 10. REST + WebSocket API.
     let app_state = AppState::new(store, bus, Some(publish_handle), Some(rules_handle), jwt);
-    hc_api::serve("0.0.0.0", 8080, app_state).await?;
+    hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())
 }

@@ -5,7 +5,7 @@
 # wired into main.rs — they are currently hard-coded defaults.
 
 # ---------------------------------------------------------------------------
-# Server  (planned — currently hard-coded to 0.0.0.0:8080)
+# Server  (parsed)
 # ---------------------------------------------------------------------------
 [server]
 host = "0.0.0.0"
@@ -70,7 +70,8 @@ jwt_secret         = "change-me-to-a-long-random-string-before-deploying"
 token_expiry_hours = 24
 
 # ---------------------------------------------------------------------------
-# Storage  (planned — currently hard-coded to /tmp for development)
+# Storage  (parsed)
+# Defaults to /tmp for development if this section is omitted.
 # ---------------------------------------------------------------------------
 [storage]
 state_db_path   = "/var/lib/homecore/state.redb"
