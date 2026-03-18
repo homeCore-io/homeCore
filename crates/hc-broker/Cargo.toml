@@ -1,0 +1,11 @@
+[package]
+name    = "hc-broker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rumqttd  = { workspace = true }
+tokio    = { workspace = true }
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
+hc-types = { path = "../hc-types" }

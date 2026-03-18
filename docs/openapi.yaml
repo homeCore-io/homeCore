@@ -1,0 +1,1371 @@
+openapi: "3.1.0"
+
+info:
+  title: HomeCore API
+  version: "0.1.0"
+  description: |
+    HomeCore home automation platform REST + WebSocket API.
+    All endpoints are under `/api/v1/`.
+
+    **Authentication:** all endpoints except `POST /auth/login` and `GET /health`
+    require a `Bearer` JWT in the `Authorization` header.  The WebSocket stream
+    endpoint instead accepts the token via `?token=` query parameter (browsers
+    cannot set headers during a WebSocket upgrade).
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+
+tags:
+  - name: auth
+    description: Login, user profile, and user management (admin only)
+  - name: devices
+    description: Device registry and state control
+  - name: areas
+    description: Room and zone management
+  - name: automations
+    description: Automation rule CRUD, dry-run, import/export
+  - name: scenes
+    description: Named state snapshots
+  - name: events
+    description: Event log (REST) and live stream (WebSocket)
+  - name: plugins
+    description: Plugin registration and health
+  - name: webhooks
+    description: Inbound webhook triggers for automations
+  - name: system
+    description: Health probe
+
+# =============================================================================
+# Paths
+# =============================================================================
+paths:
+
+  # ---------------------------------------------------------------------------
+  # Auth
+  # ---------------------------------------------------------------------------
+  /auth/login:
+    post:
+      operationId: login
+      summary: Log in and receive a JWT
+      description: Public endpoint — no token required.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              username: admin
+              password: my-secret-password
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated user's profile
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/change-password:
+    post:
+      operationId: changePassword
+      summary: Change your own password
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password changed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: New password too short (minimum 8 characters)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/users:
+    get:
+      operationId: listUsers
+      summary: List all users (admin only)
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of user profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createUser
+      summary: Create a new user (admin only)
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: Created user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Username already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/users/{id}:
+    delete:
+      operationId: deleteUser
+      summary: Delete a user (admin only)
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: User deleted
+        "400":
+          description: Cannot delete your own account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/users/{id}/role:
+    patch:
+      operationId: setUserRole
+      summary: Change a user's role (admin only)
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRoleRequest"
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Devices
+  # ---------------------------------------------------------------------------
+  /devices:
+    get:
+      operationId: listDevices
+      summary: List all devices with current state
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of device state objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeviceState"
+
+  /devices/{id}:
+    get:
+      operationId: getDevice
+      summary: Get a single device and its capability schema
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Device state and schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /devices/{id}/state:
+    patch:
+      operationId: commandDevice
+      summary: Send a command to a device (publishes to MQTT cmd topic)
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Partial attribute map to apply
+              additionalProperties: true
+            example:
+              on: true
+              brightness: 180
+      responses:
+        "202":
+          description: Command accepted and published to MQTT
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /devices/{id}/history:
+    get:
+      operationId: getDeviceHistory
+      summary: Query time-series state history
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        "200":
+          description: Array of historical state snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryEntry"
+
+  # ---------------------------------------------------------------------------
+  # Areas
+  # ---------------------------------------------------------------------------
+  /areas:
+    get:
+      operationId: listAreas
+      summary: List all areas
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of areas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Area"
+    post:
+      operationId: createArea
+      summary: Create a new area
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaCreate"
+      responses:
+        "201":
+          description: Created area
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+
+  /areas/{id}/devices:
+    put:
+      operationId: setAreaDevices
+      summary: Assign devices to an area (replaces existing assignment)
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      requestBody:
+        required: true
+        description: JSON array of device IDs to assign to this area
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+            example: ["light.virtual_01", "sensor.temp_01"]
+      responses:
+        "200":
+          description: Updated area
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Automations (rules)
+  # ---------------------------------------------------------------------------
+  /automations:
+    get:
+      operationId: listAutomations
+      summary: List all automation rules
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rule"
+    post:
+      operationId: createAutomation
+      summary: Create a new automation rule
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleCreate"
+      responses:
+        "201":
+          description: Created rule with server-assigned UUID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+
+  /automations/import:
+    post:
+      operationId: importAutomations
+      summary: Import rules from a JSON array (assigns fresh UUIDs to each)
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/Rule"
+      responses:
+        "200":
+          description: Array of imported rules with new UUIDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rule"
+
+  /automations/export:
+    get:
+      operationId: exportAutomations
+      summary: Export all rules as a JSON array (suitable for re-import)
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All rules as a JSON array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rule"
+
+  /automations/{id}:
+    get:
+      operationId: getAutomation
+      summary: Get a single automation rule
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "200":
+          description: Rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      operationId: replaceAutomation
+      summary: Replace an automation rule (full update)
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleCreate"
+      responses:
+        "200":
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: patchAutomation
+      summary: Update enabled state and/or priority only
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                priority:
+                  type: integer
+            example:
+              enabled: false
+      responses:
+        "200":
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteAutomation
+      summary: Delete an automation rule
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /automations/{id}/test:
+    post:
+      operationId: testAutomation
+      summary: Dry-run a rule — evaluate conditions and return would-fire actions without executing them
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "200":
+          description: Dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTestResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Scenes
+  # ---------------------------------------------------------------------------
+  /scenes:
+    get:
+      operationId: listScenes
+      summary: List all scenes
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of scenes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Scene"
+    post:
+      operationId: createScene
+      summary: Create a new scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SceneCreate"
+      responses:
+        "201":
+          description: Created scene
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scene"
+
+  /scenes/{id}/activate:
+    post:
+      operationId: activateScene
+      summary: Activate a scene (applies all stored device states via MQTT)
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      responses:
+        "202":
+          description: Scene activation accepted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Events
+  # ---------------------------------------------------------------------------
+  /events:
+    get:
+      operationId: listEvents
+      summary: Query the recent event log (last 1,000 events, MqttMessage excluded)
+      tags: [events]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum entries to return (default 50, max 1000)
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: type
+          in: query
+          description: Comma-separated event type names to include (e.g. `rule_fired,device_state_changed`)
+          schema:
+            type: string
+        - name: device_id
+          in: query
+          description: Only return events for this device ID
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Array of log entries (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogEntry"
+
+  /events/stream:
+    get:
+      operationId: streamEvents
+      summary: Live WebSocket event stream
+      tags: [events]
+      description: |
+        Upgrade to WebSocket.  Each message is a JSON-encoded event object.
+
+        **Authentication:** pass the JWT as `?token=<jwt>` — browsers cannot
+        set `Authorization` headers during a WebSocket upgrade.  The server
+        validates the token before accepting the upgrade and returns HTTP 401
+        if it is missing or invalid.
+
+        **Filtering (optional):**
+        - `type` — comma-separated event type names (e.g. `device_state_changed,rule_fired`)
+        - `device_id` — only forward events for this device
+
+        **Event types:** `device_state_changed`, `device_availability_changed`,
+        `rule_fired`, `scene_activated`, `plugin_registered`, `plugin_offline`,
+        `system_alert`, `custom`
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: JWT — required because browsers cannot set Authorization headers for WebSocket
+          schema:
+            type: string
+        - name: type
+          in: query
+          description: Comma-separated event type names to subscribe to
+          schema:
+            type: string
+        - name: device_id
+          in: query
+          description: Only forward events for this device ID
+          schema:
+            type: string
+      responses:
+        "101":
+          description: Switching Protocols — WebSocket upgrade accepted
+        "401":
+          description: Missing or invalid token — upgrade rejected
+
+  # ---------------------------------------------------------------------------
+  # Plugins
+  # ---------------------------------------------------------------------------
+  /plugins:
+    get:
+      operationId: listPlugins
+      summary: List registered plugins and their status
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of plugin status objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PluginStatus"
+
+  /plugins/{id}:
+    delete:
+      operationId: deregisterPlugin
+      summary: Deregister a plugin (removes from in-memory registry)
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "204":
+          description: Plugin deregistered
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Webhooks
+  # ---------------------------------------------------------------------------
+  /webhooks/{path}:
+    post:
+      operationId: receiveWebhook
+      summary: Fire a webhook trigger
+      description: |
+        Any POST to this endpoint fires a `Custom` event with
+        `event_type = "webhook"` onto the internal event bus.
+        Automation rules with `trigger.type = "WebhookReceived"` and a
+        matching `path` will execute.
+      tags: [webhooks]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: Webhook path identifier — must match the rule's `trigger.path`
+          schema:
+            type: string
+      requestBody:
+        required: false
+        description: Optional JSON body forwarded as `payload.body` in the fired event
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "202":
+          description: Webhook accepted and event fired
+
+  # ---------------------------------------------------------------------------
+  # System
+  # ---------------------------------------------------------------------------
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe — no auth required
+      tags: [system]
+      responses:
+        "200":
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+# =============================================================================
+# Components
+# =============================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: User UUID
+
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Device identifier (e.g. `light.living_room_main`)
+
+    AreaId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Area UUID
+
+    AutomationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Automation rule UUID
+
+    SceneId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Scene UUID
+
+    PluginId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Plugin identifier (e.g. `plugin.zigbee`)
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Forbidden:
+      description: Authenticated but insufficient role (admin required)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+
+    # ---- Auth ----
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      required: [token, token_type, expires_in, user]
+      properties:
+        token:
+          type: string
+          description: Signed JWT — include as `Authorization: Bearer <token>` on subsequent requests
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+        user:
+          $ref: "#/components/schemas/UserInfo"
+
+    UserInfo:
+      type: object
+      required: [id, username, role, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          type: string
+          format: date-time
+
+    Role:
+      type: string
+      enum: [Admin, User, ReadOnly]
+      description: |
+        - `Admin` — full access including user management
+        - `User` — read/write devices, automations, scenes, areas, webhooks, events
+        - `ReadOnly` — GET-only access to devices, automations, scenes, events
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    CreateUserRequest:
+      type: object
+      required: [username, password, role]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        role:
+          $ref: "#/components/schemas/Role"
+
+    SetRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+
+    # ---- Devices ----
+
+    DeviceState:
+      type: object
+      required: [device_id, name, plugin_id, available, attributes, last_seen]
+      properties:
+        device_id:
+          type: string
+        name:
+          type: string
+        plugin_id:
+          type: string
+        area:
+          type: string
+          nullable: true
+        available:
+          type: boolean
+        attributes:
+          type: object
+          additionalProperties: true
+          description: Current device attribute values (e.g. `{"on": true, "brightness": 180}`)
+        capabilities:
+          type: object
+          description: JSON Schema describing the device's attributes
+        last_seen:
+          type: string
+          format: date-time
+
+    HistoryEntry:
+      type: object
+      required: [device_id, attribute, value, recorded_at]
+      properties:
+        device_id:
+          type: string
+        attribute:
+          type: string
+        value:
+          description: JSON-encoded attribute value at the time of recording
+        recorded_at:
+          type: string
+          format: date-time
+
+    # ---- Areas ----
+
+    Area:
+      type: object
+      required: [id, name, device_ids]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        device_ids:
+          type: array
+          items:
+            type: string
+
+    AreaCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+
+    # ---- Automations ----
+
+    Rule:
+      type: object
+      required: [id, name, enabled, priority, trigger, conditions, actions]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+          description: Higher values are evaluated first
+        trigger:
+          $ref: "#/components/schemas/Trigger"
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Condition"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Action"
+
+    RuleCreate:
+      type: object
+      required: [name, trigger, actions]
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+          default: true
+        priority:
+          type: integer
+          default: 0
+        trigger:
+          $ref: "#/components/schemas/Trigger"
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Condition"
+          default: []
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Action"
+
+    Trigger:
+      type: object
+      description: |
+        Discriminated union on the `type` field.
+
+        | `type` | Additional fields |
+        |---|---|
+        | `DeviceStateChanged` | `device_id` (string), `attribute` (string, optional) |
+        | `MqttMessage` | `topic_pattern` (string, supports `+` and `#`) |
+        | `TimeOfDay` | `time` (HH:MM string), `days` (array of weekday names) |
+        | `SunEvent` | `event` (`"Sunrise"` or `"Sunset"`), `offset_minutes` (integer) |
+        | `WebhookReceived` | `path` (string) |
+        | `ManualTrigger` | no additional fields |
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [DeviceStateChanged, MqttMessage, TimeOfDay, SunEvent, WebhookReceived, ManualTrigger]
+        device_id:
+          type: string
+        attribute:
+          type: string
+        topic_pattern:
+          type: string
+        time:
+          type: string
+          description: "HH:MM format"
+        days:
+          type: array
+          items:
+            type: string
+            enum: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]
+        event:
+          type: string
+          enum: [Sunrise, Sunset, SolarNoon, CivilDawn, CivilDusk]
+        offset_minutes:
+          type: integer
+        path:
+          type: string
+      examples:
+        DeviceStateChanged:
+          value:
+            type: DeviceStateChanged
+            device_id: light.virtual_01
+            attribute: on
+        WebhookReceived:
+          value:
+            type: WebhookReceived
+            path: my-hook
+        TimeOfDay:
+          value:
+            type: TimeOfDay
+            time: "18:30"
+            days: [Monday, Tuesday, Wednesday, Thursday, Friday]
+
+    Condition:
+      type: object
+      description: |
+        Discriminated union on the `type` field.  All conditions AND together.
+
+        | `type` | Additional fields |
+        |---|---|
+        | `DeviceState` | `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
+        | `TimeWindow` | `start` (HH:MM), `end` (HH:MM) |
+        | `ScriptExpression` | `script` (Rhai expression returning bool) |
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [DeviceState, TimeWindow, ScriptExpression]
+        device_id:
+          type: string
+        attribute:
+          type: string
+        op:
+          type: string
+          enum: [Eq, Ne, Gt, Gte, Lt, Lte]
+        value: {}
+        start:
+          type: string
+        end:
+          type: string
+        script:
+          type: string
+
+    Action:
+      type: object
+      description: |
+        Discriminated union on the `type` field.  Actions run sequentially by default.
+
+        | `type` | Key fields |
+        |---|---|
+        | `SetDeviceState` | `device_id`, `state` (object) |
+        | `PublishMqtt` | `topic`, `payload` (string), `retain` (bool) |
+        | `CallService` | `url`, `method`, `body` |
+        | `FireEvent` | `event_type`, `payload` (object) |
+        | `RunScript` | `script` (Rhai) |
+        | `Notify` | `channel`, `message` |
+        | `Delay` | `duration_ms` (integer) |
+        | `Parallel` | `actions` (array — run concurrently) |
+        | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil]
+        device_id:
+          type: string
+        state:
+          type: object
+          additionalProperties: true
+        topic:
+          type: string
+        payload:
+          type: string
+        retain:
+          type: boolean
+        url:
+          type: string
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+        body:
+          type: object
+          additionalProperties: true
+        event_type:
+          type: string
+        channel:
+          type: string
+        message:
+          type: string
+        script:
+          type: string
+        condition:
+          type: string
+          description: Rhai expression returning bool (used by RepeatUntil)
+        duration_ms:
+          type: integer
+        max_iterations:
+          type: integer
+          default: 100
+        interval_ms:
+          type: integer
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Action"
+
+    AutomationTestResult:
+      type: object
+      required: [rule_id, conditions_passed, would_fire_actions]
+      properties:
+        rule_id:
+          type: string
+          format: uuid
+        conditions_passed:
+          type: boolean
+        would_fire_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Action"
+
+    # ---- Scenes ----
+
+    Scene:
+      type: object
+      required: [id, name, states]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        states:
+          type: object
+          additionalProperties: true
+          description: Map of device_id → desired attribute values
+
+    SceneCreate:
+      type: object
+      required: [name, states]
+      properties:
+        name:
+          type: string
+        states:
+          type: object
+          additionalProperties: true
+
+    # ---- Events ----
+
+    LogEntry:
+      type: object
+      required: [seq, event_type, event]
+      description: Entry in the REST event log ring buffer (GET /events)
+      properties:
+        seq:
+          type: integer
+          description: Monotonically increasing sequence number (1-based)
+        event_type:
+          type: string
+          description: Snake-case event type name (e.g. `device_state_changed`)
+        device_id:
+          type: string
+          description: Device ID if this event is device-scoped (omitted otherwise)
+        event:
+          type: object
+          additionalProperties: true
+          description: Full event payload
+
+    EventEnvelope:
+      type: object
+      required: [type, timestamp]
+      description: |
+        Event emitted on the WebSocket stream.  The `type` field determines
+        which additional fields are present.
+
+        | `type` | Extra fields |
+        |---|---|
+        | `device_state_changed` | `device_id`, `previous`, `current` |
+        | `device_availability_changed` | `device_id`, `available` |
+        | `rule_fired` | `rule_id`, `rule_name` |
+        | `scene_activated` | `scene_id`, `scene_name` |
+        | `plugin_registered` | `plugin_id` |
+        | `plugin_offline` | `plugin_id` |
+        | `system_alert` | `severity`, `message` |
+        | `custom` | `event_type`, `payload` |
+      properties:
+        type:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        device_id:
+          type: string
+        previous:
+          type: object
+        current:
+          type: object
+        available:
+          type: boolean
+        rule_id:
+          type: string
+        rule_name:
+          type: string
+        scene_id:
+          type: string
+        scene_name:
+          type: string
+        plugin_id:
+          type: string
+        severity:
+          type: string
+          enum: [info, warning, error, critical]
+        message:
+          type: string
+        event_type:
+          type: string
+        payload:
+          type: object
+
+    # ---- Plugins ----
+
+    PluginStatus:
+      type: object
+      required: [plugin_id, status, registered_at]
+      properties:
+        plugin_id:
+          type: string
+        registered_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, offline]
+
+    # ---- System ----
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        detail:
+          type: string

@@ -1,0 +1,19 @@
+{
+  "name": "homecore-plugin-sdk",
+  "version": "0.1.0",
+  "description": "Node.js SDK for HomeCore device plugins",
+  "main": "index.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mqtt": "^5.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "scripts": {
+    "test": "jest"
+  }
+}

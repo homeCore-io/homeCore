@@ -1,0 +1,18 @@
+[package]
+name    = "hc-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio       = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+hc-types    = { path = "../hc-types" }
+hc-state    = { path = "../hc-state" }
+hc-scripting = { version = "0.1.0", path = "../hc-scripting" }
+hc-mqtt-client = { version = "0.1.0", path = "../hc-mqtt-client" }
+chrono = { workspace = true, features = ["serde"] }
+serde_json.workspace = true
+reqwest = { version = "0.13.2", features = ["json"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+hc-topic-map = { version = "0.1.0", path = "../hc-topic-map" }

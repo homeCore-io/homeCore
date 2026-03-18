@@ -1,0 +1,64 @@
+# HomeCore configuration file
+#
+# Fields marked "(parsed)" are read by the server at startup.
+# Fields marked "(planned)" are documented here for reference but not yet
+# wired into main.rs — they are currently hard-coded defaults.
+
+# ---------------------------------------------------------------------------
+# Server  (planned — currently hard-coded to 0.0.0.0:8080)
+# ---------------------------------------------------------------------------
+[server]
+host = "0.0.0.0"
+port = 8080
+
+# ---------------------------------------------------------------------------
+# Embedded MQTT broker  (planned — currently hard-coded to 0.0.0.0:1883)
+# ---------------------------------------------------------------------------
+[broker]
+host     = "0.0.0.0"
+port     = 1883
+# tls_port = 8883
+# cert_path = "/etc/homecore/broker.crt"
+# key_path  = "/etc/homecore/broker.key"
+# external_url = "mqtt://192.168.1.10:1883"  # use external broker instead
+
+# ---------------------------------------------------------------------------
+# Location  (parsed — used for sunrise/sunset calculations)
+# ---------------------------------------------------------------------------
+[location]
+latitude  = 38.9072
+longitude = -77.0369
+# timezone is informational only; local system timezone is used at runtime
+timezone  = "America/New_York"
+
+# ---------------------------------------------------------------------------
+# Authentication  (parsed)
+# ---------------------------------------------------------------------------
+[auth]
+# HMAC-SHA256 secret for signing JWTs.
+# Change this to a long random string before deploying.
+# If omitted, a random secret is generated at startup and tokens will not
+# survive server restarts.
+jwt_secret         = "change-me-to-a-long-random-string-before-deploying"
+token_expiry_hours = 24
+
+# ---------------------------------------------------------------------------
+# Storage  (planned — currently hard-coded to /tmp for development)
+# ---------------------------------------------------------------------------
+[storage]
+state_db_path   = "/var/lib/homecore/state.redb"
+history_db_path = "/var/lib/homecore/history.db"
+
+# ---------------------------------------------------------------------------
+# Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
+# (parsed — each entry translates incoming MQTT topics to the HomeCore schema)
+# ---------------------------------------------------------------------------
+# [[topic_map]]
+# source_pattern  = "stat/{device}/POWER"
+# target_template = "homecore/devices/tasmota_{device}/state"
+# transform       = "tasmota_power_to_state"
+
+# [[topic_map]]
+# source_pattern  = "shellies/{device}/relay/0"
+# target_template = "homecore/devices/shelly_{device}/state"
+# transform       = "shelly_relay_to_state"

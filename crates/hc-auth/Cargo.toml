@@ -1,0 +1,18 @@
+[package]
+name    = "hc-auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+hc-types   = { path = "../hc-types" }
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+bcrypt = "0.19.0"
+argon2     = { workspace = true }
+rand_core  = { version = "0.6", features = ["getrandom"] }
+uuid       = { workspace = true }
+chrono     = { workspace = true }
+thiserror  = { workspace = true }

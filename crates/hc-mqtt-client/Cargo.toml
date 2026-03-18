@@ -1,0 +1,14 @@
+[package]
+name    = "hc-mqtt-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rumqttc  = { workspace = true }
+tokio    = { workspace = true }
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
+hc-types = { path = "../hc-types" }
+chrono = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

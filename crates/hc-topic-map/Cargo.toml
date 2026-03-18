@@ -1,0 +1,12 @@
+[package]
+name    = "hc-topic-map"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rhai       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+hc-types   = { path = "../hc-types" }

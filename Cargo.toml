@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hc-types",
+    "crates/hc-broker",
+    "crates/hc-mqtt-client",
+    "crates/hc-topic-map",
+    "crates/hc-core",
+    "crates/hc-state",
+    "crates/hc-api",
+    "crates/hc-auth",
+    "crates/hc-scripting",
+    "plugins/plugin-sdk-rs",
+    "plugins/examples/virtual-device",
+    "plugins/examples/http-poller", "homecore",
+]
+
+[workspace.dependencies]
+tokio             = { version = "1", features = ["full"] }
+rumqttd           = "0.19"
+rumqttc           = "0.24"
+axum              = { version = "0.7", features = ["ws"] }
+redb              = "2"
+rusqlite          = { version = "0.31", features = ["bundled"] }
+rhai              = { version = "1", features = ["sync"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+uuid              = { version = "1", features = ["v4", "serde"] }
+chrono            = { version = "0.4", features = ["serde"] }
+anyhow            = "1"
+thiserror         = "1"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jsonschema        = "0.18"
+toml              = "0.8"
+utoipa            = { version = "4", features = ["axum_extras"] }
+argon2            = { version = "0.5", features = ["password-hash"] }
+async-trait       = "0.1"

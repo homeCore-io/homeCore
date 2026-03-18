@@ -1,0 +1,26 @@
+[package]
+name    = "hc-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum       = { workspace = true }
+tokio      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+utoipa     = { workspace = true }
+hc-types   = { path = "../hc-types" }
+hc-state   = { path = "../hc-state" }
+hc-core    = { version = "0.1.0", path = "../hc-core" }
+tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+hc-auth = { version = "0.1.0", path = "../hc-auth" }
+chrono = { workspace = true, features = ["serde"] }
+hc-mqtt-client = { version = "0.1.0", path = "../hc-mqtt-client" }
+hc-scripting = { version = "0.1.0", path = "../hc-scripting" }
+async-trait  = { workspace = true }
+
+[dev-dependencies]
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }

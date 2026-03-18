@@ -1,0 +1,10 @@
+[package]
+name    = "hc-scripting"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rhai     = { workspace = true }
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
+hc-types = { path = "../hc-types" }
