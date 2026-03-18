@@ -1,0 +1,393 @@
+# HomeCore Device Type Catalog
+#
+# Defines canonical attribute schemas for standard device types.
+# Plugins and ecosystem profiles reference types by name instead of
+# hand-writing JSON Schema.
+#
+# Usage:
+#   - Copy this file to config/profiles/device-types.toml to activate it.
+#   - Add custom types at the bottom; do not modify the standard types above
+#     the "CUSTOM TYPES" section — future HomeCore updates may replace this file.
+#
+# Attribute fields:
+#   type     — "boolean" | "integer" | "number" | "string" | "object"
+#   minimum  — inclusive lower bound (integer/number)
+#   maximum  — inclusive upper bound (integer/number)
+#   unit     — display unit string, informational only
+#   enum     — array of allowed string values
+#   access   — "r" (read-only sensor) | "rw" (read/write, default)
+#
+# Type inheritance:
+#   extends  — copies all attributes from the named type, then adds/overrides
+
+
+# ---------------------------------------------------------------------------
+# Switch
+# ---------------------------------------------------------------------------
+
+[types.switch]
+description = "Binary on/off switch"
+
+  [types.switch.attributes.on]
+  type   = "boolean"
+  access = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Lights
+# ---------------------------------------------------------------------------
+
+[types.light]
+description = "Dimmable light (on/off + brightness)"
+
+  [types.light.attributes.on]
+  type   = "boolean"
+  access = "rw"
+
+  [types.light.attributes.brightness]
+  type    = "integer"
+  minimum = 0
+  maximum = 255
+  access  = "rw"
+
+[types.light_color]
+description = "Color-tunable dimmable light"
+extends     = "light"
+
+  [types.light_color.attributes.color_temp]
+  type    = "integer"
+  minimum = 150
+  maximum = 500
+  unit    = "mired"
+  access  = "rw"
+
+  [types.light_color.attributes.color_xy]
+  type   = "object"
+  access = "rw"
+
+[types.light_rgb]
+description = "RGB color light"
+extends     = "light"
+
+  [types.light_rgb.attributes.color_rgb]
+  type   = "object"
+  access = "rw"
+
+  [types.light_rgb.attributes.hue]
+  type    = "integer"
+  minimum = 0
+  maximum = 360
+  access  = "rw"
+
+  [types.light_rgb.attributes.saturation]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Sensors
+# ---------------------------------------------------------------------------
+
+[types.temperature_sensor]
+description = "Temperature (and optional humidity) sensor"
+
+  [types.temperature_sensor.attributes.temperature]
+  type   = "number"
+  unit   = "°C"
+  access = "r"
+
+  [types.temperature_sensor.attributes.humidity]
+  type    = "number"
+  unit    = "%"
+  minimum = 0
+  maximum = 100
+  access  = "r"
+
+[types.contact_sensor]
+description = "Door/window contact sensor"
+
+  [types.contact_sensor.attributes.contact]
+  type   = "boolean"
+  access = "r"
+
+  [types.contact_sensor.attributes.tamper]
+  type   = "boolean"
+  access = "r"
+
+[types.motion_sensor]
+description = "PIR or radar motion sensor"
+
+  [types.motion_sensor.attributes.occupancy]
+  type   = "boolean"
+  access = "r"
+
+  [types.motion_sensor.attributes.illuminance]
+  type   = "integer"
+  unit   = "lux"
+  access = "r"
+
+[types.smoke_sensor]
+description = "Smoke / CO alarm sensor"
+
+  [types.smoke_sensor.attributes.smoke]
+  type   = "boolean"
+  access = "r"
+
+  [types.smoke_sensor.attributes.co]
+  type   = "boolean"
+  access = "r"
+
+[types.water_sensor]
+description = "Water / flood sensor"
+
+  [types.water_sensor.attributes.water_detected]
+  type   = "boolean"
+  access = "r"
+
+[types.vibration_sensor]
+description = "Vibration / tilt sensor"
+
+  [types.vibration_sensor.attributes.vibration]
+  type   = "boolean"
+  access = "r"
+
+  [types.vibration_sensor.attributes.tilt_angle]
+  type   = "integer"
+  unit   = "°"
+  access = "r"
+
+[types.illuminance_sensor]
+description = "Standalone light level sensor"
+
+  [types.illuminance_sensor.attributes.illuminance]
+  type   = "integer"
+  unit   = "lux"
+  access = "r"
+
+  [types.illuminance_sensor.attributes.illuminance_raw]
+  type   = "integer"
+  access = "r"
+
+
+# ---------------------------------------------------------------------------
+# Power monitoring
+# ---------------------------------------------------------------------------
+
+[types.power_monitor]
+description = "Smart plug or inline power meter"
+extends     = "switch"
+
+  [types.power_monitor.attributes.power_w]
+  type   = "number"
+  unit   = "W"
+  access = "r"
+
+  [types.power_monitor.attributes.energy_kwh]
+  type   = "number"
+  unit   = "kWh"
+  access = "r"
+
+  [types.power_monitor.attributes.voltage]
+  type   = "number"
+  unit   = "V"
+  access = "r"
+
+  [types.power_monitor.attributes.current_a]
+  type   = "number"
+  unit   = "A"
+  access = "r"
+
+  [types.power_monitor.attributes.power_factor]
+  type    = "number"
+  minimum = 0.0
+  maximum = 1.0
+  access  = "r"
+
+
+# ---------------------------------------------------------------------------
+# Cover (blinds, curtains, garage doors)
+# ---------------------------------------------------------------------------
+
+[types.cover]
+description = "Motorised cover — roller blind, curtain, garage door"
+
+  [types.cover.attributes.state]
+  type   = "string"
+  enum   = ["open", "closed", "opening", "closing", "stopped"]
+  access = "r"
+
+  [types.cover.attributes.position]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+  [types.cover.attributes.tilt]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Lock
+# ---------------------------------------------------------------------------
+
+[types.lock]
+description = "Electronic door lock"
+
+  [types.lock.attributes.locked]
+  type   = "boolean"
+  access = "rw"
+
+  [types.lock.attributes.jammed]
+  type   = "boolean"
+  access = "r"
+
+
+# ---------------------------------------------------------------------------
+# Climate / HVAC
+# ---------------------------------------------------------------------------
+
+[types.climate]
+description = "Thermostat or HVAC controller"
+
+  [types.climate.attributes.current_temp]
+  type   = "number"
+  unit   = "°C"
+  access = "r"
+
+  [types.climate.attributes.target_temp]
+  type   = "number"
+  unit   = "°C"
+  access = "rw"
+
+  [types.climate.attributes.mode]
+  type   = "string"
+  enum   = ["off", "heat", "cool", "auto", "dry", "fan_only"]
+  access = "rw"
+
+  [types.climate.attributes.hvac_action]
+  type   = "string"
+  enum   = ["off", "heating", "cooling", "idle", "fan"]
+  access = "r"
+
+  [types.climate.attributes.fan_mode]
+  type   = "string"
+  enum   = ["auto", "low", "medium", "high"]
+  access = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Media player
+# ---------------------------------------------------------------------------
+
+[types.media_player]
+description = "Audio/video player (Sonos, Chromecast, etc.)"
+
+  [types.media_player.attributes.state]
+  type   = "string"
+  enum   = ["playing", "paused", "stopped", "idle", "buffering", "unavailable"]
+  access = "r"
+
+  [types.media_player.attributes.volume]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+  [types.media_player.attributes.muted]
+  type   = "boolean"
+  access = "rw"
+
+  [types.media_player.attributes.source]
+  type   = "string"
+  access = "rw"
+
+  [types.media_player.attributes.track_title]
+  type   = "string"
+  access = "r"
+
+  [types.media_player.attributes.track_artist]
+  type   = "string"
+  access = "r"
+
+  [types.media_player.attributes.shuffle]
+  type   = "boolean"
+  access = "rw"
+
+  [types.media_player.attributes.repeat]
+  type   = "string"
+  enum   = ["off", "one", "all"]
+  access = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Alarm / siren
+# ---------------------------------------------------------------------------
+
+[types.siren]
+description = "Alarm sounder or siren"
+
+  [types.siren.attributes.active]
+  type   = "boolean"
+  access = "rw"
+
+  [types.siren.attributes.tone]
+  type   = "string"
+  access = "rw"
+
+  [types.siren.attributes.volume]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+
+# ---------------------------------------------------------------------------
+# Button / remote
+# ---------------------------------------------------------------------------
+
+[types.button]
+description = "Wireless button or remote (read-only — triggers events)"
+
+  [types.button.attributes.action]
+  type   = "string"
+  access = "r"
+
+  [types.button.attributes.battery]
+  type    = "integer"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "r"
+
+
+# ---------------------------------------------------------------------------
+# Generic sensor (fallback)
+# ---------------------------------------------------------------------------
+
+[types.sensor]
+description = "Generic sensor — use when no specific type applies"
+
+  [types.sensor.attributes.value]
+  type   = "number"
+  access = "r"
+
+  [types.sensor.attributes.unit]
+  type   = "string"
+  access = "r"
+
+
+# ===========================================================================
+# CUSTOM TYPES — add your own below this line
+# This section is safe to edit; the section above may be overwritten by
+# HomeCore updates.
+# ===========================================================================

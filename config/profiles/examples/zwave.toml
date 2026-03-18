@@ -1,0 +1,145 @@
+# HomeCore Ecosystem Profile — ZWave-JS (via zwavejs2mqtt)
+#
+# STATUS: STUB — Full ZWave support is a dedicated future phase.
+#         This file documents the intended profile format for ZWave-JS
+#         and can be used as a reference. It is NOT yet active.
+#
+# ZWave-JS differs fundamentally from other ecosystems in two ways:
+#
+#   1. One topic per attribute — each Z-Wave attribute is published on its
+#      own topic (e.g. zwave/1/37/0/currentValue). A single device may
+#      generate dozens of topics. HomeCore must aggregate these into one
+#      device state object using a time-windowed buffer (aggregate_ms).
+#
+#   2. CommandClass-based addressing — Z-Wave topics encode the Z-Wave
+#      CommandClass (CC) number and endpoint. Mapping these to human-readable
+#      attribute names requires a CC/property → attribute alias table.
+#      Command routing reverses this: attribute name → CC + endpoint → topic.
+#
+# Both of these require implementation work beyond the standard ecosystem
+# profile engine. They will be implemented in the dedicated ZWave-JS phase.
+#
+# Prerequisites (for when this becomes active):
+#   - zwavejs2mqtt running with MQTT enabled
+#   - zwavejs2mqtt configured to publish to the "zwave" topic prefix
+#   - HomeCore broker accessible to zwavejs2mqtt
+#
+# Device IDs in HomeCore:
+#   zwave/{nodeId}/... → homecore device "zwave_{nodeId}"
+
+[ecosystem]
+name        = "zwave"
+description = "ZWave-JS via zwavejs2mqtt — STUB, not yet active"
+prefix      = "zwave_"
+aggregate_ms = 100               # time window (ms) for grouping per-attribute updates
+
+# ---------------------------------------------------------------------------
+# Attribute alias table
+#
+# Maps "{commandClass}/{endpoint}/{property}" → HomeCore canonical attribute name.
+# When a topic matches zwave/{nodeId}/{commandClass}/{endpoint}/{property},
+# the alias table is consulted to determine the attribute name. If no alias
+# exists, the raw {property} value is used as the attribute name.
+#
+# Aliases are defined as a flat table for easy extension.
+# ---------------------------------------------------------------------------
+
+[ecosystem.attribute_aliases]
+# Binary Switch (CC 37)
+"37/0/currentValue"             = "on"
+
+# Multilevel Switch / Dimmer (CC 38)
+"38/0/currentValue"             = "brightness"
+"38/0/targetValue"              = "brightness"       # write target; read as same attr
+
+# Multilevel Sensor (CC 49)
+"49/0/Air_temperature"          = "temperature"
+"49/0/Humidity"                 = "humidity"
+"49/0/Illuminance"              = "illuminance"
+"49/0/Ultraviolet"              = "uv_index"
+"49/0/CO2_level"                = "co2_ppm"
+"49/0/Atmospheric_pressure"     = "pressure"
+
+# Meter (CC 50)
+"50/0/Power"                    = "power_w"
+"50/0/Energy"                   = "energy_kwh"
+"50/0/Voltage"                  = "voltage"
+"50/0/Electric_current"         = "current_a"
+
+# Battery (CC 128)
+"128/0/level"                   = "battery"
+"128/0/isLow"                   = "battery_low"
+
+# Door Lock (CC 98)
+"98/0/currentMode"              = "locked"
+
+# Window Covering (CC 102)
+"102/0/currentValue"            = "position"
+
+# Color Switch (CC 51)
+"51/0/currentColor"             = "color_rgb"
+
+# Thermostat Setpoint (CC 67)
+"67/1/value"                    = "target_temp"      # heating setpoint
+
+# Thermostat Mode (CC 64)
+"64/0/mode"                     = "mode"
+
+# Thermostat Operating State (CC 66)
+"66/0/state"                    = "hvac_action"
+
+# Notification (CC 113) — binary sensors
+"113/0/Access_Control"          = "locked"
+"113/0/Home_Security"           = "tamper"
+"113/0/Smoke_Alarm"             = "smoke"
+"113/0/CO_Alarm"                = "co"
+"113/0/Water_Alarm"             = "water_detected"
+
+
+# ---------------------------------------------------------------------------
+# State topics
+#
+# ZWave publishes scalar values (strings) that need type inference.
+# coerce_scalar = true enables automatic detection:
+#   "true"/"false" → bool, integer strings → int, float strings → float.
+# The attribute_aliases table above overrides the raw {property} name.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
+attribute     = "{property}"     # raw fallback; overridden by attribute_aliases
+coerce_scalar = true
+
+
+# ---------------------------------------------------------------------------
+# Availability
+#
+# zwavejs2mqtt publishes node status on a dedicated topic.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.availability_topics]]
+pattern   = "zwave/{nodeId}/status"
+
+  [ecosystem.availability_topics.value_map]
+  alive   = true
+  sleep   = true    # sleeping battery devices — still available
+  dead    = false
+
+
+# ---------------------------------------------------------------------------
+# Commands
+#
+# ZWave commands are published as scalar values to the Z-Wave set topic.
+# The router uses the attribute_aliases reverse map to find commandClass
+# and endpoint, then publishes to the appropriate set topic.
+#
+# IMPLEMENTATION NOTE: This requires the router to maintain a reverse alias
+# map and construct target topics dynamically. This is implemented in the
+# ZWave-JS dedicated phase.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.cmd_topics]]
+source         = "homecore/devices/zwave_{nodeId}/cmd"
+target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/set"
+# commandClass and endpoint are resolved from the attribute_aliases reverse map
+routing        = "alias_reverse"

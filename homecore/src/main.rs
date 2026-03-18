@@ -6,7 +6,7 @@ use hc_core::{Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::{ChannelConfig, NotificationService};
 use hc_state::StateStore;
-use hc_topic_map::{TopicMapEntry, TopicMapper, BUILTIN_TRANSFORMS};
+use hc_topic_map::{loader::load_profiles_from_dir, EcosystemRouter};
 use serde::Deserialize;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -23,8 +23,8 @@ struct AppConfig {
     location: LocationSection,
     #[serde(default)]
     storage: StorageSection,
-    #[serde(rename = "topic_map", default)]
-    topic_map: Vec<TopicMapEntry>,
+    #[serde(default)]
+    profiles: ProfilesSection,
     #[serde(default)]
     auth: AuthSection,
     #[serde(default)]
@@ -64,6 +64,18 @@ impl Default for StorageSection {
 
 fn default_state_db() -> String { "/tmp/homecore-state.redb".into() }
 fn default_history_db() -> String { "/tmp/homecore-history.db".into() }
+
+#[derive(Deserialize)]
+struct ProfilesSection {
+    #[serde(default = "default_profiles_dir")]
+    dir: String,
+}
+
+impl Default for ProfilesSection {
+    fn default() -> Self { Self { dir: default_profiles_dir() } }
+}
+
+fn default_profiles_dir() -> String { "config/profiles".into() }
 
 /// `[broker]` section of homecore.toml.
 #[derive(Deserialize)]
@@ -253,13 +265,19 @@ async fn main() -> Result<()> {
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude);
 
-    // Wire topic mapper if any entries are configured (includes built-in transforms).
-    if !config.topic_map.is_empty() {
-        info!(count = config.topic_map.len(), "Loading topic map entries");
-        match TopicMapper::new(config.topic_map, Some(BUILTIN_TRANSFORMS)) {
-            Ok(mapper) => { core = core.with_mapper(mapper); }
-            Err(e) => { tracing::warn!(error = %e, "Topic mapper init failed; running without it"); }
+    // Load ecosystem profiles and build the router.
+    match load_profiles_from_dir(&config.profiles.dir) {
+        Ok(profiles) if !profiles.is_empty() => {
+            match EcosystemRouter::new(profiles, None) {
+                Ok(router) => {
+                    info!("Ecosystem router ready");
+                    core = core.with_router(router);
+                }
+                Err(e) => tracing::warn!(error = %e, "Ecosystem router init failed; running without it"),
+            }
         }
+        Ok(_) => info!("No ecosystem profiles found in {}; running without router", config.profiles.dir),
+        Err(e) => tracing::warn!(error = %e, "Could not load profiles directory; running without router"),
     }
 
     // Wire notification service if channels are configured.

@@ -1,0 +1,140 @@
+# HomeCore Ecosystem Profile — Zigbee2MQTT
+#
+# Bridges Zigbee2MQTT's MQTT topics to the HomeCore canonical schema.
+#
+# Prerequisites:
+#   - Zigbee2MQTT running and connected to the same MQTT broker as HomeCore
+#   - Zigbee2MQTT configured to publish to the default topic prefix "zigbee2mqtt"
+#     (set via zigbee2mqtt's configuration.yaml: `mqtt.base_topic: zigbee2mqtt`)
+#
+# Usage:
+#   Copy this file to config/profiles/zigbee2mqtt.toml to activate it.
+#   Adjust field_map entries if your devices use non-standard attribute names.
+#
+# Device IDs in HomeCore:
+#   Zigbee2MQTT friendly names become HomeCore device IDs with the prefix below.
+#   Example: Z2M device "Living Room Light" → HomeCore ID "zigbee_Living Room Light"
+#   Tip: use underscore-separated names in Z2M (e.g. "living_room_light") for
+#   cleaner device IDs.
+
+[ecosystem]
+name        = "zigbee2mqtt"
+description = "Zigbee2MQTT bridge"
+prefix      = "zigbee_"
+
+
+# ---------------------------------------------------------------------------
+# Inbound — device state
+#
+# Zigbee2MQTT publishes one complete JSON object per device on a single topic.
+# All attributes present in the payload are mapped through field_map and coerce,
+# then written to homecore/devices/{prefix}{device}/state.
+#
+# field_map: rename Z2M attribute keys to HomeCore canonical attribute names.
+#   Format:  z2m_key = "homecore_attribute"
+#   Keys not listed here are passed through unchanged.
+#
+# coerce: type conversions applied after renaming.
+#   Format:  homecore_attribute = "coercion_name"
+#   Available coercions: onoff_to_bool, scalar_bool, scalar_int, scalar_float,
+#                        pct255_to_100, mired_to_kelvin (see docs for full list)
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern = "zigbee2mqtt/{device}"
+
+  [ecosystem.state_topics.field_map]
+  # Lights
+  state        = "on"
+  brightness   = "brightness"
+  color_temp   = "color_temp"
+  color_mode   = "color_mode"
+  color        = "color_xy"
+
+  # Sensors
+  temperature  = "temperature"
+  humidity     = "humidity"
+  pressure     = "pressure"
+  illuminance  = "illuminance"
+  occupancy    = "occupancy"
+  contact      = "contact"
+  smoke        = "smoke"
+  water_leak   = "water_detected"
+  vibration    = "vibration"
+  action       = "action"
+  battery      = "battery"
+  battery_low  = "battery_low"
+  tamper       = "tamper"
+  tilt_angle   = "tilt_angle"
+
+  # Power monitoring
+  power        = "power_w"
+  energy       = "energy_kwh"
+  voltage      = "voltage"
+  current      = "current_a"
+  power_factor = "power_factor"
+
+  # Cover
+  position     = "position"
+  tilt         = "tilt"
+
+  # Lock
+  state_l1     = "locked"
+
+  # Climate
+  local_temperature        = "current_temp"
+  occupied_heating_setpoint = "target_temp"
+  system_mode              = "mode"
+  running_state            = "hvac_action"
+  fan_mode                 = "fan_mode"
+
+  # Signal quality (informational)
+  linkquality  = "link_quality"
+
+  [ecosystem.state_topics.coerce]
+  # Z2M represents on/off as the string "ON" or "OFF"
+  on = "onoff_to_bool"
+
+
+# ---------------------------------------------------------------------------
+# Inbound — device availability
+#
+# Z2M publishes {"state":"online"} or {"state":"offline"} to this topic.
+# json_field extracts the "state" key; value_map converts it to bool.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.availability_topics]]
+pattern    = "zigbee2mqtt/{device}/availability"
+json_field = "state"
+
+  [ecosystem.availability_topics.value_map]
+  online  = true
+  offline = false
+
+
+# ---------------------------------------------------------------------------
+# Outbound — commands from HomeCore to Zigbee2MQTT
+#
+# HomeCore sends {"on": true, "brightness": 200} to homecore/devices/{id}/cmd.
+# The mapper renames attributes back to Z2M keys and coerces types, then
+# publishes to zigbee2mqtt/{device}/set.
+#
+# Z2M accepts the same JSON schema it publishes, so most attributes pass through.
+# The main coercion needed is bool → "ON"/"OFF" for the state field.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.cmd_topics]]
+source = "homecore/devices/zigbee_{device}/cmd"
+target = "zigbee2mqtt/{device}/set"
+
+  [ecosystem.cmd_topics.field_map]
+  # Rename HomeCore canonical names back to Z2M keys for the fields that differ
+  on           = "state"
+  current_temp = "local_temperature"
+  target_temp  = "occupied_heating_setpoint"
+  mode         = "system_mode"
+  hvac_action  = "running_state"
+
+  [ecosystem.cmd_topics.coerce]
+  # HomeCore stores on/off as bool; Z2M set expects "ON"/"OFF"
+  state = "bool_to_onoff"

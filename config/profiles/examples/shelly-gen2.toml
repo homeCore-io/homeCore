@@ -1,0 +1,195 @@
+# HomeCore Ecosystem Profile — Shelly Gen2
+#
+# Covers Shelly Plus, Pro, and Mini series devices that use the new
+# RPC-based firmware (Gen2+). These devices publish per-component status
+# topics under "shellies/{device}/status/{component}".
+#
+# Prerequisites:
+#   - MQTT enabled: Settings → MQTT → Server = <homecore-host>:1883
+#   - Leave client ID as default (e.g. shellyplus2pm-abc123)
+#
+# Usage:
+#   Copy this file to config/profiles/shelly-gen2.toml to activate it.
+#   Each physical Shelly component (switch:0, switch:1, etc.) becomes a
+#   separate HomeCore device. See "Device IDs" below.
+#
+# Device IDs in HomeCore:
+#   shellies/{device}/status/switch:0 → homecore device "shelly_{device}_switch_0"
+#   shellies/{device}/status/switch:1 → homecore device "shelly_{device}_switch_1"
+#   Colons in component names are replaced with underscores.
+#
+# Gen2 command format:
+#   Commands are sent as JSON-RPC messages to shellies/{device}/rpc.
+#   The profile declares rpc_method for each cmd_topics entry; the HomeCore
+#   ecosystem router wraps the payload in the required RPC envelope:
+#   {"id":1,"src":"homecore","method":"<rpc_method>","params":{...}}
+
+[ecosystem]
+name        = "shelly-gen2"
+description = "Shelly Gen2/Plus/Pro devices (RPC firmware)"
+prefix      = "shelly_"
+
+# Colon-to-underscore sanitization is applied automatically to {component}
+# when building device IDs, so switch:0 → switch_0.
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plus Plug / Plus Plug S — single switch + power monitoring
+# Model: SNPL-00112EU, SNPL-00116US, etc.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/switch:0"
+device_id = "{device}_switch_0"
+
+  [ecosystem.state_topics.field_map]
+  output  = "on"
+  apower  = "power_w"
+  voltage = "voltage"
+  current = "current_a"
+  "aenergy.total" = "energy_kwh"   # dot-notation: extracts nested JSON field
+
+[[ecosystem.availability_topics]]
+pattern   = "shellies/{device}/online"
+payload   = "raw_bool"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_0/cmd"
+target     = "shellies/{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 0                     # component id passed as params.id
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plus 2PM — dual relay with power monitoring
+# Model: SNSW-102P16EU, SNSW-102P60EU
+# ---------------------------------------------------------------------------
+
+# Switch 0
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/switch:0"
+device_id = "{device}_switch_0"
+
+  [ecosystem.state_topics.field_map]
+  output  = "on"
+  apower  = "power_w"
+  voltage = "voltage"
+  current = "current_a"
+  "aenergy.total" = "energy_kwh"
+
+# Switch 1
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/switch:1"
+device_id = "{device}_switch_1"
+
+  [ecosystem.state_topics.field_map]
+  output  = "on"
+  apower  = "power_w"
+  voltage = "voltage"
+  current = "current_a"
+  "aenergy.total" = "energy_kwh"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_0/cmd"
+target     = "shellies/{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 0
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_1/cmd"
+target     = "shellies/{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 1
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plus 1PM Mini — single relay
+# Model: SHSW-PM-MINI
+# ---------------------------------------------------------------------------
+# Same topic structure as Plus Plug — switch:0 only. The blocks above for
+# switch:0 already cover this model.
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plus Dimmer — brightness control
+# Model: SNDM-0013US, SNDM-00110EU
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/light:0"
+device_id = "{device}_light_0"
+
+  [ecosystem.state_topics.field_map]
+  output     = "on"
+  brightness = "brightness"
+  "apower"   = "power_w"
+  voltage    = "voltage"
+  "aenergy.total" = "energy_kwh"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_light_0/cmd"
+target     = "shellies/{device}/rpc"
+rpc_method = "Light.Set"
+rpc_id     = 0
+
+  [ecosystem.cmd_topics.field_map]
+  on         = "on"
+  brightness = "brightness"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plus HT — temperature and humidity sensor
+# Model: SNSN-0013A
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/temperature:0"
+device_id = "{device}_sensor"
+
+  [ecosystem.state_topics.field_map]
+  "tC" = "temperature"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/humidity:0"
+device_id = "{device}_sensor"    # same device ID — partial update merges with temp
+
+  [ecosystem.state_topics.field_map]
+  rh = "humidity"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Pro 3EM — three-phase energy meter
+# Model: SPEM-003CEBEU
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/em:0"
+device_id = "{device}_em"
+
+  [ecosystem.state_topics.field_map]
+  "a_act_power"   = "power_w_a"
+  "b_act_power"   = "power_w_b"
+  "c_act_power"   = "power_w_c"
+  "a_voltage"     = "voltage_a"
+  "b_voltage"     = "voltage_b"
+  "c_voltage"     = "voltage_c"
+  "a_current"     = "current_a_a"
+  "b_current"     = "current_a_b"
+  "c_current"     = "current_a_c"
+  "total_act_power" = "power_w"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/status/emdata:0"
+device_id = "{device}_em"
+
+  [ecosystem.state_topics.field_map]
+  "total_act"     = "energy_kwh"

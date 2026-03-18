@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use hc_notify::NotificationService;
-use hc_topic_map::TopicMapper;
+use hc_topic_map::EcosystemRouter;
 use hc_types::event::Event;
 use hc_types::rule::Rule;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub struct Core {
     state: hc_state::StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
-    mapper: Option<TopicMapper>,
+    router: Option<EcosystemRouter>,
     notify: Option<Arc<NotificationService>>,
 }
 
@@ -66,7 +66,7 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), mapper: None, notify: None }
+        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None }
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
@@ -74,9 +74,9 @@ impl Core {
         self
     }
 
-    /// Attach a topic mapper for non-standard device topics (Tasmota, Shelly, etc.).
-    pub fn with_mapper(mut self, mapper: TopicMapper) -> Self {
-        self.mapper = Some(mapper);
+    /// Attach an ecosystem router for profile-driven topic translation.
+    pub fn with_router(mut self, router: EcosystemRouter) -> Self {
+        self.router = Some(router);
         self
     }
 
@@ -95,8 +95,8 @@ impl Core {
 
         // State bridge: MqttMessage → DeviceStateChanged + store writes.
         let mut bridge = state_bridge::StateBridge::new(self.bus.clone(), self.state.clone());
-        if let Some(mapper) = self.mapper {
-            bridge = bridge.with_mapper(mapper);
+        if let Some(router) = self.router {
+            bridge = bridge.with_router(router);
         }
         if let Some(ph) = self.publish.clone() {
             bridge = bridge.with_publish(ph);

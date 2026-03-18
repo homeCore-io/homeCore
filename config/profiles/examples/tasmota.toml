@@ -1,0 +1,196 @@
+# HomeCore Ecosystem Profile — Tasmota
+#
+# Covers devices running Tasmota firmware (ESP8266/ESP32 based devices).
+# Tasmota uses separate publish prefixes for telemetry (tele/), status
+# responses (stat/), and commands (cmnd/).
+#
+# Prerequisites:
+#   - Tasmota MQTT configured: Console → `MqttHost <homecore-host>`
+#   - Topic template left as default: `%prefix%/%topic%/`
+#     (produces stat/device/POWER, tele/device/SENSOR, etc.)
+#   - Full topic: `%prefix%/%topic%` (no trailing slash variant also works)
+#
+# Usage:
+#   Copy this file to config/profiles/tasmota.toml to activate it.
+#   A single profile covers all Tasmota devices simultaneously.
+#
+# Device IDs in HomeCore:
+#   stat/{device}/POWER → homecore device "tasmota_{device}"
+#   {device} is the Tasmota topic name, set via: Console → `Topic mydevice`
+
+[ecosystem]
+name        = "tasmota"
+description = "Tasmota firmware devices (ESP8266/ESP32)"
+prefix      = "tasmota_"
+
+
+# ---------------------------------------------------------------------------
+# Single relay / switch (most common)
+# Covers: Sonoff Basic, Sonoff S26, Gosund SP111, etc.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "stat/{device}/POWER"
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "onoff_to_bool"             # "ON" → true, "OFF" → false
+
+# Tasmota also publishes POWER state in the full STATUS response — optional:
+[[ecosystem.state_topics]]
+pattern   = "stat/{device}/RESULT"
+
+  [ecosystem.state_topics.field_map]
+  POWER = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "onoff_to_bool"
+
+
+# ---------------------------------------------------------------------------
+# Dual relay (Sonoff Dual, Shelly devices running Tasmota, etc.)
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "stat/{device}/POWER1"
+device_id = "{device}_relay1"
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "onoff_to_bool"
+
+[[ecosystem.state_topics]]
+pattern   = "stat/{device}/POWER2"
+device_id = "{device}_relay2"
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "onoff_to_bool"
+
+
+# ---------------------------------------------------------------------------
+# Availability — Last Will and Testament
+# Tasmota publishes "Online" to tele/{device}/LWT on connect and
+# "Offline" when the device disconnects (retained message).
+# ---------------------------------------------------------------------------
+
+[[ecosystem.availability_topics]]
+pattern   = "tele/{device}/LWT"
+payload   = "raw_string"
+
+  [ecosystem.availability_topics.value_map]
+  Online  = true
+  Offline = false
+
+
+# ---------------------------------------------------------------------------
+# Power monitoring (Tasmota Energy)
+# Covers: Sonoff Pow, Sonoff S31, Gosund SP111, BlitzWolf BW-SHP6, etc.
+# Published on a timer (default 5 min) or on change.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern = "tele/{device}/SENSOR"
+
+  [ecosystem.state_topics.field_map]
+  "ENERGY.Power"       = "power_w"
+  "ENERGY.Total"       = "energy_kwh"
+  "ENERGY.Voltage"     = "voltage"
+  "ENERGY.Current"     = "current_a"
+  "ENERGY.Factor"      = "power_factor"
+  "ENERGY.ApparentPower" = "apparent_power_va"
+  "ENERGY.ReactivePower" = "reactive_power_var"
+
+
+# ---------------------------------------------------------------------------
+# Temperature / humidity sensor (AM2301, DHT22, SHT3x, etc.)
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern = "tele/{device}/SENSOR"
+
+  [ecosystem.state_topics.field_map]
+  # Tasmota uses sensor driver name as the JSON key (AM2301, DHT22, DS18B20…)
+  # List the ones you have. All map to the same canonical attributes.
+  "AM2301.Temperature" = "temperature"
+  "AM2301.Humidity"    = "humidity"
+  "DHT22.Temperature"  = "temperature"
+  "DHT22.Humidity"     = "humidity"
+  "SHT3X.Temperature"  = "temperature"
+  "SHT3X.Humidity"     = "humidity"
+  "DS18B20.Temperature" = "temperature"
+
+
+# ---------------------------------------------------------------------------
+# Dimmer / PWM light (Tasmota light control)
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern = "stat/{device}/RESULT"
+
+  [ecosystem.state_topics.field_map]
+  POWER      = "on"
+  Dimmer     = "brightness"    # 0–100 in Tasmota; note: use pct100_to_255 if needed
+  CT         = "color_temp"    # color temperature in mired
+  "Color"    = "color_rgb"
+
+  [ecosystem.state_topics.coerce]
+  on = "onoff_to_bool"
+
+
+# ---------------------------------------------------------------------------
+# Outbound commands — single relay
+# ---------------------------------------------------------------------------
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/tasmota_{device}/cmd"
+target    = "cmnd/{device}/POWER"
+attribute = "on"                 # extract only "on" from the cmd JSON payload
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"           # true → "ON", false → "OFF"
+
+
+# ---------------------------------------------------------------------------
+# Outbound commands — dual relay
+# ---------------------------------------------------------------------------
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/tasmota_{device}_relay1/cmd"
+target    = "cmnd/{device}/POWER1"
+attribute = "on"
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/tasmota_{device}_relay2/cmd"
+target    = "cmnd/{device}/POWER2"
+attribute = "on"
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
+
+
+# ---------------------------------------------------------------------------
+# Outbound commands — dimmer
+# ---------------------------------------------------------------------------
+
+[[ecosystem.cmd_topics]]
+source = "homecore/devices/tasmota_{device}/cmd"
+target = "cmnd/{device}/Backlog"
+# Tasmota Backlog allows multiple commands in one message:
+# "POWER ON; Dimmer 80; CT 300"
+# This requires a custom Rhai transform rather than simple field mapping.
+transform = "homecore_cmd_to_tasmota_backlog"
+
+# Rhai transform for dimmer commands:
+# fn homecore_cmd_to_tasmota_backlog(payload) {
+#     let p = parse_json(payload);
+#     let parts = [];
+#     if "on" in p      { parts += if p.on { "POWER ON" } else { "POWER OFF" }; }
+#     if "brightness" in p { parts += "Dimmer " + p.brightness; }
+#     if "color_temp" in p { parts += "CT " + p.color_temp; }
+#     parts.join("; ")
+# }
+# Add this function to config/profiles/custom-transforms.rhai

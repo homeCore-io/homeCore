@@ -1,0 +1,206 @@
+# HomeCore Ecosystem Profile — Shelly Gen1
+#
+# Covers original Shelly firmware devices (Shelly 1, 2, Plug S, Dimmer, etc.)
+# that publish via MQTT using the "shellies/" topic prefix.
+#
+# Prerequisites:
+#   - Shelly MQTT enabled: Settings → MQTT → Server = <homecore-host>:1883
+#   - Default MQTT client ID left unchanged (e.g. shellyplug-s-AABBCC)
+#     The client ID becomes the {device} variable in all topic patterns below.
+#
+# Usage:
+#   Copy this file to config/profiles/shelly-gen1.toml to activate it.
+#   Uncomment the topic blocks that match your device model.
+#   A single profile file covers ALL Gen1 Shelly devices simultaneously —
+#   no per-device config needed.
+#
+# Device IDs in HomeCore:
+#   shellies/{device}/... → homecore device "shelly_{device}"
+#   Example: shellyplug-s-AABBCC → shelly_shellyplug-s-AABBCC
+
+[ecosystem]
+name        = "shelly-gen1"
+description = "Shelly Gen1 devices (original firmware, shellies/ prefix)"
+prefix      = "shelly_"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Plug / Plug S — single relay + power monitoring
+# Model: SHPLG-1, SHPLG-S, SHPLG-U1
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/0"
+attribute = "on"                 # scalar payload — wrap as {"on": <value>}
+
+  [ecosystem.state_topics.coerce]
+  on = "01_to_bool"              # "1" → true, "0" → false
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/0/power"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/0/energy"
+attribute = "energy_wmin"        # Watt-minutes; convert to kWh in rules if needed
+
+  [ecosystem.state_topics.coerce]
+  energy_wmin = "scalar_float"
+
+[[ecosystem.availability_topics]]
+pattern   = "shellies/{device}/online"
+payload   = "raw_bool"           # payload is literal true or false (not JSON)
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}/cmd"
+target    = "shellies/{device}/relay/0/command"
+attribute = "on"                 # extract only the "on" attribute from the cmd JSON
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_01"              # true → "on", false → "off"
+  # Note: Shelly relay/0/command accepts "on", "off", or "toggle"
+
+
+# ---------------------------------------------------------------------------
+# Shelly 1 / Shelly 1PM — single relay
+# Model: SHSW-1, SHSW-PM
+# ---------------------------------------------------------------------------
+# Uncomment if using Shelly 1 / 1PM. Topic structure is identical to Plug above.
+# The blocks above already cover these models — no additional config needed.
+
+
+# ---------------------------------------------------------------------------
+# Shelly 2 / 2.5 — dual relay (each relay is a separate HomeCore device)
+# Model: SHSW-21, SHSW-25
+# ---------------------------------------------------------------------------
+
+# Relay 0
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/0"
+device_id = "{device}_relay0"    # override device ID to distinguish relays
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "01_to_bool"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/0/power"
+device_id = "{device}_relay0"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+# Relay 1
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/1"
+device_id = "{device}_relay1"
+attribute = "on"
+
+  [ecosystem.state_topics.coerce]
+  on = "01_to_bool"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/relay/1/power"
+device_id = "{device}_relay1"
+attribute = "power_w"
+
+  [ecosystem.state_topics.coerce]
+  power_w = "scalar_float"
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_relay0/cmd"
+target    = "shellies/{device}/relay/0/command"
+attribute = "on"
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
+
+[[ecosystem.cmd_topics]]
+source    = "homecore/devices/shelly_{device}_relay1/cmd"
+target    = "shellies/{device}/relay/1/command"
+attribute = "on"
+
+  [ecosystem.cmd_topics.coerce]
+  on = "bool_to_onoff"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Dimmer / Dimmer 2 — brightness control
+# Model: SHDM-1, SHDM-2
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern = "shellies/{device}/light/0/status"
+
+  [ecosystem.state_topics.field_map]
+  ison       = "on"
+  brightness = "brightness"
+
+[[ecosystem.cmd_topics]]
+source = "homecore/devices/shelly_{device}/cmd"
+target = "shellies/{device}/light/0/set"
+
+  [ecosystem.cmd_topics.field_map]
+  on         = "turn"
+  brightness = "brightness"
+
+  [ecosystem.cmd_topics.coerce]
+  turn = "bool_to_onoff"
+
+
+# ---------------------------------------------------------------------------
+# Shelly Door/Window sensor
+# Model: SHDW-1, SHDW-2
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/state"
+attribute = "contact"
+
+  [ecosystem.state_topics.coerce]
+  contact = "open_close_to_bool"  # "open" → false, "close" → true
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/battery"
+attribute = "battery"
+
+  [ecosystem.state_topics.coerce]
+  battery = "scalar_int"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/illuminance"
+attribute = "illuminance"
+
+  [ecosystem.state_topics.coerce]
+  illuminance = "scalar_int"
+
+
+# ---------------------------------------------------------------------------
+# Shelly HT — temperature and humidity sensor
+# Model: SHHT-1
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/temperature"
+attribute = "temperature"
+
+  [ecosystem.state_topics.coerce]
+  temperature = "scalar_float"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/humidity"
+attribute = "humidity"
+
+  [ecosystem.state_topics.coerce]
+  humidity = "scalar_float"
+
+[[ecosystem.state_topics]]
+pattern   = "shellies/{device}/sensor/battery"
+attribute = "battery"
+
+  [ecosystem.state_topics.coerce]
+  battery = "scalar_int"
