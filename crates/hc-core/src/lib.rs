@@ -98,6 +98,9 @@ impl Core {
         if let Some(mapper) = self.mapper {
             bridge = bridge.with_mapper(mapper);
         }
+        if let Some(ph) = self.publish.clone() {
+            bridge = bridge.with_publish(ph);
+        }
         tokio::spawn(bridge.run());
 
         // Rule engine.

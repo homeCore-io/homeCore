@@ -87,6 +87,9 @@ history_db_path = "/var/lib/homecore/history.db"
 # transform       = "tasmota_power_to_state"
 
 # [[topic_map]]
-# source_pattern  = "shellies/{device}/relay/0"
-# target_template = "homecore/devices/shelly_{device}/state"
-# transform       = "shelly_relay_to_state"
+# source_pattern     = "shellies/{device}/relay/0"
+# target_template    = "homecore/devices/shelly_{device}/state"
+# transform          = "shelly_relay_to_state"
+# cmd_source_pattern = "homecore/devices/shelly_{device}/cmd"
+# cmd_target_template= "shellies/{device}/relay/0/command"
+# cmd_transform      = "homecore_cmd_to_shelly_relay"

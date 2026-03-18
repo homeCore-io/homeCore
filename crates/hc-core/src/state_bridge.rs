@@ -5,15 +5,19 @@
 //! typed `Event::DeviceStateChanged` / `Event::DeviceAvailabilityChanged`
 //! events so the rule engine and WebSocket clients see structured data.
 //!
-//! Topic patterns handled:
+//! Topic patterns handled (inbound):
 //! - `homecore/devices/{id}/state`          → full state replace
 //! - `homecore/devices/{id}/state/partial`  → JSON merge-patch
 //! - `homecore/devices/{id}/availability`   → "online" | "offline"
 //! - `homecore/plugins/{id}/register`       → plugin registration
+//!
+//! Topic patterns handled (outbound via reverse topic map):
+//! - `homecore/devices/{id}/cmd`            → translated to native device cmd topic
 
 use crate::EventBus;
 use anyhow::Result;
 use chrono::Utc;
+use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
 use hc_topic_map::TopicMapper;
 use hc_types::device::DeviceState;
@@ -24,17 +28,25 @@ pub struct StateBridge {
     bus: EventBus,
     store: StateStore,
     mapper: Option<TopicMapper>,
+    publish: Option<PublishHandle>,
 }
 
 impl StateBridge {
     pub fn new(bus: EventBus, store: StateStore) -> Self {
-        Self { bus, store, mapper: None }
+        Self { bus, store, mapper: None, publish: None }
     }
 
     /// Attach a `TopicMapper` so non-standard device topics are translated
-    /// before processing.
+    /// before processing, and HomeCore cmd topics are relayed to native device topics.
     pub fn with_mapper(mut self, mapper: TopicMapper) -> Self {
         self.mapper = Some(mapper);
+        self
+    }
+
+    /// Attach a publish handle so the bridge can relay translated commands back
+    /// to the broker (required for topic-mapped device two-way control).
+    pub fn with_publish(mut self, publish: PublishHandle) -> Self {
+        self.publish = Some(publish);
         self
     }
 
@@ -59,7 +71,36 @@ impl StateBridge {
     }
 
     async fn handle_mqtt(&self, raw_topic: &str, raw_payload: &[u8]) -> Result<()> {
-        // Apply topic mapper first; if a mapping matches, use the translated values.
+        // Check if this is a cmd topic for a topic-mapped device.
+        // If so, translate and republish to the native device command topic.
+        if raw_topic.starts_with("homecore/devices/") && raw_topic.ends_with("/cmd") {
+            if let Some(mapper) = &self.mapper {
+                match mapper.translate_cmd(raw_topic, raw_payload) {
+                    Ok(Some(result)) => {
+                        debug!(
+                            from = raw_topic,
+                            to = %result.target_topic,
+                            "Relaying cmd to native device topic"
+                        );
+                        if let Some(ph) = &self.publish {
+                            if let Err(e) = ph.publish(&result.target_topic, result.payload).await {
+                                warn!(topic = %result.target_topic, error = %e, "Failed to relay cmd");
+                            }
+                        } else {
+                            warn!("No publish handle — cannot relay cmd to native topic");
+                        }
+                        // A mapped cmd is fully handled; don't process further.
+                        return Ok(());
+                    }
+                    Ok(None) => {} // Not a mapped device; fall through to normal handling.
+                    Err(e) => {
+                        warn!(topic = raw_topic, error = %e, "Cmd topic mapper error");
+                    }
+                }
+            }
+        }
+
+        // Apply topic mapper for inbound state/availability topics.
         let (translated_topic, translated_payload);
         let (topic, payload): (&str, &[u8]) = if let Some(mapper) = &self.mapper {
             match mapper.translate(raw_topic, raw_payload) {
