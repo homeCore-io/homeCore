@@ -107,7 +107,20 @@ pub enum Action {
     CallService {
         url: String,
         method: String,
+        #[serde(default)]
         body: JsonValue,
+        /// Request timeout in milliseconds. Defaults to 10 000 ms (10 s).
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        /// Number of retries on network error or 5xx response. Defaults to 0.
+        /// Backoff: 500 ms, 1 000 ms, 2 000 ms, … (capped at 4 000 ms).
+        #[serde(default)]
+        retries: Option<u32>,
+        /// If set, the response body (parsed as JSON) is fired as a `Custom`
+        /// event with this `event_type` on the internal bus after a successful
+        /// call. Other rules can subscribe to it via `Trigger::MqttMessage`.
+        #[serde(default)]
+        response_event: Option<String>,
     },
     FireEvent {
         event_type: String,

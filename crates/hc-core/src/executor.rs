@@ -5,7 +5,22 @@ use hc_mqtt_client::PublishHandle;
 use hc_scripting::ScriptRuntime;
 use hc_state::StateStore;
 use hc_types::rule::Action;
+use serde_json::Value as JsonValue;
+use std::sync::OnceLock;
 use tracing::{info, warn};
+
+/// Shared HTTP client — initialised once, reused for every `CallService` action.
+/// `reqwest::Client` is cheaply cloneable (Arc-backed) and safe to share across tasks.
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("HomeCore/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("Failed to build shared HTTP client")
+    })
+}
 
 /// Execute a list of actions sequentially, honouring `Parallel` and `Delay`.
 pub async fn execute_actions(
@@ -118,24 +133,65 @@ async fn run_single_action(
             }
         }
 
-        Action::CallService { url, method, body } => {
+        Action::CallService { url, method, body, timeout_ms, retries, response_event } => {
             let method_upper = method.to_uppercase();
-            let client = reqwest::Client::new();
-            let req = match method_upper.as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url).json(&body),
-                "PUT" => client.put(&url).json(&body),
-                "PATCH" => client.patch(&url).json(&body),
-                "DELETE" => client.delete(&url),
-                other => return Err(anyhow!("Unsupported HTTP method: {other}")),
-            };
-            let resp = req.send().await?;
-            let status = resp.status();
-            if !status.is_success() {
-                warn!(url, %status, "CallService HTTP error");
-            } else {
-                info!(url, %status, "CallService OK");
+            let timeout = tokio::time::Duration::from_millis(timeout_ms.unwrap_or(10_000));
+            let max_attempts = retries.unwrap_or(0) + 1;
+            let client = http_client();
+
+            let mut last_err: anyhow::Error = anyhow!("no attempts made");
+
+            'retry: for attempt in 0..max_attempts {
+                if attempt > 0 {
+                    // Exponential backoff: 500 ms, 1 000 ms, 2 000 ms, capped at 4 000 ms.
+                    let backoff_ms = 500u64 * (1u64 << (attempt - 1).min(3));
+                    info!(url, attempt, backoff_ms, "CallService retrying");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                }
+
+                let req = match method_upper.as_str() {
+                    "GET"    => client.get(&url),
+                    "POST"   => client.post(&url).json(&body),
+                    "PUT"    => client.put(&url).json(&body),
+                    "PATCH"  => client.patch(&url).json(&body),
+                    "DELETE" => client.delete(&url),
+                    other    => return Err(anyhow!("Unsupported HTTP method: {other}")),
+                };
+
+                match req.timeout(timeout).send().await {
+                    Err(e) => {
+                        warn!(url, attempt, error = %e, "CallService request failed");
+                        last_err = e.into();
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        // Retry on 5xx; treat 4xx as a permanent failure.
+                        if status.is_server_error() {
+                            warn!(url, %status, attempt, "CallService 5xx — will retry");
+                            last_err = anyhow!("HTTP {status}");
+                            continue 'retry;
+                        }
+                        if !status.is_success() {
+                            warn!(url, %status, "CallService HTTP error (not retrying)");
+                            return Err(anyhow!("HTTP {status}"));
+                        }
+                        info!(url, %status, "CallService OK");
+
+                        // Optionally forward the response body onto the event bus.
+                        if let Some(ref event_type) = response_event {
+                            if let Some(ref ph) = publish {
+                                let resp_body: JsonValue =
+                                    resp.json().await.unwrap_or(JsonValue::Null);
+                                let topic = format!("homecore/events/{event_type}");
+                                ph.publish_json(&topic, &resp_body, false).await?;
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
             }
+
+            return Err(last_err);
         }
 
         Action::RunScript { script } => {
@@ -200,5 +256,97 @@ mod tests {
     async fn delay_action_completes() {
         let store = dummy_store().await;
         execute_actions(vec![Action::Delay { duration_ms: 1 }], None, store).await.unwrap();
+    }
+
+    // ---- CallService tests ----
+
+    fn call_service(url: &str, method: &str) -> Action {
+        Action::CallService {
+            url: url.to_string(),
+            method: method.to_string(),
+            body: serde_json::Value::Null,
+            timeout_ms: None,
+            retries: None,
+            response_event: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn call_service_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("POST", "/hook").with_status(200).create_async().await;
+
+        let store = dummy_store().await;
+        let action = Action::CallService {
+            url: format!("{}/hook", server.url()),
+            method: "POST".into(),
+            body: serde_json::json!({"key": "val"}),
+            timeout_ms: None,
+            retries: None,
+            response_event: None,
+        };
+        execute_actions(vec![action], None, store).await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn call_service_4xx_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+        server.mock("GET", "/gone").with_status(404).create_async().await;
+
+        let store = dummy_store().await;
+        let result = execute_actions(vec![call_service(&format!("{}/gone", server.url()), "GET")], None, store).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn call_service_retries_on_5xx_then_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+        // First call returns 500, second returns 200.
+        let _m1 = server.mock("POST", "/retry").with_status(500).create_async().await;
+        let _m2 = server.mock("POST", "/retry").with_status(200).create_async().await;
+
+        let store = dummy_store().await;
+        let action = Action::CallService {
+            url: format!("{}/retry", server.url()),
+            method: "POST".into(),
+            body: serde_json::Value::Null,
+            timeout_ms: None,
+            retries: Some(1),
+            response_event: None,
+        };
+        execute_actions(vec![action], None, store).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_service_exhausts_retries_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+        // Both attempts return 500.
+        let _m1 = server.mock("GET", "/fail").with_status(500).create_async().await;
+        let _m2 = server.mock("GET", "/fail").with_status(500).create_async().await;
+
+        let store = dummy_store().await;
+        let action = Action::CallService {
+            url: format!("{}/fail", server.url()),
+            method: "GET".into(),
+            body: serde_json::Value::Null,
+            timeout_ms: None,
+            retries: Some(1),
+            response_event: None,
+        };
+        let result = execute_actions(vec![action], None, store).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn call_service_unsupported_method_returns_error() {
+        let store = dummy_store().await;
+        let result = execute_actions(
+            vec![call_service("http://localhost/x", "CONNECT")],
+            None,
+            store,
+        )
+        .await;
+        assert!(result.is_err());
     }
 }

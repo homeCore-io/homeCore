@@ -650,6 +650,95 @@ The path is the only authentication mechanism for webhooks. Keep it long and ran
 
 ---
 
+### Worked example — CallService (outbound HTTP)
+
+Use `CallService` when a rule needs to reach out to an external service — a Slack webhook, a REST API, a cloud bridge, etc.
+
+**Basic POST (fire-and-forget):**
+
+```json
+{
+  "type": "CallService",
+  "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+  "method": "POST",
+  "body": { "text": "Front door opened!" }
+}
+```
+
+**With timeout and retries:**
+
+```json
+{
+  "type": "CallService",
+  "url": "https://api.example.com/notify",
+  "method": "POST",
+  "body": { "event": "motion_detected", "zone": "driveway" },
+  "timeout_ms": 5000,
+  "retries": 2
+}
+```
+
+`retries: 2` means up to 3 total attempts. Retries happen only on network errors and 5xx responses — a 4xx fails immediately without retrying. Backoff between attempts: 500 ms → 1 000 ms → 2 000 ms (capped at 4 000 ms).
+
+**Using the response body in a follow-up rule (`response_event`):**
+
+When `response_event` is set, the response JSON is published to `homecore/events/{name}` after a successful call. A second rule can react to it via `Trigger::MqttMessage`.
+
+```sh
+# Rule 1 — call the API and forward the response
+RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Fetch weather on sunrise",
+    "enabled": true,
+    "priority": 10,
+    "trigger": { "type": "SunEvent", "event": "Sunrise", "offset_minutes": 0 },
+    "conditions": [],
+    "actions": [
+      {
+        "type": "CallService",
+        "url": "http://api.example.com/weather/current",
+        "method": "GET",
+        "body": null,
+        "timeout_ms": 8000,
+        "retries": 1,
+        "response_event": "weather_fetched"
+      }
+    ]
+  }' | jq -r .id)
+
+# Rule 2 — react to the response body
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Log weather response",
+    "enabled": true,
+    "priority": 5,
+    "trigger": {
+      "type": "MqttMessage",
+      "topic_pattern": "homecore/events/weather_fetched"
+    },
+    "conditions": [],
+    "actions": [
+      {
+        "type": "Notify",
+        "channel": "log",
+        "message": "Weather data received"
+      }
+    ]
+  }' | jq
+```
+
+The `response_event` body is the raw parsed JSON from the HTTP response, available to the second rule's conditions via `ScriptExpression`.
+
+**Shared HTTP client note:**
+
+All `CallService` actions in the process share a single `reqwest::Client` (initialised once at startup). This means connection pooling is automatic — repeated calls to the same host reuse existing TCP connections.
+
+---
+
 ### Trigger type reference
 
 | `type` value | Required fields | When it fires |
@@ -679,7 +768,7 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 |---|---|---|
 | `SetDeviceState` | `device_id`, `state` | Publishes to `homecore/devices/{id}/cmd` — device plugin applies it. |
 | `PublishMqtt` | `topic`, `payload`, `retain` | Raw MQTT publish. |
-| `CallService` | `url`, `method`, `body` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. |
+| `CallService` | `url`, `method`, `body`, `timeout_ms?`, `retries?`, `response_event?` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. `timeout_ms` defaults to 10 000. `retries` retries on network errors and 5xx only (4xx fails immediately); backoff: 500 ms → 1 000 ms → 2 000 ms → 4 000 ms. If `response_event` is set, the response body (JSON) is published to `homecore/events/{response_event}` so downstream rules can react to it. |
 | `FireEvent` | `event_type`, `payload` | Emits a custom event on the internal bus — visible in WS stream and event log. |
 | `RunScript` | `script` | Sandboxed Rhai script. |
 | `Notify` | `channel`, `message` | Currently logs to server stdout. Real delivery channels are a future feature. |
