@@ -1,115 +1,213 @@
-# Adding a Shelly Plug to HomeCore
+# Shelly Device Setup Guide
 
-HomeCore supports Shelly devices natively via the built-in MQTT topic mapper —
-no plugin or custom code required. State flows in automatically when the Shelly
-publishes to its native topics, and commands sent via the HomeCore API are
-automatically relayed back to the Shelly.
-
----
-
-## Step 1 — Configure the Shelly to use your MQTT broker
-
-On the Shelly web UI (`http://<shelly-ip>`):
-
-1. Go to **Settings → MQTT**
-2. Enable MQTT
-3. Set **Server** to your HomeCore machine IP, port `1883`
-4. Leave **Client ID** as the default (e.g. `shellyplug-s-AABBCC`) — this becomes the `{device}` variable in the topic map
-5. Save and reboot
-
-The Shelly Plug S (Gen 1) will now publish to:
-```
-shellies/shellyplug-s-AABBCC/relay/0         →  "0" or "1"
-shellies/shellyplug-s-AABBCC/relay/0/power   →  watts (float)
-shellies/shellyplug-s-AABBCC/online          →  true/false
-```
+HomeCore supports all Shelly generations out of the box via built-in ecosystem
+profiles. No plugins or custom config are required — devices appear automatically
+once connected to the embedded MQTT broker.
 
 ---
 
-## Step 2 — Enable the built-in Shelly topic map
+## Prerequisites
 
-Uncomment the Shelly entries in `config/homecore.toml`:
+### 1. Activate the Shelly profiles
 
-```toml
-[[topic_map]]
-source_pattern      = "shellies/{device}/relay/0"
-target_template     = "homecore/devices/shelly_{device}/state"
-transform           = "shelly_relay_to_state"
-cmd_source_pattern  = "homecore/devices/shelly_{device}/cmd"
-cmd_target_template = "shellies/{device}/relay/0/command"
-cmd_transform       = "homecore_cmd_to_shelly_relay"
+Copy the bundled profiles into the active profiles directory:
+
+```sh
+cp config/profiles/examples/shelly-gen1.toml config/profiles/
+cp config/profiles/examples/shelly-gen2.toml config/profiles/
 ```
 
-Restart HomeCore.
+You only need the profile for the generation(s) you own. Both can coexist.
 
-The `{device}` capture extracts the Shelly's MQTT client ID from the topic.
-Your plug will appear as `shelly_shellyplug-s-AABBCC` in HomeCore.
+### 2. Start HomeCore
 
-| Direction | What happens |
+```sh
+cargo run -p homecore
+```
+
+On first run HomeCore prints a temporary admin password:
+
+```
+WARN  Default admin account created.
+WARN  Username : admin
+WARN  Password : <generated>
+```
+
+Save this password — you'll need it to get an API token.
+
+### 3. Get an API token
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<password>"}' | jq -r '.token')
+```
+
+Use `$TOKEN` in all subsequent API calls.
+
+---
+
+## Gen1 devices
+
+**Applies to:** Shelly 1, 1PM, 2, 2.5, Plug, Plug S, Plug US (original firmware)
+
+### Device setup
+
+1. Browse to the device IP (e.g. `http://192.168.1.10`)
+2. Go to **Settings → MQTT**
+3. Set **Server** to `<homecore-ip>:1883`
+4. Leave the **Client ID** as the default (e.g. `shellyplug-s-AABBCC`)
+5. Click **Save** — the device reboots and connects
+
+### What appears in HomeCore
+
+The device registers itself automatically. Device IDs follow this pattern:
+
+| Component | HomeCore device ID |
 |---|---|
-| Shelly publishes `"1"` to `shellies/{device}/relay/0` | Mapper translates to `{"on":true}` and writes to `homecore/devices/shelly_{device}/state` |
-| `PATCH /api/v1/devices/shelly_{device}/state` with `{"on":true}` | Mapper translates to `"on"` and publishes to `shellies/{device}/relay/0/command` |
+| Relay/switch channel 0 | `shelly_shellyplug-s-AABBCC_relay0` |
+| Relay/switch channel 1 | `shelly_shellyplug-s-AABBCC_relay1` |
+| Dimmer / light channel 0 | `shelly_shellyplug-s-AABBCC_light0` |
+| Roller / cover channel 0 | `shelly_shellyplug-s-AABBCC_roller0` |
+| Availability (physical device) | `shelly_shellyplug-s-AABBCC` |
 
----
+### Verify it connected
 
-## Step 3 — Verify state is flowing
-
-```bash
-# Get device state
-curl http://localhost:8080/api/v1/devices/shelly_shellyplug-s-AABBCC \
-  -H "Authorization: Bearer <token>"
-
-# Watch live events
-curl http://localhost:8080/api/v1/events/stream \
-  -H "Authorization: Bearer <token>"
+```sh
+curl -s http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].id'
 ```
 
-Toggle the plug physically and confirm the `on` attribute changes.
+### Control
 
----
-
-## Step 4 — Control the device
-
-```bash
+```sh
 # Turn on
-curl -X PATCH http://localhost:8080/api/v1/devices/shelly_shellyplug-s-AABBCC/state \
-  -H "Authorization: Bearer <token>" \
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplug-s-AABBCC_relay0/state \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"on": true}'
 
 # Turn off
-curl -X PATCH http://localhost:8080/api/v1/devices/shelly_shellyplug-s-AABBCC/state \
-  -H "Authorization: Bearer <token>" \
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplug-s-AABBCC_relay0/state \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"on": false}'
 ```
 
-HomeCore publishes `"on"` or `"off"` to `shellies/shellyplug-s-AABBCC/relay/0/command`.
-The Shelly acts on it and confirms by publishing its new state back, which HomeCore picks up.
-
 ---
 
-## Notes and current limitations
+## Gen2 / Gen3 devices
 
-| Capability | Status |
+**Applies to:** Shelly Plus 1, Plus 1PM, Plus 2PM, Plus Plug S/US, Pro series,
+Mini series (Gen3)
+
+### Device setup
+
+1. Browse to the device IP
+2. Go to **Settings → MQTT**
+3. Set **Server** to `<homecore-ip>:1883`
+4. Leave the **MQTT Topic Prefix** as the default (e.g. `shellyplus1pm-AABBCC`)
+5. Enable **RPC over MQTT** — **required for commands to work**
+6. Click **Save** — the device reboots and connects
+
+> **Note:** Without "RPC over MQTT" the device publishes status normally but
+> ignores all commands from HomeCore. This setting is off by default on many
+> Shelly Gen2 firmware versions.
+
+### What appears in HomeCore
+
+| Component | HomeCore device ID |
 |---|---|
-| Shelly state → HomeCore | **Works** |
-| HomeCore cmd → Shelly | **Works** |
-| Gen 2 Shelly (JSON payload) | Transform `shelly_gen2_to_state` exists; add a `[[topic_map]]` entry for your Gen 2 topic pattern |
-| Power/energy attribute | Not mapped — add a second `[[topic_map]]` entry for `shellies/{device}/relay/0/power` if needed |
-| Capability schema | Device appears in registry automatically; schema must be set manually via direct DB or future `POST /api/v1/devices` endpoint |
+| Switch/plug channel 0 | `shelly_shellyplus1pm-AABBCC_switch_0` |
+| Switch channel 1 | `shelly_shellyplus1pm-AABBCC_switch_1` |
+| Dimmer / light channel 0 | `shelly_shellyplus1pm-AABBCC_light_0` |
+| Cover / roller channel 0 | `shelly_shellyplus1pm-AABBCC_cover_0` |
+| Temperature + humidity sensor | `shelly_shellyplusht-AABBCC_sensor` |
+| Availability (physical device) | `shelly_shellyplus1pm-AABBCC` |
+
+### Verify it connected
+
+```sh
+curl -s http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].id'
+```
+
+### Control
+
+```sh
+# Turn on
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplus1pm-AABBCC_switch_0/state \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"on": true}'
+
+# Turn off
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplus1pm-AABBCC_switch_0/state \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"on": false}'
+
+# Set dimmer brightness (Plus Dimmer / Pro Dimmer)
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplusdimmer-AABBCC_light_0/state \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"on": true, "brightness": 75}'
+
+# Move cover to position (Plus 2PM in cover mode)
+curl -s -X PATCH \
+  http://localhost:8080/api/v1/devices/shelly_shellyplus2pm-AABBCC_cover_0/state \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"position": 50}'
+```
 
 ---
 
-## Multiple Shelly devices
+## Inspect device state
 
-Each physical Shelly device uses its own MQTT client ID, so a single `[[topic_map]]`
-entry covers all Shelly plugs simultaneously. If you have three plugs:
+```sh
+# Full state snapshot
+curl -s http://localhost:8080/api/v1/devices/shelly_shellyplus1pm-AABBCC_switch_0 \
+  -H "Authorization: Bearer $TOKEN" | jq .
 
+# Live event stream — shows every state change as it happens
+curl -sN http://localhost:8080/api/v1/events/stream \
+  -H "Authorization: Bearer $TOKEN"
 ```
-shellyplug-s-AA1111  →  homecore device: shelly_shellyplug-s-AA1111
-shellyplug-s-BB2222  →  homecore device: shelly_shellyplug-s-BB2222
-shellyplug-s-CC3333  →  homecore device: shelly_shellyplug-s-CC3333
-```
 
-No additional config needed — they are all matched by the same `{device}` pattern.
+---
+
+## Troubleshooting
+
+### Device not appearing after connecting to MQTT
+
+- Confirm the device is sending MQTT traffic. Use any MQTT client (e.g. MQTTX)
+  subscribed to `#` on `<homecore-ip>:1883` and toggle the device manually —
+  you should see topic activity.
+- Check that the profile files are in `config/profiles/` (not just
+  `config/profiles/examples/`) and that HomeCore was restarted after copying
+  them.
+- The server log at startup will say `Ecosystem router ready` if profiles loaded.
+
+### Commands return 202 but device does not respond (Gen2)
+
+- The most common cause: **RPC over MQTT is not enabled** on the device.
+  Go to Settings → MQTT in the Shelly web UI and turn it on.
+
+### Device ID is different from what the guide shows
+
+- The device ID is derived from the MQTT Topic Prefix set on the device.
+  Check Settings → MQTT → Topic Prefix in the Shelly web UI.
+- HomeCore device ID = `shelly_` + topic prefix (with `:` replaced by `_`).
+  Example: prefix `shellyplus2pm-083AF2123456`, component `switch:0`
+  → device ID `shelly_shellyplus2pm-083AF2123456_switch_0`.
+
+### Gen1 and Gen2 devices mixed
+
+Both profiles can be active simultaneously. Gen1 devices use `shellies/` topics,
+Gen2 devices use their bare device ID as the topic prefix — there is no conflict.
