@@ -56,14 +56,30 @@ pub async fn command_device(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let topic = format!("homecore/devices/{id}/cmd");
+    let payload = match serde_json::to_vec(&body) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    };
+
+    // Publish to MQTT so plugins and external subscribers receive the command.
     if let Some(ph) = &s.publish {
-        match ph.publish_json::<Value>(&topic, &body, false).await {
-            Ok(_) => (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" }))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        if let Err(e) = ph.publish(&topic, payload.clone()).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
         }
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "MQTT not connected" })))
     }
+
+    // Inject directly into the event bus so the state bridge routes the cmd to
+    // the native device topic without depending on the broker echoing the publish
+    // back to the internal client.
+    let ev = hc_types::event::Event::MqttMessage {
+        timestamp: chrono::Utc::now(),
+        topic,
+        payload,
+        retain: false,
+    };
+    let _ = s.event_bus.publish(ev);
+
+    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
 }
 
 pub async fn device_history(
