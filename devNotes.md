@@ -13,19 +13,36 @@ This is the standard workflow for spinning up the full system and interacting wi
 ### Terminal 1 — the server
 
 ```sh
-# Optional: wipe state from a previous session for a clean start
-rm -f /tmp/homecore-state.redb /tmp/homecore-history.db
-
 cargo run -p homecore
 ```
 
-Watch for two things:
+On first run, HomeCore creates its directory layout under `~/.homecore/` and prints
+a temporary admin password.  Watch for two things:
+
 1. The startup banner with the generated admin password — copy it
 2. `INFO HomeCore API server starting addr="0.0.0.0:8080"` — server is ready
 
 Leave this running. Server logs appear here as you interact with the API.
 
-To restart after making code changes: press `Ctrl-C`, then `cargo run -p homecore` again. State persists across restarts unless you delete the `/tmp` files.
+To restart after making code changes: press `Ctrl-C`, then `cargo run -p homecore` again.
+State persists across restarts unless you wipe the data directory (see "Resetting" below).
+
+**Custom home directory during development** — useful when you want a throwaway
+state separate from your normal `~/.homecore`:
+
+```sh
+HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
+# or
+cargo run -p homecore -- --home /tmp/hc-dev
+```
+
+**Custom config file only** (keep normal data directory):
+
+```sh
+cargo run -p homecore -- --config /path/to/custom.toml
+# or
+HOMECORE_CONFIG=/path/to/custom.toml cargo run -p homecore
+```
 
 ---
 
@@ -113,10 +130,17 @@ If you only changed a library crate and want to verify it compiles before restar
 # Stop the server (Ctrl-C in Terminal 1)
 # Stop the virtual device (Ctrl-C in Terminal 2)
 
-rm -f /tmp/homecore-state.redb /tmp/homecore-history.db
+# Wipe all state (device registry, rules, users, history)
+rm -rf ~/.homecore/data
 
-# Restart both — a new admin password will be printed
+# Restart — a new admin password will be printed
 cargo run -p homecore
+```
+
+Or if you used a custom home:
+```sh
+rm -rf /tmp/hc-dev/data
+HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
 ```
 
 ---
@@ -235,45 +259,291 @@ cargo watch -x "test -p hc-api"
 
 ---
 
-## Log output and filtering
+## Logging
 
-The server uses `tracing` for structured logging. Control verbosity with the `RUST_LOG` environment variable:
+HomeCore uses `tracing` for structured logging throughout every crate. The logging system is config-driven — all settings live in `[logging]` sections of `homecore.toml`. Three independent outputs can run simultaneously, each with its own format and level filter.
+
+### Outputs at a glance
+
+| Output | Default | Use for |
+|--------|---------|---------|
+| **stderr** | enabled, pretty | Interactive development, systemd journal |
+| **file** | disabled | Persistent logs, post-mortem analysis |
+| **syslog** | disabled | Centralised log aggregation (Graylog, Loki, rsyslog, etc.) |
+
+---
+
+### Quick start — changing the log level
+
+The fastest way during development is the `RUST_LOG` environment variable (takes precedence over config):
 
 ```sh
-# Default (info and above)
+# Default: info and above from all crates
 cargo run -p homecore
 
-# Show debug messages from hc-core only
+# Debug from the rule engine only, info everywhere else
 RUST_LOG=info,hc_core=debug cargo run -p homecore
 
-# Show everything (very noisy — includes MQTT frame-level logs)
+# Debug from multiple crates
+RUST_LOG=info,hc_core=debug,hc_mqtt_client=debug cargo run -p homecore
+
+# Everything (very noisy — includes MQTT frame-level and broker internals)
 RUST_LOG=trace cargo run -p homecore
 
 # Silence everything except errors
 RUST_LOG=error cargo run -p homecore
 
-# Useful combination during rule engine work
+# Rule engine internals specifically
 RUST_LOG=info,hc_core::engine=debug,hc_core::executor=debug cargo run -p homecore
 ```
 
-Log targets match crate names with underscores: `hc_core`, `hc_api`, `hc_auth`, `hc_state`, `hc_mqtt_client`, `hc_topic_map`.
+For a persistent change that survives restarts without setting env vars, use `[logging.targets]` in `homecore.toml` (see below).
+
+---
+
+### Full configuration reference
+
+All logging config lives under the `[logging]` top-level section in `config/homecore.toml`.
+
+#### `[logging]` — global defaults
+
+```toml
+[logging]
+# Global default log level applied to all crates unless overridden.
+# Values: error | warn | info | debug | trace
+level = "info"
+```
+
+#### `[logging.targets]` — per-crate level overrides
+
+```toml
+[logging.targets]
+# Keys are Rust target names (crate name with hyphens replaced by underscores).
+# Values are log levels: error | warn | info | debug | trace
+#
+# These are equivalent to RUST_LOG directives but set permanently in config.
+# RUST_LOG env var still works and takes highest precedence on top of these.
+
+hc_core        = "debug"    # rule engine, scheduler, state bridge, action executor
+hc_api         = "info"     # HTTP/WebSocket handlers
+hc_auth        = "warn"     # JWT, password hashing
+hc_state       = "info"     # redb device registry, SQLite history
+hc_mqtt_client = "debug"    # MQTT connection, topic routing
+hc_broker      = "warn"     # embedded rumqttd broker (very noisy at debug)
+hc_topic_map   = "debug"    # ecosystem profile matching and transforms
+hc_notify      = "info"     # email/Pushover notification channels
+hc_scripting   = "warn"     # Rhai script execution
+
+# Module-level granularity is also supported:
+# hc_core__engine   = "debug"   # just the rule engine evaluation loop
+# hc_core__executor = "debug"   # just the action executor
+```
+
+#### `[logging.stderr]` — console output
+
+```toml
+[logging.stderr]
+# Whether to emit logs to stderr. Disable only if you want file/syslog exclusively.
+enabled = true
+
+# Output format.
+# "pretty"  — human-readable, multi-line, coloured (default; best for dev)
+# "compact" — single line per event, coloured
+# "json"    — machine-readable JSON (one object per line)
+format = "pretty"
+
+# Emit ANSI colour codes.
+# Set false when piping output to systemd journal, Docker logs, or any
+# collector that doesn't strip escape codes.
+ansi = true
+```
+
+#### `[logging.file]` — rolling log file
+
+```toml
+[logging.file]
+# Enable rolling file output. Off by default.
+enabled = false
+
+# Directory where log files are written.
+# Created automatically at startup if it doesn't exist.
+dir = "/var/log/homecore"
+
+# Log file name prefix. Files are named: <prefix>.<YYYY-MM-DD>
+# (or <prefix>.<YYYY-MM-DD-HH> for hourly rotation).
+prefix = "homecore"
+
+# When to rotate to a new file.
+# "daily"  — rotate at midnight UTC (default)
+# "hourly" — rotate at the top of each hour
+# "never"  — single file, no rotation (pair with logrotate for size-based)
+rotation = "daily"
+
+# Documented expected size limit; not enforced by HomeCore itself.
+# Use logrotate or a similar tool for size-based rotation.
+max_size_mb = 100
+
+# Output format for file logs.
+# "json"    — recommended for files; structured, parseable by log aggregators
+# "compact" — single line per event, no colour
+# "pretty"  — human-readable, no colour
+format = "json"
+```
+
+#### `[logging.syslog]` — remote syslog server
+
+```toml
+[logging.syslog]
+# Enable remote syslog output. Off by default.
+enabled = false
+
+# Transport protocol.
+# "udp" — fire-and-forget, no back-pressure, recommended for most setups
+# "tcp" — reliable delivery; uses RFC 6587 octet-counting framing
+transport = "udp"
+
+# Remote syslog server address.
+host = "192.168.1.100"
+port = 514
+
+# Syslog wire protocol.
+# "rfc5424" — modern IETF syslog (default); structured data, app name, msgid
+# "rfc3164" — classic BSD syslog; wider compatibility with older receivers
+protocol = "rfc5424"
+
+# Syslog facility to use. Controls how the remote server categorises messages.
+# Names: kern | user | mail | daemon | auth | syslog | lpr | news |
+#        uucp | cron | authpriv | ftp | local0 | local1 | ... | local7
+facility = "daemon"
+
+# Application name field in the syslog message.
+app_name = "homecore"
+
+# Level override for syslog only.
+# Useful to send only warnings and above to the remote server while keeping
+# debug-level output in the local file.
+# If omitted, uses the global [logging].level.
+level = "warn"
+```
+
+---
+
+### Common configuration recipes
+
+**Development — verbose rule engine, quiet broker:**
+```toml
+[logging]
+level = "info"
+
+[logging.targets]
+hc_core        = "debug"
+hc_mqtt_client = "debug"
+hc_broker      = "warn"
+
+[logging.stderr]
+enabled = true
+format  = "pretty"
+ansi    = true
+```
+
+**Production — structured file + remote syslog warnings:**
+```toml
+[logging]
+level = "info"
+
+[logging.stderr]
+enabled = false   # no console output when running as a systemd service
+
+[logging.file]
+enabled  = true
+dir      = "/var/log/homecore"
+rotation = "daily"
+format   = "json"
+
+[logging.syslog]
+enabled   = true
+transport = "udp"
+host      = "192.168.1.50"
+port      = 514
+protocol  = "rfc5424"
+facility  = "daemon"
+level     = "warn"   # only warnings+ go to the remote server
+```
+
+**Systemd service — journal-friendly:**
+```toml
+[logging.stderr]
+enabled = true
+format  = "compact"
+ansi    = false   # systemd journal doesn't need ANSI codes
+```
+
+**Log aggregator (Grafana Loki, Graylog, Datadog) via file:**
+```toml
+[logging.file]
+enabled  = true
+dir      = "/var/log/homecore"
+format   = "json"   # JSON is required for structured field extraction
+rotation = "hourly"
+```
+
+---
+
+### Log target names (quick reference)
+
+| Crate | Log target | Covers |
+|-------|-----------|--------|
+| `hc-core` | `hc_core` | Rule engine, scheduler, state bridge, action executor |
+| `hc-api` | `hc_api` | HTTP handlers, WebSocket stream, auth middleware |
+| `hc-auth` | `hc_auth` | JWT issuance/validation, password hashing |
+| `hc-state` | `hc_state` | Device registry (redb), time-series history (SQLite) |
+| `hc-mqtt-client` | `hc_mqtt_client` | MQTT connection, subscriptions, topic routing to event bus |
+| `hc-broker` | `hc_broker` | Embedded rumqttd broker internals |
+| `hc-topic-map` | `hc_topic_map` | Ecosystem profile matching, payload transforms |
+| `hc-notify` | `hc_notify` | Email and Pushover notification channels |
+| `hc-scripting` | `hc_scripting` | Rhai script execution |
+
+Sub-module targets can be used for finer control, e.g.:
+
+```toml
+[logging.targets]
+"hc_core::engine"   = "debug"   # rule evaluation loop only
+"hc_core::executor" = "debug"   # action execution only
+"hc_core::bridge"   = "debug"   # MQTT↔EventBus state bridge only
+```
+
+---
+
+### Implementation notes
+
+- **`RUST_LOG` always wins**: env var directives are appended last and override config values. Use it for one-off debugging without editing the TOML.
+- **File writer is non-blocking**: log writes go to a background thread via a bounded channel. They never stall the tokio async executor even under heavy I/O.
+- **Syslog is best-effort**: UDP drops silently if the server is unreachable; TCP blocks only if the kernel send buffer is full. For UDP (the default), log calls are effectively fire-and-forget.
+- **All outputs are independent**: enabling syslog doesn't affect stderr or file output in any way. Each has its own filter and format.
+- **Zero changes to application code**: all crates use `tracing::info!()`, `debug!()`, etc. unchanged. The subscriber config in `hc-logging` handles where those events go.
 
 ---
 
 ## State database — resetting between runs
 
-The server writes two files during development:
+The server writes two databases under `{HOMECORE_HOME}/data/` by default:
 
-- `/tmp/homecore-state.redb` — device registry, rules, users, scenes, areas
-- `/tmp/homecore-history.db` — SQLite time-series history
+- `data/state.redb` — device registry, rules, users, scenes, areas
+- `data/history.db` — SQLite time-series history
 
 To start completely fresh (wipes all stored data including the admin account):
 
 ```sh
-rm -f /tmp/homecore-state.redb /tmp/homecore-history.db
+rm -rf ~/.homecore/data
 ```
 
-The server will recreate them and print a new admin password on next start.
+The server recreates the directory and both files on next start, and prints a new admin password.
+
+To wipe only one:
+```sh
+rm ~/.homecore/data/state.redb   # clears devices, rules, users; keeps history
+rm ~/.homecore/data/history.db   # clears time-series only
+```
 
 The integration test creates and deletes its own temp files at `/tmp/hc-test-{port}.redb` and `/tmp/hc-test-{port}.db` automatically. If a test crashes mid-run, clean them up with:
 
@@ -1530,6 +1800,7 @@ Integration tests live in `homecore/tests/`. The existing `integration_test.rs` 
 | `expected struct Claims, found ()` | `jwt.validate()` returns `Result<Claims>` — missing `?` or `.unwrap()` | Propagate the error with `?` |
 | `RecvError::Lagged` in a loop | Broadcast channel consumer fell behind | Add `Err(RecvError::Lagged(_)) => continue` arm to the match |
 | Port already in use (integration test) | Stale test DB or previous run still alive | `rm -f /tmp/hc-test-*.redb /tmp/hc-test-*.db` then retry |
+| Server starts but data is gone | Wrong `HOMECORE_HOME` set | Check the "HomeCore base directory:" line printed at startup |
 
 ---
 

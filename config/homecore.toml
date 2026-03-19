@@ -1,48 +1,61 @@
 # HomeCore configuration file
 #
-# Fields marked "(parsed)" are read by the server at startup.
-# Fields marked "(planned)" are documented here for reference but not yet
-# wired into main.rs — they are currently hard-coded defaults.
+# BASE DIRECTORY
+# ==============
+# All relative paths in this file are resolved against the HomeCore base
+# directory (also called HOMECORE_HOME).  Absolute paths are used as-is.
+#
+# The base directory is determined at startup in this order:
+#   1. --home <path>          command-line argument
+#   2. HOMECORE_HOME          environment variable
+#   3. ~/.homecore            default (current user's home directory)
+#
+# The config file itself is located at:
+#   {base_dir}/config/homecore.toml   (default)
+#   --config <path>                   command-line override
+#   HOMECORE_CONFIG                   environment variable override
+#
+# Standard directory layout under base_dir (created automatically):
+#   config/           this file + homecore.toml
+#   config/profiles/  ecosystem device profiles (Shelly, Tasmota, etc.)
+#   data/             state.redb and history.db
+#   logs/             rolling log files (when file logging is enabled)
 
 # ---------------------------------------------------------------------------
-# Server  (parsed)
+# Server
 # ---------------------------------------------------------------------------
 [server]
 host = "0.0.0.0"
 port = 8080
 
 # ---------------------------------------------------------------------------
-# Embedded MQTT broker  (parsed)
+# Embedded MQTT broker
 #
 # Authentication: when [[broker.clients]] entries are present the broker
 # requires every client to authenticate with matching credentials.
 # The internal core client must always be listed when auth is enabled.
 #
-# TLS: set tls_port + cert_path + key_path to add a TLS listener on that
-# port in addition to the plain-text port.  Generate a self-signed cert:
+# TLS: set tls_port + cert_path + key_path to add a TLS listener.
+# cert_path and key_path may be absolute or relative to base_dir.
+# Generate a self-signed cert:
 #   openssl req -x509 -newkey rsa:4096 -keyout broker.key -out broker.crt \
 #               -days 3650 -nodes -subj "/CN=homecore-broker"
-#
-# Topic ACL note: allow_pub / allow_sub are metadata only.  The embedded
-# rumqttd broker does not enforce per-topic ACL.  For strict topic isolation
-# use an external Mosquitto or EMQX broker.
 # ---------------------------------------------------------------------------
 [broker]
-host     = "0.0.0.0"
-port     = 1883
-# tls_port  = 8883
-# cert_path = "/etc/homecore/broker.crt"
-# key_path  = "/etc/homecore/broker.key"
+host = "0.0.0.0"
+port = 1883
+# tls_port = 8883
+# cert_path = "config/broker.crt"   # relative to base_dir
+# key_path  = "config/broker.key"   # relative to base_dir
 
-# Internal core client — must be listed when authentication is enabled.
-# The password here must match the one used by the server at startup.
+# Internal core client — required when authentication is enabled.
 # [[broker.clients]]
 # id       = "internal.core"
 # password = "change-me-internal-password"
 # allow_pub = ["homecore/#"]
 # allow_sub = ["homecore/#"]
 
-# Example plugin entry.  Each plugin gets its own credential.
+# Example plugin entry.
 # [[broker.clients]]
 # id       = "plugin.zigbee"
 # password = "plugin-zigbee-password"
@@ -50,36 +63,118 @@ port     = 1883
 # allow_sub = ["homecore/devices/zigbee_+/cmd"]
 
 # ---------------------------------------------------------------------------
-# Location  (parsed — used for sunrise/sunset calculations)
+# Location  (used for sunrise/sunset calculations)
 # ---------------------------------------------------------------------------
 [location]
 latitude  = 38.9072
 longitude = -77.0369
-# timezone is informational only; local system timezone is used at runtime
+# timezone is informational only; the local system timezone is used at runtime
 timezone  = "America/New_York"
 
 # ---------------------------------------------------------------------------
-# Authentication  (parsed)
+# Authentication
 # ---------------------------------------------------------------------------
 [auth]
 # HMAC-SHA256 secret for signing JWTs.
 # Change this to a long random string before deploying.
-# If omitted, a random secret is generated at startup and tokens will not
+# If omitted, a random secret is generated at startup — tokens will not
 # survive server restarts.
 jwt_secret         = "change-me-to-a-long-random-string-before-deploying"
 token_expiry_hours = 24
 
+# IP whitelist — addresses that bypass JWT authentication entirely.
+# Requests from these IPs receive full Admin access without a token.
+# Both IPv4 and IPv6 CIDR notation are supported.  A bare address without
+# a prefix length is treated as a host route (/32 or /128).
+#
+# Use cases:
+#   - Localhost-only scripts and dashboards on the same machine
+#   - Trusted LAN subnet (home network) for direct device control
+#   - Internal automation services that can't carry tokens
+#
+# WARNING: anyone on a whitelisted network gets unrestricted Admin access.
+# Do not whitelist ranges that include untrusted hosts.
+#
+# whitelist = [
+#   "127.0.0.1/32",      # localhost IPv4
+#   "::1/128",           # localhost IPv6
+#   "192.168.1.0/24",    # home LAN
+# ]
+
 # ---------------------------------------------------------------------------
-# Storage  (parsed)
-# Defaults to /tmp for development if this section is omitted.
+# Storage
+#
+# Paths may be absolute or relative to base_dir.
+# When omitted, defaults are:
+#   state_db_path   = {base_dir}/data/state.redb
+#   history_db_path = {base_dir}/data/history.db
 # ---------------------------------------------------------------------------
 [storage]
-state_db_path   = "/tmp/homecore/state.redb"
-history_db_path = "/tmp/homecore/history.db"
+# state_db_path   = "data/state.redb"    # relative to base_dir (default)
+# history_db_path = "data/history.db"    # relative to base_dir (default)
+
+# ---------------------------------------------------------------------------
+# Ecosystem profiles
+#
+# Directory containing device ecosystem profile TOML files.
+# Path may be absolute or relative to base_dir.
+# Default: {base_dir}/config/profiles
+# ---------------------------------------------------------------------------
+[profiles]
+# dir = "config/profiles"    # relative to base_dir (default)
+
+# ---------------------------------------------------------------------------
+# Logging
+#
+# Three independent outputs run simultaneously.  Each can be enabled or
+# disabled individually with its own format and level filter.
+#
+# Log levels:  error | warn | info | debug | trace
+# Formats:     pretty | compact | json
+# ---------------------------------------------------------------------------
+[logging]
+level = "info"
+
+# Per-crate overrides.  Keys are Rust target names (hyphens → underscores).
+# Equivalent to RUST_LOG directives but set permanently in config.
+# RUST_LOG env var still works and takes highest precedence on top of these.
+[logging.targets]
+# hc_core        = "debug"
+# hc_mqtt_client = "debug"
+# hc_broker      = "warn"
+# hc_api         = "info"
+# hc_state       = "info"
+# hc_topic_map   = "debug"
+
+# Stderr output (enabled by default)
+[logging.stderr]
+enabled = true
+format  = "pretty"   # pretty | compact | json
+ansi    = true       # set false when piping to systemd journal / Docker logs
+
+# Rolling file output (disabled by default)
+# dir may be absolute or relative to base_dir.  Default: {base_dir}/logs
+[logging.file]
+enabled  = false
+# dir    = "logs"          # relative to base_dir (default)
+prefix   = "homecore"      # log files named homecore.YYYY-MM-DD
+rotation = "daily"         # daily | hourly | never
+format   = "json"          # json recommended for files (structured, parseable)
+
+# Remote syslog output (disabled by default)
+# Supports UDP (recommended) or TCP; RFC 3164 or RFC 5424.
+[logging.syslog]
+enabled   = false
+transport = "udp"          # udp | tcp
+host      = "192.168.1.100"
+port      = 514
+protocol  = "rfc5424"      # rfc5424 | rfc3164
+facility  = "daemon"       # kern user mail daemon auth syslog local0-local7
+app_name  = "homecore"
+# level = "warn"           # syslog-only level override (defaults to [logging].level)
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
-# (parsed — each entry translates incoming MQTT topics to the HomeCore schema)
 # ---------------------------------------------------------------------------
 # [[topic_map]]
 # source_pattern  = "stat/{device}/POWER"

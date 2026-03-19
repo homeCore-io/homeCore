@@ -21,6 +21,7 @@ chrono = { workspace = true, features = ["serde"] }
 hc-mqtt-client = { version = "0.1.0", path = "../hc-mqtt-client" }
 hc-scripting = { version = "0.1.0", path = "../hc-scripting" }
 async-trait  = { workspace = true }
+ipnet        = { workspace = true }
 
 [dev-dependencies]
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }

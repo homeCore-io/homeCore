@@ -1,0 +1,12 @@
+[package]
+name    = "hc-logging"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing            = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-appender   = "0.2"
+serde              = { workspace = true }
+anyhow             = { workspace = true }
+chrono             = { workspace = true }

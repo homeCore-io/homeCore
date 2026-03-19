@@ -11,6 +11,7 @@ members = [
     "crates/hc-auth",
     "crates/hc-scripting",
     "crates/hc-notify",
+    "crates/hc-logging",
     "plugins/plugin-sdk-rs",
     "plugins/examples/virtual-device",
     "plugins/examples/http-poller",
@@ -32,7 +33,9 @@ chrono            = { version = "0.4", features = ["serde"] }
 anyhow            = "1"
 thiserror         = "1"
 tracing           = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-appender   = "0.2"
+ipnet              = { version = "2", features = ["serde"] }
 jsonschema        = "0.18"
 toml              = "0.8"
 utoipa            = { version = "4", features = ["axum_extras"] }

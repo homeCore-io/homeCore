@@ -13,6 +13,8 @@ hc-api         = { path = "../crates/hc-api" }
 hc-types       = { path = "../crates/hc-types" }
 hc-topic-map   = { path = "../crates/hc-topic-map" }
 hc-notify      = { path = "../crates/hc-notify" }
+hc-logging     = { path = "../crates/hc-logging" }
+ipnet          = { workspace = true }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 toml           = { workspace = true }

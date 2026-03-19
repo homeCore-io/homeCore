@@ -1,0 +1,382 @@
+# HomeCore Ecosystem Profile — Shelly Gen2 / Gen3
+#
+# Covers ALL Shelly Plus, Pro, and Mini series devices (Gen2 and Gen3).
+# Gen3 uses the identical MQTT/RPC protocol as Gen2 — no differences at
+# the topic layer.
+#
+# ─── Prerequisites ────────────────────────────────────────────────────────────
+#   Device: Settings → MQTT → Server = <homecore-host>:1883
+#   Leave the default MQTT Topic Prefix (it equals the Shelly device ID,
+#   e.g. shellyplus2pm-083AF2123456). If you set a custom prefix, update
+#   the patterns below accordingly.
+#
+# ─── Activation ───────────────────────────────────────────────────────────────
+#   Copy to: config/profiles/shelly-gen2.toml
+#
+# ─── MQTT Topic Structure (default prefix = bare device ID) ───────────────────
+#   State:    {device}/status/{component}:{id}    e.g. shellyplus2pm-083AF2/status/switch:0
+#   Commands: {device}/rpc                         JSON-RPC envelope
+#   Events:   {device}/events/rpc                 (informational, not mapped here)
+#   Announce: {device}/announce                    (informational)
+#   Online:   {device}/online                     "true"/"false"
+#
+# ─── HomeCore Device IDs ──────────────────────────────────────────────────────
+#   Switch components:     shelly_{device}_switch_{id}
+#   Light/Dimmer:          shelly_{device}_light_{id}
+#   Cover/Roller:          shelly_{device}_cover_{id}
+#   Sensor (HT, add-on):  shelly_{device}_sensor
+#   Energy meter (3EM):   shelly_{device}_em
+#   Input:                 shelly_{device}_input_{id}
+#   Voltmeter (Uni):       shelly_{device}_voltmeter_{id}
+#   Availability:          shelly_{device}  (physical device)
+#
+# ─── Command payloads (HomeCore → device) ─────────────────────────────────────
+#   Switch / Plug:  {"on": true}  or  {"on": false}
+#   Dimmer / Light: {"on": true, "brightness": 75}
+#   Cover:          {"position": 50}  (0=fully closed, 100=fully open)
+#                   Send {"position": 100} to fully open, {"position": 0} to close.
+#
+# ─── Command format sent to device ────────────────────────────────────────────
+#   All commands are wrapped in a JSON-RPC envelope by the HomeCore router:
+#   {
+#     "id": 1,
+#     "src": "homecore",
+#     "method": "<Method>",
+#     "params": { "id": <component_id>, ...fields... }
+#   }
+#
+# ─── Model / Component Mapping ────────────────────────────────────────────────
+#   Plus 1              →  switch:0
+#   Plus 1PM            →  switch:0  (+ apower/voltage/current/energy)
+#   Plus 1 Mini Gen3    →  switch:0
+#   Plus 1PM Mini Gen3  →  switch:0  (+ metering)
+#   Plus PM Mini Gen3   →  switch:0  (+ metering)
+#   Plus 2PM relay mode →  switch:0, switch:1
+#   Plus 2PM cover mode →  cover:0
+#   Plus Plug S/US      →  switch:0  (+ metering)
+#   Plus HT             →  temperature:0, humidity:0
+#   Plus Dimmer 0/1-10V →  light:0
+#   Plus i4             →  input:0 … input:3
+#   Plus Uni            →  input:0, input:1, voltmeter:0
+#   Pro 1               →  switch:0
+#   Pro 1PM             →  switch:0  (+ metering)
+#   Pro 2               →  switch:0, switch:1
+#   Pro 2PM relay mode  →  switch:0, switch:1
+#   Pro 2PM cover mode  →  cover:0
+#   Pro 3               →  switch:0, switch:1, switch:2
+#   Pro 4PM             →  switch:0 … switch:3  (all with metering)
+#   Pro 3EM             →  em:0, emdata:0, switch:0, temperature:0
+#   Pro Dimmer 1PM/2PM  →  light:0 (+ metering)
+#   Mini Dimmer Gen3    →  light:0
+
+[ecosystem]
+name        = "shelly-gen2"
+description = "Shelly Gen2/Gen3 devices (Plus, Pro, Mini — JSON-RPC over MQTT)"
+prefix      = "shelly_"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — SWITCH COMPONENTS
+# Models: Plus 1, Plus 1PM, Plus 2PM (relay mode), Plus Plug S/US, Pro 1,
+#         Pro 1PM, Pro 2, Pro 2PM (relay mode), Pro 3, Pro 4PM, Mini 1/1PM/PM
+#
+# Status payload (metered):
+#   {"id":0,"output":true,"apower":125.4,"voltage":230.1,"current":0.545,
+#    "pf":0.99,"freq":50.0,
+#    "aenergy":{"total":1234.56,"by_minute":[2.1,2.0,2.0],"minute_ts":...},
+#    "temperature":{"tC":42.1,"tF":107.8},"errors":[]}
+#
+# Status payload (non-metered):
+#   {"id":0,"output":true}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# {device}/status/switch:{switch_id} captures device ID + component index.
+# Device ID template: shelly_{device}_switch_{switch_id}
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/switch:{switch_id}"
+device_id = "shelly_{device}_switch_{switch_id}"
+
+  [ecosystem.state_topics.field_map]
+  output          = "on"            # JSON bool — no coercion
+  apower          = "power_w"       # W, null if non-metered
+  voltage         = "voltage"       # V, null if non-metered
+  current         = "current_a"     # A, null if non-metered
+  pf              = "power_factor"  # 0–1
+  freq            = "frequency_hz"  # Hz
+  "aenergy.total" = "energy_wh"     # Wh (cumulative, persists across reboots)
+  "temperature.tC" = "device_temperature_c"  # device internal temp (°C)
+
+
+# ─── Switch commands ──────────────────────────────────────────────────────────
+# RPC: Switch.Set  params: {"id": <N>, "on": true/false}
+# HomeCore sends: {"on": true}  or  {"on": false}
+# The router wraps this in the RPC envelope and adds "id" from rpc_id.
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_0/cmd"
+target     = "{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 0
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"    # HomeCore "on" → RPC params "on" (bool, unchanged)
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_1/cmd"
+target     = "{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 1
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_2/cmd"
+target     = "{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 2
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_switch_3/cmd"
+target     = "{device}/rpc"
+rpc_method = "Switch.Set"
+rpc_id     = 3
+
+  [ecosystem.cmd_topics.field_map]
+  on = "on"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — LIGHT / DIMMER COMPONENTS
+# Models: Plus Dimmer 0/1-10V, Pro Dimmer 1PM/2PM, Mini Dimmer Gen3
+#
+# Status payload:
+#   {"id":0,"output":true,"brightness":75.0,"apower":8.5,"voltage":230.0,
+#    "current":0.037,"aenergy":{"total":12.3,...},"temperature":{"tC":38.0,...}}
+#
+# brightness is 0.0–100.0 (percent).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/light:{light_id}"
+device_id = "shelly_{device}_light_{light_id}"
+
+  [ecosystem.state_topics.field_map]
+  output          = "on"
+  brightness      = "brightness"   # 0–100 (percent)
+  apower          = "power_w"
+  voltage         = "voltage"
+  current         = "current_a"
+  "aenergy.total" = "energy_wh"
+  "temperature.tC" = "device_temperature_c"
+
+
+# ─── Dimmer commands ──────────────────────────────────────────────────────────
+# RPC: Light.Set  params: {"id": 0, "on": true, "brightness": 75}
+# HomeCore sends: {"on": true, "brightness": 75}
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_light_0/cmd"
+target     = "{device}/rpc"
+rpc_method = "Light.Set"
+rpc_id     = 0
+
+  [ecosystem.cmd_topics.field_map]
+  on         = "on"
+  brightness = "brightness"
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_light_1/cmd"
+target     = "{device}/rpc"
+rpc_method = "Light.Set"
+rpc_id     = 1
+
+  [ecosystem.cmd_topics.field_map]
+  on         = "on"
+  brightness = "brightness"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — COVER / ROLLER COMPONENTS
+# Models: Plus 2PM (cover mode), Pro 2PM (cover mode)
+#
+# Status payload:
+#   {"id":0,"source":"limit_switch","state":"stopped","current_pos":75,
+#    "target_pos":null,"apower":0.0,"voltage":230.1,"current":0.0,
+#    "aenergy":{"total":5.2,...},"temperature":{"tC":40.0,...},
+#    "pos_control":true,"last_direction":"open","errors":[]}
+#
+# state: "open" | "closed" | "opening" | "closing" | "stopped" | "calibrating"
+# current_pos: 0–100 (null if not calibrated; 0=closed, 100=open)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/cover:{cover_id}"
+device_id = "shelly_{device}_cover_{cover_id}"
+
+  [ecosystem.state_topics.field_map]
+  state           = "state"          # string: "open"/"closed"/"opening"/"closing"/"stopped"
+  current_pos     = "position"       # 0–100 %, null if uncalibrated
+  target_pos      = "target_position"
+  apower          = "power_w"
+  voltage         = "voltage"
+  current         = "current_a"
+  "aenergy.total" = "energy_wh"
+  last_direction  = "last_direction"
+  pos_control     = "position_control"  # bool: true if calibrated
+
+
+# ─── Cover commands ────────────────────────────────────────────────────────────
+# RPC: Cover.GoToPosition  params: {"id": 0, "pos": 50}
+# HomeCore sends: {"position": 50}
+# To OPEN:  send {"position": 100}
+# To CLOSE: send {"position": 0}
+# To STOP:  send {"position": -1} — see note below
+#
+# Note: Cover.Stop is a separate RPC method. For stop support, use a rule
+# that sends {"position": -1} or create a separate HomeCore action calling
+# the REST /rpc endpoint directly.
+
+[[ecosystem.cmd_topics]]
+source     = "homecore/devices/shelly_{device}_cover_0/cmd"
+target     = "{device}/rpc"
+rpc_method = "Cover.GoToPosition"
+rpc_id     = 0
+
+  [ecosystem.cmd_topics.field_map]
+  position = "pos"    # HomeCore "position" → RPC params "pos"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — TEMPERATURE & HUMIDITY COMPONENTS
+# Models: Plus HT, Pro 3EM (internal sensor), any device with add-on sensor
+#
+# Temperature status: {"id":0,"tC":24.4,"tF":75.9,"errors":[]}
+# Humidity status:    {"id":0,"rh":55.2,"errors":[]}
+#
+# Both components from Plus HT map to the SAME HomeCore device via partial
+# updates, so the device ends up with both "temperature" and "humidity" attrs.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/temperature:{temp_id}"
+device_id = "shelly_{device}_sensor"
+
+  [ecosystem.state_topics.field_map]
+  tC = "temperature"    # °C (null if sensor error)
+  tF = "temperature_f"  # °F (optional, for display)
+
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/humidity:{hum_id}"
+device_id = "shelly_{device}_sensor"    # same device ID → partial update merges
+
+  [ecosystem.state_topics.field_map]
+  rh = "humidity"    # % relative humidity (null if sensor error)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — INPUT COMPONENTS (read-only)
+# Models: Plus i4, Pro i4 DC, Plus Uni, any device with input lines
+#
+# Switch/button input status: {"id":0,"state":true,"errors":[]}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/input:{input_id}"
+device_id = "shelly_{device}_input_{input_id}"
+
+  [ecosystem.state_topics.field_map]
+  state   = "on"       # bool: true=active/pressed, false=inactive
+  percent = "percent"  # for analog inputs: 0–100 %
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 6 — VOLTMETER COMPONENT (Plus Uni)
+#
+# Status: {"id":0,"voltage":3.3,"xvoltage":null,"errors":[]}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/voltmeter:{vm_id}"
+device_id = "shelly_{device}_voltmeter_{vm_id}"
+
+  [ecosystem.state_topics.field_map]
+  voltage = "voltage"    # V (null if sensor error)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — THREE-PHASE ENERGY METER (Pro 3EM)
+# Model: Shelly Pro 3EM (SPEM-003CEBEU)
+#
+# em:0 status payload (abbreviated):
+#   {"id":0,
+#    "a_current":5.2,"a_voltage":230.1,"a_act_power":1196.5,
+#    "a_aprt_power":1197.0,"a_pf":0.99,"a_freq":50.0,"a_errors":[],
+#    "b_current":4.8,"b_voltage":229.8,"b_act_power":1103.0,
+#    "b_aprt_power":1104.0,"b_pf":0.99,"b_freq":50.0,"b_errors":[],
+#    "c_current":6.1,"c_voltage":230.5,"c_act_power":1407.0,
+#    "c_aprt_power":1408.0,"c_pf":0.99,"c_freq":50.0,"c_errors":[],
+#    "total_current":16.1,"total_act_power":3706.5,"total_aprt_power":3709.0}
+#
+# emdata:0 status payload:
+#   {"id":0,
+#    "a_total_act_energy":12345.6,"a_total_act_ret_energy":0.0,
+#    "b_total_act_energy":11200.0,"b_total_act_ret_energy":0.0,
+#    "c_total_act_energy":13500.0,"c_total_act_ret_energy":0.0,
+#    "total_act":37045.6,"total_act_ret":0.0}
+# All energy values in Wh.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/em:{em_id}"
+device_id = "shelly_{device}_em"
+
+  [ecosystem.state_topics.field_map]
+  a_current       = "current_a_a"
+  a_voltage       = "voltage_a"
+  a_act_power     = "power_w_a"
+  a_aprt_power    = "apparent_power_va_a"
+  a_pf            = "power_factor_a"
+  a_freq          = "frequency_hz_a"
+  b_current       = "current_a_b"
+  b_voltage       = "voltage_b"
+  b_act_power     = "power_w_b"
+  b_aprt_power    = "apparent_power_va_b"
+  b_pf            = "power_factor_b"
+  b_freq          = "frequency_hz_b"
+  c_current       = "current_a_c"
+  c_voltage       = "voltage_c"
+  c_act_power     = "power_w_c"
+  c_aprt_power    = "apparent_power_va_c"
+  c_pf            = "power_factor_c"
+  c_freq          = "frequency_hz_c"
+  total_current   = "current_a_total"
+  total_act_power = "power_w"        # total active power across all phases
+
+
+[[ecosystem.state_topics]]
+pattern   = "{device}/status/emdata:{emdata_id}"
+device_id = "shelly_{device}_em"    # same device — partial update merges
+
+  [ecosystem.state_topics.field_map]
+  a_total_act_energy = "energy_wh_a"
+  b_total_act_energy = "energy_wh_b"
+  c_total_act_energy = "energy_wh_c"
+  total_act          = "energy_wh"   # total Wh all phases
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — AVAILABILITY
+# All Gen2/Gen3 devices publish {device}/online with payload "true" or "false".
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[ecosystem.availability_topics]]
+pattern = "{device}/online"
+payload = "raw_bool"    # Payload is literal "true" or "false"
+# Creates/updates the physical device shelly_{device} availability.
+# Component devices (shelly_{device}_switch_0 etc.) track state independently.

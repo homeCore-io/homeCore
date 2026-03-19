@@ -3,14 +3,100 @@ use hc_api::AppState;
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{Core, EventBus};
+use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::{ChannelConfig, NotificationService};
 use hc_state::StateStore;
 use hc_topic_map::{loader::load_profiles_from_dir, EcosystemRouter};
+use ipnet::IpNet;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+// ── base directory resolution ───────────────────────────────────────────────
+
+/// Determine the HomeCore home/installation directory.
+///
+/// Priority order (first match wins):
+///   1. `--home <path>` command-line argument
+///   2. `HOMECORE_HOME` environment variable
+///   3. `~/.homecore` (current user's home directory)
+///   4. `/var/lib/homecore` (fallback when $HOME is unavailable)
+fn resolve_base_dir() -> PathBuf {
+    // 1. --home CLI arg
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if args[i] == "--home" {
+            if let Some(p) = args.get(i + 1) {
+                return PathBuf::from(p);
+            }
+        }
+    }
+
+    // 2. HOMECORE_HOME env var
+    if let Ok(p) = std::env::var("HOMECORE_HOME") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+
+    // 3. ~/.homecore
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".homecore");
+        }
+    }
+
+    // 4. Absolute fallback (no $HOME available)
+    PathBuf::from("/var/lib/homecore")
+}
+
+/// Determine the config file path.
+///
+/// Priority order:
+///   1. `--config <path>` command-line argument
+///   2. `HOMECORE_CONFIG` environment variable
+///   3. `{base_dir}/config/homecore.toml`
+fn resolve_config_path(base: &Path) -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if args[i] == "--config" {
+            if let Some(p) = args.get(i + 1) {
+                return PathBuf::from(p);
+            }
+        }
+    }
+    if let Ok(p) = std::env::var("HOMECORE_CONFIG") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    base.join("config").join("homecore.toml")
+}
+
+/// Resolve a path string field:
+///   - empty string  → `{base}/{relative_default}`
+///   - relative path → `{base}/{path}`
+///   - absolute path → unchanged
+fn resolve_path(field: &mut String, base: &Path, relative_default: &str) {
+    if field.is_empty() {
+        *field = base.join(relative_default).to_string_lossy().into_owned();
+    } else if !Path::new(field.as_str()).is_absolute() {
+        *field = base.join(field.as_str()).to_string_lossy().into_owned();
+    }
+}
+
+/// Resolve an optional path string: only touches it when Some and relative.
+fn resolve_opt_path(field: &mut Option<String>, base: &Path) {
+    if let Some(p) = field {
+        if !Path::new(p.as_str()).is_absolute() {
+            *field = Some(base.join(p.as_str()).to_string_lossy().into_owned());
+        }
+    }
+}
+
+// ── config structs ──────────────────────────────────────────────────────────
 
 /// Top-level config shape (subset — just what main.rs needs to parse).
 #[derive(Deserialize, Default)]
@@ -29,6 +115,20 @@ struct AppConfig {
     auth: AuthSection,
     #[serde(default)]
     notify: NotifySection,
+    #[serde(default)]
+    logging: LoggingConfig,
+}
+
+impl AppConfig {
+    /// Fill in any empty/relative path fields using `base_dir` as the root.
+    /// Called after loading the TOML file so explicit absolute paths in config
+    /// are always honoured; only unset (empty) or relative paths are resolved.
+    fn resolve_paths(&mut self, base: &Path) {
+        self.storage.resolve(base);
+        self.profiles.resolve(base);
+        self.broker.resolve(base);
+        self.logging.resolve_paths(base);
+    }
 }
 
 #[derive(Deserialize)]
@@ -48,34 +148,42 @@ impl Default for ServerSection {
 fn default_server_host() -> String { "0.0.0.0".into() }
 fn default_server_port() -> u16 { 8080 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct StorageSection {
-    #[serde(default = "default_state_db")]
+    /// Path to the redb state database.
+    /// Default: `{base_dir}/data/state.redb`
+    #[serde(default)]
     state_db_path: String,
-    #[serde(default = "default_history_db")]
+    /// Path to the SQLite history database.
+    /// Default: `{base_dir}/data/history.db`
+    #[serde(default)]
     history_db_path: String,
 }
 
-impl Default for StorageSection {
-    fn default() -> Self {
-        Self { state_db_path: default_state_db(), history_db_path: default_history_db() }
+impl StorageSection {
+    fn resolve(&mut self, base: &Path) {
+        resolve_path(&mut self.state_db_path,   base, "data/state.redb");
+        resolve_path(&mut self.history_db_path, base, "data/history.db");
     }
 }
 
-fn default_state_db() -> String { "/tmp/homecore-state.redb".into() }
-fn default_history_db() -> String { "/tmp/homecore-history.db".into() }
-
 #[derive(Deserialize)]
 struct ProfilesSection {
-    #[serde(default = "default_profiles_dir")]
+    /// Directory containing ecosystem profile TOML files (Shelly, Tasmota, etc.).
+    /// Default: `{base_dir}/config/profiles`
+    #[serde(default)]
     dir: String,
 }
 
 impl Default for ProfilesSection {
-    fn default() -> Self { Self { dir: default_profiles_dir() } }
+    fn default() -> Self { Self { dir: String::new() } }
 }
 
-fn default_profiles_dir() -> String { "config/profiles".into() }
+impl ProfilesSection {
+    fn resolve(&mut self, base: &Path) {
+        resolve_path(&mut self.dir, base, "config/profiles");
+    }
+}
 
 /// `[broker]` section of homecore.toml.
 #[derive(Deserialize)]
@@ -84,14 +192,17 @@ struct BrokerSection {
     host: String,
     #[serde(default = "default_broker_port")]
     port: u16,
-    /// MQTT v5 listener port for Gen2/Gen3 devices (Shelly Plus/Pro, etc.).
-    /// Defaults to port+1 (1884 when port is 1883). Set to null to disable.
+    /// MQTT v5 listener port. Defaults to port+1 (1884 when port is 1883).
+    /// Set to null to disable.
     #[serde(default = "default_broker_v5_port")]
     v5_port: Option<u16>,
     tls_port: Option<u16>,
+    /// Path to TLS certificate file.  Relative paths are resolved against
+    /// base_dir; absolute paths are used as-is.
     cert_path: Option<String>,
+    /// Path to TLS private key file.  Same resolution rules as cert_path.
     key_path: Option<String>,
-    /// Per-client credentials. When any entries are present the broker
+    /// Per-client credentials.  When any entries are present the broker
     /// requires authentication on all connections.
     #[serde(default)]
     clients: Vec<ClientAclConfig>,
@@ -108,6 +219,13 @@ impl Default for BrokerSection {
             key_path: None,
             clients: vec![],
         }
+    }
+}
+
+impl BrokerSection {
+    fn resolve(&mut self, base: &Path) {
+        resolve_opt_path(&mut self.cert_path, base);
+        resolve_opt_path(&mut self.key_path,  base);
     }
 }
 
@@ -146,20 +264,28 @@ impl Default for LocationSection {
 
 #[derive(Deserialize)]
 struct AuthSection {
-    /// HMAC-SHA256 secret for signing JWTs. If not set, a random secret is
+    /// HMAC-SHA256 secret for signing JWTs.  If not set, a random secret is
     /// generated at startup (tokens will be invalidated on restart).
     jwt_secret: Option<String>,
     #[serde(default = "default_expiry")]
     token_expiry_hours: u64,
+    /// IP addresses or CIDR ranges that may access all API endpoints without
+    /// a JWT.  Requests from these addresses receive full Admin access.
+    /// Parsed as standard CIDR notation.  Both IPv4 and IPv6 are supported.
+    /// Example: ["127.0.0.1/32", "::1/128", "192.168.1.0/24"]
+    #[serde(default)]
+    whitelist: Vec<String>,
 }
 
 fn default_expiry() -> u64 { 24 }
 
 impl Default for AuthSection {
     fn default() -> Self {
-        Self { jwt_secret: None, token_expiry_hours: 24 }
+        Self { jwt_secret: None, token_expiry_hours: 24, whitelist: vec![] }
     }
 }
+
+// ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Generate a random alphanumeric password of the given length.
 fn random_password(len: usize) -> String {
@@ -167,9 +293,6 @@ fn random_password(len: usize) -> String {
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Use a mix of time + process ID as a simple source of entropy for the
-    // bootstrap password.  This is not cryptographically strong, but it only
-    // needs to be human-typable for the first login before the admin changes it.
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -188,21 +311,54 @@ fn random_password(len: usize) -> String {
     result
 }
 
+// ── main ────────────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
-        .init();
+    // ── 1. Determine base directory and config file path ──────────────────
+    //
+    // This happens before any logging is initialised, so errors go to stderr.
+    let base_dir = resolve_base_dir();
+    let config_path = resolve_config_path(&base_dir);
 
-    info!("HomeCore starting");
+    eprintln!("HomeCore base directory: {}", base_dir.display());
+    eprintln!("HomeCore config file:    {}", config_path.display());
 
-    // Load optional config file.
-    let config: AppConfig = std::fs::read_to_string("config/homecore.toml")
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default();
+    // ── 2. Load config (path defaults filled in by resolve_paths below) ───
+    let mut config: AppConfig = match std::fs::read_to_string(&config_path) {
+        Ok(s) => match toml::from_str::<AppConfig>(&s) {
+            Ok(c)  => c,
+            Err(e) => {
+                eprintln!("Warning: config parse error in {}: {e}; using defaults",
+                    config_path.display());
+                AppConfig::default()
+            }
+        },
+        Err(_) => AppConfig::default(),
+    };
 
-    // 1. Embedded MQTT broker.
+    // ── 3. Resolve all path fields relative to base_dir ───────────────────
+    config.resolve_paths(&base_dir);
+
+    // ── 4. Create standard directory layout under base_dir ────────────────
+    //
+    // Harmless if directories already exist.  Failures are non-fatal so that
+    // explicitly configured absolute paths elsewhere on the filesystem work.
+    for subdir in &["config/profiles", "data", "logs"] {
+        if let Err(e) = std::fs::create_dir_all(base_dir.join(subdir)) {
+            eprintln!("Warning: could not create {}/{subdir}: {e}", base_dir.display());
+        }
+    }
+
+    // ── 5. Initialise logging from config ──────────────────────────────────
+    //
+    // _logging_handle must remain in scope until the end of main() so the
+    // background file-writer thread stays alive.
+    let _logging_handle = hc_logging::init(&config.logging)?;
+
+    info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
+
+    // ── 6. Embedded MQTT broker ────────────────────────────────────────────
     let broker_cfg = BrokerConfig {
         host:      config.broker.host.clone(),
         port:      config.broker.port,
@@ -219,8 +375,7 @@ async fn main() -> Result<()> {
     };
     Broker::new(broker_cfg).spawn()?;
 
-    // 2. Internal MQTT client.
-    // If broker auth is configured, find the "internal.core" credential and use it.
+    // ── 7. Internal MQTT client ────────────────────────────────────────────
     let internal_cred = config.broker.clients.iter()
         .find(|c| c.id == "internal.core")
         .cloned();
@@ -234,27 +389,25 @@ async fn main() -> Result<()> {
     let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
     let publish_handle = mqtt_client.publish_handle();
 
-    // 3. State store.
+    // ── 8. State store ─────────────────────────────────────────────────────
     let store = StateStore::open(&config.storage.state_db_path, &config.storage.history_db_path).await?;
 
-    // 4. Event bus — the shared backbone all crates communicate through.
+    // ── 9. Event bus ───────────────────────────────────────────────────────
     let bus = EventBus::new(1024);
 
-    // 5. Core: state bridge + rule engine.
+    // ── 10. Core: state bridge + rule engine ───────────────────────────────
     let rules = store.list_rules().await?;
     info!(count = rules.len(), "Loaded rules from store");
 
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude);
 
-    // Load ecosystem profiles and build the router.
-    // Done before spawning the MQTT client so we can add topic subscriptions first.
+    // Load ecosystem profiles and build the router.  Done before spawning the
+    // MQTT client so add_subscription("#") runs first.
     match load_profiles_from_dir(&config.profiles.dir) {
         Ok(profiles) if !profiles.is_empty() => {
             match EcosystemRouter::new(profiles, None) {
                 Ok(router) => {
-                    // Subscribe to all broker traffic so native device topics
-                    // (shellies/#, shellyplus*/#, etc.) flow through the router.
                     mqtt_client.add_subscription("#");
                     info!("Ecosystem router ready; subscribed to all topics (#)");
                     core = core.with_router(router);
@@ -266,15 +419,13 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "Could not load profiles directory; running without router"),
     }
 
-    // 6. Forwarder: MQTT client broadcast → EventBus.
+    // ── 11. MQTT forwarder → EventBus ──────────────────────────────────────
     {
         let bus_clone = bus.clone();
         tokio::spawn(async move {
             loop {
                 match mqtt_rx.recv().await {
-                    Ok(event) => {
-                        let _ = bus_clone.publish(event);
-                    }
+                    Ok(event) => { let _ = bus_clone.publish(event); }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("MQTT→bus forwarder lagged by {n}");
                     }
@@ -284,14 +435,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 7. Drive the MQTT event loop in its own task.
+    // ── 12. MQTT event loop ────────────────────────────────────────────────
     tokio::spawn(async move {
         if let Err(e) = mqtt_client.run().await {
             tracing::error!(error = %e, "MQTT client exited");
         }
     });
 
-    // Wire notification service if channels are configured.
+    // ── 13. Notification service ───────────────────────────────────────────
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
         let svc = NotificationService::from_configs(config.notify.channels);
@@ -301,7 +452,7 @@ async fn main() -> Result<()> {
 
     let rules_handle = core.start(rules).await?;
 
-    // 8. JWT service.
+    // ── 14. JWT service ────────────────────────────────────────────────────
     let jwt_secret = match &config.auth.jwt_secret {
         Some(s) => s.clone(),
         None => {
@@ -311,7 +462,7 @@ async fn main() -> Result<()> {
     };
     let jwt = JwtService::new_hs256(jwt_secret.as_bytes(), config.auth.token_expiry_hours);
 
-    // 9. Bootstrap: create default admin if no users exist.
+    // ── 15. Bootstrap default admin account ───────────────────────────────
     let count = store.user_count().await?;
     if count == 0 {
         let password = random_password(16);
@@ -341,8 +492,30 @@ async fn main() -> Result<()> {
         );
     }
 
-    // 10. REST + WebSocket API.
-    let app_state = AppState::new(store, bus, Some(publish_handle), Some(rules_handle), jwt);
+    // ── 16. REST + WebSocket API ───────────────────────────────────────────
+
+    // Parse IP whitelist CIDRs.  Invalid entries are skipped with a warning
+    // rather than failing startup — a typo in the whitelist shouldn't take
+    // down the server.
+    let whitelist: Vec<IpNet> = config.auth.whitelist.iter().filter_map(|s| {
+        match s.parse::<IpNet>() {
+            Ok(net) => Some(net),
+            Err(e) => {
+                tracing::warn!(entry = %s, error = %e, "Invalid whitelist CIDR — skipping");
+                None
+            }
+        }
+    }).collect();
+
+    if !whitelist.is_empty() {
+        info!(
+            count = whitelist.len(),
+            entries = %whitelist.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "),
+            "IP whitelist active — these addresses bypass JWT authentication"
+        );
+    }
+
+    let app_state = AppState::new(store, bus, Some(publish_handle), Some(rules_handle), jwt, whitelist);
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())

@@ -11,7 +11,9 @@ use hc_core::EventBus;
 use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
 use hc_types::rule::Rule;
+use ipnet::IpNet;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -47,6 +49,8 @@ pub struct AppState {
     pub jwt: Arc<JwtService>,
     /// Bounded ring buffer of recent events for GET /events.
     pub event_log: EventLog,
+    /// IP/CIDR ranges that bypass JWT authentication and receive Admin access.
+    pub whitelist: Arc<Vec<IpNet>>,
 }
 
 impl AppState {
@@ -56,6 +60,7 @@ impl AppState {
         publish: Option<PublishHandle>,
         rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
         jwt: JwtService,
+        whitelist: Vec<IpNet>,
     ) -> Self {
         let plugins = Arc::new(RwLock::new(HashMap::new()));
 
@@ -106,7 +111,16 @@ impl AppState {
             });
         }
 
-        Self { store, event_bus, publish, rules_handle, plugins, jwt: Arc::new(jwt), event_log }
+        Self {
+            store,
+            event_bus,
+            publish,
+            rules_handle,
+            plugins,
+            jwt: Arc::new(jwt),
+            event_log,
+            whitelist: Arc::new(whitelist),
+        }
     }
 }
 
@@ -123,7 +137,7 @@ pub fn router(state: AppState) -> Router {
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/:path", post(handlers::receive_webhook));
 
-    // Protected routes — all require a valid Bearer JWT.
+    // Protected routes — require a valid Bearer JWT *or* a whitelisted source IP.
     let protected = Router::new()
         // Auth / user management
         .route("/auth/me", get(auth_handlers::me))
@@ -170,10 +184,17 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Bind and serve the API on the given address.
+///
+/// Uses `into_make_service_with_connect_info` so that the remote socket address
+/// is available to middleware (required for IP whitelist checking).
 pub async fn serve(host: &str, port: u16, state: AppState) -> Result<()> {
     let addr = format!("{host}:{port}");
     info!(%addr, "HomeCore API server starting");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

@@ -22,24 +22,49 @@
 
 use async_trait::async_trait;
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
-use hc_auth::Claims;
+use hc_auth::{Claims, Role};
 use serde_json::json;
+use std::net::SocketAddr;
 
 use crate::AppState;
 
-/// Extract and validate a Bearer token from the `Authorization` header.
-/// Uses `State<AppState>` to get the `JwtService`.
+/// Middleware that enforces authentication on protected routes.
+///
+/// **Whitelist bypass:** if the request's source IP matches any entry in
+/// `AppState::whitelist`, synthetic Admin `Claims` are injected and the JWT
+/// check is skipped entirely.  Whitelisted requests are logged at debug level.
+///
+/// **JWT path:** for non-whitelisted sources a valid `Bearer` token must be
+/// present in the `Authorization` header.
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    // ── 1. IP whitelist check ─────────────────────────────────────────────
+    if !state.whitelist.is_empty() {
+        let remote_ip = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+
+        if let Some(ip) = remote_ip {
+            if state.whitelist.iter().any(|net| net.contains(&ip)) {
+                tracing::debug!(%ip, "IP whitelist bypass — granting Admin access");
+                let claims = whitelist_claims();
+                request.extensions_mut().insert(claims);
+                return next.run(request).await;
+            }
+        }
+    }
+
+    // ── 2. JWT validation ─────────────────────────────────────────────────
     let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -66,6 +91,18 @@ pub async fn require_auth(
             Json(json!({ "error": "invalid or expired token" })),
         )
             .into_response(),
+    }
+}
+
+/// Synthetic Admin claims injected for whitelisted source IPs.
+/// The `uid` and `sub` identify the request as a whitelist bypass in logs.
+fn whitelist_claims() -> Claims {
+    Claims {
+        sub: "whitelist".into(),
+        uid: "whitelist".into(),
+        exp: u64::MAX,
+        role: Role::Admin,
+        scopes: Role::Admin.scopes(),
     }
 }
 
