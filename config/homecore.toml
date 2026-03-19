@@ -2,21 +2,24 @@
 #
 # BASE DIRECTORY
 # ==============
-# All relative paths in this file are resolved against the HomeCore base
-# directory (also called HOMECORE_HOME).  Absolute paths are used as-is.
+# HomeCore uses a single installation directory for all files — config,
+# data, logs, and profiles.  The intended model is:
+#
+#   cd /opt/homecore        (or wherever the package was installed)
+#   ./bin/homecore          (binary reads everything relative to here)
 #
 # The base directory is determined at startup in this order:
 #   1. --home <path>          command-line argument
 #   2. HOMECORE_HOME          environment variable
-#   3. ~/.homecore            default (current user's home directory)
+#   3. Current working directory of the process (default)
 #
 # The config file itself is located at:
 #   {base_dir}/config/homecore.toml   (default)
 #   --config <path>                   command-line override
 #   HOMECORE_CONFIG                   environment variable override
 #
-# Standard directory layout under base_dir (created automatically):
-#   config/           this file + homecore.toml
+# Standard directory layout (created automatically on first run):
+#   config/           this file and homecore.toml
 #   config/profiles/  ecosystem device profiles (Shelly, Tasmota, etc.)
 #   data/             state.redb and history.db
 #   logs/             rolling log files (when file logging is enabled)
@@ -100,6 +103,9 @@ token_expiry_hours = 24
 #   "::1/128",           # localhost IPv6
 #   "192.168.1.0/24",    # home LAN
 # ]
+whitelist = [
+    "10.0.10.200",
+]
 
 # ---------------------------------------------------------------------------
 # Storage

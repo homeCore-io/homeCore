@@ -16,8 +16,13 @@ This is the standard workflow for spinning up the full system and interacting wi
 cargo run -p homecore
 ```
 
-On first run, HomeCore creates its directory layout under `~/.homecore/` and prints
-a temporary admin password.  Watch for two things:
+HomeCore uses the **current working directory** as its base.  Running from the
+workspace root (which contains `config/`) means it picks up `config/homecore.toml`
+and writes data to `data/` and logs to `logs/` right there — no hidden directories,
+everything visible alongside the source.
+
+On first run it creates any missing subdirectories and prints a temporary admin
+password.  Watch for two things:
 
 1. The startup banner with the generated admin password — copy it
 2. `INFO HomeCore API server starting addr="0.0.0.0:8080"` — server is ready
@@ -27,8 +32,17 @@ Leave this running. Server logs appear here as you interact with the API.
 To restart after making code changes: press `Ctrl-C`, then `cargo run -p homecore` again.
 State persists across restarts unless you wipe the data directory (see "Resetting" below).
 
-**Custom home directory during development** — useful when you want a throwaway
-state separate from your normal `~/.homecore`:
+**Run from a specific installation directory:**
+
+```sh
+cd /opt/homecore
+./bin/homecore
+# or from anywhere:
+HOMECORE_HOME=/opt/homecore /opt/homecore/bin/homecore
+homecore --home /opt/homecore
+```
+
+**Throwaway state during development:**
 
 ```sh
 HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
@@ -36,7 +50,7 @@ HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
 cargo run -p homecore -- --home /tmp/hc-dev
 ```
 
-**Custom config file only** (keep normal data directory):
+**Custom config file only** (keep current directory as base):
 
 ```sh
 cargo run -p homecore -- --config /path/to/custom.toml
@@ -131,13 +145,13 @@ If you only changed a library crate and want to verify it compiles before restar
 # Stop the virtual device (Ctrl-C in Terminal 2)
 
 # Wipe all state (device registry, rules, users, history)
-rm -rf ~/.homecore/data
+rm -rf data/
 
-# Restart — a new admin password will be printed
+# Restart from the workspace root — a new admin password will be printed
 cargo run -p homecore
 ```
 
-Or if you used a custom home:
+Or if you used a custom home directory:
 ```sh
 rm -rf /tmp/hc-dev/data
 HOMECORE_HOME=/tmp/hc-dev cargo run -p homecore
@@ -526,7 +540,8 @@ Sub-module targets can be used for finer control, e.g.:
 
 ## State database — resetting between runs
 
-The server writes two databases under `{HOMECORE_HOME}/data/` by default:
+The server writes two databases under `data/` in the base directory (current
+working directory by default):
 
 - `data/state.redb` — device registry, rules, users, scenes, areas
 - `data/history.db` — SQLite time-series history
@@ -534,15 +549,15 @@ The server writes two databases under `{HOMECORE_HOME}/data/` by default:
 To start completely fresh (wipes all stored data including the admin account):
 
 ```sh
-rm -rf ~/.homecore/data
+rm -rf data/
 ```
 
 The server recreates the directory and both files on next start, and prints a new admin password.
 
 To wipe only one:
 ```sh
-rm ~/.homecore/data/state.redb   # clears devices, rules, users; keeps history
-rm ~/.homecore/data/history.db   # clears time-series only
+rm data/state.redb   # clears devices, rules, users; keeps history
+rm data/history.db   # clears time-series only
 ```
 
 The integration test creates and deletes its own temp files at `/tmp/hc-test-{port}.redb` and `/tmp/hc-test-{port}.db` automatically. If a test crashes mid-run, clean them up with:

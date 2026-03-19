@@ -16,13 +16,17 @@ use uuid::Uuid;
 
 // ── base directory resolution ───────────────────────────────────────────────
 
-/// Determine the HomeCore home/installation directory.
+/// Determine the HomeCore installation directory.
 ///
 /// Priority order (first match wins):
 ///   1. `--home <path>` command-line argument
 ///   2. `HOMECORE_HOME` environment variable
-///   3. `~/.homecore` (current user's home directory)
-///   4. `/var/lib/homecore` (fallback when $HOME is unavailable)
+///   3. Current working directory of the process (default)
+///
+/// The intended deployment model is: install the package into a directory,
+/// `cd` into it, and run the binary.  All data, config, and logs are then
+/// visible siblings of the binary — no hidden directories, no user-home
+/// scattered files.
 fn resolve_base_dir() -> PathBuf {
     // 1. --home CLI arg
     let args: Vec<String> = std::env::args().collect();
@@ -41,15 +45,8 @@ fn resolve_base_dir() -> PathBuf {
         }
     }
 
-    // 3. ~/.homecore
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home).join(".homecore");
-        }
-    }
-
-    // 4. Absolute fallback (no $HOME available)
-    PathBuf::from("/var/lib/homecore")
+    // 3. Current working directory
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Determine the config file path.
