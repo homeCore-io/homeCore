@@ -126,11 +126,16 @@ pub async fn create_area(
 }
 
 // ---------- Automations (Rules) ----------
+//
+// The rules_handle (Arc<RwLock<Vec<Rule>>>) is the single in-memory source of
+// truth.  All reads come from it; all writes go to the rule_file_store (which
+// writes a TOML file on disk) *and* directly update the handle so the change
+// is immediately visible — no need to wait for the hot-reload watcher.
 
 pub async fn list_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
-    match s.store.list_rules().await {
-        Ok(rules) => (StatusCode::OK, Json(json!(rules))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    match &s.rules_handle {
+        Some(rh) => (StatusCode::OK, Json(json!(rh.read().await.clone()))),
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
     }
 }
 
@@ -140,17 +145,20 @@ pub async fn create_automation(
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
     rule.id = Uuid::new_v4();
-    match s.store.upsert_rule(&rule).await {
-        Ok(_) => {
-            // Reload rules into the engine via the rules_handle.
-            if let Some(rh) = &s.rules_handle {
-                let mut rules = rh.write().await;
-                rules.push(rule.clone());
-            }
-            (StatusCode::CREATED, Json(json!(rule)))
+
+    // Write file first — if this fails the in-memory state is unchanged.
+    if let Some(fs) = &s.rule_file_store {
+        if let Err(e) = fs.write_rule(&rule) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
     }
+
+    // Update live engine handle immediately (don't wait for watcher).
+    if let Some(rh) = &s.rules_handle {
+        rh.write().await.push(rule.clone());
+    }
+
+    (StatusCode::CREATED, Json(json!(rule))).into_response()
 }
 
 pub async fn get_automation(
@@ -158,10 +166,13 @@ pub async fn get_automation(
     _: AutomationsRead,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    match s.store.get_rule(id).await {
-        Ok(Some(rule)) => (StatusCode::OK, Json(json!(rule))),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+    let rules = rh.read().await;
+    match rules.iter().find(|r| r.id == id).cloned() {
+        Some(rule) => (StatusCode::OK, Json(json!(rule))).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
     }
 }
 
@@ -172,20 +183,38 @@ pub async fn update_automation(
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
     rule.id = id;
-    match s.store.upsert_rule(&rule).await {
-        Ok(_) => {
-            if let Some(rh) = &s.rules_handle {
-                let mut rules = rh.write().await;
-                if let Some(pos) = rules.iter().position(|r| r.id == id) {
-                    rules[pos] = rule.clone();
-                } else {
-                    rules.push(rule.clone());
-                }
-            }
-            (StatusCode::OK, Json(json!(rule)))
+
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    // Check existence and get old name for potential rename.
+    let old_name = {
+        let rules = rh.read().await;
+        match rules.iter().find(|r| r.id == id) {
+            Some(r) => r.name.clone(),
+            None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    };
+
+    // Write file — handles rename (deletes old slug file if name changed).
+    if let Some(fs) = &s.rule_file_store {
+        if let Err(e) = fs.write_rule_renamed(&rule, &old_name) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        }
     }
+
+    // Update live handle.
+    {
+        let mut rules = rh.write().await;
+        if let Some(pos) = rules.iter().position(|r| r.id == id) {
+            rules[pos] = rule.clone();
+        } else {
+            rules.push(rule.clone());
+        }
+    }
+
+    (StatusCode::OK, Json(json!(rule))).into_response()
 }
 
 pub async fn delete_automation(
@@ -193,17 +222,37 @@ pub async fn delete_automation(
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    match s.store.delete_rule(id).await {
-        Ok(true) => {
-            if let Some(rh) = &s.rules_handle {
-                let mut rules = rh.write().await;
-                rules.retain(|r| r.id != id);
-            }
-            StatusCode::NO_CONTENT.into_response()
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    // Verify existence before touching the filesystem.
+    {
+        let rules = rh.read().await;
+        if !rules.iter().any(|r| r.id == id) {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response();
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
+
+    // Delete the file.
+    if let Some(fs) = &s.rule_file_store {
+        match fs.delete_rule(id) {
+            Ok(false) => {
+                // File not found on disk — could have been manually deleted.
+                // Still remove from live handle below.
+                tracing::warn!(%id, "Rule file not found on disk during delete — removing from memory only");
+            }
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+            Ok(true) => {}
+        }
+    }
+
+    // Remove from live handle.
+    rh.write().await.retain(|r| r.id != id);
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ---------- Scenes ----------
@@ -269,10 +318,12 @@ pub async fn test_automation(
     _: AutomationsRead,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let rule = match s.store.get_rule(id).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" })));
+    };
+    let rule = match rh.read().await.iter().find(|r| r.id == id).cloned() {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))),
     };
 
     // Evaluate each condition independently and collect results.
@@ -355,39 +406,38 @@ fn compare_values(
 /// `GET /api/v1/automations/export`
 /// Returns all rules as a JSON array (ready to re-import).
 pub async fn export_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
-    match s.store.list_rules().await {
-        Ok(rules) => (StatusCode::OK, Json(json!(rules))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
+    match &s.rules_handle {
+        Some(rh) => (StatusCode::OK, Json(json!(rh.read().await.clone()))),
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
     }
 }
 
 /// `POST /api/v1/automations/import`
-/// Accepts a JSON array of rules; assigns fresh UUIDs and saves them all.
+/// Accepts a JSON array of rules; assigns fresh UUIDs and writes each as a TOML file.
 pub async fn import_automations(
     State(s): State<AppState>,
     _: AutomationsWrite,
     Json(rules): Json<Vec<Rule>>,
 ) -> impl IntoResponse {
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" })));
+    };
+
     let mut saved = Vec::with_capacity(rules.len());
     for mut rule in rules {
         rule.id = Uuid::new_v4();
-        match s.store.upsert_rule(&rule).await {
-            Ok(_) => {
-                if let Some(rh) = &s.rules_handle {
-                    rh.write().await.push(rule.clone());
-                }
-                saved.push(rule);
-            }
-            Err(e) => {
+
+        if let Some(fs) = &s.rule_file_store {
+            if let Err(e) = fs.write_rule(&rule) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": e.to_string() })),
                 );
             }
         }
+
+        rh.write().await.push(rule.clone());
+        saved.push(rule);
     }
     (StatusCode::CREATED, Json(json!({ "imported": saved.len(), "rules": saved })))
 }
@@ -451,29 +501,39 @@ pub async fn patch_automation(
     Path(id): Path<Uuid>,
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
-    let mut rule = match s.store.get_rule(id).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
     };
+
+    // Read current rule from handle.
+    let mut rule = match rh.read().await.iter().find(|r| r.id == id).cloned() {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+    };
+
     if let Some(enabled) = patch.enabled {
         rule.enabled = enabled;
     }
     if let Some(priority) = patch.priority {
         rule.priority = priority;
     }
-    match s.store.upsert_rule(&rule).await {
-        Ok(_) => {
-            if let Some(rh) = &s.rules_handle {
-                let mut rules = rh.write().await;
-                if let Some(pos) = rules.iter().position(|r| r.id == id) {
-                    rules[pos] = rule.clone();
-                }
-            }
-            (StatusCode::OK, Json(json!(rule))).into_response()
+
+    // Persist to file.
+    if let Some(fs) = &s.rule_file_store {
+        if let Err(e) = fs.write_rule(&rule) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
+
+    // Update live handle.
+    {
+        let mut rules = rh.write().await;
+        if let Some(pos) = rules.iter().position(|r| r.id == id) {
+            rules[pos] = rule.clone();
+        }
+    }
+
+    (StatusCode::OK, Json(json!(rule))).into_response()
 }
 
 // ---------- Webhooks ----------

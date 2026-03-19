@@ -1,8 +1,8 @@
 use anyhow::Result;
-use hc_api::AppState;
+use hc_api::{rule_file_store::RuleFileStore, AppState};
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
-use hc_core::{Core, EventBus};
+use hc_core::{rule_loader, Core, EventBus};
 use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::{ChannelConfig, NotificationService};
@@ -109,6 +109,8 @@ struct AppConfig {
     #[serde(default)]
     profiles: ProfilesSection,
     #[serde(default)]
+    rules: RulesSection,
+    #[serde(default)]
     auth: AuthSection,
     #[serde(default)]
     notify: NotifySection,
@@ -123,8 +125,28 @@ impl AppConfig {
     fn resolve_paths(&mut self, base: &Path) {
         self.storage.resolve(base);
         self.profiles.resolve(base);
+        self.rules.resolve(base);
         self.broker.resolve(base);
         self.logging.resolve_paths(base);
+    }
+}
+
+/// `[rules]` section of homecore.toml.
+#[derive(Deserialize)]
+struct RulesSection {
+    /// Directory containing per-rule TOML files.
+    /// Default: `{base_dir}/rules`
+    #[serde(default)]
+    dir: String,
+}
+
+impl Default for RulesSection {
+    fn default() -> Self { Self { dir: String::new() } }
+}
+
+impl RulesSection {
+    fn resolve(&mut self, base: &Path) {
+        resolve_path(&mut self.dir, base, "rules");
     }
 }
 
@@ -341,7 +363,7 @@ async fn main() -> Result<()> {
     //
     // Harmless if directories already exist.  Failures are non-fatal so that
     // explicitly configured absolute paths elsewhere on the filesystem work.
-    for subdir in &["config/profiles", "data", "logs"] {
+    for subdir in &["config/profiles", "data", "logs", "rules"] {
         if let Err(e) = std::fs::create_dir_all(base_dir.join(subdir)) {
             eprintln!("Warning: could not create {}/{subdir}: {e}", base_dir.display());
         }
@@ -392,9 +414,49 @@ async fn main() -> Result<()> {
     // ── 9. Event bus ───────────────────────────────────────────────────────
     let bus = EventBus::new(1024);
 
-    // ── 10. Core: state bridge + rule engine ───────────────────────────────
-    let rules = store.list_rules().await?;
-    info!(count = rules.len(), "Loaded rules from store");
+    // ── 10. Load rules from TOML files ────────────────────────────────────
+    let rules_dir = PathBuf::from(&config.rules.dir);
+    let rules = {
+        let dir = rules_dir.clone();
+        tokio::task::spawn_blocking(move || rule_loader::load_all(&dir)).await??
+    };
+
+    let rules = if rules.is_empty() {
+        // Migration: if the rules directory is empty but redb has rules, write
+        // each out to a TOML file so the new file-based system picks them up.
+        let legacy = store.list_rules().await.unwrap_or_default();
+        if !legacy.is_empty() {
+            info!(
+                count = legacy.len(),
+                dir = %rules_dir.display(),
+                "Migrating rules from redb → TOML files (one-time)"
+            );
+            let fs = RuleFileStore::new(&rules_dir);
+            for rule in &legacy {
+                if let Err(e) = fs.write_rule(rule) {
+                    tracing::warn!(rule_id = %rule.id, error = %e, "Failed to migrate rule");
+                }
+            }
+            // Reload from files so the migrated set is canonical.
+            let dir = rules_dir.clone();
+            match tokio::task::spawn_blocking(move || rule_loader::load_all(&dir)).await? {
+                Ok(migrated) => {
+                    info!(count = migrated.len(), "Rules migrated and loaded from files");
+                    migrated
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Migrated rule reload failed; using redb rules");
+                    legacy
+                }
+            }
+        } else {
+            info!("No rules found — starting with empty rule set");
+            vec![]
+        }
+    } else {
+        info!(count = rules.len(), dir = %rules_dir.display(), "Loaded rules from files");
+        rules
+    };
 
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude);
@@ -449,6 +511,13 @@ async fn main() -> Result<()> {
 
     let rules_handle = core.start(rules).await?;
 
+    // ── Hot-reload watcher for rule TOML files ─────────────────────────────
+    // Must be kept alive for the duration of the process.
+    let _rule_watcher = hc_core::rule_loader::RuleWatcher::start(
+        rules_dir.clone(),
+        std::sync::Arc::clone(&rules_handle),
+    )?;
+
     // ── 14. JWT service ────────────────────────────────────────────────────
     let jwt_secret = match &config.auth.jwt_secret {
         Some(s) => s.clone(),
@@ -495,13 +564,11 @@ async fn main() -> Result<()> {
     // rather than failing startup — a typo in the whitelist shouldn't take
     // down the server.
     let whitelist: Vec<IpNet> = config.auth.whitelist.iter().filter_map(|s| {
-        match s.parse::<IpNet>() {
-            Ok(net) => Some(net),
-            Err(e) => {
-                tracing::warn!(entry = %s, error = %e, "Invalid whitelist CIDR — skipping");
-                None
-            }
-        }
+        // Accept both CIDR notation ("10.0.0.1/32") and bare IPs ("10.0.0.1").
+        s.parse::<IpNet>()
+            .or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from))
+            .map_err(|e| tracing::warn!(entry = %s, error = %e, "Invalid whitelist entry — skipping"))
+            .ok()
     }).collect();
 
     if !whitelist.is_empty() {
@@ -512,7 +579,16 @@ async fn main() -> Result<()> {
         );
     }
 
-    let app_state = AppState::new(store, bus, Some(publish_handle), Some(rules_handle), jwt, whitelist);
+    let rule_file_store = RuleFileStore::new(&rules_dir);
+    let app_state = AppState::new(
+        store,
+        bus,
+        Some(publish_handle),
+        Some(rules_handle),
+        Some(rule_file_store),
+        jwt,
+        whitelist,
+    );
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())

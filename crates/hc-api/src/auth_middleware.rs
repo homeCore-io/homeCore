@@ -30,7 +30,7 @@ use axum::{
 };
 use hc_auth::{Claims, Role};
 use serde_json::json;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::AppState;
 
@@ -49,10 +49,18 @@ pub async fn require_auth(
 ) -> Response {
     // ── 1. IP whitelist check ─────────────────────────────────────────────
     if !state.whitelist.is_empty() {
+        // Canonicalize IPv4-mapped IPv6 (::ffff:x.x.x.x → x.x.x.x) so that
+        // clients connecting to a dual-stack 0.0.0.0 listener match IPv4 entries.
         let remote_ip = request
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|ci| ci.0.ip());
+            .map(|ci| match ci.0.ip() {
+                IpAddr::V6(v6) => v6
+                    .to_ipv4_mapped()
+                    .map(IpAddr::V4)
+                    .unwrap_or(IpAddr::V6(v6)),
+                v4 => v4,
+            });
 
         if let Some(ip) = remote_ip {
             if state.whitelist.iter().any(|net| net.contains(&ip)) {

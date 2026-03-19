@@ -90,7 +90,7 @@ pub struct FileConfig {
 impl Default for FileConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             dir: default_log_dir(),
             prefix: default_prefix(),
             rotation: RotationStrategy::Daily,

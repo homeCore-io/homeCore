@@ -103,9 +103,12 @@ token_expiry_hours = 24
 #   "::1/128",           # localhost IPv6
 #   "192.168.1.0/24",    # home LAN
 # ]
+
 whitelist = [
+    "127.0.0.1",
     "10.0.10.200",
 ]
+
 
 # ---------------------------------------------------------------------------
 # Storage
@@ -118,6 +121,17 @@ whitelist = [
 [storage]
 # state_db_path   = "data/state.redb"    # relative to base_dir (default)
 # history_db_path = "data/history.db"    # relative to base_dir (default)
+
+# ---------------------------------------------------------------------------
+# Automation rules
+#
+# Each rule lives in its own TOML file.  The filename (minus .toml) is the
+# rule's slug; the `name` field inside the file is the human display name.
+# Changes to files are hot-reloaded automatically — no restart required.
+# Validation runs before any swap; parse errors leave the running rules intact.
+# ---------------------------------------------------------------------------
+[rules]
+# dir = "rules"    # relative to base_dir (default)
 
 # ---------------------------------------------------------------------------
 # Ecosystem profiles
@@ -158,10 +172,10 @@ enabled = true
 format  = "pretty"   # pretty | compact | json
 ansi    = true       # set false when piping to systemd journal / Docker logs
 
-# Rolling file output (disabled by default)
+# Rolling file output (enabled by default)
 # dir may be absolute or relative to base_dir.  Default: {base_dir}/logs
 [logging.file]
-enabled  = false
+enabled  = true
 # dir    = "logs"          # relative to base_dir (default)
 prefix   = "homecore"      # log files named homecore.YYYY-MM-DD
 rotation = "daily"         # daily | hourly | never

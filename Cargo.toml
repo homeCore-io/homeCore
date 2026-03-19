@@ -41,3 +41,4 @@ toml              = "0.8"
 utoipa            = { version = "4", features = ["axum_extras"] }
 argon2            = { version = "0.5", features = ["password-hash"] }
 async-trait       = "0.1"
+notify            = "6"

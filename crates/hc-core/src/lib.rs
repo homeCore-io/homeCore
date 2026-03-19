@@ -11,6 +11,7 @@ use tracing::info;
 
 pub mod engine;
 pub mod executor;
+pub mod rule_loader;
 pub mod scheduler;
 pub mod state_bridge;
 
@@ -115,11 +116,12 @@ impl Core {
         tokio::spawn(engine.run());
 
         // Scheduler: time-based and solar triggers.
+        // Uses the shared handle so hot-reloaded time rules take effect immediately.
         let sched = scheduler::Scheduler::new(
             self.bus.clone(),
             self.location.latitude,
             self.location.longitude,
-            rules,
+            Arc::clone(&rules_handle),
         );
         tokio::spawn(sched.run());
 

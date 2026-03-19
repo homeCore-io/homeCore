@@ -22,10 +22,12 @@ pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod event_log;
 pub mod handlers;
+pub mod rule_file_store;
 pub mod ws;
 
 use auth_middleware::require_auth;
 use event_log::EventLog;
+use rule_file_store::RuleFileStore;
 
 /// Registered plugin record stored in-memory.
 #[derive(Clone, serde::Serialize)]
@@ -41,8 +43,12 @@ pub struct AppState {
     pub store: StateStore,
     pub event_bus: EventBus,
     pub publish: Option<PublishHandle>,
-    /// Live rule set updated when automations are created/modified via the API.
+    /// Live rule set — source of truth for the rule engine and all API reads.
+    /// Updated atomically by the API (write-through to files) and by the
+    /// hot-reload watcher when files change on disk.
     pub rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+    /// Write-through file store for automation rules.
+    pub rule_file_store: Option<RuleFileStore>,
     /// In-memory plugin registry (plugin_id → record).
     pub plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
     /// JWT service for issuing and validating tokens.
@@ -59,6 +65,7 @@ impl AppState {
         event_bus: EventBus,
         publish: Option<PublishHandle>,
         rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+        rule_file_store: Option<RuleFileStore>,
         jwt: JwtService,
         whitelist: Vec<IpNet>,
     ) -> Self {
@@ -116,6 +123,7 @@ impl AppState {
             event_bus,
             publish,
             rules_handle,
+            rule_file_store,
             plugins,
             jwt: Arc::new(jwt),
             event_log,

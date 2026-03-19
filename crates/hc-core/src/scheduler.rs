@@ -10,18 +10,27 @@ use crate::EventBus;
 use chrono::{Datelike, Local, NaiveTime, Timelike};
 use hc_types::event::Event;
 use hc_types::rule::{Rule, SunEventType, Trigger};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 pub struct Scheduler {
     bus: EventBus,
     latitude: f64,
     longitude: f64,
-    rules: Vec<Rule>,
+    /// Shared rule set — reads the live handle each tick so hot-reloaded
+    /// time-based rules take effect immediately without a restart.
+    rules: Arc<RwLock<Vec<Rule>>>,
 }
 
 impl Scheduler {
-    pub fn new(bus: EventBus, latitude: f64, longitude: f64, rules: Vec<Rule>) -> Self {
+    pub fn new(
+        bus: EventBus,
+        latitude: f64,
+        longitude: f64,
+        rules: Arc<RwLock<Vec<Rule>>>,
+    ) -> Self {
         Self { bus, latitude, longitude, rules }
     }
 
@@ -34,43 +43,47 @@ impl Scheduler {
             let current_time = now.time().with_second(0).unwrap_or(now.time());
             let current_day = now.weekday();
 
-            for rule in &self.rules {
-                if !rule.enabled {
-                    continue;
-                }
-                let fires = match &rule.trigger {
-                    Trigger::TimeOfDay { time, days } => {
-                        let time_match = times_match(*time, current_time);
-                        let day_match = days.is_empty() || days.contains(&current_day);
-                        time_match && day_match
+            // Hold the read lock only for the duration of the tick evaluation.
+            {
+                let rules = self.rules.read().await;
+                for rule in rules.iter() {
+                    if !rule.enabled {
+                        continue;
                     }
-                    Trigger::SunEvent { event, offset_minutes } => {
-                        if let Some(sun_time) = solar_event_time(
-                            self.latitude,
-                            self.longitude,
-                            now.date_naive(),
-                            *event,
-                            *offset_minutes,
-                        ) {
-                            times_match(sun_time, current_time)
-                        } else {
-                            false
+                    let fires = match &rule.trigger {
+                        Trigger::TimeOfDay { time, days } => {
+                            let time_match = times_match(*time, current_time);
+                            let day_match = days.is_empty() || days.contains(&current_day);
+                            time_match && day_match
                         }
-                    }
-                    _ => false,
-                };
+                        Trigger::SunEvent { event, offset_minutes } => {
+                            if let Some(sun_time) = solar_event_time(
+                                self.latitude,
+                                self.longitude,
+                                now.date_naive(),
+                                *event,
+                                *offset_minutes,
+                            ) {
+                                times_match(sun_time, current_time)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
 
-                if fires {
-                    debug!(rule_id = %rule.id, "Scheduler firing time trigger");
-                    // Emit a synthetic Custom event that the engine interprets as
-                    // a manual fire for this specific rule.
-                    let _ = self.bus.publish(Event::Custom {
-                        timestamp: chrono::Utc::now(),
-                        event_type: "scheduler_tick".into(),
-                        payload: serde_json::json!({ "rule_id": rule.id }),
-                    });
+                    if fires {
+                        debug!(rule_id = %rule.id, "Scheduler firing time trigger");
+                        // Emit a synthetic Custom event that the engine interprets as
+                        // a manual fire for this specific rule.
+                        let _ = self.bus.publish(Event::Custom {
+                            timestamp: chrono::Utc::now(),
+                            event_type: "scheduler_tick".into(),
+                            payload: serde_json::json!({ "rule_id": rule.id }),
+                        });
+                    }
                 }
-            }
+            } // read lock released here
 
             // Sleep until the start of the next minute.
             let secs_until_next_minute = 60 - now.second() as u64;
