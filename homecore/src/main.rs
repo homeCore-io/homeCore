@@ -84,6 +84,10 @@ struct BrokerSection {
     host: String,
     #[serde(default = "default_broker_port")]
     port: u16,
+    /// MQTT v5 listener port for Gen2/Gen3 devices (Shelly Plus/Pro, etc.).
+    /// Defaults to port+1 (1884 when port is 1883). Set to null to disable.
+    #[serde(default = "default_broker_v5_port")]
+    v5_port: Option<u16>,
     tls_port: Option<u16>,
     cert_path: Option<String>,
     key_path: Option<String>,
@@ -98,6 +102,7 @@ impl Default for BrokerSection {
         Self {
             host: default_broker_host(),
             port: default_broker_port(),
+            v5_port: default_broker_v5_port(),
             tls_port: None,
             cert_path: None,
             key_path: None,
@@ -107,6 +112,7 @@ impl Default for BrokerSection {
 }
 
 fn default_broker_host() -> String { "0.0.0.0".into() }
+fn default_broker_v5_port() -> Option<u16> { Some(1884) }
 fn default_broker_port() -> u16 { 1883 }
 
 /// A single `[[broker.clients]]` entry.
@@ -200,6 +206,7 @@ async fn main() -> Result<()> {
     let broker_cfg = BrokerConfig {
         host:      config.broker.host.clone(),
         port:      config.broker.port,
+        v5_port:   config.broker.v5_port,
         tls_port:  config.broker.tls_port,
         cert_path: config.broker.cert_path.clone(),
         key_path:  config.broker.key_path.clone(),
@@ -224,7 +231,7 @@ async fn main() -> Result<()> {
         username:    internal_cred.as_ref().map(|c| c.id.clone()),
         password:    internal_cred.as_ref().map(|c| c.password.clone()),
     };
-    let (mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
+    let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
     let publish_handle = mqtt_client.publish_handle();
 
     // 3. State store.
@@ -233,7 +240,33 @@ async fn main() -> Result<()> {
     // 4. Event bus — the shared backbone all crates communicate through.
     let bus = EventBus::new(1024);
 
-    // 5. Forwarder: MQTT client broadcast → EventBus.
+    // 5. Core: state bridge + rule engine.
+    let rules = store.list_rules().await?;
+    info!(count = rules.len(), "Loaded rules from store");
+
+    let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
+        .with_location(config.location.latitude, config.location.longitude);
+
+    // Load ecosystem profiles and build the router.
+    // Done before spawning the MQTT client so we can add topic subscriptions first.
+    match load_profiles_from_dir(&config.profiles.dir) {
+        Ok(profiles) if !profiles.is_empty() => {
+            match EcosystemRouter::new(profiles, None) {
+                Ok(router) => {
+                    // Subscribe to all broker traffic so native device topics
+                    // (shellies/#, shellyplus*/#, etc.) flow through the router.
+                    mqtt_client.add_subscription("#");
+                    info!("Ecosystem router ready; subscribed to all topics (#)");
+                    core = core.with_router(router);
+                }
+                Err(e) => tracing::warn!(error = %e, "Ecosystem router init failed; running without it"),
+            }
+        }
+        Ok(_) => info!("No ecosystem profiles found in {}; running without router", config.profiles.dir),
+        Err(e) => tracing::warn!(error = %e, "Could not load profiles directory; running without router"),
+    }
+
+    // 6. Forwarder: MQTT client broadcast → EventBus.
     {
         let bus_clone = bus.clone();
         tokio::spawn(async move {
@@ -251,34 +284,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 6. Drive the MQTT event loop in its own task.
+    // 7. Drive the MQTT event loop in its own task.
     tokio::spawn(async move {
         if let Err(e) = mqtt_client.run().await {
             tracing::error!(error = %e, "MQTT client exited");
         }
     });
-
-    // 7. Core: state bridge + rule engine.
-    let rules = store.list_rules().await?;
-    info!(count = rules.len(), "Loaded rules from store");
-
-    let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
-        .with_location(config.location.latitude, config.location.longitude);
-
-    // Load ecosystem profiles and build the router.
-    match load_profiles_from_dir(&config.profiles.dir) {
-        Ok(profiles) if !profiles.is_empty() => {
-            match EcosystemRouter::new(profiles, None) {
-                Ok(router) => {
-                    info!("Ecosystem router ready");
-                    core = core.with_router(router);
-                }
-                Err(e) => tracing::warn!(error = %e, "Ecosystem router init failed; running without it"),
-            }
-        }
-        Ok(_) => info!("No ecosystem profiles found in {}; running without router", config.profiles.dir),
-        Err(e) => tracing::warn!(error = %e, "Could not load profiles directory; running without router"),
-    }
 
     // Wire notification service if channels are configured.
     if !config.notify.channels.is_empty() {

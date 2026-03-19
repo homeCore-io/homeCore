@@ -42,6 +42,16 @@ impl StateStore {
         let history_path = history_db_path.to_string();
 
         let (devices, rules, history, users) = tokio::task::spawn_blocking(move || {
+            // Ensure parent directories exist before opening databases.
+            if let Some(parent) = std::path::Path::new(&state_path).parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create state DB directory: {}", parent.display()))?;
+            }
+            if let Some(parent) = std::path::Path::new(&history_path).parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create history DB directory: {}", parent.display()))?;
+            }
+
             // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
             let db = Arc::new(
                 Database::create(&state_path).context("failed to open state DB")?,

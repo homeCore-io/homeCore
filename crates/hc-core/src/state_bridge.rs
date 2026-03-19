@@ -99,7 +99,9 @@ impl StateBridge {
                 Ok(Some(InboundResult::Availability { device_id, available })) => {
                     return self.handle_availability(&device_id, available).await;
                 }
-                Ok(None) => {} // No ecosystem match; fall through to canonical handling.
+                Ok(None) => {
+                    debug!(topic, "No ecosystem profile match — falling through to canonical handling");
+                }
                 Err(e)   => warn!(topic, error = %e, "Inbound router error"),
             }
         }
@@ -142,8 +144,10 @@ impl StateBridge {
                 plugin_id: plugin_id.to_string(),
             });
             info!(plugin_id, "Plugin registered");
+            return Ok(());
         }
 
+        debug!(topic, "Topic not handled by any profile or canonical pattern — ignored");
         Ok(())
     }
 

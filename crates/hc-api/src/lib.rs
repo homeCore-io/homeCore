@@ -121,7 +121,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events/stream", get(ws::ws_events_handler))
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
-        .route("/webhooks/{path}", post(handlers::receive_webhook));
+        .route("/webhooks/:path", post(handlers::receive_webhook));
 
     // Protected routes — all require a valid Bearer JWT.
     let protected = Router::new()
@@ -129,34 +129,34 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/me", get(auth_handlers::me))
         .route("/auth/change-password", post(auth_handlers::change_password))
         .route("/auth/users", get(auth_handlers::list_users).post(auth_handlers::create_user))
-        .route("/auth/users/{id}", delete(auth_handlers::delete_user))
-        .route("/auth/users/{id}/role", patch(auth_handlers::set_user_role))
+        .route("/auth/users/:id", delete(auth_handlers::delete_user))
+        .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
         // Devices
         .route("/devices", get(handlers::list_devices))
-        .route("/devices/{id}", get(handlers::get_device))
-        .route("/devices/{id}/state", patch(handlers::command_device))
-        .route("/devices/{id}/history", get(handlers::device_history))
+        .route("/devices/:id", get(handlers::get_device))
+        .route("/devices/:id/state", patch(handlers::command_device))
+        .route("/devices/:id/history", get(handlers::device_history))
         // Areas
         .route("/areas", get(handlers::list_areas).post(handlers::create_area))
-        .route("/areas/{id}/devices", put(handlers::set_area_devices))
+        .route("/areas/:id/devices", put(handlers::set_area_devices))
         // Automations
         .route("/automations", get(handlers::list_automations).post(handlers::create_automation))
         .route(
-            "/automations/{id}",
+            "/automations/:id",
             get(handlers::get_automation)
                 .put(handlers::update_automation)
                 .patch(handlers::patch_automation)
                 .delete(handlers::delete_automation),
         )
-        .route("/automations/{id}/test", post(handlers::test_automation))
+        .route("/automations/:id/test", post(handlers::test_automation))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
         // Scenes
         .route("/scenes", get(handlers::list_scenes).post(handlers::create_scene))
-        .route("/scenes/{id}/activate", post(handlers::activate_scene))
+        .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
-        .route("/plugins/{id}", delete(handlers::deregister_plugin))
+        .route("/plugins/:id", delete(handlers::deregister_plugin))
         // Events
         .route("/events", get(handlers::list_events))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));

@@ -77,6 +77,8 @@ pub struct MqttClient {
     tx: broadcast::Sender<Event>,
     client: AsyncClient,
     eventloop: EventLoop,
+    /// Additional topic filters to subscribe to on connect (beyond `homecore/#`).
+    extra_subscriptions: Vec<String>,
 }
 
 impl MqttClient {
@@ -97,7 +99,13 @@ impl MqttClient {
         }
 
         let (client, eventloop) = AsyncClient::new(opts, 256);
-        (Self { config, tx, client, eventloop }, rx)
+        (Self { config, tx, client, eventloop, extra_subscriptions: Vec::new() }, rx)
+    }
+
+    /// Add extra topic filters to subscribe to on (re)connect.
+    /// Call before [`run`] to ensure the subscriptions are in place from the start.
+    pub fn add_subscription(&mut self, filter: impl Into<String>) {
+        self.extra_subscriptions.push(filter.into());
     }
 
     /// Returns a publish handle that can be cloned and shared freely.
@@ -123,6 +131,13 @@ impl MqttClient {
                         .subscribe("homecore/#", QoS::AtLeastOnce)
                         .await
                         .context("subscribe failed")?;
+                    for filter in &self.extra_subscriptions {
+                        info!(%filter, "Subscribing to ecosystem topic filter");
+                        self.client
+                            .subscribe(filter, QoS::AtLeastOnce)
+                            .await
+                            .with_context(|| format!("subscribe to {filter} failed"))?;
+                    }
                 }
 
                 Ok(rumqttc::Event::Incoming(Packet::Publish(p))) => {

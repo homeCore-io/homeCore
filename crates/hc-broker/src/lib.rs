@@ -49,8 +49,11 @@ pub struct ClientAcl {
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub host: String,
-    /// Plain-text MQTT port.
+    /// Plain-text MQTT v3.1.1 port (used by Gen1 devices and the internal core client).
     pub port: u16,
+    /// Optional MQTT v5 port for Gen2/Gen3 devices (e.g. Shelly Plus/Pro).
+    /// When set, a second listener is started that speaks MQTT v5.
+    pub v5_port: Option<u16>,
     /// Optional TLS port.  Requires `cert_path` and `key_path` to be set.
     pub tls_port: Option<u16>,
     /// Path to PEM-encoded server certificate (for TLS listener).
@@ -66,6 +69,7 @@ impl Default for BrokerConfig {
         Self {
             host: "0.0.0.0".into(),
             port: 1883,
+            v5_port: Some(1884),
             tls_port: None,
             cert_path: None,
             key_path: None,
@@ -122,7 +126,7 @@ impl Broker {
             dynamic_filters: false,
         };
 
-        // Plain-text listener.
+        // Plain-text MQTT v3.1.1 listener (Gen1 devices + internal core client).
         let tcp = ServerSettings {
             name: "homecore-tcp".into(),
             listen: SocketAddrV4::new(host, self.config.port).into(),
@@ -131,10 +135,25 @@ impl Broker {
             connections: connection_settings.clone(),
         };
 
-        let mut servers = HashMap::new();
-        servers.insert("tcp".to_string(), tcp);
+        let mut v4_servers = HashMap::new();
+        v4_servers.insert("tcp".to_string(), tcp);
 
-        // Optional TLS listener.
+        // Optional MQTT v5 listener on a separate port (Gen2/Gen3 devices).
+        // v4 and v5 cannot share a port — rumqttd binds each map entry independently.
+        let mut v5_servers = HashMap::new();
+        if let Some(v5_port) = self.config.v5_port {
+            let tcp_v5 = ServerSettings {
+                name: "homecore-tcp-v5".into(),
+                listen: SocketAddrV4::new(host, v5_port).into(),
+                tls: None,
+                next_connection_delay_ms: 1,
+                connections: connection_settings.clone(),
+            };
+            v5_servers.insert("tcp-v5".to_string(), tcp_v5);
+            info!(port = v5_port, "MQTT v5 listener enabled (for Gen2/Gen3 devices)");
+        }
+
+        // Optional TLS listener (v3.1.1).
         if let (Some(tls_port), Some(cert), Some(key)) = (
             self.config.tls_port,
             &self.config.cert_path,
@@ -146,7 +165,6 @@ impl Broker {
                 keypath: key.clone(),
             };
 
-            // Validate that certificate and key files exist before wiring them in.
             if tls_config.validate_paths() {
                 let tls = ServerSettings {
                     name: "homecore-tls".into(),
@@ -155,7 +173,7 @@ impl Broker {
                     next_connection_delay_ms: 1,
                     connections: connection_settings,
                 };
-                servers.insert("tls".to_string(), tls);
+                v4_servers.insert("tls".to_string(), tls);
                 info!(port = tls_port, cert = %cert, "TLS listener enabled");
             } else {
                 warn!(
@@ -169,8 +187,8 @@ impl Broker {
         Config {
             id: 0,
             router,
-            v4: Some(servers),
-            v5: None,
+            v4: Some(v4_servers),
+            v5: if v5_servers.is_empty() { None } else { Some(v5_servers) },
             ws: None,
             cluster: None,
             console: None,

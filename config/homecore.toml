@@ -74,8 +74,8 @@ token_expiry_hours = 24
 # Defaults to /tmp for development if this section is omitted.
 # ---------------------------------------------------------------------------
 [storage]
-state_db_path   = "/var/lib/homecore/state.redb"
-history_db_path = "/var/lib/homecore/history.db"
+state_db_path   = "/tmp/homecore/state.redb"
+history_db_path = "/tmp/homecore/history.db"
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
