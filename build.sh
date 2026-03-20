@@ -16,6 +16,7 @@ cargo build $CARGO_FLAG --manifest-path "$ROOT/Cargo.toml"
 # Add plugin directories here as they are created.
 PLUGINS=(
   "plugins/hc-yolink"
+  "plugins/hc-lutron"
 )
 
 for plugin in "${PLUGINS[@]}"; do
