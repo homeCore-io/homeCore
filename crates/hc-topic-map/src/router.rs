@@ -229,15 +229,17 @@ impl EcosystemRouter {
             // Render the template (e.g. "{property}" → actual captured value).
             let rendered = render_template(attr_template, vars);
 
-            // For Z-Wave: look up "{commandClass}/{endpoint}/{property}" in the
-            // CC alias table. Falls back to the rendered template for profiles
-            // without aliases (Shelly, Zigbee, …).
-            let alias_key = format!(
-                "{}/{}/{}",
-                vars.get("commandClass").map(String::as_str).unwrap_or(""),
-                vars.get("endpoint").map(String::as_str).unwrap_or(""),
-                vars.get("property").map(String::as_str).unwrap_or(""),
-            );
+            // For Z-Wave: look up "{commandClass}/{endpoint}/{property}" (or
+            // "{commandClass}/{endpoint}/{property}/{propertyKey}" for CCs like
+            // Meter that publish a propertyKey segment) in the CC alias table.
+            // Falls back to the rendered template for profiles without aliases.
+            let cc  = vars.get("commandClass").map(String::as_str).unwrap_or("");
+            let ep  = vars.get("endpoint").map(String::as_str).unwrap_or("");
+            let prop = vars.get("property").map(String::as_str).unwrap_or("");
+            let alias_key = match vars.get("propertyKey") {
+                Some(pk) => format!("{cc}/{ep}/{prop}/{pk}"),
+                None     => format!("{cc}/{ep}/{prop}"),
+            };
             let attr_name = attribute_aliases
                 .get(&alias_key)
                 .cloned()
@@ -819,14 +821,20 @@ prefix       = "zwave_"
 aggregate_ms = 100
 
 [ecosystem.attribute_aliases]
-"37/0/currentValue" = "on"
-"38/0/currentValue" = "brightness"
-"49/0/Air_temperature" = "temperature"
-"128/0/level" = "battery"
+"37/0/currentValue"   = "on"
+"38/0/currentValue"   = "brightness"
+"49/0/Air temperature" = "temperature"
+"128/0/level"         = "battery"
+"50/0/value/65537"    = "power_w"
 
 [[ecosystem.state_topics]]
 pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
 attribute     = "{property}"
+coerce_scalar = true
+
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/{propertyKey}"
+attribute     = "{property}/{propertyKey}"
 coerce_scalar = true
 "#;
 
@@ -860,12 +868,43 @@ coerce_scalar = true
 
     #[test]
     fn zwave_sensor_temperature_alias() {
+        // zwavejs2mqtt uses spaces in property names per the Z-Wave spec.
         let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/7/49/0/Air_temperature", b"21.5").unwrap().unwrap();
+        let result = router.route_inbound("zwave/7/49/0/Air temperature", b"21.5").unwrap().unwrap();
         match result {
             InboundResult::State { payload, .. } => {
                 let temp = payload["temperature"].as_f64().unwrap();
                 assert!((temp - 21.5).abs() < 0.01);
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_meter_six_segment_propertykey() {
+        // Meter CC publishes 6-segment topics: zwave/{node}/50/{ep}/value/{propertyKey}
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/5/50/0/value/65537", b"127.4").unwrap().unwrap();
+        match result {
+            InboundResult::State { device_id, payload, aggregate_ms, .. } => {
+                assert_eq!(device_id, "zwave_5");
+                // Alias "50/0/value/65537" → "power_w"
+                let pw = payload["power_w"].as_f64().unwrap();
+                assert!((pw - 127.4).abs() < 0.01);
+                assert_eq!(aggregate_ms, Some(100));
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_meter_six_segment_no_alias_falls_back() {
+        // 6-segment topic with no alias entry → attr name is "{property}/{propertyKey}"
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/5/50/0/value/99999", b"42").unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                assert_eq!(payload["value/99999"], 42);
             }
             _ => panic!("Expected State"),
         }

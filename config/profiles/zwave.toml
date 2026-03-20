@@ -1,8 +1,5 @@
 # HomeCore Ecosystem Profile — ZWave-JS (via zwavejs2mqtt / ZwaveJS-UI)
 #
-# This is the canonical reference profile. Copy to config/profiles/zwave.toml
-# to activate. The active copy at config/profiles/zwave.toml is kept in sync.
-#
 # Prerequisites:
 #   - zwavejs2mqtt running with MQTT enabled and pointing at the HomeCore broker
 #   - MQTT prefix set to "zwave" in zwavejs2mqtt Settings → MQTT
