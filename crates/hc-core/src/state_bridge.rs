@@ -171,7 +171,12 @@ impl StateBridge {
             .store
             .get_device(device_id)
             .await?
-            .unwrap_or_else(|| DeviceState::new(device_id, device_id, "unknown"));
+            .unwrap_or_else(|| {
+                // Derive plugin_id from the device_id prefix convention:
+                // "shelly_abc" → "shelly", "tasmota_abc" → "tasmota", etc.
+                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+                DeviceState::new(device_id, device_id, plugin_id)
+            });
 
         let previous = device.attributes.clone();
 
@@ -279,7 +284,10 @@ impl StateBridge {
             .store
             .get_device(device_id)
             .await?
-            .unwrap_or_else(|| DeviceState::new(device_id, device_id, "unknown"));
+            .unwrap_or_else(|| {
+                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+                DeviceState::new(device_id, device_id, plugin_id)
+            });
 
         device.available = available;
         device.last_seen = Utc::now();
