@@ -1,0 +1,38 @@
+# Office Humidifier Off
+#
+# When the office desk sensor reports humidity at or above 35%, turn off
+# the humidifier plug — but only if it is not already off.
+#
+# Replace SENSOR_DEVICE_ID with the actual yolink_* id from:
+#   curl -s http://localhost:8080/api/v1/devices | jq '.[] | select(.name | test("desk"; "i")) | {id,name}'
+
+id       = "e1000001-0002-0002-0002-000000000002"
+name     = "Office Humidifier Off"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c01000d458f"
+attribute = "humidity_pct"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000d458f"
+attribute = "humidity_pct"
+op        = "gte"
+value     = 35.0
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0100044441"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "yolink_d88b4c0100044441"
+
+[actions.state]
+on = false

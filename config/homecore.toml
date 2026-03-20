@@ -204,11 +204,11 @@ app_name  = "homecore"
 # Paths may be absolute or relative to base_dir.
 # ---------------------------------------------------------------------------
 
-# [[plugins]]
-# id      = "plugin.yolink"
-# binary  = "plugins/hc-yolink/target/release/hc-yolink"
-# config  = "plugins/hc-yolink/config/config.toml"
-# enabled = true
+[[plugins]]
+ id      = "plugin.yolink"
+ binary  = "plugins/hc-yolink/target/release/hc-yolink"
+ config  = "plugins/hc-yolink/config/config.toml"
+ enabled = true
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
