@@ -196,6 +196,23 @@ app_name  = "homecore"
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Plugins
+#
+# HomeCore spawns each enabled plugin as a child process and supervises it
+# with exponential-backoff restarts (2 s → 4 → 8 → … → 60 s max).
+# Paths may be absolute or relative to base_dir.
+# ---------------------------------------------------------------------------
+
+# [[plugins]]
+# id      = "plugin.yolink"
+# binary  = "plugins/hc-yolink/target/release/hc-yolink"
+# config  = "plugins/hc-yolink/config/config.toml"
+# enabled = true
+
+# ---------------------------------------------------------------------------
+# Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
+# ---------------------------------------------------------------------------
 # [[topic_map]]
 # source_pattern  = "stat/{device}/POWER"
 # target_template = "homecore/devices/tasmota_{device}/state"
