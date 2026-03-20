@@ -241,17 +241,19 @@ impl StateBridge {
             Some(mut existing) => {
                 let previous_name = existing.name.clone();
 
-                // Always keep plugin_id and area in sync with what the plugin reports.
+                // Always keep metadata in sync with what the plugin reports.
                 existing.plugin_id = plugin_id.to_string();
                 if area.is_some() {
                     existing.area = area;
                 }
+                existing.name = new_name.to_string();
 
-                if existing.name != new_name {
-                    // Name changed at source — update and notify.
-                    existing.name = new_name.to_string();
-                    self.store.upsert_device(&existing).await?;
+                // Always persist — ensures name/plugin_id/area are correct even
+                // when the device was auto-created from a retained state message
+                // before registration arrived.
+                self.store.upsert_device(&existing).await?;
 
+                if previous_name != new_name {
                     info!(
                         device_id,
                         previous_name = %previous_name,
@@ -265,7 +267,6 @@ impl StateBridge {
                         current_name:  new_name.to_string(),
                     });
                 }
-                // If name is unchanged, no store write or event needed.
             }
             None => {
                 // First registration — create the device record.

@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use hc_types::event::Event;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, Packet, QoS};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for the internal MQTT client.
@@ -79,6 +79,9 @@ pub struct MqttClient {
     eventloop: EventLoop,
     /// Additional topic filters to subscribe to on connect (beyond `homecore/#`).
     extra_subscriptions: Vec<String>,
+    /// Optional one-shot sender that fires once subscriptions are confirmed on
+    /// the first connect.  Lets the caller know it is safe to launch plugins.
+    ready_tx: Option<oneshot::Sender<()>>,
 }
 
 impl MqttClient {
@@ -99,7 +102,14 @@ impl MqttClient {
         }
 
         let (client, eventloop) = AsyncClient::new(opts, 256);
-        (Self { config, tx, client, eventloop, extra_subscriptions: Vec::new() }, rx)
+        (Self { config, tx, client, eventloop, extra_subscriptions: Vec::new(), ready_tx: None }, rx)
+    }
+
+    /// Register a one-shot sender that will be signalled once the first
+    /// `homecore/#` subscription is confirmed.  Use this to delay plugin
+    /// launch until the internal client is actually listening.
+    pub fn set_ready_notify(&mut self, tx: oneshot::Sender<()>) {
+        self.ready_tx = Some(tx);
     }
 
     /// Add extra topic filters to subscribe to on (re)connect.
@@ -137,6 +147,11 @@ impl MqttClient {
                             .subscribe(filter, QoS::AtLeastOnce)
                             .await
                             .with_context(|| format!("subscribe to {filter} failed"))?;
+                    }
+                    // Signal that the client is subscribed and ready.
+                    // Only fires on the first connect; ignored on reconnects.
+                    if let Some(tx) = self.ready_tx.take() {
+                        let _ = tx.send(());
                     }
                 }
 

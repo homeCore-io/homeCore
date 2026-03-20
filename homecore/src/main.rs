@@ -427,31 +427,6 @@ async fn main() -> Result<()> {
     };
     Broker::new(broker_cfg).spawn()?;
 
-    // ── 7. Launch plugins ─────────────────────────────────────────────────
-    //
-    // Plugins are spawned after the broker is ready so they can connect
-    // immediately.  Each plugin is supervised in its own task and restarted
-    // on exit with exponential backoff.
-    {
-        let enabled: Vec<_> = config.plugins.iter()
-            .filter(|p| p.enabled)
-            .collect();
-
-        if enabled.is_empty() {
-            info!("No plugins configured");
-        } else {
-            info!(count = enabled.len(), "Launching plugins");
-            let processes = enabled.into_iter().map(|p| {
-                plugin_launcher::PluginProcess {
-                    id:     p.id.clone(),
-                    binary: PathBuf::from(&p.binary),
-                    config: PathBuf::from(&p.config),
-                }
-            }).collect();
-            plugin_launcher::spawn_all(processes);
-        }
-    }
-
     // ── 9. Internal MQTT client ────────────────────────────────────────────
     let internal_cred = config.broker.clients.iter()
         .find(|c| c.id == "internal.core")
@@ -465,6 +440,12 @@ async fn main() -> Result<()> {
     };
     let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
     let publish_handle = mqtt_client.publish_handle();
+
+    // Set up a ready signal so plugins are launched only after the internal
+    // MQTT client has subscribed to homecore/#.  This prevents registration
+    // messages from being published before anyone is listening.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    mqtt_client.set_ready_notify(ready_tx);
 
     // ── 10. State store ─────────────────────────────────────────────────────
     let store = StateStore::open(&config.storage.state_db_path, &config.storage.history_db_path).await?;
@@ -559,7 +540,34 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── 15. Notification service ───────────────────────────────────────────
+    // ── 15. Launch plugins (after MQTT is subscribed) ─────────────────────
+    //
+    // Wait for the internal MQTT client to confirm its homecore/# subscription
+    // before spawning plugins.  This ensures that registration messages
+    // published by plugins on startup are not missed due to a race condition.
+    {
+        let _ = ready_rx.await;
+
+        let enabled: Vec<_> = config.plugins.iter()
+            .filter(|p| p.enabled)
+            .collect();
+
+        if enabled.is_empty() {
+            info!("No plugins configured");
+        } else {
+            info!(count = enabled.len(), "Launching plugins");
+            let processes = enabled.into_iter().map(|p| {
+                plugin_launcher::PluginProcess {
+                    id:     p.id.clone(),
+                    binary: PathBuf::from(&p.binary),
+                    config: PathBuf::from(&p.config),
+                }
+            }).collect();
+            plugin_launcher::spawn_all(processes);
+        }
+    }
+
+    // ── 16. Notification service ───────────────────────────────────────────
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
         let svc = NotificationService::from_configs(config.notify.channels);
@@ -576,7 +584,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::clone(&rules_handle),
     )?;
 
-    // ── 16. JWT service ────────────────────────────────────────────────────
+    // ── 17. JWT service ────────────────────────────────────────────────────
     let jwt_secret = match &config.auth.jwt_secret {
         Some(s) => s.clone(),
         None => {
@@ -586,7 +594,7 @@ async fn main() -> Result<()> {
     };
     let jwt = JwtService::new_hs256(jwt_secret.as_bytes(), config.auth.token_expiry_hours);
 
-    // ── 17. Bootstrap default admin account ───────────────────────────────
+    // ── 18. Bootstrap default admin account ───────────────────────────────
     let count = store.user_count().await?;
     if count == 0 {
         let password = random_password(16);
@@ -616,7 +624,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    // ── 18. REST + WebSocket API ───────────────────────────────────────────
+    // ── 19. REST + WebSocket API ───────────────────────────────────────────
 
     // Parse IP whitelist CIDRs.  Invalid entries are skipped with a warning
     // rather than failing startup — a typo in the whitelist shouldn't take
