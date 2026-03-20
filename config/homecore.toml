@@ -220,7 +220,7 @@ app_name  = "homecore"
  id      = "plugin.sonos"
  binary  = "plugins/hc-sonos/target/release/hc-sonos"
  config  = "plugins/hc-sonos/config/config.toml"
- enabled = false
+ enabled = true
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
