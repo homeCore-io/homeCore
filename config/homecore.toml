@@ -210,6 +210,12 @@ app_name  = "homecore"
  config  = "plugins/hc-yolink/config/config.toml"
  enabled = true
 
+[[plugins]]
+ id      = "plugin.lutron"
+ binary  = "plugins/hc-lutron/target/release/hc-lutron"
+ config  = "plugins/hc-lutron/config/config.toml"
+ enabled = true
+
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------
