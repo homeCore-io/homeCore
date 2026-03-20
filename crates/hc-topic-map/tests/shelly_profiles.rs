@@ -67,7 +67,7 @@ fn gen1_relay_cmd_on() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplug-s-AABBCC_relay0/cmd",
         br#"{"on":true}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellies/shellyplug-s-AABBCC/relay/0/command");
     assert_eq!(res.payload, b"ON");
 }
@@ -78,7 +78,7 @@ fn gen1_relay_cmd_off() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplug-s-AABBCC_relay0/cmd",
         br#"{"on":false}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.payload, b"OFF");
 }
 
@@ -88,7 +88,7 @@ fn gen1_relay1_cmd() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shelly25-112233_relay1/cmd",
         br#"{"on":true}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellies/shelly25-112233/relay/1/command");
     assert_eq!(res.payload, b"ON");
 }
@@ -171,7 +171,7 @@ fn gen1_dimmer_cmd() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellydimmer-AABBCC_light0/cmd",
         br#"{"on":false,"brightness":50}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellies/shellydimmer-AABBCC/light/0/set");
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["turn"], "OFF");
@@ -184,7 +184,7 @@ fn gen1_dimmer_on_with_brightness_cmd() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellydimmer-AABBCC_light0/cmd",
         br#"{"on":true,"brightness":80}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["turn"], "ON");
     assert_eq!(body["brightness"], 80);
@@ -219,7 +219,7 @@ fn gen1_roller_cmd_open() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shelly25-AABBCC_roller0/cmd",
         br#"{"state":"open"}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellies/shelly25-AABBCC/roller/0/command");
     assert_eq!(res.payload, b"open");
 }
@@ -302,7 +302,7 @@ fn gen2_switch_cmd_on() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplus2pm-083AF2123456_switch_0/cmd",
         br#"{"on":true}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellyplus2pm-083AF2123456/rpc");
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["method"], "Switch.Set");
@@ -316,7 +316,7 @@ fn gen2_switch1_cmd_off() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplus2pm-083AF2123456_switch_1/cmd",
         br#"{"on":false}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["method"], "Switch.Set");
     assert_eq!(body["params"]["on"], false);
@@ -329,7 +329,7 @@ fn gen2_pro4pm_switch3_cmd() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellypro4pm-AABBCC_switch_3/cmd",
         br#"{"on":true}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["method"], "Switch.Set");
     assert_eq!(body["params"]["id"], 3);
@@ -358,7 +358,7 @@ fn gen2_light_cmd_brightness() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplusdimmer-AABBCC_light_0/cmd",
         br#"{"on":true,"brightness":60}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["method"], "Light.Set");
     assert_eq!(body["params"]["on"], true);
@@ -389,7 +389,7 @@ fn gen2_cover_cmd_position() {
     let res = r.route_outbound(
         "homecore/devices/shelly_shellyplus2pm-AABBCC_cover_0/cmd",
         br#"{"position":50}"#,
-    ).unwrap().unwrap();
+    ).unwrap().unwrap().remove(0);
     assert_eq!(res.target_topic, "shellyplus2pm-AABBCC/rpc");
     let body: Value = serde_json::from_slice(&res.payload).unwrap();
     assert_eq!(body["method"], "Cover.GoToPosition");

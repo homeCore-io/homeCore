@@ -2155,6 +2155,178 @@ websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=device_avai
 
 ---
 
+## Z-Wave / ZwaveJS-UI (zwavejs2mqtt) integration
+
+HomeCore supports Z-Wave devices via the **zwavejs2mqtt** bridge (also known as ZwaveJS-UI). This bridge speaks Z-Wave to your USB stick and exposes devices over MQTT, which HomeCore then translates into its canonical device model.
+
+---
+
+### Prerequisites
+
+1. Install and run **zwavejs2mqtt** (Docker is easiest):
+
+```sh
+docker run -d --name zwavejs2mqtt -p 8091:8091 -p 3000:3000 --device=/dev/ttyUSB0 -v $(pwd)/store:/usr/src/app/store zwavejs/zwave-js-ui:latest
+```
+
+2. In the zwavejs2mqtt web UI (`http://<host>:8091`), open **Settings → MQTT**:
+   - **Enabled**: on
+   - **Host**: your HomeCore broker IP
+   - **Port**: 1883
+   - **Topic prefix**: `zwave` (must match the profile)
+   - **Client ID**: anything unique (e.g. `zwavejs2mqtt`)
+   - **Name location**: `Name + Location` (node name appears in topics)
+
+3. Under **Settings → General**:
+   - **Use nodes name instead of numeric nodeId**: leave **off** — HomeCore uses numeric node IDs as device IDs
+
+---
+
+### Enabling the Z-Wave profile
+
+Copy (or symlink) the profile into your active profiles directory:
+
+```sh
+cp config/profiles/examples/zwave.toml config/profiles/zwave.toml
+```
+
+Restart HomeCore. Devices will appear as `zwave_{nodeId}` (e.g. `zwave_5`).
+
+---
+
+### How it works — inbound (Z-Wave → HomeCore)
+
+Z-Wave publishes one MQTT topic per attribute:
+
+```
+zwave/5/37/0/currentValue   →  "true"
+zwave/5/38/0/currentValue   →  "128"
+zwave/5/128/0/level         →  "85"
+```
+
+HomeCore handles this in two steps:
+
+**1. CC alias lookup** — `{commandClass}/{endpoint}/{property}` is looked up in the `[ecosystem.attribute_aliases]` table in `zwave.toml`:
+
+| Topic segment | Alias key | HomeCore attribute |
+|---|---|---|
+| `37/0/currentValue` | `37/0/currentValue` | `on` |
+| `38/0/currentValue` | `38/0/currentValue` | `brightness` |
+| `128/0/level` | `128/0/level` | `battery` |
+| Unknown CC | — | raw property name |
+
+**2. Aggregation buffer** — Z-Wave nodes often publish several attributes in quick succession. HomeCore debounces them with a 100 ms window (`aggregate_ms = 100` in the profile). All attribute updates within the window are merged into one state event:
+
+```
+zwave/5/37/0/currentValue  "true"   ─┐
+zwave/5/38/0/currentValue  "128"    ─┤ 100 ms window → {"on": true, "brightness": 128}
+(window expires)                     ─┘
+```
+
+The window is **debounced** — each new attribute arrival resets the 100 ms timer, so a burst of 5 attributes still produces exactly one state update.
+
+---
+
+### How it works — outbound (HomeCore → Z-Wave)
+
+Commands go via the REST API or rules as usual:
+
+```sh
+curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"brightness": 200}'
+```
+
+HomeCore uses the **reverse alias table** to translate each attribute name back to its Z-Wave CC/endpoint/property and publishes one MQTT message per attribute:
+
+```
+brightness  →  CC 38, ep 0, property targetValue
+  → publishes: zwave/5/38/0/targetValue/set  "200"
+```
+
+Multi-attribute commands produce multiple publishes:
+
+```sh
+curl -X PATCH ... -d '{"on": false, "brightness": 0}'
+  → zwave/5/37/0/targetValue/set   "false"
+  → zwave/5/38/0/targetValue/set   "0"
+```
+
+**Alias ordering matters for write targets.** When the same HomeCore attribute has both a `currentValue` and `targetValue` alias, define `targetValue` **after** `currentValue` in `zwave.toml` — the reverse map prefers the alphabetically-later property, which happens to be `targetValue`. This is already done in the shipped profile.
+
+---
+
+### Extending the alias table
+
+Add entries to `[ecosystem.attribute_aliases]` in `config/profiles/zwave.toml`:
+
+```toml
+[ecosystem.attribute_aliases]
+# format: "{commandClass}/{endpoint}/{property}" = "homecore_attribute_name"
+"91/0/scene"        = "scene_id"       # Central Scene (CC 91)
+"112/0/3"           = "sensitivity"    # Configuration (CC 112), param 3
+```
+
+For write targets, add the write-path entry **after** the read-path entry so it wins in the reverse map:
+
+```toml
+"38/0/currentValue" = "brightness"   # read path
+"38/0/targetValue"  = "brightness"   # write path (comes after → wins in reverse map)
+```
+
+Unknown CC/endpoint/property combinations that have no alias are passed through using the raw `{property}` value as the attribute name.
+
+---
+
+### Availability
+
+zwavejs2mqtt publishes node status on `zwave/{nodeId}/status`. The profile maps:
+
+| Status | HomeCore available |
+|--------|-------------------|
+| `alive` | `true` |
+| `sleep` | `true` (battery devices sleeping are still available) |
+| `dead`  | `false` |
+
+---
+
+### Supported CommandClasses (built-in aliases)
+
+| CC | Number | Attributes |
+|----|--------|------------|
+| Binary Switch | 37 | `on` |
+| Multilevel Switch / Dimmer | 38 | `brightness` |
+| Multilevel Sensor | 49 | `temperature`, `humidity`, `illuminance`, `uv_index`, `co2_ppm`, `pressure` |
+| Meter | 50 | `power_w`, `energy_kwh`, `voltage`, `current_a` |
+| Color Switch | 51 | `color_rgb` |
+| Thermostat Mode | 64 | `mode` |
+| Thermostat Operating State | 66 | `hvac_action` |
+| Thermostat Setpoint | 67 | `target_temp` |
+| Door Lock | 98 | `locked` |
+| Window Covering | 102 | `position` |
+| Notification | 113 | `locked`, `tamper`, `smoke`, `co`, `water_detected` |
+| Battery | 128 | `battery`, `battery_low` |
+
+---
+
+### Troubleshooting
+
+**Devices not appearing**
+- Check that the Z-Wave profile is in the active profiles directory (`config/profiles/zwave.toml`), not `config/profiles/examples/`
+- Verify zwavejs2mqtt is publishing to the `zwave` prefix: subscribe with `mosquitto_sub -t 'zwave/#' -v`
+- HomeCore subscribes to `#` via the ecosystem router; check server logs for "No ecosystem profile match" messages
+
+**Attributes showing with raw property names (e.g. `currentValue` instead of `on`)**
+- The CC/endpoint/property combination isn't in `[ecosystem.attribute_aliases]` — add an entry
+
+**Commands not reaching the device**
+- Check that the `routing = "alias_reverse"` entry's attribute name is in the alias table
+- An unknown attribute in a cmd payload returns an error logged as `alias_reverse: no Z-Wave mapping for attribute '...'`
+- Verify zwavejs2mqtt can receive on `zwave/{nodeId}/{cc}/{ep}/{property}/set`
+
+**State updates arriving one attribute at a time (no aggregation)**
+- The profile's `aggregate_ms` must be set (default 100); if missing, each attribute update is committed immediately as a partial state — this is harmless but less efficient
+
+---
+
 ## What "done" looks like for each phase
 
 Use this as a checklist when finishing a feature before moving on.

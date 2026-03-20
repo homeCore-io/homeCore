@@ -47,10 +47,11 @@ aggregate_ms = 100               # time window (ms) for grouping per-attribute u
 [ecosystem.attribute_aliases]
 # Binary Switch (CC 37)
 "37/0/currentValue"             = "on"
+"37/0/targetValue"              = "on"               # write target; must come after currentValue
 
 # Multilevel Switch / Dimmer (CC 38)
 "38/0/currentValue"             = "brightness"
-"38/0/targetValue"              = "brightness"       # write target; read as same attr
+"38/0/targetValue"              = "brightness"       # write target; must come after currentValue
 
 # Multilevel Sensor (CC 49)
 "49/0/Air_temperature"          = "temperature"
@@ -140,6 +141,8 @@ pattern   = "zwave/{nodeId}/status"
 
 [[ecosystem.cmd_topics]]
 source         = "homecore/devices/zwave_{nodeId}/cmd"
-target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/set"
-# commandClass and endpoint are resolved from the attribute_aliases reverse map
+target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/set"
+# commandClass, endpoint, and property are resolved from the attribute_aliases reverse map.
+# For write targets, define the "targetValue" alias *after* the "currentValue" alias so
+# the reverse map prefers it (e.g. "38/0/targetValue" = "brightness" after "38/0/currentValue").
 routing        = "alias_reverse"

@@ -27,6 +27,10 @@ pub enum InboundResult {
         /// True → publish to `.../state/partial` (merge-patch).
         /// False → publish to `.../state` (full replace).
         partial: bool,
+        /// Non-None for profiles that require time-windowed aggregation (e.g. Z-Wave).
+        /// The caller should buffer partial updates for this device for `aggregate_ms`
+        /// milliseconds (debounced) before committing as a single state event.
+        aggregate_ms: Option<u64>,
     },
     /// An availability update — set `device.available`.
     Availability {
@@ -47,9 +51,13 @@ pub struct OutboundResult {
 // ---------------------------------------------------------------------------
 
 struct CompiledState {
-    segments:      Vec<Segment>,
-    profile_prefix: String,
-    config:        StateTopicConfig,
+    segments:          Vec<Segment>,
+    profile_prefix:    String,
+    config:            StateTopicConfig,
+    /// Propagated from `EcosystemProfile::aggregate_ms`.
+    aggregate_ms:      Option<u64>,
+    /// Propagated from `EcosystemProfile::attribute_aliases` (CC alias table).
+    attribute_aliases: HashMap<String, String>,
 }
 
 struct CompiledAvailability {
@@ -59,8 +67,13 @@ struct CompiledAvailability {
 }
 
 struct CompiledCmd {
-    segments: Vec<Segment>,
-    config:   CmdTopicConfig,
+    segments:      Vec<Segment>,
+    config:        CmdTopicConfig,
+    /// For `alias_reverse` routing: maps HomeCore attribute name →
+    /// (commandClass, endpoint, property) derived by inverting the profile's
+    /// `attribute_aliases` table. Later entries in the alias table win on
+    /// collision (e.g. `targetValue` overrides `currentValue` for the same attr).
+    alias_reverse: HashMap<String, (String, String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,13 +97,17 @@ impl EcosystemRouter {
         let mut cmd_entries          = Vec::new();
 
         for profile in profiles {
-            let prefix = profile.prefix.clone();
+            let prefix            = profile.prefix.clone();
+            let aggregate_ms      = profile.aggregate_ms;
+            let attribute_aliases = profile.attribute_aliases.clone();
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
-                    segments:       parse_pattern(&sc.pattern),
-                    profile_prefix: prefix.clone(),
-                    config:         sc,
+                    segments:          parse_pattern(&sc.pattern),
+                    profile_prefix:    prefix.clone(),
+                    aggregate_ms,
+                    attribute_aliases: attribute_aliases.clone(),
+                    config:            sc,
                 });
             }
             for ac in profile.availability_topics {
@@ -100,10 +117,28 @@ impl EcosystemRouter {
                     config:         ac,
                 });
             }
+            // Build alias reverse map: hc_attr → (commandClass, endpoint, property).
+            // Sort keys before inverting so that for the same HC attribute,
+            // alphabetically later properties win (e.g. "targetValue" > "currentValue",
+            // so targetValue is the write target that ends up in the reverse map).
+            let mut alias_reverse: HashMap<String, (String, String, String)> = HashMap::new();
+            let mut sorted_aliases: Vec<(&String, &String)> = attribute_aliases.iter().collect();
+            sorted_aliases.sort_by_key(|(cc_key, _)| cc_key.as_str());
+            for (cc_key, hc_attr) in sorted_aliases {
+                let parts: Vec<&str> = cc_key.splitn(3, '/').collect();
+                if parts.len() == 3 {
+                    alias_reverse.insert(
+                        hc_attr.clone(),
+                        (parts[0].to_string(), parts[1].to_string(), parts[2].to_string()),
+                    );
+                }
+            }
+
             for cc in profile.cmd_topics {
                 cmd_entries.push(CompiledCmd {
-                    segments: parse_pattern(&cc.source),
-                    config:   cc,
+                    segments:      parse_pattern(&cc.source),
+                    alias_reverse: alias_reverse.clone(),
+                    config:        cc,
                 });
             }
         }
@@ -139,7 +174,7 @@ impl EcosystemRouter {
         // Try state topics first.
         for entry in &self.state_entries {
             if let Some(vars) = match_segments(&entry.segments, topic) {
-                let result = self.apply_state(&entry.config, &entry.profile_prefix, &vars, payload)?;
+                let result = self.apply_state(entry, &vars, payload)?;
                 debug!(%topic, device_id = %result_device_id(&result), "State topic matched");
                 return Ok(Some(result));
             }
@@ -158,11 +193,15 @@ impl EcosystemRouter {
 
     fn apply_state(
         &self,
-        config: &StateTopicConfig,
-        prefix: &str,
+        entry: &CompiledState,
         vars: &HashMap<String, String>,
         raw_payload: &[u8],
     ) -> Result<InboundResult> {
+        let config            = &entry.config;
+        let prefix            = &entry.profile_prefix;
+        let aggregate_ms      = entry.aggregate_ms;
+        let attribute_aliases = &entry.attribute_aliases;
+
         // Resolve device ID.
         let device_id = resolve_device_id(config, prefix, vars);
 
@@ -186,19 +225,37 @@ impl EcosystemRouter {
         };
 
         // If `attribute` is set, wrap scalar in a JSON object.
-        if let Some(attr_name) = &config.attribute {
+        if let Some(attr_template) = &config.attribute {
+            // Render the template (e.g. "{property}" → actual captured value).
+            let rendered = render_template(attr_template, vars);
+
+            // For Z-Wave: look up "{commandClass}/{endpoint}/{property}" in the
+            // CC alias table. Falls back to the rendered template for profiles
+            // without aliases (Shelly, Zigbee, …).
+            let alias_key = format!(
+                "{}/{}/{}",
+                vars.get("commandClass").map(String::as_str).unwrap_or(""),
+                vars.get("endpoint").map(String::as_str).unwrap_or(""),
+                vars.get("property").map(String::as_str).unwrap_or(""),
+            );
+            let attr_name = attribute_aliases
+                .get(&alias_key)
+                .cloned()
+                .unwrap_or(rendered);
+
             if config.coerce_scalar {
                 json_value = coerce::coerce_scalar_auto(json_value);
             }
-            if let Some(coercion) = config.coerce.get(attr_name) {
+            if let Some(coercion) = config.coerce.get(&attr_name) {
                 json_value = coerce::apply(coercion, json_value)?;
             }
             let mut obj = Map::new();
-            obj.insert(attr_name.clone(), json_value);
+            obj.insert(attr_name, json_value);
             return Ok(InboundResult::State {
                 device_id,
                 payload: Value::Object(obj),
                 partial: true,    // scalar topics are always partial updates
+                aggregate_ms,
             });
         }
 
@@ -212,7 +269,7 @@ impl EcosystemRouter {
         // one device_id naturally produce partial updates since each carry one attr.
         let partial = config.attribute.is_some();
 
-        Ok(InboundResult::State { device_id, payload: mapped, partial })
+        Ok(InboundResult::State { device_id, payload: mapped, partial, aggregate_ms })
     }
 
     fn apply_availability(
@@ -267,13 +324,15 @@ impl EcosystemRouter {
     // Outbound routing
     // -----------------------------------------------------------------------
 
-    /// Route an outbound HomeCore cmd. Returns `None` if no profile matches.
-    pub fn route_outbound(&self, topic: &str, payload: &[u8]) -> Result<Option<OutboundResult>> {
+    /// Route an outbound HomeCore cmd. Returns `None` if no profile matches,
+    /// or `Some(vec)` with one result per native publish (alias_reverse may
+    /// produce one publish per attribute in the cmd payload).
+    pub fn route_outbound(&self, topic: &str, payload: &[u8]) -> Result<Option<Vec<OutboundResult>>> {
         for entry in &self.cmd_entries {
             if let Some(vars) = match_segments(&entry.segments, topic) {
-                let result = self.apply_cmd(&entry.config, &vars, payload)?;
-                debug!(%topic, target = %result.target_topic, "Cmd topic matched");
-                return Ok(Some(result));
+                let results = self.apply_cmd(entry, &vars, payload)?;
+                debug!(%topic, count = results.len(), "Cmd topic matched");
+                return Ok(Some(results));
             }
         }
         Ok(None)
@@ -281,10 +340,40 @@ impl EcosystemRouter {
 
     fn apply_cmd(
         &self,
-        config: &CmdTopicConfig,
+        entry: &CompiledCmd,
         vars: &HashMap<String, String>,
         raw_payload: &[u8],
-    ) -> Result<OutboundResult> {
+    ) -> Result<Vec<OutboundResult>> {
+        let config = &entry.config;
+
+        // --- alias_reverse: Z-Wave CC-based multi-topic command routing ---
+        if config.routing.as_deref() == Some("alias_reverse") {
+            let pattern = config.target_pattern.as_deref()
+                .ok_or_else(|| anyhow!("alias_reverse cmd entry requires target_pattern"))?;
+
+            let cmd_value: Value = serde_json::from_slice(raw_payload)
+                .map_err(|e| anyhow!("cmd payload is not valid JSON: {e}"))?;
+            let obj = cmd_value.as_object()
+                .ok_or_else(|| anyhow!("alias_reverse cmd payload must be a JSON object"))?;
+
+            let mut results = Vec::new();
+            for (hc_attr, val) in obj {
+                let (cc, ep, prop) = entry.alias_reverse.get(hc_attr)
+                    .ok_or_else(|| anyhow!("alias_reverse: no Z-Wave mapping for attribute '{hc_attr}'"))?;
+
+                let mut topic_vars = vars.clone();
+                topic_vars.insert("commandClass".into(), cc.clone());
+                topic_vars.insert("endpoint".into(), ep.clone());
+                topic_vars.insert("property".into(), prop.clone());
+
+                let target_topic = render_template(pattern, &topic_vars);
+                results.push(OutboundResult { target_topic, payload: value_to_bytes(val) });
+            }
+            return Ok(results);
+        }
+
+        // --- Standard single-target routing ---
+
         let target_topic = config
             .target
             .as_deref()
@@ -294,7 +383,7 @@ impl EcosystemRouter {
         // Apply optional Rhai transform on the full payload.
         if let Some(fn_name) = &config.transform {
             let out = self.run_rhai(fn_name, raw_payload)?;
-            return Ok(OutboundResult { target_topic, payload: out });
+            return Ok(vec![OutboundResult { target_topic, payload: out }]);
         }
 
         // Parse HomeCore cmd payload as JSON.
@@ -304,10 +393,10 @@ impl EcosystemRouter {
         // For Shelly Gen2 RPC commands.
         if let Some(method) = &config.rpc_method {
             let out_payload = build_rpc_payload(method, config.rpc_id, &cmd_value, &config.field_map)?;
-            return Ok(OutboundResult {
+            return Ok(vec![OutboundResult {
                 target_topic,
                 payload: serde_json::to_vec(&out_payload)?,
-            });
+            }]);
         }
 
         // If `attribute` is set, extract that single field and publish its scalar value.
@@ -318,16 +407,15 @@ impl EcosystemRouter {
             } else {
                 attr_val
             };
-            let out_bytes = value_to_bytes(&coerced);
-            return Ok(OutboundResult { target_topic, payload: out_bytes });
+            return Ok(vec![OutboundResult { target_topic, payload: value_to_bytes(&coerced) }]);
         }
 
         // Full JSON object: rename and coerce.
         let mapped = apply_field_map_cmd(&cmd_value, &config.field_map, &config.coerce)?;
-        Ok(OutboundResult {
+        Ok(vec![OutboundResult {
             target_topic,
             payload: serde_json::to_vec(&mapped)?,
-        })
+        }])
     }
 
     // -----------------------------------------------------------------------
@@ -630,23 +718,24 @@ attribute = "on"
     #[test]
     fn z2m_cmd_on() {
         let router = make_router(Z2M_PROFILE);
-        let result = router.route_outbound(
+        let results = router.route_outbound(
             "homecore/devices/zigbee_living_room_light/cmd",
             br#"{"on":true}"#,
         ).unwrap().unwrap();
-        assert_eq!(result.target_topic, "zigbee2mqtt/living_room_light/set");
-        let body: Value = serde_json::from_slice(&result.payload).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].target_topic, "zigbee2mqtt/living_room_light/set");
+        let body: Value = serde_json::from_slice(&results[0].payload).unwrap();
         assert_eq!(body["state"], "ON");
     }
 
     #[test]
     fn z2m_cmd_off() {
         let router = make_router(Z2M_PROFILE);
-        let result = router.route_outbound(
+        let results = router.route_outbound(
             "homecore/devices/zigbee_living_room_light/cmd",
             br#"{"on":false}"#,
         ).unwrap().unwrap();
-        let body: Value = serde_json::from_slice(&result.payload).unwrap();
+        let body: Value = serde_json::from_slice(&results[0].payload).unwrap();
         assert_eq!(body["state"], "OFF");
     }
 
@@ -657,7 +746,7 @@ attribute = "on"
         let router = make_router(SHELLY_PROFILE);
         let result = router.route_inbound("shellies/myplug/relay/0", b"1").unwrap().unwrap();
         match result {
-            InboundResult::State { device_id, payload, partial } => {
+            InboundResult::State { device_id, payload, partial, .. } => {
                 assert_eq!(device_id, "shelly_myplug");
                 assert_eq!(payload["on"], true);
                 assert!(partial);
@@ -693,22 +782,23 @@ attribute = "on"
     #[test]
     fn shelly_cmd_on() {
         let router = make_router(SHELLY_PROFILE);
-        let result = router.route_outbound(
+        let results = router.route_outbound(
             "homecore/devices/shelly_myplug/cmd",
             br#"{"on":true}"#,
         ).unwrap().unwrap();
-        assert_eq!(result.target_topic, "shellies/myplug/relay/0/command");
-        assert_eq!(result.payload, b"1");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].target_topic, "shellies/myplug/relay/0/command");
+        assert_eq!(results[0].payload, b"1");
     }
 
     #[test]
     fn shelly_cmd_off() {
         let router = make_router(SHELLY_PROFILE);
-        let result = router.route_outbound(
+        let results = router.route_outbound(
             "homecore/devices/shelly_myplug/cmd",
             br#"{"on":false}"#,
         ).unwrap().unwrap();
-        assert_eq!(result.payload, b"0");
+        assert_eq!(results[0].payload, b"0");
     }
 
     // --- No match ---
@@ -718,5 +808,182 @@ attribute = "on"
         let router = make_router(Z2M_PROFILE);
         assert!(router.route_inbound("unknown/topic/here", b"{}").unwrap().is_none());
         assert!(router.route_outbound("homecore/devices/unknown/cmd", b"{}").unwrap().is_none());
+    }
+
+    // --- Z-Wave inbound (alias lookup + aggregation metadata) ---
+
+    const ZWAVE_PROFILE: &str = r#"
+[ecosystem]
+name         = "zwave"
+prefix       = "zwave_"
+aggregate_ms = 100
+
+[ecosystem.attribute_aliases]
+"37/0/currentValue" = "on"
+"38/0/currentValue" = "brightness"
+"49/0/Air_temperature" = "temperature"
+"128/0/level" = "battery"
+
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
+attribute     = "{property}"
+coerce_scalar = true
+"#;
+
+    #[test]
+    fn zwave_binary_switch_resolves_alias() {
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/5/37/0/currentValue", b"true").unwrap().unwrap();
+        match result {
+            InboundResult::State { device_id, payload, partial, aggregate_ms } => {
+                assert_eq!(device_id, "zwave_5");
+                assert_eq!(payload["on"], true);
+                assert!(partial);
+                assert_eq!(aggregate_ms, Some(100));
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_dimmer_brightness_alias() {
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/3/38/0/currentValue", b"128").unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, aggregate_ms, .. } => {
+                assert_eq!(payload["brightness"], 128);
+                assert_eq!(aggregate_ms, Some(100));
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_sensor_temperature_alias() {
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/7/49/0/Air_temperature", b"21.5").unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                let temp = payload["temperature"].as_f64().unwrap();
+                assert!((temp - 21.5).abs() < 0.01);
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_unknown_property_falls_back_to_raw_name() {
+        // A property not in the alias table should use the raw property name.
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/9/99/0/someNewProp", b"42").unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                // Falls back to rendered template value: "someNewProp"
+                assert_eq!(payload["someNewProp"], 42);
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_battery_level_alias() {
+        let router = make_router(ZWAVE_PROFILE);
+        let result = router.route_inbound("zwave/4/128/0/level", b"85").unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                assert_eq!(payload["battery"], 85);
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn non_zwave_profile_has_no_aggregate_ms() {
+        let router = make_router(Z2M_PROFILE);
+        let payload = br#"{"state":"ON","brightness":128}"#;
+        let result = router.route_inbound("zigbee2mqtt/living_room_light", payload).unwrap().unwrap();
+        match result {
+            InboundResult::State { aggregate_ms, .. } => {
+                assert_eq!(aggregate_ms, None);
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    // --- Z-Wave outbound cmd (alias_reverse routing) ---
+
+    const ZWAVE_PROFILE_WITH_CMD: &str = r#"
+[ecosystem]
+name         = "zwave"
+prefix       = "zwave_"
+aggregate_ms = 100
+
+[ecosystem.attribute_aliases]
+"37/0/currentValue" = "on"
+"38/0/currentValue" = "brightness"
+"38/0/targetValue"  = "brightness"
+"67/1/value"        = "target_temp"
+
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
+attribute     = "{property}"
+coerce_scalar = true
+
+[[ecosystem.cmd_topics]]
+source         = "homecore/devices/zwave_{nodeId}/cmd"
+target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/set"
+routing        = "alias_reverse"
+"#;
+
+    #[test]
+    fn zwave_cmd_single_attr_routes_to_set_topic() {
+        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
+        let results = router.route_outbound(
+            "homecore/devices/zwave_5/cmd",
+            br#"{"on":true}"#,
+        ).unwrap().unwrap();
+        assert_eq!(results.len(), 1);
+        // "on" → CC 37, ep 0, property currentValue (only alias for "on")
+        assert_eq!(results[0].target_topic, "zwave/5/37/0/currentValue/set");
+        assert_eq!(results[0].payload, b"true");
+    }
+
+    #[test]
+    fn zwave_cmd_brightness_uses_last_alias_entry() {
+        // "brightness" has two alias entries; targetValue comes later and should win.
+        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
+        let results = router.route_outbound(
+            "homecore/devices/zwave_3/cmd",
+            br#"{"brightness":128}"#,
+        ).unwrap().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].target_topic, "zwave/3/38/0/targetValue/set");
+        assert_eq!(results[0].payload, b"128");
+    }
+
+    #[test]
+    fn zwave_cmd_multi_attr_produces_multiple_publishes() {
+        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
+        let mut results = router.route_outbound(
+            "homecore/devices/zwave_5/cmd",
+            br#"{"on":false,"brightness":50}"#,
+        ).unwrap().unwrap();
+        assert_eq!(results.len(), 2);
+        // Sort by topic for deterministic assertion order.
+        results.sort_by(|a, b| a.target_topic.cmp(&b.target_topic));
+        assert_eq!(results[0].target_topic, "zwave/5/37/0/currentValue/set");
+        assert_eq!(results[0].payload, b"false");
+        assert_eq!(results[1].target_topic, "zwave/5/38/0/targetValue/set");
+        assert_eq!(results[1].payload, b"50");
+    }
+
+    #[test]
+    fn zwave_cmd_unknown_attr_returns_error() {
+        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
+        let err = router.route_outbound(
+            "homecore/devices/zwave_5/cmd",
+            br#"{"color_xy":{"x":0.3,"y":0.6}}"#,
+        ).unwrap_err();
+        assert!(err.to_string().contains("color_xy"), "{err}");
     }
 }

@@ -122,4 +122,7 @@ pub struct CmdTopicConfig {
     pub transform: Option<String>,
     /// Routing strategy: "alias_reverse" for ZWave CC-based routing.
     pub routing: Option<String>,
+    /// For `alias_reverse` routing: target topic template with `{nodeId}`,
+    /// `{commandClass}`, `{endpoint}`, and `{property}` placeholders.
+    pub target_pattern: Option<String>,
 }
