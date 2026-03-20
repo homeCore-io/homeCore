@@ -1,0 +1,27 @@
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.sonos"
+# password  = ""
+
+[sonos]
+discovery_interval_secs  = 60   # how often to re-run SSDP scan
+poll_interval_secs        = 5    # how often to poll each speaker for state
+discovery_timeout_secs    = 5    # SSDP scan duration
+# manual_hosts = ["192.168.1.50", "192.168.1.51"]
+
+# Optional: pre-configure specific speakers.
+# Any speaker found via SSDP that is NOT listed here is auto-registered
+# with hc_id = "sonos_{sanitized_room_name}" and no area.
+
+# [[devices]]
+# uuid  = "RINCON_347E5C3D12E401400"
+# hc_id = "sonos_living_room"
+# name  = "Living Room"
+# area  = "living_room"
+
+# [[devices]]
+# uuid  = "RINCON_B8E937BB0E5001400"
+# hc_id = "sonos_kitchen"
+# name  = "Kitchen"
+# area  = "kitchen"

@@ -216,6 +216,12 @@ app_name  = "homecore"
  config  = "plugins/hc-lutron/config/config.toml"
  enabled = true
 
+[[plugins]]
+ id      = "plugin.sonos"
+ binary  = "plugins/hc-sonos/target/release/hc-sonos"
+ config  = "plugins/hc-sonos/config/config.toml"
+ enabled = false
+
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------
