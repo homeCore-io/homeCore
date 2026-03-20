@@ -47,6 +47,13 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
     },
+    /// A device's human-readable name was changed at the source (plugin or user).
+    DeviceNameChanged {
+        timestamp: DateTime<Utc>,
+        device_id: String,
+        previous_name: String,
+        current_name: String,
+    },
     /// A raw MQTT message arrived (used before topic routing is applied).
     MqttMessage {
         timestamp: DateTime<Utc>,
@@ -78,6 +85,7 @@ impl Event {
             | Event::SceneActivated { timestamp, .. }
             | Event::PluginRegistered { timestamp, .. }
             | Event::PluginOffline { timestamp, .. }
+            | Event::DeviceNameChanged { timestamp, .. }
             | Event::MqttMessage { timestamp, .. }
             | Event::Custom { timestamp, .. }
             | Event::SystemAlert { timestamp, .. } => *timestamp,

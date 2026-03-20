@@ -143,7 +143,9 @@ impl StateBridge {
                 timestamp: Utc::now(),
                 plugin_id: plugin_id.to_string(),
             });
-            info!(plugin_id, "Plugin registered");
+            if let Err(e) = self.handle_device_registration(plugin_id, payload).await {
+                warn!(plugin_id, error = %e, "Device registration upsert failed");
+            }
             return Ok(());
         }
 
@@ -200,6 +202,74 @@ impl StateBridge {
             previous,
             current,
         });
+
+        Ok(())
+    }
+
+    /// Parse a plugin registration payload and upsert the device record.
+    ///
+    /// If the device already exists and the name has changed, the stored name is
+    /// updated and a [`Event::DeviceNameChanged`] event is emitted so that API
+    /// clients and the WebSocket stream are notified immediately.
+    ///
+    /// This is the single point where registration is treated as an upsert —
+    /// both new registrations and re-registrations (e.g. after a source rename)
+    /// go through here.
+    async fn handle_device_registration(
+        &self,
+        plugin_id: &str,
+        payload: &[u8],
+    ) -> Result<()> {
+        let json: serde_json::Value = serde_json::from_slice(payload)?;
+
+        // Both old-style (capabilities) and new-style (device_type) payloads
+        // carry these common fields.
+        let device_id = json["device_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("registration missing device_id"))?;
+        let new_name = json["name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("registration missing name"))?;
+        let area = json["area"].as_str().map(str::to_string);
+
+        match self.store.get_device(device_id).await? {
+            Some(mut existing) => {
+                let previous_name = existing.name.clone();
+
+                // Always keep plugin_id and area in sync with what the plugin reports.
+                existing.plugin_id = plugin_id.to_string();
+                if area.is_some() {
+                    existing.area = area;
+                }
+
+                if existing.name != new_name {
+                    // Name changed at source — update and notify.
+                    existing.name = new_name.to_string();
+                    self.store.upsert_device(&existing).await?;
+
+                    info!(
+                        device_id,
+                        previous_name = %previous_name,
+                        current_name  = %new_name,
+                        "Device name changed"
+                    );
+                    let _ = self.bus.publish(Event::DeviceNameChanged {
+                        timestamp:     Utc::now(),
+                        device_id:     device_id.to_string(),
+                        previous_name,
+                        current_name:  new_name.to_string(),
+                    });
+                }
+                // If name is unchanged, no store write or event needed.
+            }
+            None => {
+                // First registration — create the device record.
+                let mut device = DeviceState::new(device_id, new_name, plugin_id);
+                device.area = area;
+                self.store.upsert_device(&device).await?;
+                info!(device_id, name = new_name, plugin_id, "Device registered");
+            }
+        }
 
         Ok(())
     }

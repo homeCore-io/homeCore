@@ -130,6 +130,7 @@ pub fn event_device_id(event: &Event) -> Option<&str> {
     match event {
         Event::DeviceStateChanged { device_id, .. } => Some(device_id),
         Event::DeviceAvailabilityChanged { device_id, .. } => Some(device_id),
+        Event::DeviceNameChanged { device_id, .. } => Some(device_id),
         _ => None,
     }
 }
@@ -144,6 +145,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::SceneActivated { .. } => "scene_activated",
         Event::PluginRegistered { .. } => "plugin_registered",
         Event::PluginOffline { .. } => "plugin_offline",
+        Event::DeviceNameChanged { .. } => "device_name_changed",
         Event::Custom { .. } => "custom",
         Event::SystemAlert { .. } => "system_alert",
     }
