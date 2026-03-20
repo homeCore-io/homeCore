@@ -22,17 +22,19 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        ConnectInfo, Query, State,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+use crate::auth_middleware::whitelist_claims;
 use crate::AppState;
 use crate::event_log::{event_device_id, event_type_name};
 use hc_auth::Claims;
 use serde::Deserialize;
 use serde_json::json;
+use std::net::{IpAddr, SocketAddr};
 use tracing::{debug, info, warn};
 
 #[derive(Deserialize, Default)]
@@ -50,9 +52,10 @@ pub async fn ws_events_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<EventStreamQuery>,
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    // Validate token before accepting the upgrade.
-    let claims = match authenticate_ws(&query, &state) {
+    // Validate before accepting the upgrade.
+    let claims = match authenticate_ws(&query, &state, addr.ip()) {
         Ok(c) => c,
         Err(resp) => return resp,
     };
@@ -60,9 +63,27 @@ pub async fn ws_events_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, query, claims))
 }
 
-/// Validate the `?token=` query parameter.  Returns the parsed `Claims` on
-/// success or an HTTP error response on failure.
-fn authenticate_ws(query: &EventStreamQuery, state: &AppState) -> Result<Claims, Response> {
+/// Authenticate a WebSocket upgrade request.
+///
+/// Checks the IP whitelist first (same logic as `require_auth` middleware).
+/// If the source IP is whitelisted the `?token=` parameter is not required.
+/// Otherwise falls back to JWT validation via `?token=`.
+fn authenticate_ws(
+    query: &EventStreamQuery,
+    state: &AppState,
+    remote_ip: IpAddr,
+) -> Result<Claims, Response> {
+    // Canonicalize IPv4-mapped IPv6 to match whitelist entries.
+    let ip = match remote_ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+
+    if !state.whitelist.is_empty() && state.whitelist.iter().any(|net| net.contains(&ip)) {
+        tracing::debug!(%ip, "IP whitelist bypass — granting Admin access (WS)");
+        return Ok(whitelist_claims());
+    }
+
     validate_ws_token(query.token.as_deref(), &state.jwt)
 }
 

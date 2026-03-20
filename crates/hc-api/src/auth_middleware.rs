@@ -104,7 +104,7 @@ pub async fn require_auth(
 
 /// Synthetic Admin claims injected for whitelisted source IPs.
 /// The `uid` and `sub` identify the request as a whitelist bypass in logs.
-fn whitelist_claims() -> Claims {
+pub fn whitelist_claims() -> Claims {
     Claims {
         sub: "whitelist".into(),
         uid: "whitelist".into(),
