@@ -22,14 +22,14 @@
 //!
 //! # States
 //!
-//! ```
-//! idle ──start──► running ──elapsed──► fired
-//!                    │                   │
+//! ```text
+//! idle --start--> running --elapsed--> fired
+//!                    |                   |
 //!                  pause             (repeat: start new cycle)
-//!                    ▼
-//!                 paused ──resume──► running
+//!                    v
+//!                 paused --resume--> running
 //!
-//!  cancel from any state → cancelled
+//!  cancel from any state -> cancelled
 //! ```
 //!
 //! # Rule integration

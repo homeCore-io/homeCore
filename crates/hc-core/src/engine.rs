@@ -96,16 +96,27 @@ impl RuleEngine {
                 debug!(rule_name = %rule.name, "rule.trigger: SKIP (disabled)");
                 continue;
             }
-            let matched = trigger_matches(&rule.trigger, event);
-            debug!(
-                rule_name = %rule.name,
-                rule_id   = %rule.id,
-                trigger   = trigger_type(&rule.trigger),
-                matched,
-                "rule.trigger"
-            );
-            if matched {
-                matching.push(rule);
+            match trigger_check(&rule.trigger, event) {
+                TriggerResult::Matched => {
+                    debug!(
+                        rule_name = %rule.name,
+                        rule_id   = %rule.id,
+                        trigger   = trigger_type(&rule.trigger),
+                        matched   = true,
+                        "rule.trigger"
+                    );
+                    matching.push(rule);
+                }
+                TriggerResult::NoMatch(reason) => {
+                    debug!(
+                        rule_name = %rule.name,
+                        rule_id   = %rule.id,
+                        trigger   = trigger_type(&rule.trigger),
+                        matched   = false,
+                        reason,
+                        "rule.trigger"
+                    );
+                }
             }
         }
 
@@ -221,11 +232,6 @@ impl RuleEngine {
         for (i, cond) in rule.conditions.iter().enumerate() {
             let passed = self.evaluate_one(&rule.name, i, rule.conditions.len(), cond).await?;
             if !passed {
-                debug!(
-                    rule_name    = %rule.name,
-                    failed_at    = i,
-                    "rule.conditions: FAILED — skipping actions"
-                );
                 return Ok(Some(i));
             }
         }
@@ -245,36 +251,48 @@ impl RuleEngine {
             Condition::DeviceState { device_id, attribute, op, value } => {
                 let device = self.state.get_device(device_id).await?;
                 let Some(device) = device else {
-                    debug!(
+                    info!(
                         rule_name,
                         cond      = format!("{}/{}", idx + 1, total),
                         device_id,
-                        "rule.condition: DeviceState FAIL — device not found"
+                        "rule.condition: FAIL — device not found"
                     );
                     return Ok(false);
                 };
                 let Some(actual) = device.attributes.get(attribute) else {
-                    debug!(
+                    info!(
                         rule_name,
                         cond      = format!("{}/{}", idx + 1, total),
                         device_id,
                         attribute,
-                        "rule.condition: DeviceState FAIL — attribute not present on device"
+                        "rule.condition: FAIL — attribute not present on device"
                     );
                     return Ok(false);
                 };
                 let result = compare(actual, op, value);
-                debug!(
-                    rule_name,
-                    cond     = format!("{}/{}", idx + 1, total),
-                    device_id,
-                    attribute,
-                    op       = ?op,
-                    expected = %value,
-                    actual   = %actual,
-                    result,
-                    "rule.condition: DeviceState"
-                );
+                if result {
+                    debug!(
+                        rule_name,
+                        cond     = format!("{}/{}", idx + 1, total),
+                        device_id,
+                        attribute,
+                        op       = ?op,
+                        expected = %value,
+                        actual   = %actual,
+                        "rule.condition: pass"
+                    );
+                } else {
+                    info!(
+                        rule_name,
+                        cond     = format!("{}/{}", idx + 1, total),
+                        device_id,
+                        attribute,
+                        op       = ?op,
+                        expected = %value,
+                        actual   = %actual,
+                        "rule.condition: FAIL"
+                    );
+                }
                 Ok(result)
             }
 
@@ -391,35 +409,58 @@ fn log_incoming_event(event: &Event) {
     }
 }
 
-/// Returns true if this event should cause the rule to be evaluated.
-fn trigger_matches(trigger: &Trigger, event: &Event) -> bool {
+enum TriggerResult {
+    Matched,
+    NoMatch(&'static str),
+}
+
+/// Check whether an event matches a trigger, returning a reason on mismatch for logging.
+fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
+    use TriggerResult::*;
     match (trigger, event) {
         (
             Trigger::DeviceStateChanged { device_id, attribute },
-            Event::DeviceStateChanged { device_id: eid, current, .. },
+            Event::DeviceStateChanged { device_id: eid, current, previous, .. },
         ) => {
             if device_id != eid {
-                return false;
+                return NoMatch("device_id mismatch");
             }
             match attribute {
-                None => true,
-                Some(attr) => current.contains_key(attr),
+                None => Matched,
+                Some(attr) => {
+                    if !current.contains_key(attr.as_str()) {
+                        return NoMatch("attribute not in device state");
+                    }
+                    // Only fire when the attribute value actually changed.
+                    if previous.get(attr.as_str()) == current.get(attr.as_str()) {
+                        return NoMatch("attribute value unchanged");
+                    }
+                    Matched
+                }
             }
         }
+        (_, Event::DeviceStateChanged { .. }) => NoMatch("wrong trigger type for DeviceStateChanged event"),
         (Trigger::MqttMessage { topic_pattern }, Event::MqttMessage { topic, .. }) => {
-            mqtt_topic_matches(topic_pattern, topic)
+            if mqtt_topic_matches(topic_pattern, topic) {
+                Matched
+            } else {
+                NoMatch("topic pattern mismatch")
+            }
         }
-        // Scheduler emits Custom{event_type:"scheduler_tick"} — handled separately.
-        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. }, Event::Custom { event_type, .. }) => {
-            event_type == "scheduler_tick" // handled via rule_id in handle_event
-                && false                   // never matched here; dispatch happens above
-        }
+        // Scheduler emits Custom{event_type:"scheduler_tick"} — handled separately above.
+        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. }, _) => NoMatch("handled by scheduler"),
         (Trigger::WebhookReceived { path: trigger_path }, Event::Custom { event_type, payload, .. }) => {
-            event_type == "webhook"
-                && payload.get("path").and_then(|v| v.as_str()) == Some(trigger_path.as_str())
+            if event_type != "webhook" {
+                return NoMatch("not a webhook event");
+            }
+            if payload.get("path").and_then(|v| v.as_str()) == Some(trigger_path.as_str()) {
+                Matched
+            } else {
+                NoMatch("webhook path mismatch")
+            }
         }
-        (Trigger::ManualTrigger, _) => false,
-        _ => false,
+        (Trigger::ManualTrigger, _) => NoMatch("manual trigger only fires via API"),
+        _ => NoMatch("event type does not match trigger type"),
     }
 }
 
@@ -479,7 +520,7 @@ mod tests {
             event_type: "webhook".into(),
             payload: json!({ "path": "doorbell", "body": {} }),
         };
-        assert!(trigger_matches(&trigger, &event));
+        assert!(matches!(trigger_check(&trigger, &event), TriggerResult::Matched));
     }
 
     #[test]
@@ -490,7 +531,7 @@ mod tests {
             event_type: "webhook".into(),
             payload: json!({ "path": "motion", "body": {} }),
         };
-        assert!(!trigger_matches(&trigger, &event));
+        assert!(matches!(trigger_check(&trigger, &event), TriggerResult::NoMatch(_)));
     }
 
     #[test]
