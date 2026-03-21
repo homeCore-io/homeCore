@@ -155,6 +155,16 @@ pub enum Action {
         /// Delay between iterations in milliseconds (default: 0).
         interval_ms: Option<u64>,
     },
+    /// Evaluate a Rhai boolean expression and execute one of two action branches.
+    /// `else_actions` is optional — omit or leave empty to do nothing on false.
+    Conditional {
+        /// Rhai boolean expression.  Has access to `device_state("id")`,
+        /// `current_hour()`, `current_minute()`, and `current_weekday()`.
+        condition: String,
+        then_actions: Vec<Action>,
+        #[serde(default)]
+        else_actions: Vec<Action>,
+    },
 }
 
 /// A named snapshot of device states that can be activated as a unit.

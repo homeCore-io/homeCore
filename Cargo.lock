@@ -1389,6 +1389,7 @@ name = "hc-scripting"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hc-types",
  "rhai",
  "serde_json",

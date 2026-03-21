@@ -1,0 +1,58 @@
+# Multiple Conditions — AND Logic
+#
+# CONCEPT: All [[conditions]] blocks must pass before actions fire.  This is
+# the default behavior — conditions are always evaluated with AND logic.
+# List as many [[conditions]] blocks as needed; short-circuit evaluation stops
+# at the first failure.
+#
+# EXAMPLE: Motion detected AND time is between 22:00 and 06:00 (night)
+#          AND no one is home → turn on a dim security light.
+#
+# All three conditions must be true simultaneously:
+#   A. motion    == true         (sensor reports active motion)
+#   B. time      in 22:00-06:00 (nighttime window, wraps midnight)
+#   C. presence  == false        (presence sensor says nobody home)
+#
+# If any one fails the rule does not fire.  Conditions are evaluated in order;
+# list the cheapest or most likely to fail first to short-circuit early.
+
+id       = "a1b2c3d4-0013-0013-0013-000000000013"
+name     = "Multi-Condition AND — Night Motion Security Light"
+enabled  = false
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "motion_sensor_hallway"
+attribute = "motion"
+
+# Condition A: motion is active (not a clearance event).
+[[conditions]]
+type      = "device_state"
+device_id = "motion_sensor_hallway"
+attribute = "motion"
+op        = "eq"
+value     = true
+
+# Condition B: nighttime window.
+# start > end means the window wraps midnight: 22:00 tonight → 06:00 tomorrow.
+[[conditions]]
+type  = "time_window"
+start = "22:00:00"
+end   = "06:00:00"
+
+# Condition C: nobody home.  AND with the above — all three must hold.
+[[conditions]]
+type      = "device_state"
+device_id = "sensor.presence_home"
+attribute = "occupied"
+op        = "eq"
+value     = false
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light.hallway_security"
+
+[actions.state]
+on         = true
+brightness = 60

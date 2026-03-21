@@ -3,12 +3,12 @@
 use anyhow::{anyhow, Result};
 use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
-use hc_scripting::ScriptRuntime;
+use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
 use hc_state::StateStore;
 use hc_types::rule::Action;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -239,16 +239,46 @@ async fn run_single_action(
         Action::RunScript { script } => {
             let snippet = if script.len() > 80 { &script[..80] } else { &script };
             debug!(script = %snippet, "action: RunScript — starting");
-            // Snapshot device state so scripts can call device_state("id").
             let snapshot = device_snapshot(&state).await;
             let script_clone = script.clone();
+            // Collect side effects synchronously inside spawn_blocking, then
+            // execute them asynchronously here after the script returns.
+            let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
+            let buf_clone = Arc::clone(&buf);
             tokio::task::spawn_blocking(move || {
                 ScriptRuntime::new_with_devices(snapshot)
+                    .with_side_effects(buf_clone)
                     .run_action(&script_clone)
                     .map(|_| ())
             })
             .await??;
+            let effects = std::mem::take(&mut *buf.lock().unwrap());
+            if !effects.is_empty() {
+                debug!(script = %snippet, count = effects.len(), "action: RunScript — executing side effects");
+            }
+            for effect in effects {
+                execute_script_effect(effect, publish.clone(), notify.clone()).await?;
+            }
             debug!(script = %snippet, "action: RunScript — completed");
+        }
+
+        Action::Conditional { condition, then_actions, else_actions } => {
+            let snippet = if condition.len() > 80 { &condition[..80] } else { &condition };
+            debug!(condition = %snippet, "action: Conditional — evaluating");
+            let snapshot = device_snapshot(&state).await;
+            let cond = condition.clone();
+            let passed = tokio::task::spawn_blocking(move || {
+                ScriptRuntime::new_with_devices(snapshot).eval_condition(&cond)
+            })
+            .await??;
+            let branch_name = if passed { "then" } else { "else" };
+            let branch = if passed { then_actions } else { else_actions };
+            debug!(passed, branch = branch_name, actions = branch.len(), "action: Conditional — branch selected");
+            // Iterate directly with Box::pin to avoid recursive Send issues,
+            // same pattern as RepeatUntil.
+            for a in branch {
+                Box::pin(run_single_action(a, publish.clone(), state.clone(), notify.clone())).await?;
+            }
         }
 
         Action::Notify { channel, message, title } => {
@@ -286,7 +316,79 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::Delay { .. }          => "Delay",
         Action::Parallel { .. }       => "Parallel",
         Action::RepeatUntil { .. }    => "RepeatUntil",
+        Action::Conditional { .. }    => "Conditional",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Script side-effect executor
+// ---------------------------------------------------------------------------
+
+async fn execute_script_effect(
+    effect: ScriptSideEffect,
+    publish: Option<PublishHandle>,
+    notify: Option<Arc<NotificationService>>,
+) -> Result<()> {
+    match effect {
+        ScriptSideEffect::SetDeviceState { device_id, state } => {
+            let topic = format!("homecore/devices/{device_id}/cmd");
+            debug!(device_id, payload = %state, "RunScript: set_device_state");
+            match publish {
+                Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
+                None => warn!(device_id, "RunScript: set_device_state — no publish handle, dropped"),
+            }
+        }
+
+        ScriptSideEffect::Notify { channel, title, message } => {
+            debug!(channel, title, message, "RunScript: notify");
+            match notify {
+                Some(svc) => {
+                    if let Err(e) = svc.notify(&channel, &title, &message).await {
+                        warn!(channel, error = %e, "RunScript: notify failed");
+                    }
+                }
+                None => warn!(channel, "RunScript: notify — no NotificationService configured"),
+            }
+        }
+
+        ScriptSideEffect::PublishMqtt { topic, payload } => {
+            debug!(topic, "RunScript: publish_mqtt");
+            match publish {
+                Some(ph) => ph.publish(&topic, payload.into_bytes()).await?,
+                None => warn!(topic, "RunScript: publish_mqtt — no publish handle, dropped"),
+            }
+        }
+
+        ScriptSideEffect::CallService { method, url, body } => {
+            let client = http_client();
+            debug!(method, url, "RunScript: call_service");
+            let req = match method.to_uppercase().as_str() {
+                "GET" => client.get(&url),
+                "POST" => {
+                    let body_json: JsonValue =
+                        serde_json::from_str(&body).unwrap_or(JsonValue::Null);
+                    client.post(&url).json(&body_json)
+                }
+                other => return Err(anyhow!("RunScript: unsupported HTTP method '{other}'")),
+            };
+            match req
+                .timeout(tokio::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    info!(method, url, status = %resp.status(), "RunScript: call_service — OK");
+                }
+                Ok(resp) => {
+                    warn!(method, url, status = %resp.status(), "RunScript: call_service — HTTP error");
+                }
+                Err(e) => {
+                    warn!(method, url, error = %e, "RunScript: call_service — request failed");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Snapshot all device attributes for Rhai script access via `device_state("id")`.

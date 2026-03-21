@@ -1,0 +1,34 @@
+# Bathroom - Door Opens
+#
+# When the bathroom door opens: stop the Sonos and start a 5-minute countdown.
+# The timer firing will turn off the exhaust fan.
+
+id       = "ba000001-0004-0004-0004-000000000004"
+name     = "Bathroom - Door Opens"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[actions]]
+type   = "call_service"
+url    = "http://10.0.10.200:5005/Bathroom/stop"
+method = "GET"
+
+[[actions]]
+type      = "set_device_state"
+device_id = "timer_bathroom"
+
+[actions.state]
+command       = "start"
+duration_secs = 300

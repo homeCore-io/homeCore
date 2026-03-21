@@ -1,0 +1,32 @@
+# Bathroom - Play Music on Close (Morning)
+#
+# When the bathroom door closes between 06:00 and noon, play Sonos favorite 1.
+# See bathroom_play_music_afternoon.toml for the noon-midnight case.
+# No music plays between midnight and 06:00.
+
+id       = "ba000001-0002-0002-0002-000000000002"
+name     = "Bathroom - Play Music on Close (Morning)"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type  = "time_window"
+start = "06:00:00"
+end   = "12:00:00"
+
+[[actions]]
+type   = "call_service"
+url    = "http://10.0.10.200:5005/Bathroom/favorite/1"
+method = "GET"

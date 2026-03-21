@@ -1,0 +1,35 @@
+# Bathroom - Cancel Timer on Close
+#
+# If the bathroom exit timer is still running when the door closes (someone
+# re-entered), cancel it so the exhaust does not shut off mid-session.
+
+id       = "ba000001-0001-0001-0001-000000000001"
+name     = "Bathroom - Cancel Timer on Close"
+enabled  = true
+priority = 20
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0400064299"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "timer_bathroom"
+attribute = "state"
+op        = "eq"
+value     = "running"
+
+[[actions]]
+type      = "set_device_state"
+device_id = "timer_bathroom"
+
+[actions.state]
+command = "cancel"

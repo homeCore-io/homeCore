@@ -1,0 +1,74 @@
+# Multiple Actions — OR Trigger (broad condition, all actions always fire)
+#
+# CONCEPT: Actions have no OR/AND logic — every listed action fires when the
+# rule is triggered and all conditions pass.  The OR/AND distinction here
+# refers to what TRIGGERS the rule, not the actions themselves.
+#
+# This file demonstrates OR-style triggering: a broad ScriptExpression
+# condition allows any one of several states to kick off the full action list.
+# All three actions below fire together whenever the condition is met.
+#
+# EXAMPLE: Good-morning scene — fire when the bedroom motion sensor detects
+# presence OR the bedside lamp is turned on manually.
+# Either event is enough to start the morning routine.
+#
+# Actions (all fire regardless of which OR branch was true):
+#   1. Set kitchen lights to a warm morning level
+#   2. Start the coffee-maker plug
+#   3. Send a "Good morning" notification
+#
+# TIP: For truly simultaneous actions (no ordering dependency) wrap them in
+# a single [[actions]] type = "parallel" block (see movie_mode.toml example).
+# Sequential actions are simpler to read and debug; use parallel only when
+# timing matters.
+
+id       = "a1b2c3d4-0014-0014-0014-000000000014"
+name     = "Multi-Action OR — Good Morning Scene"
+enabled  = false
+priority = 10
+
+# Trigger on the bedroom motion sensor.  The ScriptExpression condition
+# below also checks the bedside lamp, completing the OR.
+[trigger]
+type      = "device_state_changed"
+device_id = "motion_sensor_bedroom"
+
+# OR condition: motion detected OR bedside lamp turned on.
+# Either branch allows all actions to fire.
+[[conditions]]
+type   = "script_expression"
+script = """
+  let motion = device_state("motion_sensor_bedroom")["motion"];
+  let lamp   = device_state("light.bedside")["on"];
+  motion == true || lamp == true
+"""
+
+# Time guard: only trigger the morning scene between 05:30 and 09:00.
+[[conditions]]
+type  = "time_window"
+start = "05:30:00"
+end   = "09:00:00"
+
+# Action 1: kitchen lights — warm white at moderate brightness.
+[[actions]]
+type      = "set_device_state"
+device_id = "light.kitchen_main"
+
+[actions.state]
+on         = true
+brightness = 180
+color_temp = 2800
+
+# Action 2: start the coffee maker.
+[[actions]]
+type      = "set_device_state"
+device_id = "switch.coffee_maker"
+
+[actions.state]
+on = true
+
+# Action 3: send a notification.
+[[actions]]
+type    = "notify"
+channel = "pushover"
+message = "Good morning! Kitchen lights and coffee are on."

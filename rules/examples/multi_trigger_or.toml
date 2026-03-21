@@ -1,0 +1,46 @@
+# Multiple Trigger Devices — OR Logic
+#
+# CONCEPT: The rule engine allows only one trigger per rule, so OR logic across
+# multiple trigger devices is achieved by creating one rule per device.  Any
+# rule firing = OR.  All rules below point to the same action; duplicating this
+# file with a different device_id produces another OR branch.
+#
+# EXAMPLE: Front OR back motion sensor detected → turn on the porch light.
+#
+#   Rule A (this file) — triggers on front motion sensor
+#   Rule B (copy with a different id/device_id) — triggers on back motion sensor
+#
+# When either sensor fires, the porch light turns on.  The condition
+# `motion == true` guards against state updates that clear the motion flag —
+# without it the light would also turn on when motion stops.
+#
+# TIP: Because each rule is independent, you can give individual branches
+# different actions.  For identical actions across all branches the simplest
+# pattern is identical rules with only device_id changed.
+
+id       = "a1b2c3d4-0010-0010-0010-000000000010"
+name     = "Multi-Trigger OR — Front Motion (rule 1 of 2)"
+enabled  = false
+priority = 10
+
+# Trigger: front motion sensor state change.
+# Duplicate this file as "rule 2 of 2" and swap device_id for the back sensor.
+[trigger]
+type      = "device_state_changed"
+device_id = "motion_sensor_front"
+attribute = "motion"
+
+# Guard: only fire when motion is actually detected, not when it clears.
+[[conditions]]
+type      = "device_state"
+device_id = "motion_sensor_front"
+attribute = "motion"
+op        = "eq"
+value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch.porch_light"
+
+[actions.state]
+on = true

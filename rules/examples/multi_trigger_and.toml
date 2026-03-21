@@ -1,0 +1,51 @@
+# Multiple Trigger Devices — AND Logic
+#
+# CONCEPT: "Trigger when device A changes AND device B is in a specific state."
+# One device is the trigger (the event that wakes the rule); the other devices
+# are checked as DeviceState conditions at the moment the rule evaluates.
+#
+# This is the canonical AND pattern: the trigger fires the evaluation cycle,
+# conditions snapshot the current state of all relevant devices.
+#
+# EXAMPLE: Front door opens AND the house is in Away mode → send a security alert.
+#
+#   - Trigger: front door sensor opens  (the event that initiates evaluation)
+#   - Condition A: door is actually open  (guard against spurious events)
+#   - Condition B: away_mode switch is on  (the "AND" with the second device)
+#
+# If the house is in Home mode, condition B fails and no alert is sent even
+# though the door opened.  Both conditions must pass (AND logic).
+
+id       = "a1b2c3d4-0011-0011-0011-000000000011"
+name     = "Multi-Trigger AND — Door Open While Away"
+enabled  = false
+priority = 10
+
+# Trigger: front door state changes.  Evaluation begins only on this event.
+[trigger]
+type      = "device_state_changed"
+device_id = "sensor.door_front"
+attribute = "open"
+
+# Condition A: confirm the door is now open (not closing).
+[[conditions]]
+type      = "device_state"
+device_id = "sensor.door_front"
+attribute = "open"
+op        = "eq"
+value     = true
+
+# Condition B: the second "trigger device" — house must be in Away mode.
+# This is the AND: door open AND away_mode is on.
+[[conditions]]
+type      = "device_state"
+device_id = "switch.away_mode"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type    = "notify"
+channel = "pushover"
+title   = "Security Alert"
+message = "Front door opened while house is in Away mode."
