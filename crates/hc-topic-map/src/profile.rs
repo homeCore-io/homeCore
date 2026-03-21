@@ -31,13 +31,6 @@ pub struct EcosystemProfile {
     /// Prefix prepended to the captured device variable to form HomeCore device IDs.
     /// e.g. "zigbee_" → device ID "zigbee_{friendly_name}".
     pub prefix: String,
-    /// For multi-topic ecosystems (ZWave): aggregate attribute updates within
-    /// this window (ms) before publishing to HomeCore.
-    pub aggregate_ms: Option<u64>,
-    /// CC/property alias table for ZWave routing.
-    /// Key: "{commandClass}/{endpoint}/{property}", value: HomeCore attribute name.
-    #[serde(default)]
-    pub attribute_aliases: HashMap<String, String>,
 
     #[serde(default)]
     pub state_topics: Vec<StateTopicConfig>,
@@ -70,7 +63,7 @@ pub struct StateTopicConfig {
     /// Coercions keyed by HomeCore attribute name (after renaming).
     #[serde(default)]
     pub coerce: HashMap<String, String>,
-    /// Auto-detect scalar type (string → bool/int/float). Used for ZWave.
+    /// Auto-detect scalar type (string → bool/int/float).
     #[serde(default)]
     pub coerce_scalar: bool,
     /// Force partial-update semantics for this topic regardless of other settings.
@@ -80,8 +73,7 @@ pub struct StateTopicConfig {
     pub partial: Option<bool>,
     /// Map raw scalar string → typed output value. Applied when `attribute` is set,
     /// after `coerce_scalar` and `coerce`. The lookup key is the stringified coerced
-    /// value (e.g. integer 1 → key "1"). Useful for translating Z-Wave mode numbers
-    /// to canonical strings: `{ "1" = "heat", "2" = "cool", "3" = "auto" }`.
+    /// value (e.g. integer 1 → key "1").
     #[serde(default)]
     pub value_map: HashMap<String, Value>,
     /// Optional Rhai function name for fully custom payload transformation.
@@ -132,16 +124,4 @@ pub struct CmdTopicConfig {
     pub rpc_id: Option<u32>,
     /// Optional Rhai function for custom cmd payload transformation.
     pub transform: Option<String>,
-    /// Routing strategy: "alias_reverse" for ZWave CC-based routing.
-    pub routing: Option<String>,
-    /// For `alias_reverse` routing: target topic template with `{nodeId}`,
-    /// `{commandClass}`, `{endpoint}`, and `{property}` placeholders.
-    pub target_pattern: Option<String>,
-    /// Per-attribute value substitution for `alias_reverse` routing.
-    /// Outer key: HC attribute name. Inner key: stringified HC value.
-    /// Inner value: the native value to publish to the device.
-    /// Example: `{ locked = { "true" = 255, "false" = 0 } }`
-    /// maps `{"locked": true}` → publishes integer 255 to the ZWave set topic.
-    #[serde(default)]
-    pub cmd_value_map: HashMap<String, HashMap<String, Value>>,
 }

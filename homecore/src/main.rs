@@ -62,13 +62,15 @@ fn resolve_config_path(base: &Path) -> PathBuf {
     for i in 1..args.len() {
         if args[i] == "--config" {
             if let Some(p) = args.get(i + 1) {
-                return PathBuf::from(p);
+                let path = PathBuf::from(p);
+                return if path.is_relative() { base.join(path) } else { path };
             }
         }
     }
     if let Ok(p) = std::env::var("HOMECORE_CONFIG") {
         if !p.is_empty() {
-            return PathBuf::from(p);
+            let path = PathBuf::from(p);
+            return if path.is_relative() { base.join(path) } else { path };
         }
     }
     base.join("config").join("homecore.toml")

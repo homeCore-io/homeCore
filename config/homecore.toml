@@ -104,12 +104,6 @@ token_expiry_hours = 24
 #   "192.168.1.0/24",    # home LAN
 # ]
 
-whitelist = [
-    "127.0.0.1",
-    "10.0.10.200",
-]
-
-
 # ---------------------------------------------------------------------------
 # Storage
 #
@@ -206,20 +200,20 @@ app_name  = "homecore"
 
 [[plugins]]
  id      = "plugin.yolink"
- binary  = "plugins/hc-yolink/target/release/hc-yolink"
- config  = "plugins/hc-yolink/config/config.toml"
+ binary  = "bin/hc-yolink"
+ config  = "config/plugins/hc-yolink.toml"
  enabled = true
 
 [[plugins]]
  id      = "plugin.lutron"
- binary  = "plugins/hc-lutron/target/release/hc-lutron"
- config  = "plugins/hc-lutron/config/config.toml"
+ binary  = "bin/hc-lutron"
+ config  = "config/plugins/hc-lutron.toml"
  enabled = true
 
 [[plugins]]
  id      = "plugin.sonos"
- binary  = "plugins/hc-sonos/target/release/hc-sonos"
- config  = "plugins/hc-sonos/config/config.toml"
+ binary  = "bin/hc-sonos"
+ config  = "config/plugins/hc-sonos.toml"
  enabled = true
 
 # ---------------------------------------------------------------------------

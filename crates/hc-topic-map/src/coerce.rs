@@ -100,16 +100,6 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
             Ok(Value::Number(raw.into()))
         }
 
-        // Non-zero number / truthy string  →  bool.
-        // Z-Wave Door Lock CC 98 publishes 0 (unsecured) or 255 (secured).
-        // Any non-zero value becomes `true`; zero becomes `false`.
-        "nonzero_bool" => Ok(Value::Bool(match &value {
-            Value::Number(n) => n.as_i64().map(|i| i != 0).unwrap_or(false),
-            Value::Bool(b)   => *b,
-            Value::String(s) => s != "0" && !s.is_empty() && !s.eq_ignore_ascii_case("false"),
-            _                => false,
-        })),
-
         // Mired  ↔  Kelvin
         "mired_to_kelvin" => {
             let n = as_f64(&value, name)?;
@@ -254,22 +244,6 @@ mod tests {
         // 370 mired ≈ 2703 K
         let k = apply("mired_to_kelvin", json!(370)).unwrap().as_i64().unwrap();
         assert!((k - 2703).abs() <= 1);
-    }
-
-    #[test]
-    fn nonzero_bool_from_255() {
-        assert_eq!(apply("nonzero_bool", json!(255)).unwrap(), json!(true));
-    }
-
-    #[test]
-    fn nonzero_bool_from_zero() {
-        assert_eq!(apply("nonzero_bool", json!(0)).unwrap(), json!(false));
-    }
-
-    #[test]
-    fn nonzero_bool_from_bool() {
-        assert_eq!(apply("nonzero_bool", json!(true)).unwrap(), json!(true));
-        assert_eq!(apply("nonzero_bool", json!(false)).unwrap(), json!(false));
     }
 
     #[test]

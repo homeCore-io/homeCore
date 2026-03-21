@@ -24,12 +24,6 @@ use hc_state::StateStore;
 use hc_topic_map::{EcosystemRouter, InboundResult};
 use hc_types::device::DeviceState;
 use hc_types::event::Event;
-use serde_json::Map;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 pub struct StateBridge {
@@ -37,28 +31,15 @@ pub struct StateBridge {
     store:   StateStore,
     router:  Option<EcosystemRouter>,
     publish: Option<PublishHandle>,
-    /// Pending partial attribute maps for devices under active aggregation windows.
-    agg_buf:     Mutex<HashMap<String, Map<String, serde_json::Value>>>,
-    /// Active debounce timer handles keyed by device_id.
-    agg_handles: Mutex<HashMap<String, JoinHandle<()>>>,
-    /// Signal channel: debounce tasks send device_id here when the window expires.
-    agg_flush_tx: mpsc::Sender<String>,
-    /// Receiver end stored until `run()` takes it.
-    agg_flush_rx: Mutex<Option<mpsc::Receiver<String>>>,
 }
 
 impl StateBridge {
     pub fn new(bus: EventBus, store: StateStore) -> Self {
-        let (agg_flush_tx, agg_flush_rx) = mpsc::channel(64);
         Self {
             bus,
             store,
-            router:       None,
-            publish:      None,
-            agg_buf:      Mutex::new(HashMap::new()),
-            agg_handles:  Mutex::new(HashMap::new()),
-            agg_flush_tx,
-            agg_flush_rx: Mutex::new(Some(agg_flush_rx)),
+            router:  None,
+            publish: None,
         }
     }
 
@@ -74,41 +55,20 @@ impl StateBridge {
 
     /// Drive the bridge until the event bus closes. Spawn in a `tokio::task`.
     pub async fn run(self) {
-        let mut flush_rx = self.agg_flush_rx
-            .lock()
-            .unwrap()
-            .take()
-            .expect("StateBridge::run() called more than once");
-
         let mut rx = self.bus.subscribe();
         info!("State bridge started");
         loop {
-            tokio::select! {
-                msg = rx.recv() => {
-                    match msg {
-                        Ok(Event::MqttMessage { topic, payload, .. }) => {
-                            if let Err(e) = self.handle_mqtt(&topic, &payload).await {
-                                warn!(topic, error = %e, "State bridge error");
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("State bridge lagged by {n} events");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            match rx.recv().await {
+                Ok(Event::MqttMessage { topic, payload, .. }) => {
+                    if let Err(e) = self.handle_mqtt(&topic, &payload).await {
+                        warn!(topic, error = %e, "State bridge error");
                     }
                 }
-                Some(device_id) = flush_rx.recv() => {
-                    // A debounce timer expired — flush the buffered partial state.
-                    let attrs = self.agg_buf.lock().unwrap().remove(&device_id);
-                    self.agg_handles.lock().unwrap().remove(&device_id);
-                    if let Some(map) = attrs {
-                        let payload = serde_json::Value::Object(map);
-                        if let Err(e) = self.handle_state(&device_id, &payload, true).await {
-                            warn!(device_id, error = %e, "Aggregation flush error");
-                        }
-                    }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("State bridge lagged by {n} events");
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     }
@@ -140,11 +100,7 @@ impl StateBridge {
         // --- Inbound: try ecosystem router first ---
         if let Some(router) = &self.router {
             match router.route_inbound(topic, payload) {
-                Ok(Some(InboundResult::State { device_id, payload: json_payload, partial, aggregate_ms })) => {
-                    if let Some(window_ms) = aggregate_ms {
-                        self.handle_aggregated(&device_id, &json_payload, window_ms);
-                        return Ok(());
-                    }
+                Ok(Some(InboundResult::State { device_id, payload: json_payload, partial })) => {
                     return self.handle_state(&device_id, &json_payload, partial).await;
                 }
                 Ok(Some(InboundResult::Availability { device_id, available })) => {
@@ -204,39 +160,6 @@ impl StateBridge {
         Ok(())
     }
 
-    /// Merge `new_attrs` into the per-device aggregation buffer, then (re-)start
-    /// a debounce timer. The timer fires after `window_ms` ms of inactivity for
-    /// the device, sending its ID to `agg_flush_tx` so `run()` can commit the
-    /// accumulated state as a single partial update.
-    fn handle_aggregated(
-        &self,
-        device_id: &str,
-        new_attrs: &serde_json::Value,
-        window_ms: u64,
-    ) {
-        // Merge incoming attributes into the buffer.
-        if let Some(obj) = new_attrs.as_object() {
-            let mut buf = self.agg_buf.lock().unwrap();
-            let entry = buf.entry(device_id.to_string()).or_default();
-            for (k, v) in obj {
-                entry.insert(k.clone(), v.clone());
-            }
-        }
-
-        // Debounce: cancel any existing timer for this device, start a new one.
-        let mut handles = self.agg_handles.lock().unwrap();
-        if let Some(old) = handles.remove(device_id) {
-            old.abort();
-        }
-        let tx = self.agg_flush_tx.clone();
-        let id = device_id.to_string();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(window_ms)).await;
-            let _ = tx.send(id).await;
-        });
-        handles.insert(device_id.to_string(), handle);
-    }
-
     async fn handle_state(
         &self,
         device_id: &str,
@@ -263,6 +186,13 @@ impl StateBridge {
             });
 
         let previous = device.attributes.clone();
+        let previous_name = device.name.clone();
+
+        // Extract "name" before attrs is potentially consumed by into_iter().
+        let incoming_name: Option<String> = attrs
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         if partial {
             for (k, v) in &attrs {
@@ -274,12 +204,35 @@ impl StateBridge {
         device.last_seen = Utc::now();
         device.available = true;
 
+        // Sync display name from the "name" attribute when it arrives in a state
+        // update (e.g. from ZwaveJS UI nodeInfo). Keeps device.name in sync with
+        // the node name set in the ecosystem controller without a full registration.
+        if let Some(new_name) = incoming_name {
+            device.name = new_name;
+        }
+
         self.store.upsert_device(&device).await?;
 
         for (attr, val) in &device.attributes {
             if previous.get(attr) != Some(val) {
                 let _ = self.store.append_history(device_id, attr, val).await;
             }
+        }
+
+        // Fire DeviceNameChanged if the name attribute caused a rename.
+        if device.name != previous_name {
+            info!(
+                device_id,
+                previous_name = %previous_name,
+                current_name  = %device.name,
+                "Device name changed via state attribute"
+            );
+            let _ = self.bus.publish(Event::DeviceNameChanged {
+                timestamp:    Utc::now(),
+                device_id:    device_id.to_string(),
+                previous_name,
+                current_name: device.name.clone(),
+            });
         }
 
         let current = device.attributes.clone();

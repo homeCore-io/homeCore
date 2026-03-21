@@ -27,10 +27,6 @@ pub enum InboundResult {
         /// True → publish to `.../state/partial` (merge-patch).
         /// False → publish to `.../state` (full replace).
         partial: bool,
-        /// Non-None for profiles that require time-windowed aggregation (e.g. Z-Wave).
-        /// The caller should buffer partial updates for this device for `aggregate_ms`
-        /// milliseconds (debounced) before committing as a single state event.
-        aggregate_ms: Option<u64>,
     },
     /// An availability update — set `device.available`.
     Availability {
@@ -51,13 +47,9 @@ pub struct OutboundResult {
 // ---------------------------------------------------------------------------
 
 struct CompiledState {
-    segments:          Vec<Segment>,
-    profile_prefix:    String,
-    config:            StateTopicConfig,
-    /// Propagated from `EcosystemProfile::aggregate_ms`.
-    aggregate_ms:      Option<u64>,
-    /// Propagated from `EcosystemProfile::attribute_aliases` (CC alias table).
-    attribute_aliases: HashMap<String, String>,
+    segments:       Vec<Segment>,
+    profile_prefix: String,
+    config:         StateTopicConfig,
 }
 
 struct CompiledAvailability {
@@ -67,13 +59,8 @@ struct CompiledAvailability {
 }
 
 struct CompiledCmd {
-    segments:      Vec<Segment>,
-    config:        CmdTopicConfig,
-    /// For `alias_reverse` routing: maps HomeCore attribute name →
-    /// (commandClass, endpoint, property) derived by inverting the profile's
-    /// `attribute_aliases` table. Later entries in the alias table win on
-    /// collision (e.g. `targetValue` overrides `currentValue` for the same attr).
-    alias_reverse: HashMap<String, (String, String, String)>,
+    segments: Vec<Segment>,
+    config:   CmdTopicConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,17 +84,13 @@ impl EcosystemRouter {
         let mut cmd_entries          = Vec::new();
 
         for profile in profiles {
-            let prefix            = profile.prefix.clone();
-            let aggregate_ms      = profile.aggregate_ms;
-            let attribute_aliases = profile.attribute_aliases.clone();
+            let prefix = profile.prefix.clone();
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
-                    segments:          parse_pattern(&sc.pattern),
-                    profile_prefix:    prefix.clone(),
-                    aggregate_ms,
-                    attribute_aliases: attribute_aliases.clone(),
-                    config:            sc,
+                    segments:       parse_pattern(&sc.pattern),
+                    profile_prefix: prefix.clone(),
+                    config:         sc,
                 });
             }
             for ac in profile.availability_topics {
@@ -117,28 +100,10 @@ impl EcosystemRouter {
                     config:         ac,
                 });
             }
-            // Build alias reverse map: hc_attr → (commandClass, endpoint, property).
-            // Sort keys before inverting so that for the same HC attribute,
-            // alphabetically later properties win (e.g. "targetValue" > "currentValue",
-            // so targetValue is the write target that ends up in the reverse map).
-            let mut alias_reverse: HashMap<String, (String, String, String)> = HashMap::new();
-            let mut sorted_aliases: Vec<(&String, &String)> = attribute_aliases.iter().collect();
-            sorted_aliases.sort_by_key(|(cc_key, _)| cc_key.as_str());
-            for (cc_key, hc_attr) in sorted_aliases {
-                let parts: Vec<&str> = cc_key.splitn(3, '/').collect();
-                if parts.len() == 3 {
-                    alias_reverse.insert(
-                        hc_attr.clone(),
-                        (parts[0].to_string(), parts[1].to_string(), parts[2].to_string()),
-                    );
-                }
-            }
-
             for cc in profile.cmd_topics {
                 cmd_entries.push(CompiledCmd {
-                    segments:      parse_pattern(&cc.source),
-                    alias_reverse: alias_reverse.clone(),
-                    config:        cc,
+                    segments: parse_pattern(&cc.source),
+                    config:   cc,
                 });
             }
         }
@@ -197,10 +162,8 @@ impl EcosystemRouter {
         vars: &HashMap<String, String>,
         raw_payload: &[u8],
     ) -> Result<InboundResult> {
-        let config            = &entry.config;
-        let prefix            = &entry.profile_prefix;
-        let aggregate_ms      = entry.aggregate_ms;
-        let attribute_aliases = &entry.attribute_aliases;
+        let config = &entry.config;
+        let prefix = &entry.profile_prefix;
 
         // Resolve device ID.
         let device_id = resolve_device_id(config, prefix, vars);
@@ -226,38 +189,7 @@ impl EcosystemRouter {
 
         // If `attribute` is set, wrap scalar in a JSON object.
         if let Some(attr_template) = &config.attribute {
-            // Render the template (e.g. "{property}" → actual captured value).
-            let rendered = render_template(attr_template, vars);
-
-            // For Z-Wave: look up "{commandClass}/{endpoint}/{property}" (or
-            // "{commandClass}/{endpoint}/{property}/{propertyKey}" for CCs like
-            // Meter that publish a propertyKey segment) in the CC alias table.
-            // Falls back to the rendered template for profiles without aliases.
-            let cc  = vars.get("commandClass").map(String::as_str).unwrap_or("");
-            let ep  = vars.get("endpoint").map(String::as_str).unwrap_or("");
-            let prop = vars.get("property").map(String::as_str).unwrap_or("");
-            let alias_key = match vars.get("propertyKey") {
-                Some(pk) => format!("{cc}/{ep}/{prop}/{pk}"),
-                None     => format!("{cc}/{ep}/{prop}"),
-            };
-            let attr_name = attribute_aliases
-                .get(&alias_key)
-                .cloned()
-                .unwrap_or(rendered);
-
-            // ZwaveJS UI "value objects" mode: when enabled, every value topic
-            // carries a JSON envelope {"time": <ms>, "value": <actual>} instead
-            // of a bare scalar. Detect and unwrap before coercion so downstream
-            // processing sees the actual value (bool/int/float/string).
-            // Also handles the minimal {"value": <x>} form (no time key).
-            if let Value::Object(ref map) = json_value {
-                let has_time = map.contains_key("time") || map.contains_key("t");
-                if let Some(inner) = map.get("value") {
-                    if has_time || map.len() == 1 {
-                        json_value = inner.clone();
-                    }
-                }
-            }
+            let attr_name = render_template(attr_template, vars);
 
             if config.coerce_scalar {
                 json_value = coerce::coerce_scalar_auto(json_value);
@@ -266,7 +198,6 @@ impl EcosystemRouter {
                 json_value = coerce::apply(coercion, json_value)?;
             }
             // value_map: translate scalar values to canonical representations.
-            // e.g. Z-Wave thermostat mode integer 1 → "heat".
             if !config.value_map.is_empty() {
                 let key = match &json_value {
                     Value::String(s) => s.clone(),
@@ -284,7 +215,6 @@ impl EcosystemRouter {
                 device_id,
                 payload: Value::Object(obj),
                 partial: true,    // scalar topics are always partial updates
-                aggregate_ms,
             });
         }
 
@@ -297,7 +227,7 @@ impl EcosystemRouter {
         //   - field_map topics without explicit partial default to full replace
         let partial = config.partial.unwrap_or(config.attribute.is_some());
 
-        Ok(InboundResult::State { device_id, payload: mapped, partial, aggregate_ms })
+        Ok(InboundResult::State { device_id, payload: mapped, partial })
     }
 
     fn apply_availability(
@@ -373,47 +303,6 @@ impl EcosystemRouter {
         raw_payload: &[u8],
     ) -> Result<Vec<OutboundResult>> {
         let config = &entry.config;
-
-        // --- alias_reverse: Z-Wave CC-based multi-topic command routing ---
-        if config.routing.as_deref() == Some("alias_reverse") {
-            let pattern = config.target_pattern.as_deref()
-                .ok_or_else(|| anyhow!("alias_reverse cmd entry requires target_pattern"))?;
-
-            let cmd_value: Value = serde_json::from_slice(raw_payload)
-                .map_err(|e| anyhow!("cmd payload is not valid JSON: {e}"))?;
-            let obj = cmd_value.as_object()
-                .ok_or_else(|| anyhow!("alias_reverse cmd payload must be a JSON object"))?;
-
-            let mut results = Vec::new();
-            for (hc_attr, val) in obj {
-                let (cc, ep, prop) = entry.alias_reverse.get(hc_attr)
-                    .ok_or_else(|| anyhow!("alias_reverse: no Z-Wave mapping for attribute '{hc_attr}'"))?;
-
-                let mut topic_vars = vars.clone();
-                topic_vars.insert("commandClass".into(), cc.clone());
-                topic_vars.insert("endpoint".into(), ep.clone());
-                topic_vars.insert("property".into(), prop.clone());
-
-                let target_topic = render_template(pattern, &topic_vars);
-
-                // cmd_value_map: translate canonical HC values to native device values.
-                // e.g. locked: true → 255  (Z-Wave door lock secured mode).
-                let effective_val = if let Some(attr_map) = config.cmd_value_map.get(hc_attr) {
-                    let key = match val {
-                        Value::String(s) => s.clone(),
-                        Value::Bool(b)   => b.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        other            => other.to_string(),
-                    };
-                    attr_map.get(&key).cloned().unwrap_or_else(|| val.clone())
-                } else {
-                    val.clone()
-                };
-
-                results.push(OutboundResult { target_topic, payload: value_to_bytes(&effective_val) });
-            }
-            return Ok(results);
-        }
 
         // --- Standard single-target routing ---
 
@@ -851,248 +740,5 @@ attribute = "on"
         let router = make_router(Z2M_PROFILE);
         assert!(router.route_inbound("unknown/topic/here", b"{}").unwrap().is_none());
         assert!(router.route_outbound("homecore/devices/unknown/cmd", b"{}").unwrap().is_none());
-    }
-
-    // --- Z-Wave inbound (alias lookup + aggregation metadata) ---
-
-    const ZWAVE_PROFILE: &str = r#"
-[ecosystem]
-name         = "zwave"
-prefix       = "zwave_"
-aggregate_ms = 100
-
-[ecosystem.attribute_aliases]
-"37/0/currentValue"   = "on"
-"38/0/currentValue"   = "brightness"
-"49/0/Air temperature" = "temperature"
-"128/0/level"         = "battery"
-"50/0/value/65537"    = "power_w"
-
-[[ecosystem.state_topics]]
-pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
-attribute     = "{property}"
-coerce_scalar = true
-
-[[ecosystem.state_topics]]
-pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/{propertyKey}"
-attribute     = "{property}/{propertyKey}"
-coerce_scalar = true
-"#;
-
-    #[test]
-    fn zwave_binary_switch_resolves_alias() {
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/5/37/0/currentValue", b"true").unwrap().unwrap();
-        match result {
-            InboundResult::State { device_id, payload, partial, aggregate_ms } => {
-                assert_eq!(device_id, "zwave_5");
-                assert_eq!(payload["on"], true);
-                assert!(partial);
-                assert_eq!(aggregate_ms, Some(100));
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_value_object_envelope_unwrapped() {
-        // ZwaveJS UI "value objects" mode: payload is {"time": <ms>, "value": <actual>}.
-        // The router must unwrap the envelope so downstream gets a clean bool.
-        let router = make_router(ZWAVE_PROFILE);
-        let payload = br#"{"time":1742512313337,"value":true}"#;
-        let result = router.route_inbound("zwave/5/37/0/currentValue", payload).unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                assert_eq!(payload["on"], true, "value object envelope should be unwrapped to bool");
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_value_object_numeric_unwrapped() {
-        // Numeric value inside a value object envelope.
-        let router = make_router(ZWAVE_PROFILE);
-        let payload = br#"{"time":1742512313337,"value":75}"#;
-        let result = router.route_inbound("zwave/3/38/0/currentValue", payload).unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                assert_eq!(payload["brightness"], 75);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_dimmer_brightness_alias() {
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/3/38/0/currentValue", b"128").unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, aggregate_ms, .. } => {
-                assert_eq!(payload["brightness"], 128);
-                assert_eq!(aggregate_ms, Some(100));
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_sensor_temperature_alias() {
-        // ZwaveJS UI uses spaces in property names per the Z-Wave spec.
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/7/49/0/Air temperature", b"21.5").unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                let temp = payload["temperature"].as_f64().unwrap();
-                assert!((temp - 21.5).abs() < 0.01);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_meter_six_segment_propertykey() {
-        // Meter CC publishes 6-segment topics: zwave/{node}/50/{ep}/value/{propertyKey}
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/5/50/0/value/65537", b"127.4").unwrap().unwrap();
-        match result {
-            InboundResult::State { device_id, payload, aggregate_ms, .. } => {
-                assert_eq!(device_id, "zwave_5");
-                // Alias "50/0/value/65537" → "power_w"
-                let pw = payload["power_w"].as_f64().unwrap();
-                assert!((pw - 127.4).abs() < 0.01);
-                assert_eq!(aggregate_ms, Some(100));
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_meter_six_segment_no_alias_falls_back() {
-        // 6-segment topic with no alias entry → attr name is "{property}/{propertyKey}"
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/5/50/0/value/99999", b"42").unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                assert_eq!(payload["value/99999"], 42);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_unknown_property_falls_back_to_raw_name() {
-        // A property not in the alias table should use the raw property name.
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/9/99/0/someNewProp", b"42").unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                // Falls back to rendered template value: "someNewProp"
-                assert_eq!(payload["someNewProp"], 42);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn zwave_battery_level_alias() {
-        let router = make_router(ZWAVE_PROFILE);
-        let result = router.route_inbound("zwave/4/128/0/level", b"85").unwrap().unwrap();
-        match result {
-            InboundResult::State { payload, .. } => {
-                assert_eq!(payload["battery"], 85);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    #[test]
-    fn non_zwave_profile_has_no_aggregate_ms() {
-        let router = make_router(Z2M_PROFILE);
-        let payload = br#"{"state":"ON","brightness":128}"#;
-        let result = router.route_inbound("zigbee2mqtt/living_room_light", payload).unwrap().unwrap();
-        match result {
-            InboundResult::State { aggregate_ms, .. } => {
-                assert_eq!(aggregate_ms, None);
-            }
-            _ => panic!("Expected State"),
-        }
-    }
-
-    // --- Z-Wave outbound cmd (alias_reverse routing) ---
-
-    const ZWAVE_PROFILE_WITH_CMD: &str = r#"
-[ecosystem]
-name         = "zwave"
-prefix       = "zwave_"
-aggregate_ms = 100
-
-[ecosystem.attribute_aliases]
-"37/0/currentValue" = "on"
-"38/0/currentValue" = "brightness"
-"38/0/targetValue"  = "brightness"
-"67/1/value"        = "target_temp"
-
-[[ecosystem.state_topics]]
-pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
-attribute     = "{property}"
-coerce_scalar = true
-
-[[ecosystem.cmd_topics]]
-source         = "homecore/devices/zwave_{nodeId}/cmd"
-target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/set"
-routing        = "alias_reverse"
-"#;
-
-    #[test]
-    fn zwave_cmd_single_attr_routes_to_set_topic() {
-        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
-        let results = router.route_outbound(
-            "homecore/devices/zwave_5/cmd",
-            br#"{"on":true}"#,
-        ).unwrap().unwrap();
-        assert_eq!(results.len(), 1);
-        // "on" → CC 37, ep 0, property currentValue (only alias for "on")
-        assert_eq!(results[0].target_topic, "zwave/5/37/0/currentValue/set");
-        assert_eq!(results[0].payload, b"true");
-    }
-
-    #[test]
-    fn zwave_cmd_brightness_uses_last_alias_entry() {
-        // "brightness" has two alias entries; targetValue comes later and should win.
-        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
-        let results = router.route_outbound(
-            "homecore/devices/zwave_3/cmd",
-            br#"{"brightness":128}"#,
-        ).unwrap().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].target_topic, "zwave/3/38/0/targetValue/set");
-        assert_eq!(results[0].payload, b"128");
-    }
-
-    #[test]
-    fn zwave_cmd_multi_attr_produces_multiple_publishes() {
-        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
-        let mut results = router.route_outbound(
-            "homecore/devices/zwave_5/cmd",
-            br#"{"on":false,"brightness":50}"#,
-        ).unwrap().unwrap();
-        assert_eq!(results.len(), 2);
-        // Sort by topic for deterministic assertion order.
-        results.sort_by(|a, b| a.target_topic.cmp(&b.target_topic));
-        assert_eq!(results[0].target_topic, "zwave/5/37/0/currentValue/set");
-        assert_eq!(results[0].payload, b"false");
-        assert_eq!(results[1].target_topic, "zwave/5/38/0/targetValue/set");
-        assert_eq!(results[1].payload, b"50");
-    }
-
-    #[test]
-    fn zwave_cmd_unknown_attr_returns_error() {
-        let router = make_router(ZWAVE_PROFILE_WITH_CMD);
-        let err = router.route_outbound(
-            "homecore/devices/zwave_5/cmd",
-            br#"{"color_xy":{"x":0.3,"y":0.6}}"#,
-        ).unwrap_err();
-        assert!(err.to_string().contains("color_xy"), "{err}");
     }
 }

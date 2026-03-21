@@ -2155,206 +2155,188 @@ websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=device_avai
 
 ---
 
-## Z-Wave / ZwaveJS UI integration
+## Z-Wave (`hc-zwave` plugin)
 
-HomeCore supports Z-Wave devices via **ZwaveJS UI**. This bridge speaks Z-Wave to your USB stick and exposes devices over MQTT, which HomeCore then translates into its canonical device model.
+HomeCore integrates Z-Wave via the **`hc-zwave`** plugin, a standalone Rust binary that connects directly to **zwave-js-server** over its native WebSocket API. This gives lower latency and more reliable state than the MQTT bridge approach — events arrive as typed values from the Z-Wave driver rather than passing through an intermediate MQTT layer.
+
+Source: `../hc-zwave/` (separate git repo)
 
 ---
 
 ### Prerequisites
 
-1. Install and run **ZwaveJS UI** (Docker is easiest):
+1. Install and run **ZwaveJS UI** (Docker is easiest). It bundles zwave-js-server on port 3000:
 
 ```sh
 docker run -d --name zwave-js-ui -p 8091:8091 -p 3000:3000 --device=/dev/ttyUSB0 -v $(pwd)/store:/usr/src/app/store zwavejs/zwave-js-ui:latest
 ```
 
-2. In the ZwaveJS UI web UI (`http://<host>:8091`), open **Settings → MQTT**:
-   - **Enabled**: on
-   - **Host**: your HomeCore broker IP
-   - **Port**: 1883
-   - **Topic prefix**: `zwave` (must match the profile)
-   - **Client ID**: anything unique (e.g. `zwave-js-ui`)
-   - **Name location**: `Name + Location` (node name appears in topics)
+2. In the ZwaveJS UI web UI (`http://<host>:8091`), open **Settings → WS Server**:
+   - **Enabled**: on (WebSocket server must be running on port 3000)
 
-3. Under **Settings → General**:
-   - **Use nodes name instead of numeric nodeId**: leave **off** — HomeCore uses numeric node IDs as device IDs
+No MQTT configuration in ZwaveJS UI is required — `hc-zwave` bypasses ZwaveJS UI's MQTT bridge entirely.
 
 ---
 
-### Enabling the Z-Wave profile
+### Configuration
 
-Copy (or symlink) the profile into your active profiles directory:
+Copy the example and fill in your values:
 
 ```sh
-cp config/profiles/examples/zwave.toml config/profiles/zwave.toml
+cd ../hc-zwave
+cp config/config.toml.example config/config.toml
 ```
-
-Restart HomeCore. Devices will appear as `zwave_{nodeId}` (e.g. `zwave_5`).
-
----
-
-### How it works — inbound (Z-Wave → HomeCore)
-
-Z-Wave publishes one MQTT topic per attribute:
-
-```
-zwave/5/37/0/currentValue   →  "true"
-zwave/5/38/0/currentValue   →  "128"
-zwave/5/128/0/level         →  "85"
-```
-
-HomeCore handles this in two steps:
-
-**1. CC alias lookup** — `{commandClass}/{endpoint}/{property}` is looked up in the `[ecosystem.attribute_aliases]` table in `zwave.toml`:
-
-| Topic segment | Alias key | HomeCore attribute |
-|---|---|---|
-| `37/0/currentValue` | `37/0/currentValue` | `on` |
-| `38/0/currentValue` | `38/0/currentValue` | `brightness` |
-| `128/0/level` | `128/0/level` | `battery` |
-| Unknown CC | — | raw property name |
-
-**2. Aggregation buffer** — Z-Wave nodes often publish several attributes in quick succession. HomeCore debounces them with a 100 ms window (`aggregate_ms = 100` in the profile). All attribute updates within the window are merged into one state event:
-
-```
-zwave/5/37/0/currentValue  "true"   ─┐
-zwave/5/38/0/currentValue  "128"    ─┤ 100 ms window → {"on": true, "brightness": 128}
-(window expires)                     ─┘
-```
-
-The window is **debounced** — each new attribute arrival resets the 100 ms timer, so a burst of 5 attributes still produces exactly one state update.
-
----
-
-### How it works — outbound (HomeCore → Z-Wave)
-
-Commands go via the REST API or rules as usual:
-
-```sh
-curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"brightness": 200}'
-```
-
-HomeCore uses the **reverse alias table** to translate each attribute name back to its Z-Wave CC/endpoint/property and publishes one MQTT message per attribute:
-
-```
-brightness  →  CC 38, ep 0, property targetValue
-  → publishes: zwave/5/38/0/targetValue/set  "200"
-```
-
-Multi-attribute commands produce multiple publishes:
-
-```sh
-curl -X PATCH ... -d '{"on": false, "brightness": 0}'
-  → zwave/5/37/0/targetValue/set   "false"
-  → zwave/5/38/0/targetValue/set   "0"
-```
-
-**Alias ordering matters for write targets.** When the same HomeCore attribute has both a `currentValue` and `targetValue` alias, define `targetValue` **after** `currentValue` in `zwave.toml` — the reverse map prefers the alphabetically-later property, which happens to be `targetValue`. This is already done in the shipped profile.
-
----
-
-### Extending the alias table
-
-Add entries to `[ecosystem.attribute_aliases]` in `config/profiles/zwave.toml`:
 
 ```toml
-[ecosystem.attribute_aliases]
-# format: "{commandClass}/{endpoint}/{property}" = "homecore_attribute_name"
-"91/0/scene"        = "scene_id"       # Central Scene (CC 91)
-"112/0/3"           = "sensitivity"    # Configuration (CC 112), param 3
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.zwave"
+password    = ""               # must match [[mqtt.clients]] in homecore.toml
+
+[server]
+url            = "ws://localhost:3000"
+schema_version = 32            # clamped to server's advertised min/max automatically
 ```
-
-For write targets, add the write-path entry **after** the read-path entry so it wins in the reverse map:
-
-```toml
-"38/0/currentValue" = "brightness"   # read path
-"38/0/targetValue"  = "brightness"   # write path (comes after → wins in reverse map)
-```
-
-Unknown CC/endpoint/property combinations that have no alias are passed through using the raw `{property}` value as the attribute name.
 
 ---
 
-### Availability
+### Running
 
-ZwaveJS UI publishes node status on `zwave/{nodeId}/status`. The profile maps:
+```sh
+cd ../hc-zwave
+cargo build --release
+./target/release/hc-zwave              # uses config/config.toml by default
+./target/release/hc-zwave /path/to/config.toml   # explicit path
+```
 
-| Status | HomeCore available |
-|--------|-------------------|
-| `alive` | `true` |
-| `sleep` | `true` (battery devices sleeping are still available) |
-| `dead`  | `false` |
+Logs go to `logs/hc-zwave.log.<date>` (daily rolling) and stderr.
 
 ---
 
-### Supported CommandClasses (built-in aliases)
+### How it works
 
-| CC | Number | Attributes |
-|----|--------|------------|
+**Startup (handshake)**
+
+On connect, `hc-zwave` performs the zwave-js-server three-step handshake:
+
+1. Receives server `version` announcement
+2. Sends `set_api_schema` to negotiate schema version
+3. Sends `start_listening` — server responds with full Z-Wave state (all nodes + all current values)
+
+For every node in the initial state, `hc-zwave` publishes:
+- `homecore/devices/zwave_{nodeId}/state` — full device state (retained)
+- `homecore/devices/zwave_{nodeId}/availability` — `online`/`offline` based on node status
+
+**Live events**
+
+| zwave-js-server event | HomeCore action |
+|---|---|
+| `value updated` | `state/partial` publish with translated attribute |
+| `node status changed` | `availability` publish (`Alive`/`Awake` → online, `Dead` → offline) |
+| `node ready` | Full state republish (handles sleeping battery devices that come online) |
+| `node name updated` | `state/partial` with `{"name": "..."}` |
+| `node location updated` | `state/partial` with `{"location": "..."}` |
+| `node removed` | `availability` offline |
+
+**Commands**
+
+Incoming `homecore/devices/zwave_{nodeId}/cmd` payloads are translated and sent as `node.set_value` WebSocket commands:
+
+```sh
+curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"brightness": 80}'
+# → node.set_value: nodeId=5, CC=38, ep=0, property="targetValue", value=80
+
+curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"locked": true}'
+# → node.set_value: nodeId=5, CC=98, ep=0, property="targetMode", value=255
+```
+
+**Reconnect**
+
+If the WebSocket connection drops, `hc-zwave` reconnects with exponential backoff (2 s → 60 s max). Full state is republished on every reconnect.
+
+---
+
+### Supported CommandClasses
+
+| CC | Number | HomeCore attributes |
+|----|--------|---------------------|
+| Binary Sensor | 48 | `motion`, `contact_open`, `water_detected`, `smoke`, `co`, `vibration`, `tamper` |
 | Binary Switch | 37 | `on` |
-| Multilevel Switch / Dimmer | 38 | `brightness` |
+| Multilevel Switch / Dimmer | 38 | `brightness` (0–99) |
 | Multilevel Sensor | 49 | `temperature`, `humidity`, `illuminance`, `uv_index`, `co2_ppm`, `pressure` |
 | Meter | 50 | `power_w`, `energy_kwh`, `voltage`, `current_a` |
 | Color Switch | 51 | `color_rgb` |
-| Thermostat Mode | 64 | `mode` |
+| Thermostat Mode | 64 | `mode` (`off`/`heat`/`cool`/`auto`/`fan_only`/`energy_heat`) |
 | Thermostat Operating State | 66 | `hvac_action` |
-| Thermostat Setpoint | 67 | `target_temp` |
-| Door Lock | 98 | `locked` |
+| Thermostat Setpoint | 67 | `target_temp` (endpoint 1 = heating setpoint) |
+| Door Lock | 98 | `locked` (0/255 → false/true) |
 | Window Covering | 102 | `position` |
 | Notification | 113 | `locked`, `tamper`, `smoke`, `co`, `water_detected` |
 | Battery | 128 | `battery`, `battery_low` |
+
+Alias table lives in `src/translator.rs`. To add a new CC, add an `AliasEntry` row to the `ALIAS_TABLE` slice — no other changes needed.
+
+---
+
+### Adding support for a new CC or property
+
+Edit `src/translator.rs` and add one or more entries to `ALIAS_TABLE`:
+
+```rust
+// Read-only sensor value
+AliasEntry { key: "49/0/Soil moisture", attribute: "soil_moisture", transform: Transform::Identity, is_write: false },
+
+// Writable with separate read/write properties
+AliasEntry { key: "38/1/currentValue", attribute: "brightness_ep1", transform: Transform::Identity, is_write: false },
+AliasEntry { key: "38/1/targetValue",  attribute: "brightness_ep1", transform: Transform::Identity, is_write: true  },
+```
+
+- Set `is_write: true` on the entry that should receive commands (usually `targetValue`).
+- Use `Transform::NonzeroBool` for attributes where the raw value is 0/255 (e.g. lock modes).
+- Use `Transform::ModeMap` for integer-to-string mode translations — add mappings to the `THERMOSTAT_MODE_FWD_DATA` / `THERMOSTAT_MODE_REV_DATA` tables, or add a new `Transform` variant for other CCs.
+
+To find the exact property names for your device, watch the WebSocket stream:
+
+```sh
+websocat ws://localhost:3000
+# Then send: {"messageId":"x","command":"start_listening"}
+# Watch for "value updated" events and note the property/propertyKey fields
+```
+
+---
+
+### Multi-endpoint devices
+
+Devices with multiple logical channels (dual-outlet plugs, thermostats with heating + cooling setpoints) use `ep{N}_` prefixed attribute names:
+
+```rust
+AliasEntry { key: "37/1/currentValue", attribute: "ep1_on", transform: Transform::Identity, is_write: false },
+AliasEntry { key: "37/1/targetValue",  attribute: "ep1_on", transform: Transform::Identity, is_write: true  },
+AliasEntry { key: "37/2/currentValue", attribute: "ep2_on", transform: Transform::Identity, is_write: false },
+AliasEntry { key: "37/2/targetValue",  attribute: "ep2_on", transform: Transform::Identity, is_write: true  },
+```
+
+This gives device `zwave_5` a state like `{"on": true, "ep1_on": false, "ep2_on": true}`. Commands work identically — PATCH with `{"ep2_on": false}` routes to endpoint 2.
 
 ---
 
 ### Troubleshooting
 
 **Devices not appearing**
-- Check that the Z-Wave profile is in the active profiles directory (`config/profiles/zwave.toml`), not `config/profiles/examples/`
-- Verify ZwaveJS UI is publishing to the `zwave` prefix: subscribe with `mosquitto_sub -t 'zwave/#' -v`
-- HomeCore subscribes to `#` via the ecosystem router; check server logs for "No ecosystem profile match" messages
+- Confirm ZwaveJS UI WebSocket server is enabled on port 3000
+- Check `hc-zwave` logs for connection errors; the handshake logs `"Connected to zwave-js-server"` and `"Received initial Z-Wave state"` on success
+- Ensure `plugin_id` in `config/config.toml` matches an `[[mqtt.clients]]` entry in `homecore.toml`
 
-**Attributes showing with raw property names (e.g. `currentValue` instead of `on`)**
-- The CC/endpoint/property combination isn't in `[ecosystem.attribute_aliases]` — add an entry
+**Attribute shows as raw value instead of canonical name**
+- The CC/endpoint/property combination isn't in `ALIAS_TABLE` — add an entry in `src/translator.rs`
 
 **Commands not reaching the device**
-- Check that the `routing = "alias_reverse"` entry's attribute name is in the alias table
-- An unknown attribute in a cmd payload returns an error logged as `alias_reverse: no Z-Wave mapping for attribute '...'`
-- Verify ZwaveJS UI can receive on `zwave/{nodeId}/{cc}/{ep}/{property}/set`
+- The attribute must have an entry with `is_write: true` in `ALIAS_TABLE`; check `hc-zwave` logs for "No write target for attribute" warnings
+- Verify the node is reachable (not dead/asleep) in ZwaveJS UI
 
-**State updates arriving one attribute at a time (no aggregation)**
-- The profile's `aggregate_ms` must be set (default 100); if missing, each attribute update is committed immediately as a partial state — this is harmless but less efficient
-
----
-
-### Multi-endpoint devices
-
-Some Z-Wave devices expose multiple logical channels via endpoints > 0 (e.g. dual-outlet smart plugs, thermostats with heating/cooling setpoints). The current approach is **namespaced attributes** — add explicit alias entries per endpoint in `zwave.toml`:
-
-```toml
-[ecosystem.attribute_aliases]
-# Endpoint 0 (root) — no prefix
-"37/0/currentValue" = "on"
-"37/0/targetValue"  = "on"
-
-# Endpoint 1 — ep1_ prefix
-"37/1/currentValue" = "ep1_on"
-"37/1/targetValue"  = "ep1_on"
-
-# Endpoint 2 — ep2_ prefix
-"37/2/currentValue" = "ep2_on"
-"37/2/targetValue"  = "ep2_on"
-```
-
-This gives a single device (e.g. `zwave_5`) a state like `{"on": true, "ep1_on": false, "ep2_on": true}`. Commands work the same way — PATCH with `{"ep2_on": false}` and the reverse alias map routes it to `zwave/5/37/2/targetValue/set`.
-
-The Thermostat Setpoint profile already demonstrates this pattern:
-```toml
-"67/1/value" = "target_temp"   # endpoint 1 = heating setpoint
-"67/2/value" = "cool_setpoint" # endpoint 2 = cooling setpoint (add if needed)
-```
-
-No code changes are needed — just alias table entries.
+**Lock shows wrong value**
+- Door Lock (CC 98) uses integer values 0/255; `hc-zwave` applies `Transform::NonzeroBool` automatically. If your lock uses different values, add a custom `AliasEntry` with the appropriate transform.
 
 ---
 
