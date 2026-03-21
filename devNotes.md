@@ -2155,26 +2155,26 @@ websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=device_avai
 
 ---
 
-## Z-Wave / ZwaveJS-UI (zwavejs2mqtt) integration
+## Z-Wave / ZwaveJS UI integration
 
-HomeCore supports Z-Wave devices via the **zwavejs2mqtt** bridge (also known as ZwaveJS-UI). This bridge speaks Z-Wave to your USB stick and exposes devices over MQTT, which HomeCore then translates into its canonical device model.
+HomeCore supports Z-Wave devices via **ZwaveJS UI**. This bridge speaks Z-Wave to your USB stick and exposes devices over MQTT, which HomeCore then translates into its canonical device model.
 
 ---
 
 ### Prerequisites
 
-1. Install and run **zwavejs2mqtt** (Docker is easiest):
+1. Install and run **ZwaveJS UI** (Docker is easiest):
 
 ```sh
-docker run -d --name zwavejs2mqtt -p 8091:8091 -p 3000:3000 --device=/dev/ttyUSB0 -v $(pwd)/store:/usr/src/app/store zwavejs/zwave-js-ui:latest
+docker run -d --name zwave-js-ui -p 8091:8091 -p 3000:3000 --device=/dev/ttyUSB0 -v $(pwd)/store:/usr/src/app/store zwavejs/zwave-js-ui:latest
 ```
 
-2. In the zwavejs2mqtt web UI (`http://<host>:8091`), open **Settings → MQTT**:
+2. In the ZwaveJS UI web UI (`http://<host>:8091`), open **Settings → MQTT**:
    - **Enabled**: on
    - **Host**: your HomeCore broker IP
    - **Port**: 1883
    - **Topic prefix**: `zwave` (must match the profile)
-   - **Client ID**: anything unique (e.g. `zwavejs2mqtt`)
+   - **Client ID**: anything unique (e.g. `zwave-js-ui`)
    - **Name location**: `Name + Location` (node name appears in topics)
 
 3. Under **Settings → General**:
@@ -2278,7 +2278,7 @@ Unknown CC/endpoint/property combinations that have no alias are passed through 
 
 ### Availability
 
-zwavejs2mqtt publishes node status on `zwave/{nodeId}/status`. The profile maps:
+ZwaveJS UI publishes node status on `zwave/{nodeId}/status`. The profile maps:
 
 | Status | HomeCore available |
 |--------|-------------------|
@@ -2311,7 +2311,7 @@ zwavejs2mqtt publishes node status on `zwave/{nodeId}/status`. The profile maps:
 
 **Devices not appearing**
 - Check that the Z-Wave profile is in the active profiles directory (`config/profiles/zwave.toml`), not `config/profiles/examples/`
-- Verify zwavejs2mqtt is publishing to the `zwave` prefix: subscribe with `mosquitto_sub -t 'zwave/#' -v`
+- Verify ZwaveJS UI is publishing to the `zwave` prefix: subscribe with `mosquitto_sub -t 'zwave/#' -v`
 - HomeCore subscribes to `#` via the ecosystem router; check server logs for "No ecosystem profile match" messages
 
 **Attributes showing with raw property names (e.g. `currentValue` instead of `on`)**
@@ -2320,7 +2320,7 @@ zwavejs2mqtt publishes node status on `zwave/{nodeId}/status`. The profile maps:
 **Commands not reaching the device**
 - Check that the `routing = "alias_reverse"` entry's attribute name is in the alias table
 - An unknown attribute in a cmd payload returns an error logged as `alias_reverse: no Z-Wave mapping for attribute '...'`
-- Verify zwavejs2mqtt can receive on `zwave/{nodeId}/{cc}/{ep}/{property}/set`
+- Verify ZwaveJS UI can receive on `zwave/{nodeId}/{cc}/{ep}/{property}/set`
 
 **State updates arriving one attribute at a time (no aggregation)**
 - The profile's `aggregate_ms` must be set (default 100); if missing, each attribute update is committed immediately as a partial state — this is harmless but less efficient

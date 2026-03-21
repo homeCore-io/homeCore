@@ -1,8 +1,8 @@
-# HomeCore Ecosystem Profile — ZWave-JS (via zwavejs2mqtt / ZwaveJS-UI)
+# HomeCore Ecosystem Profile — ZWave-JS (via ZwaveJS UI)
 #
 # Prerequisites:
-#   - zwavejs2mqtt running with MQTT enabled and pointing at the HomeCore broker
-#   - MQTT prefix set to "zwave" in zwavejs2mqtt Settings → MQTT
+#   - ZwaveJS UI running with MQTT enabled and pointing at the HomeCore broker
+#   - MQTT prefix set to "zwave" in ZwaveJS UI Settings → MQTT
 #   - "Use nodes name instead of numeric nodeId" set to OFF (use numeric IDs)
 #
 # Device IDs in HomeCore:
@@ -23,7 +23,7 @@
 
 [ecosystem]
 name         = "zwave"
-description  = "ZWave-JS via zwavejs2mqtt"
+description  = "ZWave-JS via ZwaveJS UI"
 prefix       = "zwave_"
 aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 
@@ -62,7 +62,7 @@ aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 "49/0/Atmospheric pressure"      = "pressure"
 
 # Meter (CC 50) — read-only energy/power monitoring
-# zwavejs2mqtt publishes Meter values as 6-segment topics:
+# ZwaveJS UI publishes Meter values as 6-segment topics:
 #   zwave/{nodeId}/50/{endpoint}/value/{propertyKey}
 # The propertyKey encodes meter type + scale. Common electric meter values:
 #   65537 = Power (W), 65538 = Energy (kWh), 65539 = Voltage (V), 65540 = Current (A)
@@ -109,7 +109,7 @@ aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 # ---------------------------------------------------------------------------
 # State topics
 #
-# Two patterns handle the two topic formats zwavejs2mqtt uses:
+# Two patterns handle the two topic formats ZwaveJS UI uses:
 #
 #   5-segment: zwave/{nodeId}/{CC}/{endpoint}/{property}
 #     Used by most CCs (Binary Switch, Dimmer, Sensor, Door Lock, etc.)
@@ -135,7 +135,7 @@ coerce_scalar = true
 # ---------------------------------------------------------------------------
 # Availability
 #
-# zwavejs2mqtt publishes node status to zwave/{nodeId}/status.
+# ZwaveJS UI publishes node status to zwave/{nodeId}/status.
 # Payload is a plain string: "alive", "sleep", or "dead".
 # ---------------------------------------------------------------------------
 

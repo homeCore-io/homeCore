@@ -868,7 +868,7 @@ coerce_scalar = true
 
     #[test]
     fn zwave_sensor_temperature_alias() {
-        // zwavejs2mqtt uses spaces in property names per the Z-Wave spec.
+        // ZwaveJS UI uses spaces in property names per the Z-Wave spec.
         let router = make_router(ZWAVE_PROFILE);
         let result = router.route_inbound("zwave/7/49/0/Air temperature", b"21.5").unwrap().unwrap();
         match result {
