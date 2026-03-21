@@ -245,6 +245,20 @@ impl EcosystemRouter {
                 .cloned()
                 .unwrap_or(rendered);
 
+            // ZwaveJS UI "value objects" mode: when enabled, every value topic
+            // carries a JSON envelope {"time": <ms>, "value": <actual>} instead
+            // of a bare scalar. Detect and unwrap before coercion so downstream
+            // processing sees the actual value (bool/int/float/string).
+            // Also handles the minimal {"value": <x>} form (no time key).
+            if let Value::Object(ref map) = json_value {
+                let has_time = map.contains_key("time") || map.contains_key("t");
+                if let Some(inner) = map.get("value") {
+                    if has_time || map.len() == 1 {
+                        json_value = inner.clone();
+                    }
+                }
+            }
+
             if config.coerce_scalar {
                 json_value = coerce::coerce_scalar_auto(json_value);
             }
@@ -875,6 +889,35 @@ coerce_scalar = true
                 assert_eq!(payload["on"], true);
                 assert!(partial);
                 assert_eq!(aggregate_ms, Some(100));
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_value_object_envelope_unwrapped() {
+        // ZwaveJS UI "value objects" mode: payload is {"time": <ms>, "value": <actual>}.
+        // The router must unwrap the envelope so downstream gets a clean bool.
+        let router = make_router(ZWAVE_PROFILE);
+        let payload = br#"{"time":1742512313337,"value":true}"#;
+        let result = router.route_inbound("zwave/5/37/0/currentValue", payload).unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                assert_eq!(payload["on"], true, "value object envelope should be unwrapped to bool");
+            }
+            _ => panic!("Expected State"),
+        }
+    }
+
+    #[test]
+    fn zwave_value_object_numeric_unwrapped() {
+        // Numeric value inside a value object envelope.
+        let router = make_router(ZWAVE_PROFILE);
+        let payload = br#"{"time":1742512313337,"value":75}"#;
+        let result = router.route_inbound("zwave/3/38/0/currentValue", payload).unwrap().unwrap();
+        match result {
+            InboundResult::State { payload, .. } => {
+                assert_eq!(payload["brightness"], 75);
             }
             _ => panic!("Expected State"),
         }

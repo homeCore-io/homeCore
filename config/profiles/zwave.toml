@@ -179,7 +179,10 @@ coerce_scalar = true
 [[ecosystem.state_topics]]
 pattern   = "zwave/{nodeId}/nodeInfo"
 partial   = true
-field_map = { "name" = "name" }
+# ZwaveJS UI publishes { "nodeName": "...", "nodeLocation": "...", ... }
+# Map nodeName → name (synced to device.name by state_bridge)
+# Map nodeLocation → location (stored as attribute for display in TUI detail panel)
+field_map = { "nodeName" = "name", "nodeLocation" = "location" }
 
 
 # ---------------------------------------------------------------------------
