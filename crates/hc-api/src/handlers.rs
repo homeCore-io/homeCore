@@ -139,6 +139,61 @@ pub async fn device_history(
     }
 }
 
+// ---------- Timers ----------
+
+#[derive(Deserialize)]
+pub struct CreateTimerBody {
+    /// Slug used to form the device_id: "garage_close" → "timer_garage_close".
+    pub id: String,
+    pub label: Option<String>,
+}
+
+pub async fn create_timer(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<CreateTimerBody>,
+) -> impl IntoResponse {
+    // Enforce the timer_ prefix convention.
+    let device_id = if body.id.starts_with("timer_") {
+        body.id.clone()
+    } else {
+        format!("timer_{}", body.id)
+    };
+
+    if let Ok(Some(_)) = s.store.get_device(&device_id).await {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "timer already exists" }))).into_response();
+    }
+
+    let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
+    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.timer");
+    dev.available = true;
+    dev.attributes.insert("state".into(), json!("idle"));
+    dev.attributes.insert("duration_ms".into(), json!(0_u64));
+    dev.attributes.insert("remaining_ms".into(), json!(0_u64));
+    dev.attributes.insert("repeat".into(), json!(false));
+
+    match s.store.upsert_device(&dev).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    match s.store.list_devices().await {
+        Ok(devices) => {
+            let timers: Vec<_> = devices
+                .into_iter()
+                .filter(|d| d.plugin_id == "core.timer")
+                .collect();
+            (StatusCode::OK, Json(json!(timers)))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 // ---------- Areas ----------
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {

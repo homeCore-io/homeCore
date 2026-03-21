@@ -14,6 +14,7 @@ pub mod executor;
 pub mod rule_loader;
 pub mod scheduler;
 pub mod state_bridge;
+pub mod timer_manager;
 
 /// Shared handle to the internal event bus.
 #[derive(Clone)]
@@ -114,6 +115,10 @@ impl Core {
         );
         let rules_handle = engine.rules_handle();
         tokio::spawn(engine.run());
+
+        // Timer manager: virtual countdown timer devices.
+        let timer_mgr = timer_manager::TimerManager::new(self.bus.clone(), self.state.clone());
+        tokio::spawn(timer_mgr.start());
 
         // Scheduler: time-based and solar triggers.
         // Uses the shared handle so hot-reloaded time rules take effect immediately.

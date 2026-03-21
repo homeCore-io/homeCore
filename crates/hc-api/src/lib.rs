@@ -158,6 +158,8 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device).delete(handlers::delete_device))
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
+        // Timers (timer devices are also visible via /devices)
+        .route("/timers", get(handlers::list_timers).post(handlers::create_timer))
         // Areas
         .route("/areas", get(handlers::list_areas).post(handlers::create_area))
         .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))
