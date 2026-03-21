@@ -13,7 +13,7 @@
 //! # Commands  (PATCH /api/v1/devices/timer_garage_close/state)
 //!
 //! ```json
-//! { "command": "start",   "duration_ms": 600000, "label": "optional", "repeat": false }
+//! { "command": "start",   "duration_secs": 600, "label": "optional", "repeat": false }
 //! { "command": "pause" }
 //! { "command": "resume" }
 //! { "command": "cancel" }
@@ -71,7 +71,7 @@ pub const TIMER_ID_PREFIX: &str = "timer_";
 #[serde(tag = "command", rename_all = "snake_case")]
 enum TimerCommand {
     Start {
-        duration_ms: u64,
+        duration_secs: u64,
         #[serde(default)]
         label: Option<String>,
         #[serde(default)]
@@ -94,7 +94,7 @@ enum TimerCtrl {
 
 struct TimerHandle {
     /// Full configured duration — needed for Restart without re-reading state.
-    duration_ms: u64,
+    duration_secs: u64,
     ctrl_tx: mpsc::Sender<TimerCtrl>,
     _join: JoinHandle<()>,
 }
@@ -166,9 +166,9 @@ impl TimerManager {
 
             match state_str {
                 "running" => {
-                    let duration_ms = dev
+                    let duration_secs = dev
                         .attributes
-                        .get("duration_ms")
+                        .get("duration_secs")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     let started_at = dev
@@ -177,12 +177,12 @@ impl TimerManager {
                         .and_then(|v| v.as_str())
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&Utc));
-                    let remaining_ms = if let Some(started) = started_at {
+                    let remaining_secs = if let Some(started) = started_at {
                         let elapsed =
-                            (Utc::now() - started).num_milliseconds().max(0) as u64;
-                        duration_ms.saturating_sub(elapsed)
+                            (Utc::now() - started).num_seconds().max(0) as u64;
+                        duration_secs.saturating_sub(elapsed)
                     } else {
-                        duration_ms
+                        duration_secs
                     };
                     let repeat = dev
                         .attributes
@@ -190,13 +190,13 @@ impl TimerManager {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
 
-                    if remaining_ms > 0 {
+                    if remaining_secs > 0 {
                         info!(
                             device_id = %dev.device_id,
-                            remaining_ms,
+                            remaining_secs,
                             "TimerManager: reconstructing running timer"
                         );
-                        self.spawn_timer_task(&dev.device_id, remaining_ms, duration_ms, repeat)
+                        self.spawn_timer_task(&dev.device_id, remaining_secs, duration_secs, repeat)
                             .await;
                     } else {
                         info!(
@@ -232,18 +232,18 @@ impl TimerManager {
         debug!(%device_id, ?cmd, "Timer command received");
 
         match cmd {
-            TimerCommand::Start { duration_ms, label, repeat } => {
+            TimerCommand::Start { duration_secs, label, repeat } => {
                 self.cancel_task(device_id).await;
                 let repeat = repeat.unwrap_or(false);
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
-                extra.insert("duration_ms", serde_json::json!(duration_ms));
-                extra.insert("remaining_ms", serde_json::json!(duration_ms));
+                extra.insert("duration_secs", serde_json::json!(duration_secs));
+                extra.insert("remaining_secs", serde_json::json!(duration_secs));
                 extra.insert("repeat", serde_json::json!(repeat));
                 if let Some(lbl) = label {
                     extra.insert("label", serde_json::json!(lbl));
                 }
                 self.set_state(device_id, "running", Some(extra)).await;
-                self.spawn_timer_task(device_id, duration_ms, duration_ms, repeat)
+                self.spawn_timer_task(device_id, duration_secs, duration_secs, repeat)
                     .await;
             }
 
@@ -254,10 +254,10 @@ impl TimerManager {
                     return;
                 }
                 // Compute remaining before cancelling the task.
-                let remaining_ms = self.compute_remaining(device_id).await;
+                let remaining_secs = self.compute_remaining(device_id).await;
                 self.cancel_task(device_id).await;
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
-                extra.insert("remaining_ms", serde_json::json!(remaining_ms));
+                extra.insert("remaining_secs", serde_json::json!(remaining_secs));
                 self.set_state(device_id, "paused", Some(extra)).await;
             }
 
@@ -278,25 +278,25 @@ impl TimerManager {
                     warn!(%device_id, %state_str, "Timer: resume called but timer not paused");
                     return;
                 }
-                let remaining_ms = dev
+                let remaining_secs = dev
                     .attributes
-                    .get("remaining_ms")
+                    .get("remaining_secs")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let duration_ms = dev
+                let duration_secs = dev
                     .attributes
-                    .get("duration_ms")
+                    .get("duration_secs")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(remaining_ms);
+                    .unwrap_or(remaining_secs);
                 let repeat = dev
                     .attributes
                     .get("repeat")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                if remaining_ms > 0 {
+                if remaining_secs > 0 {
                     self.set_state(device_id, "running", None).await;
-                    self.spawn_timer_task(device_id, remaining_ms, duration_ms, repeat)
+                    self.spawn_timer_task(device_id, remaining_secs, duration_secs, repeat)
                         .await;
                 } else {
                     self.set_state(device_id, "fired", None).await;
@@ -310,17 +310,17 @@ impl TimerManager {
 
             TimerCommand::Restart => {
                 // Use stored duration — no need to accept it again.
-                let duration_ms = {
+                let duration_secs = {
                     let handles = self.handles.read().await;
-                    handles.get(device_id).map(|h| h.duration_ms)
+                    handles.get(device_id).map(|h| h.duration_secs)
                 };
-                let duration_ms = if let Some(d) = duration_ms {
+                let duration_secs = if let Some(d) = duration_secs {
                     d
                 } else {
                     match self.state.get_device(device_id).await {
                         Ok(Some(dev)) => dev
                             .attributes
-                            .get("duration_ms")
+                            .get("duration_secs")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0),
                         _ => {
@@ -329,7 +329,7 @@ impl TimerManager {
                         }
                     }
                 };
-                if duration_ms == 0 {
+                if duration_secs == 0 {
                     warn!(%device_id, "Timer: restart called but no duration configured");
                     return;
                 }
@@ -343,9 +343,9 @@ impl TimerManager {
                 };
                 self.cancel_task(device_id).await;
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
-                extra.insert("remaining_ms", serde_json::json!(duration_ms));
+                extra.insert("remaining_secs", serde_json::json!(duration_secs));
                 self.set_state(device_id, "running", Some(extra)).await;
-                self.spawn_timer_task(device_id, duration_ms, duration_ms, repeat)
+                self.spawn_timer_task(device_id, duration_secs, duration_secs, repeat)
                     .await;
             }
         }
@@ -358,8 +358,8 @@ impl TimerManager {
     async fn spawn_timer_task(
         &self,
         device_id: &str,
-        remaining_ms: u64,
-        duration_ms: u64,
+        remaining_secs: u64,
+        duration_secs: u64,
         repeat: bool,
     ) {
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<TimerCtrl>(4);
@@ -369,18 +369,17 @@ impl TimerManager {
         let handles_ref = Arc::clone(&self.handles);
 
         let join = tokio::spawn(async move {
-            let mut rem = remaining_ms;
+            let mut rem = remaining_secs;
             loop {
-                debug!(device_id = %id, remaining_ms = rem, "Timer sleeping");
-                let sleep = tokio::time::sleep(tokio::time::Duration::from_millis(rem));
+                debug!(device_id = %id, remaining_secs = rem, "Timer sleeping");
+                let sleep = tokio::time::sleep(tokio::time::Duration::from_secs(rem));
                 tokio::select! {
                     _ = sleep => {
                         info!(device_id = %id, "Timer fired");
                         fire_timer(&id, &state, &bus).await;
                         if repeat {
-                            // Reset for next cycle.
-                            rem = duration_ms;
-                            reset_for_repeat(&id, duration_ms, &state, &bus).await;
+                            rem = duration_secs;
+                            reset_for_repeat(&id, duration_secs, &state, &bus).await;
                             continue;
                         }
                         handles_ref.write().await.remove(&id);
@@ -395,7 +394,7 @@ impl TimerManager {
             }
         });
 
-        let handle = TimerHandle { duration_ms, ctrl_tx, _join: join };
+        let handle = TimerHandle { duration_secs, ctrl_tx, _join: join };
         self.handles.write().await.insert(device_id.to_string(), handle);
     }
 
@@ -410,14 +409,14 @@ impl TimerManager {
     // State helpers
     // -----------------------------------------------------------------------
 
-    /// Estimate remaining_ms by reading started_at from state store.
+    /// Estimate remaining_secs by reading started_at from state store.
     async fn compute_remaining(&self, device_id: &str) -> u64 {
         let Ok(Some(dev)) = self.state.get_device(device_id).await else {
             return 0;
         };
-        let duration_ms = dev
+        let duration_secs = dev
             .attributes
-            .get("duration_ms")
+            .get("duration_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let started_at = dev
@@ -427,10 +426,10 @@ impl TimerManager {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc));
         if let Some(started) = started_at {
-            let elapsed = (Utc::now() - started).num_milliseconds().max(0) as u64;
-            return duration_ms.saturating_sub(elapsed);
+            let elapsed = (Utc::now() - started).num_seconds().max(0) as u64;
+            return duration_secs.saturating_sub(elapsed);
         }
-        duration_ms
+        duration_secs
     }
 
     /// Apply a state transition, optionally merging extra attributes, then emit
@@ -480,7 +479,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
     let previous = dev.attributes.clone();
     dev.attributes.insert("state".into(), serde_json::json!("fired"));
-    dev.attributes.insert("remaining_ms".into(), serde_json::json!(0_u64));
+    dev.attributes.insert("remaining_secs".into(), serde_json::json!(0_u64));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
     let _ = bus.publish(Event::DeviceStateChanged {
@@ -493,7 +492,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
 
 async fn reset_for_repeat(
     device_id: &str,
-    duration_ms: u64,
+    duration_secs: u64,
     state: &StateStore,
     bus: &EventBus,
 ) {
@@ -504,7 +503,7 @@ async fn reset_for_repeat(
         "started_at".into(),
         serde_json::json!(Utc::now().to_rfc3339()),
     );
-    dev.attributes.insert("remaining_ms".into(), serde_json::json!(duration_ms));
+    dev.attributes.insert("remaining_secs".into(), serde_json::json!(duration_secs));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
     let _ = bus.publish(Event::DeviceStateChanged {

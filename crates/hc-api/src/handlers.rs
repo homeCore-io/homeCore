@@ -168,8 +168,8 @@ pub async fn create_timer(
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.timer");
     dev.available = true;
     dev.attributes.insert("state".into(), json!("idle"));
-    dev.attributes.insert("duration_ms".into(), json!(0_u64));
-    dev.attributes.insert("remaining_ms".into(), json!(0_u64));
+    dev.attributes.insert("duration_secs".into(), json!(0_u64));
+    dev.attributes.insert("remaining_secs".into(), json!(0_u64));
     dev.attributes.insert("repeat".into(), json!(false));
 
     match s.store.upsert_device(&dev).await {
