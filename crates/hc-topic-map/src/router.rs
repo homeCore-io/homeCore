@@ -251,6 +251,19 @@ impl EcosystemRouter {
             if let Some(coercion) = config.coerce.get(&attr_name) {
                 json_value = coerce::apply(coercion, json_value)?;
             }
+            // value_map: translate scalar values to canonical representations.
+            // e.g. Z-Wave thermostat mode integer 1 → "heat".
+            if !config.value_map.is_empty() {
+                let key = match &json_value {
+                    Value::String(s) => s.clone(),
+                    Value::Bool(b)   => b.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    _                => json_value.to_string(),
+                };
+                if let Some(mapped) = config.value_map.get(&key) {
+                    json_value = mapped.clone();
+                }
+            }
             let mut obj = Map::new();
             obj.insert(attr_name, json_value);
             return Ok(InboundResult::State {
@@ -264,12 +277,11 @@ impl EcosystemRouter {
         // Full JSON object — apply field_map and coercions.
         let mapped = apply_field_map(&json_value, &config.field_map, &config.coerce)?;
 
-        // partial=true when the topic is known to carry only a subset of attributes
-        // (attribute_name set, or multiple state_topics share the same device_id).
-        // For now, single-topic full-object publishes are full replaces; scalar
-        // wraps above are always partial. Profiles with multiple state_topics for
-        // one device_id naturally produce partial updates since each carry one attr.
-        let partial = config.attribute.is_some();
+        // Determine partial flag:
+        //   - explicit profile override wins if set
+        //   - scalar attribute wraps (handled above) are always partial
+        //   - field_map topics without explicit partial default to full replace
+        let partial = config.partial.unwrap_or(config.attribute.is_some());
 
         Ok(InboundResult::State { device_id, payload: mapped, partial, aggregate_ms })
     }
@@ -369,7 +381,22 @@ impl EcosystemRouter {
                 topic_vars.insert("property".into(), prop.clone());
 
                 let target_topic = render_template(pattern, &topic_vars);
-                results.push(OutboundResult { target_topic, payload: value_to_bytes(val) });
+
+                // cmd_value_map: translate canonical HC values to native device values.
+                // e.g. locked: true → 255  (Z-Wave door lock secured mode).
+                let effective_val = if let Some(attr_map) = config.cmd_value_map.get(hc_attr) {
+                    let key = match val {
+                        Value::String(s) => s.clone(),
+                        Value::Bool(b)   => b.to_string(),
+                        Value::Number(n) => n.to_string(),
+                        other            => other.to_string(),
+                    };
+                    attr_map.get(&key).cloned().unwrap_or_else(|| val.clone())
+                } else {
+                    val.clone()
+                };
+
+                results.push(OutboundResult { target_topic, payload: value_to_bytes(&effective_val) });
             }
             return Ok(results);
         }

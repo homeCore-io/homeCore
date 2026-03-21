@@ -6,6 +6,7 @@
 //! and `[[ecosystem.cmd_topics]]` arrays.
 
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,17 @@ pub struct StateTopicConfig {
     /// Auto-detect scalar type (string → bool/int/float). Used for ZWave.
     #[serde(default)]
     pub coerce_scalar: bool,
+    /// Force partial-update semantics for this topic regardless of other settings.
+    /// When true, the result is a JSON merge-patch rather than a full state replace.
+    /// Useful for field_map-based topics (like nodeInfo) that extract a single field
+    /// from a larger JSON payload and must not wipe out other device attributes.
+    pub partial: Option<bool>,
+    /// Map raw scalar string → typed output value. Applied when `attribute` is set,
+    /// after `coerce_scalar` and `coerce`. The lookup key is the stringified coerced
+    /// value (e.g. integer 1 → key "1"). Useful for translating Z-Wave mode numbers
+    /// to canonical strings: `{ "1" = "heat", "2" = "cool", "3" = "auto" }`.
+    #[serde(default)]
+    pub value_map: HashMap<String, Value>,
     /// Optional Rhai function name for fully custom payload transformation.
     pub transform: Option<String>,
 }
@@ -125,4 +137,11 @@ pub struct CmdTopicConfig {
     /// For `alias_reverse` routing: target topic template with `{nodeId}`,
     /// `{commandClass}`, `{endpoint}`, and `{property}` placeholders.
     pub target_pattern: Option<String>,
+    /// Per-attribute value substitution for `alias_reverse` routing.
+    /// Outer key: HC attribute name. Inner key: stringified HC value.
+    /// Inner value: the native value to publish to the device.
+    /// Example: `{ locked = { "true" = 255, "false" = 0 } }`
+    /// maps `{"locked": true}` → publishes integer 255 to the ZWave set topic.
+    #[serde(default)]
+    pub cmd_value_map: HashMap<String, HashMap<String, Value>>,
 }

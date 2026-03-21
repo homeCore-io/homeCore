@@ -44,6 +44,16 @@ aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 
 [ecosystem.attribute_aliases]
 
+# Binary Sensor (CC 48) — read-only contact/motion/leak/alarm sensors.
+# Property names match what zwave-js reports. Add device-specific names as needed.
+"48/0/Motion Detector Status"     = "motion"
+"48/0/Door/Window Status"         = "contact_open"
+"48/0/Water Leak Status"          = "water_detected"
+"48/0/Smoke Alarm Status"         = "smoke"
+"48/0/CO Alarm Status"            = "co"
+"48/0/Vibration Detection Status" = "vibration"
+"48/0/Tamper Alarm Status"        = "tamper"
+
 # Binary Switch (CC 37) — on/off
 "37/0/currentValue"              = "on"
 "37/0/targetValue"               = "on"       # write target (comes after currentValue)
@@ -109,10 +119,14 @@ aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 # ---------------------------------------------------------------------------
 # State topics
 #
-# Two patterns handle the two topic formats ZwaveJS UI uses:
+# IMPORTANT: Explicit CC-specific patterns are listed first. The router uses
+# first-match semantics, so these override the generic wildcard patterns below
+# for the CCs that need value coercion or translation.
+#
+# Two generic patterns handle all remaining ZwaveJS UI topic formats:
 #
 #   5-segment: zwave/{nodeId}/{CC}/{endpoint}/{property}
-#     Used by most CCs (Binary Switch, Dimmer, Sensor, Door Lock, etc.)
+#     Used by most CCs (Binary Switch, Dimmer, Sensor, Battery, etc.)
 #
 #   6-segment: zwave/{nodeId}/{CC}/{endpoint}/{property}/{propertyKey}
 #     Used by Meter CC (50) and any CC with a propertyKey sub-value.
@@ -121,15 +135,51 @@ aggregate_ms = 100               # debounce window (ms) for per-attribute bursts
 #   "true"/"false" → bool, integer strings → i64, float strings → f64.
 # ---------------------------------------------------------------------------
 
+# Door Lock (CC 98) — currentMode/targetMode publish 0 (unsecured) or 255 (secured).
+# coerce_scalar turns "255" → integer 255; nonzero_bool then maps to true/false.
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/98/{endpoint}/{property}"
+attribute     = "locked"
+coerce_scalar = true
+coerce        = { "locked" = "nonzero_bool" }
+
+# Thermostat Mode (CC 64) — publishes an integer mode index.
+# value_map translates to canonical strings understood by rules and the TUI.
+[[ecosystem.state_topics]]
+pattern       = "zwave/{nodeId}/64/{endpoint}/{property}"
+attribute     = "mode"
+coerce_scalar = true
+value_map     = { "0" = "off", "1" = "heat", "2" = "cool", "3" = "auto", "6" = "fan_only", "11" = "energy_heat" }
+
+# Generic 5-segment — catches all other CCs.
 [[ecosystem.state_topics]]
 pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}"
 attribute     = "{property}"     # resolved via attribute_aliases; raw name as fallback
 coerce_scalar = true
 
+# Generic 6-segment — Meter CC (50) and CCs with a propertyKey sub-value.
 [[ecosystem.state_topics]]
 pattern       = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/{propertyKey}"
 attribute     = "{property}/{propertyKey}"   # alias key: "{CC}/{ep}/{property}/{propertyKey}"
 coerce_scalar = true
+
+
+# ---------------------------------------------------------------------------
+# Node name
+#
+# ZwaveJS UI publishes node metadata to zwave/{nodeId}/nodeInfo as a JSON
+# object whenever a node's name or location changes (retained message).
+# We extract only the "name" field so HomeCore's device display name tracks
+# the node name set in ZwaveJS UI.
+#
+# partial = true — merges only the "name" attribute; does not replace
+# any other device attributes captured from CC value topics.
+# ---------------------------------------------------------------------------
+
+[[ecosystem.state_topics]]
+pattern   = "zwave/{nodeId}/nodeInfo"
+partial   = true
+field_map = { "name" = "name" }
 
 
 # ---------------------------------------------------------------------------
@@ -163,3 +213,6 @@ pattern = "zwave/{nodeId}/status"
 source         = "homecore/devices/zwave_{nodeId}/cmd"
 target_pattern = "zwave/{nodeId}/{commandClass}/{endpoint}/{property}/set"
 routing        = "alias_reverse"
+# cmd_value_map translates canonical HC values → native ZWave values before publish.
+# Door Lock: true/false → 255/0 (ZWave secured/unsecured mode integers).
+cmd_value_map  = { locked = { "true" = 255, "false" = 0 } }
