@@ -175,6 +175,16 @@ prefix   = "homecore"      # log files named homecore.YYYY-MM-DD
 rotation = "daily"         # daily | hourly | never
 format   = "json"          # json recommended for files (structured, parseable)
 
+# Dedicated rule/automation log (disabled by default).
+# When enabled, writes ONLY hc_core (engine/executor/scheduler) debug logs to a
+# separate file — clean audit trail of every trigger, condition, and action.
+# [logging.rules_file]
+# enabled  = true
+# dir      = "logs"       # defaults to same dir as [logging.file]
+# prefix   = "rules"      # files named rules.YYYY-MM-DD
+# rotation = "daily"
+# format   = "pretty"     # "json" recommended for log aggregators
+
 # Remote syslog output (disabled by default)
 # Supports UDP (recommended) or TCP; RFC 3164 or RFC 5424.
 [logging.syslog]

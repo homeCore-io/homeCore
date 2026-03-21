@@ -32,11 +32,19 @@ impl LoggingConfig {
     /// Call this after deserialising from TOML and before calling [`init`].
     /// Absolute paths in the config are left unchanged.
     pub fn resolve_paths(&mut self, base_dir: &std::path::Path) {
+        // Main file log dir.
         let dir = &mut self.file.dir;
         if dir.is_empty() {
             *dir = base_dir.join("logs").to_string_lossy().into_owned();
         } else if !std::path::Path::new(dir.as_str()).is_absolute() {
             *dir = base_dir.join(dir.as_str()).to_string_lossy().into_owned();
+        }
+        // Rules file dir — defaults to the same dir as the main file log.
+        let rules_dir = &mut self.rules_file.dir;
+        if rules_dir.is_empty() {
+            *rules_dir = self.file.dir.clone();
+        } else if !std::path::Path::new(rules_dir.as_str()).is_absolute() {
+            *rules_dir = base_dir.join(rules_dir.as_str()).to_string_lossy().into_owned();
         }
     }
 }
@@ -48,9 +56,10 @@ use syslog_layer::SyslogLayer;
 use tracing_subscriber::{prelude::*, Registry};
 
 /// Returned by [`init`].  Must be kept alive for the entire process lifetime.
-/// Dropping it flushes and closes the background file-writer thread.
+/// Dropping it flushes and closes the background file-writer threads.
 pub struct LoggingHandle {
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    _rules_file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
 
 type DynLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>;
@@ -62,6 +71,7 @@ type DynLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>;
 pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
     let mut layers: Vec<DynLayer> = Vec::new();
     let mut file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    let mut rules_file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
 
     // ── stderr ────────────────────────────────────────────────────────────
     if config.stderr.enabled {
@@ -77,6 +87,28 @@ pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
         let filter = build_filter(config, None);
         let (layer, guard) = build_file_layer(&config.file, filter);
         file_guard = Some(guard);
+        layers.push(layer);
+    }
+
+    // ── rules file ────────────────────────────────────────────────────────
+    // Dedicated file capturing only hc_core (engine, executor, scheduler)
+    // at debug level — provides a clean, noise-free rule audit trail.
+    if config.rules_file.enabled {
+        std::fs::create_dir_all(&config.rules_file.dir).unwrap_or_else(|e| {
+            eprintln!("hc-logging: cannot create rules log dir {}: {e}", config.rules_file.dir);
+        });
+        // Hard-wired filter: only hc_core at debug, everything else OFF.
+        let filter = tracing_subscriber::EnvFilter::new("hc_core=debug");
+        let cfg = config::FileConfig {
+            enabled: true,
+            dir: config.rules_file.dir.clone(),
+            prefix: config.rules_file.prefix.clone(),
+            rotation: config.rules_file.rotation.clone(),
+            max_size_mb: 100,
+            format: config.rules_file.format.clone(),
+        };
+        let (layer, guard) = build_file_layer(&cfg, filter);
+        rules_file_guard = Some(guard);
         layers.push(layer);
     }
 
@@ -101,7 +133,7 @@ pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
         .try_init()
         .map_err(|e| anyhow::anyhow!("Failed to install global tracing subscriber: {e}"))?;
 
-    Ok(LoggingHandle { _file_guard: file_guard })
+    Ok(LoggingHandle { _file_guard: file_guard, _rules_file_guard: rules_file_guard })
 }
 
 // ── layer builders ─────────────────────────────────────────────────────────

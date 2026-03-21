@@ -87,6 +87,14 @@ prefix  = "homecore"
 rotation = "daily"
 format  = "json"
 
+# Dedicated rule/automation log — captures only hc_core at debug level.
+# Clean audit trail: every trigger check, condition result, and action step.
+[logging.rules_file]
+enabled  = true
+prefix   = "rules"
+rotation = "daily"
+format   = "pretty"
+
 [logging.syslog]
 enabled = false
 transport = "udp"

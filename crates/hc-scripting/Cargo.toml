@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rhai     = { workspace = true }
-anyhow   = { workspace = true }
-tracing  = { workspace = true }
-hc-types = { path = "../hc-types" }
+rhai       = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+serde_json = { workspace = true }
+hc-types   = { path = "../hc-types" }

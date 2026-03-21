@@ -5,6 +5,7 @@ fn default_level() -> String { "info".into() }
 fn default_true() -> bool { true }
 fn default_log_dir() -> String { String::new() }
 fn default_prefix() -> String { "homecore".into() }
+fn default_rules_prefix() -> String { "rules".into() }
 fn default_max_size_mb() -> u64 { 100 }
 fn default_syslog_host() -> String { "127.0.0.1".into() }
 fn default_syslog_port() -> u16 { 514 }
@@ -31,6 +32,11 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     pub syslog: SyslogConfig,
+
+    /// Dedicated rules/automation log file — captures only `hc_core` at debug
+    /// regardless of the global log level.  Disabled by default.
+    #[serde(default)]
+    pub rules_file: RulesFileConfig,
 }
 
 impl Default for LoggingConfig {
@@ -41,6 +47,7 @@ impl Default for LoggingConfig {
             stderr: StderrConfig::default(),
             file: FileConfig::default(),
             syslog: SyslogConfig::default(),
+            rules_file: RulesFileConfig::default(),
         }
     }
 }
@@ -96,6 +103,53 @@ impl Default for FileConfig {
             rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
             format: OutputFormat::Json,
+        }
+    }
+}
+
+// ── rules file ─────────────────────────────────────────────────────────────
+
+/// Separate log file for the rule/automation engine.
+///
+/// Captures only `hc_core` (engine, executor, scheduler) at **debug** level,
+/// regardless of the global `[logging].level`.  This gives a clean,
+/// noise-free audit trail of every trigger evaluation, condition check,
+/// and action execution without mixing broker/API/state messages.
+///
+/// ```toml
+/// [logging.rules_file]
+/// enabled  = true
+/// dir      = "logs"          # defaults to same dir as [logging.file]
+/// prefix   = "rules"         # files named rules.YYYY-MM-DD
+/// rotation = "daily"
+/// format   = "pretty"        # human-readable; use "json" for log aggregators
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct RulesFileConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for rule log files. Empty string = inherit from `[logging.file].dir`.
+    #[serde(default = "default_log_dir")]
+    pub dir: String,
+    #[serde(default = "default_rules_prefix")]
+    pub prefix: String,
+    #[serde(default)]
+    pub rotation: RotationStrategy,
+    /// Output format: "pretty" (default, human-readable) | "compact" | "json"
+    #[serde(default = "default_rules_format")]
+    pub format: OutputFormat,
+}
+
+fn default_rules_format() -> OutputFormat { OutputFormat::Pretty }
+
+impl Default for RulesFileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_log_dir(),
+            prefix: default_rules_prefix(),
+            rotation: RotationStrategy::Daily,
+            format: OutputFormat::Pretty,
         }
     }
 }

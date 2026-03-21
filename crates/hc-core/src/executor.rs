@@ -7,11 +7,12 @@ use hc_scripting::ScriptRuntime;
 use hc_state::StateStore;
 use hc_types::rule::Action;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use tracing::{info, warn};
+use std::time::Instant;
+use tracing::{debug, info, warn};
 
 /// Shared HTTP client — initialised once, reused for every `CallService` action.
-/// `reqwest::Client` is cheaply cloneable (Arc-backed) and safe to share across tasks.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn http_client() -> &'static reqwest::Client {
@@ -30,36 +31,47 @@ pub async fn execute_actions(
     state: StateStore,
     notify: Option<Arc<NotificationService>>,
 ) -> Result<()> {
-    for action in actions {
-        execute_one(action, publish.clone(), state.clone(), notify.clone()).await?;
+    let total = actions.len();
+    for (idx, action) in actions.into_iter().enumerate() {
+        execute_one(action, idx, total, publish.clone(), state.clone(), notify.clone()).await?;
     }
     Ok(())
 }
 
 async fn execute_one(
     action: Action,
+    idx: usize,
+    total: usize,
     publish: Option<PublishHandle>,
     state: StateStore,
     notify: Option<Arc<NotificationService>>,
 ) -> Result<()> {
+    let label = format!("action[{}/{}]", idx + 1, total);
     match action {
         Action::Delay { duration_ms } => {
+            debug!(label, duration_ms, "action: Delay");
             tokio::time::sleep(tokio::time::Duration::from_millis(duration_ms)).await;
+            debug!(label, "action: Delay — done");
         }
 
         Action::Parallel { actions } => {
+            let count = actions.len();
+            debug!(label, parallel_count = count, "action: Parallel — spawning {} concurrent actions", count);
             let handles: Vec<_> = actions
                 .into_iter()
-                .map(|a| {
+                .enumerate()
+                .map(|(i, a)| {
                     let p = publish.clone();
                     let s = state.clone();
                     let n = notify.clone();
+                    debug!("action: Parallel[{}/{}] — {:?}", i + 1, count, action_type_name(&a));
                     tokio::spawn(run_single_action(a, p, s, n))
                 })
                 .collect();
             for h in handles {
                 h.await??;
             }
+            debug!(label, "action: Parallel — all done");
         }
 
         other => run_single_action(other, publish, state, notify).await?,
@@ -75,10 +87,13 @@ async fn run_single_action(
 ) -> Result<()> {
     match action {
         Action::Delay { duration_ms } => {
+            debug!(duration_ms, "action: Delay");
             tokio::time::sleep(tokio::time::Duration::from_millis(duration_ms)).await;
         }
 
         Action::Parallel { actions } => {
+            let count = actions.len();
+            debug!(parallel_count = count, "action: Parallel (nested)");
             for a in actions {
                 Box::pin(run_single_action(a, publish.clone(), state.clone(), notify.clone())).await?;
             }
@@ -87,17 +102,21 @@ async fn run_single_action(
         Action::RepeatUntil { condition, actions, max_iterations, interval_ms } => {
             let limit = max_iterations.unwrap_or(100);
             let delay = interval_ms.unwrap_or(0);
+            let snippet = if condition.len() > 60 { &condition[..60] } else { &condition };
+            debug!(condition = %snippet, limit, delay_ms = delay, "action: RepeatUntil — starting");
             for i in 0..limit {
                 let cond_script = condition.clone();
                 let done = tokio::task::spawn_blocking(move || {
                     ScriptRuntime::new().eval_condition(&cond_script)
                 })
                 .await??;
+                debug!(iteration = i + 1, done, "action: RepeatUntil — condition check");
                 if done {
+                    debug!(iterations = i + 1, "action: RepeatUntil — condition met, exiting loop");
                     break;
                 }
                 if i == limit - 1 {
-                    warn!(max = limit, "RepeatUntil hit max_iterations without condition becoming true");
+                    warn!(max = limit, "action: RepeatUntil — hit max_iterations without condition becoming true");
                     break;
                 }
                 for a in &actions {
@@ -111,30 +130,42 @@ async fn run_single_action(
 
         Action::SetDeviceState { device_id, state: desired } => {
             let topic = format!("homecore/devices/{device_id}/cmd");
+            debug!(device_id, payload = %desired, "action: SetDeviceState");
             let payload = desired.to_string().into_bytes();
-            if let Some(ph) = publish {
-                ph.publish(&topic, payload).await?;
-            } else {
-                warn!(device = %device_id, "No publish handle; SetDeviceState dropped");
+            match publish {
+                Some(ph) => {
+                    ph.publish(&topic, payload).await?;
+                    debug!(device_id, topic, "action: SetDeviceState — published");
+                }
+                None => {
+                    warn!(device_id, "action: SetDeviceState — no publish handle, command dropped");
+                }
             }
         }
 
         Action::PublishMqtt { topic, payload, retain } => {
-            if let Some(ph) = publish {
-                if retain {
-                    ph.publish_retained(&topic, payload.into_bytes()).await?;
-                } else {
-                    ph.publish(&topic, payload.into_bytes()).await?;
+            debug!(topic, retain, payload_len = payload.len(), "action: PublishMqtt");
+            match publish {
+                Some(ph) => {
+                    if retain {
+                        ph.publish_retained(&topic, payload.into_bytes()).await?;
+                    } else {
+                        ph.publish(&topic, payload.into_bytes()).await?;
+                    }
+                    debug!(topic, retain, "action: PublishMqtt — published");
                 }
-            } else {
-                warn!(topic, "No publish handle; PublishMqtt dropped");
+                None => {
+                    warn!(topic, "action: PublishMqtt — no publish handle, message dropped");
+                }
             }
         }
 
         Action::FireEvent { event_type, payload } => {
+            debug!(event_type, "action: FireEvent");
             if let Some(ph) = publish {
                 let topic = format!("homecore/events/{event_type}");
                 ph.publish_json(&topic, &payload, false).await?;
+                debug!(event_type, "action: FireEvent — published");
             }
         }
 
@@ -143,14 +174,21 @@ async fn run_single_action(
             let timeout = tokio::time::Duration::from_millis(timeout_ms.unwrap_or(10_000));
             let max_attempts = retries.unwrap_or(0) + 1;
             let client = http_client();
+            debug!(
+                url,
+                method    = %method_upper,
+                retries   = retries.unwrap_or(0),
+                timeout_ms = timeout_ms.unwrap_or(10_000),
+                "action: CallService"
+            );
 
             let mut last_err: anyhow::Error = anyhow!("no attempts made");
+            let call_start = Instant::now();
 
             'retry: for attempt in 0..max_attempts {
                 if attempt > 0 {
-                    // Exponential backoff: 500 ms, 1 000 ms, 2 000 ms, capped at 4 000 ms.
                     let backoff_ms = 500u64 * (1u64 << (attempt - 1).min(3));
-                    info!(url, attempt, backoff_ms, "CallService retrying");
+                    info!(url, attempt, backoff_ms, "action: CallService — retrying");
                     tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 }
 
@@ -165,68 +203,112 @@ async fn run_single_action(
 
                 match req.timeout(timeout).send().await {
                     Err(e) => {
-                        warn!(url, attempt, error = %e, "CallService request failed");
+                        warn!(url, attempt, error = %e, "action: CallService — request failed");
                         last_err = e.into();
                     }
                     Ok(resp) => {
                         let status = resp.status();
-                        // Retry on 5xx; treat 4xx as a permanent failure.
                         if status.is_server_error() {
-                            warn!(url, %status, attempt, "CallService 5xx — will retry");
+                            warn!(url, %status, attempt, "action: CallService — 5xx, will retry");
                             last_err = anyhow!("HTTP {status}");
                             continue 'retry;
                         }
                         if !status.is_success() {
-                            warn!(url, %status, "CallService HTTP error (not retrying)");
+                            warn!(url, %status, "action: CallService — HTTP error (not retrying)");
                             return Err(anyhow!("HTTP {status}"));
                         }
-                        info!(url, %status, "CallService OK");
+                        let elapsed_ms = call_start.elapsed().as_millis();
+                        info!(url, %status, elapsed_ms, "action: CallService — OK");
 
-                        // Optionally forward the response body onto the event bus.
                         if let Some(ref event_type) = response_event {
                             if let Some(ref ph) = publish {
                                 let resp_body: JsonValue =
                                     resp.json().await.unwrap_or(JsonValue::Null);
                                 let topic = format!("homecore/events/{event_type}");
                                 ph.publish_json(&topic, &resp_body, false).await?;
+                                debug!(event_type, "action: CallService — response published as event");
                             }
                         }
                         return Ok(());
                     }
                 }
             }
-
             return Err(last_err);
         }
 
         Action::RunScript { script } => {
-            // Rhai scripts run synchronously on a blocking thread.
-            // `Dynamic` is not Send, so we map to () before crossing the thread boundary.
+            let snippet = if script.len() > 80 { &script[..80] } else { &script };
+            debug!(script = %snippet, "action: RunScript — starting");
+            // Snapshot device state so scripts can call device_state("id").
+            let snapshot = device_snapshot(&state).await;
+            let script_clone = script.clone();
             tokio::task::spawn_blocking(move || {
-                let runtime = ScriptRuntime::new();
-                runtime.run_action(&script).map(|_| ())
+                ScriptRuntime::new_with_devices(snapshot)
+                    .run_action(&script_clone)
+                    .map(|_| ())
             })
             .await??;
+            debug!(script = %snippet, "action: RunScript — completed");
         }
 
         Action::Notify { channel, message, title } => {
-            let title = title.as_deref().unwrap_or("HomeCore Alert");
+            let title_str = title.as_deref().unwrap_or("HomeCore Alert");
+            debug!(channel, title = title_str, message = %message, "action: Notify");
             match &notify {
                 Some(svc) => {
-                    if let Err(e) = svc.notify(&channel, title, &message).await {
-                        warn!(channel, error = %e, "Notification failed");
+                    if let Err(e) = svc.notify(&channel, title_str, &message).await {
+                        warn!(channel, error = %e, "action: Notify — failed");
                     } else {
-                        info!(channel, "Notification sent");
+                        info!(channel, "action: Notify — sent");
                     }
                 }
                 None => {
-                    warn!(channel, "Notify action fired but no NotificationService configured");
+                    warn!(channel, "action: Notify — no NotificationService configured");
                 }
             }
         }
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn action_type_name(action: &Action) -> &'static str {
+    match action {
+        Action::SetDeviceState { .. } => "SetDeviceState",
+        Action::PublishMqtt { .. }    => "PublishMqtt",
+        Action::CallService { .. }    => "CallService",
+        Action::FireEvent { .. }      => "FireEvent",
+        Action::RunScript { .. }      => "RunScript",
+        Action::Notify { .. }         => "Notify",
+        Action::Delay { .. }          => "Delay",
+        Action::Parallel { .. }       => "Parallel",
+        Action::RepeatUntil { .. }    => "RepeatUntil",
+    }
+}
+
+/// Snapshot all device attributes for Rhai script access via `device_state("id")`.
+async fn device_snapshot(state: &StateStore) -> HashMap<String, serde_json::Value> {
+    match state.list_devices().await {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|d| {
+                let attrs = serde_json::Value::Object(d.attributes.into_iter().collect());
+                (d.device_id, attrs)
+            })
+            .collect(),
+        Err(e) => {
+            warn!(error = %e, "device_snapshot: list_devices failed; scripts will see empty state");
+            HashMap::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -245,7 +327,6 @@ mod tests {
     #[tokio::test]
     async fn repeat_until_exits_when_condition_true_immediately() {
         let store = dummy_store().await;
-        // Condition is always true → loop body should never run (0 iterations).
         let action = Action::RepeatUntil {
             condition: "true".into(),
             actions: vec![Action::Delay { duration_ms: 0 }],
@@ -258,14 +339,12 @@ mod tests {
     #[tokio::test]
     async fn repeat_until_respects_max_iterations() {
         let store = dummy_store().await;
-        // Condition is always false → must stop at max_iterations.
         let action = Action::RepeatUntil {
             condition: "false".into(),
             actions: vec![Action::Delay { duration_ms: 0 }],
             max_iterations: Some(3),
             interval_ms: None,
         };
-        // Should complete without hanging.
         execute_actions(vec![action], None, store, None).await.unwrap();
     }
 
@@ -274,8 +353,6 @@ mod tests {
         let store = dummy_store().await;
         execute_actions(vec![Action::Delay { duration_ms: 1 }], None, store, None).await.unwrap();
     }
-
-    // ---- CallService tests ----
 
     fn call_service(url: &str, method: &str) -> Action {
         Action::CallService {
@@ -319,7 +396,6 @@ mod tests {
     #[tokio::test]
     async fn call_service_retries_on_5xx_then_succeeds() {
         let mut server = mockito::Server::new_async().await;
-        // First call returns 500, second returns 200.
         let _m1 = server.mock("POST", "/retry").with_status(500).create_async().await;
         let _m2 = server.mock("POST", "/retry").with_status(200).create_async().await;
 
@@ -338,7 +414,6 @@ mod tests {
     #[tokio::test]
     async fn call_service_exhausts_retries_returns_error() {
         let mut server = mockito::Server::new_async().await;
-        // Both attempts return 500.
         let _m1 = server.mock("GET", "/fail").with_status(500).create_async().await;
         let _m2 = server.mock("GET", "/fail").with_status(500).create_async().await;
 

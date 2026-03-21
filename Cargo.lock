@@ -1391,6 +1391,7 @@ dependencies = [
  "anyhow",
  "hc-types",
  "rhai",
+ "serde_json",
  "tracing",
 ]
 
