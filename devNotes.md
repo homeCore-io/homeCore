@@ -2327,6 +2327,37 @@ ZwaveJS UI publishes node status on `zwave/{nodeId}/status`. The profile maps:
 
 ---
 
+### Multi-endpoint devices
+
+Some Z-Wave devices expose multiple logical channels via endpoints > 0 (e.g. dual-outlet smart plugs, thermostats with heating/cooling setpoints). The current approach is **namespaced attributes** — add explicit alias entries per endpoint in `zwave.toml`:
+
+```toml
+[ecosystem.attribute_aliases]
+# Endpoint 0 (root) — no prefix
+"37/0/currentValue" = "on"
+"37/0/targetValue"  = "on"
+
+# Endpoint 1 — ep1_ prefix
+"37/1/currentValue" = "ep1_on"
+"37/1/targetValue"  = "ep1_on"
+
+# Endpoint 2 — ep2_ prefix
+"37/2/currentValue" = "ep2_on"
+"37/2/targetValue"  = "ep2_on"
+```
+
+This gives a single device (e.g. `zwave_5`) a state like `{"on": true, "ep1_on": false, "ep2_on": true}`. Commands work the same way — PATCH with `{"ep2_on": false}` and the reverse alias map routes it to `zwave/5/37/2/targetValue/set`.
+
+The Thermostat Setpoint profile already demonstrates this pattern:
+```toml
+"67/1/value" = "target_temp"   # endpoint 1 = heating setpoint
+"67/2/value" = "cool_setpoint" # endpoint 2 = cooling setpoint (add if needed)
+```
+
+No code changes are needed — just alias table entries.
+
+---
+
 ## What "done" looks like for each phase
 
 Use this as a checklist when finishing a feature before moving on.

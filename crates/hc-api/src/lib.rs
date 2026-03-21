@@ -155,7 +155,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
         // Devices
         .route("/devices", get(handlers::list_devices))
-        .route("/devices/:id", get(handlers::get_device))
+        .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device))
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
         // Areas

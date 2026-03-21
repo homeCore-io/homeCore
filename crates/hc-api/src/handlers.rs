@@ -82,6 +82,34 @@ pub async fn command_device(
     (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
 }
 
+pub async fn update_device(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    match s.store.get_device(&id).await {
+        Ok(Some(mut device)) => {
+            if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+                device.name = name.to_string();
+            }
+            if let Some(area) = body.get("area") {
+                device.area = if area.is_null() {
+                    None
+                } else {
+                    area.as_str().map(|s| s.to_string())
+                };
+            }
+            match s.store.upsert_device(&device).await {
+                Ok(_) => (StatusCode::OK, Json(json!(device))),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+            }
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
 pub async fn device_history(
     State(s): State<AppState>,
     _: DevicesRead,
