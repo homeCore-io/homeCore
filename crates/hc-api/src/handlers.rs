@@ -110,6 +110,18 @@ pub async fn update_device(
     }
 }
 
+pub async fn delete_device(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.store.delete_device(&id).await {
+        Ok(true)  => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response(),
+        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 pub async fn device_history(
     State(s): State<AppState>,
     _: DevicesRead,
@@ -150,6 +162,41 @@ pub async fn create_area(
     match s.store.upsert_area(&area).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(area))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PatchAreaBody {
+    pub name: String,
+}
+
+pub async fn patch_area(
+    State(s): State<AppState>,
+    _: AreasWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchAreaBody>,
+) -> impl IntoResponse {
+    let mut area = match s.store.get_area(id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
+        Err(e)    => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    area.name = body.name;
+    match s.store.upsert_area(&area).await {
+        Ok(_) => (StatusCode::OK, Json(json!(area))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn delete_area(
+    State(s): State<AppState>,
+    _: AreasWrite,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match s.store.delete_area(id).await {
+        Ok(true)  => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
+        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
 

@@ -156,6 +156,11 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.upsert_area(&a)).await?
     }
 
+    pub async fn delete_area(&self, id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.rules);
+        tokio::task::spawn_blocking(move || store.delete_area(id)).await?
+    }
+
     pub async fn list_areas(&self) -> Result<Vec<Area>> {
         let store = Arc::clone(&self.rules);
         tokio::task::spawn_blocking(move || store.list_areas()).await?

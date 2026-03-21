@@ -155,11 +155,12 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
         // Devices
         .route("/devices", get(handlers::list_devices))
-        .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device))
+        .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device).delete(handlers::delete_device))
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
         // Areas
         .route("/areas", get(handlers::list_areas).post(handlers::create_area))
+        .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))
         .route("/areas/:id/devices", put(handlers::set_area_devices))
         // Automations
         .route("/automations", get(handlers::list_automations).post(handlers::create_automation))

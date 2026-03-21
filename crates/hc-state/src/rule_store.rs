@@ -135,6 +135,17 @@ impl RuleStore {
         }
     }
 
+    pub fn delete_area(&self, id: Uuid) -> Result<bool> {
+        let write_txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = write_txn.open_table(AREAS)?;
+            let result = table.remove(id.to_string().as_str())?.is_some();
+            result
+        };
+        write_txn.commit()?;
+        Ok(removed)
+    }
+
     pub fn list_areas(&self) -> Result<Vec<Area>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(AREAS)?;
