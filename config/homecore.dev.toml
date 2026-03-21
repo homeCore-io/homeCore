@@ -1,0 +1,126 @@
+# HomeCore DEV configuration
+#
+# Used when running HomeCore from the development workspace.
+# Launch with run-dev.sh (repo root) or:
+#   homecore --home /home/john/RustroverProjects/homeCore/homeCore \
+#            --config config/homecore.dev.toml
+#
+# Plugin binary paths are relative to HOMECORE_HOME and point directly into
+# each plugin's cargo target/debug directory so no install step is needed
+# during development.
+#
+# DO NOT use this config in production — use config/homecore.toml instead.
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+[server]
+host = "0.0.0.0"
+port = 8080
+
+# ---------------------------------------------------------------------------
+# Embedded MQTT broker
+# ---------------------------------------------------------------------------
+[broker]
+host = "0.0.0.0"
+port = 1883
+# v5_port = 1884
+
+# ---------------------------------------------------------------------------
+# Location
+# ---------------------------------------------------------------------------
+[location]
+latitude  = 38.9072
+longitude = -77.0369
+timezone  = "America/New_York"
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+[auth]
+jwt_secret         = "dev-secret-do-not-use-in-production"
+token_expiry_hours = 24
+
+whitelist = [
+    "127.0.0.1",
+    "10.0.10.200",
+]
+
+# ---------------------------------------------------------------------------
+# Storage  (defaults to {base_dir}/data/ — fine for dev)
+# ---------------------------------------------------------------------------
+[storage]
+# state_db_path   = "data/state.redb"
+# history_db_path = "data/history.db"
+
+# ---------------------------------------------------------------------------
+# Rules  (defaults to {base_dir}/rules/)
+# ---------------------------------------------------------------------------
+[rules]
+# dir = "rules"
+
+# ---------------------------------------------------------------------------
+# Ecosystem profiles  (defaults to {base_dir}/config/profiles/)
+# ---------------------------------------------------------------------------
+[profiles]
+# dir = "config/profiles"
+
+# ---------------------------------------------------------------------------
+# Logging  — pretty stderr only in dev; file logging off to reduce noise
+# ---------------------------------------------------------------------------
+[logging]
+level = "debug"
+
+[logging.targets]
+# hc_core        = "debug"
+# hc_mqtt_client = "debug"
+# hc_broker      = "warn"
+
+[logging.stderr]
+enabled = true
+format  = "pretty"
+ansi    = true
+
+[logging.file]
+enabled = false
+prefix  = "homecore"
+rotation = "daily"
+format  = "json"
+
+[logging.syslog]
+enabled = false
+transport = "udp"
+host    = "192.168.1.100"
+port    = 514
+protocol = "rfc5424"
+facility = "daemon"
+app_name = "homecore"
+
+# ---------------------------------------------------------------------------
+# Plugins — paths relative to HOMECORE_HOME = homeCore/homeCore/
+# Plugin repos sit one level up at homeCore/hc-*/
+# ---------------------------------------------------------------------------
+
+[[plugins]]
+id      = "plugin.yolink"
+binary  = "../hc-yolink/target/debug/hc-yolink"
+config  = "../hc-yolink/config/config.toml"
+enabled = true
+
+[[plugins]]
+id      = "plugin.lutron"
+binary  = "../hc-lutron/target/debug/hc-lutron"
+config  = "../hc-lutron/config/config.toml"
+enabled = true
+
+[[plugins]]
+id      = "plugin.sonos"
+binary  = "../hc-sonos/target/debug/hc-sonos"
+config  = "../hc-sonos/config/config.toml"
+enabled = true
+
+[[plugins]]
+id      = "plugin.zwave"
+binary  = "../hc-zwave/target/debug/hc-zwave"
+config  = "../hc-zwave/config/config.toml"
+enabled = true
