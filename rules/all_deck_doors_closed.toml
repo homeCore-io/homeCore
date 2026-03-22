@@ -1,5 +1,5 @@
 
-id = "543e3818-13f8-466b-9f7a-8552204a4818"
+id = "40469bde-5042-4d4a-bc28-e62c8244b444"
 name     = "Any Deck Door Opened"
 enabled  = true
 priority = 10
@@ -8,7 +8,7 @@ priority = 10
 type      = "device_state_changed"
 device_id = "switch_any_deck_door_open"
 attribute = "on"
-to        = true
+to        = false
 
 [[conditions]]
 type      = "device_state"
@@ -18,6 +18,9 @@ op        = "eq"
 value     = true
 
 [[actions]]
-type = "set_device_state"
-device_id = "lutron_scene_deck_on_phantom"
-state = { activate = true }
+type      = "set_device_state"
+device_id = "timer_deck_lights_off"
+
+[actions.state]
+command       = "start"
+duration_secs = 300

@@ -1,0 +1,15 @@
+id = "0063f5b3-bfb0-4b15-ae21-1cd00f8f8105"
+name     = "Garage Lights Off - Timer Finished"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "timer_garage_lights"
+attribute = "state"
+to        = "finished"
+
+[[actions]]
+type = "set_device_state"
+device_id = "lutron_54"
+state = { on = false }
