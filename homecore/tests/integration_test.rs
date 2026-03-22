@@ -49,6 +49,7 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
         trigger: Trigger::DeviceStateChanged {
             device_id: "test_light".into(),
             attribute: Some("on".into()),
+            to: None,
         },
         conditions: vec![],
         actions: vec![Action::PublishMqtt {

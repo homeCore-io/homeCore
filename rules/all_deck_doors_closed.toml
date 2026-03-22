@@ -1,0 +1,23 @@
+
+id = "543e3818-13f8-466b-9f7a-8552204a4818"
+name     = "Any Deck Door Opened"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "switch_any_deck_door_open"
+attribute = "on"
+to        = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type = "set_device_state"
+device_id = "lutron_scene_deck_on_phantom"
+state = { activate = true }

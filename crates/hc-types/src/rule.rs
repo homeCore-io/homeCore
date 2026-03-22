@@ -18,7 +18,9 @@ pub struct Rule {
     pub priority: i32,
     pub trigger: Trigger,
     /// All conditions must pass (short-circuit AND logic).
+    #[serde(default)]
     pub conditions: Vec<Condition>,
+    #[serde(default)]
     pub actions: Vec<Action>,
 }
 
