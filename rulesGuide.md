@@ -623,7 +623,7 @@ type      = "device_state"
 device_id = "timer_bathroom"
 attribute = "state"
 op        = "eq"
-value     = "fired"
+value     = "finished"
 
 [[actions]]
 type      = "set_device_state"
@@ -687,6 +687,180 @@ script = """
       notify("pushover", "Office light still on at 11 PM");
   }
 """
+```
+
+---
+
+## Virtual Devices
+
+HomeCore provides two built-in virtual device types — **timers** and **switches** — that
+live in the state store like any plugin device and integrate with the rule engine through
+the same trigger/condition/action primitives.
+
+---
+
+### Timers (`core.timer`)
+
+Countdown timers that fire a `DeviceStateChanged` event when they elapse.
+Device IDs are always prefixed `timer_`.
+
+#### Create
+
+```bash
+curl -X POST http://localhost:8080/api/v1/timers \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "garage_close", "label": "Garage OH1 Auto-Close"}'
+```
+
+`id` becomes the suffix: `"garage_close"` → `device_id = "timer_garage_close"`.
+`label` is the human display name (optional; defaults to the device_id).
+
+#### List
+
+```bash
+curl http://localhost:8080/api/v1/timers
+```
+
+#### Commands (`PATCH /api/v1/devices/timer_{id}/state`)
+
+| Command | Payload | Description |
+|---|---|---|
+| `start` | `{"command":"start","duration_secs":600}` | Start or restart the countdown |
+| `pause` | `{"command":"pause"}` | Pause, preserving remaining time |
+| `resume` | `{"command":"resume"}` | Resume from where it paused |
+| `cancel` | `{"command":"cancel"}` | Stop and set state to `cancelled` |
+| `restart` | `{"command":"restart"}` | Reset to original duration and start again |
+
+`start` also accepts optional fields: `"label": "..."` and `"repeat": true` (loops indefinitely).
+
+```bash
+# Start a 10-minute timer
+curl -X PATCH http://localhost:8080/api/v1/devices/timer_garage_close/state \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "start", "duration_secs": 600}'
+
+# Cancel
+curl -X PATCH http://localhost:8080/api/v1/devices/timer_garage_close/state \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "cancel"}'
+```
+
+#### State attributes
+
+```json
+{
+  "state":         "idle",
+  "duration_secs": 600,
+  "remaining_secs": 423,
+  "started_at":    "2026-03-22T16:17:30Z",
+  "repeat":        false,
+  "label":         "Garage OH1 Auto-Close"
+}
+```
+
+`state` values: `idle` → `running` → `finished` (or `paused`, `cancelled`).
+
+#### Rule integration
+
+```toml
+# Trigger when the timer fires
+[trigger]
+type      = "device_state_changed"
+device_id = "timer_garage_close"
+attribute = "state"
+
+[[conditions]]
+type      = "device_state"
+device_id = "timer_garage_close"
+attribute = "state"
+op        = "eq"
+value     = "finished"
+
+# Start the timer from an action (duration_secs is required)
+[[actions]]
+type      = "set_device_state"
+device_id = "timer_garage_close"
+
+[actions.state]
+command       = "start"
+duration_secs = 600
+label         = "Garage OH1 auto-close"
+```
+
+---
+
+### Virtual Switches (`core.switch`)
+
+Software-only on/off switches — useful as flags and guards in automation logic
+(e.g., "auto-close enabled", "vacation mode", "guest mode").
+Device IDs are always prefixed `switch_`.
+
+#### Create
+
+```bash
+curl -X POST http://localhost:8080/api/v1/switches \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "auto_garage_door", "label": "Auto Garage Door"}'
+```
+
+`id` becomes the suffix: `"auto_garage_door"` → `device_id = "switch_auto_garage_door"`.
+
+#### List
+
+```bash
+curl http://localhost:8080/api/v1/switches
+```
+
+#### Commands (`PATCH /api/v1/devices/switch_{id}/state`)
+
+| Command | Payload | Description |
+|---|---|---|
+| `on` | `{"command":"on"}` | Turn the switch on |
+| `off` | `{"command":"off"}` | Turn the switch off |
+| `toggle` | `{"command":"toggle"}` | Flip current state |
+
+```bash
+# Turn on
+curl -X PATCH http://localhost:8080/api/v1/devices/switch_auto_garage_door/state \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "on"}'
+
+# Turn off
+curl -X PATCH http://localhost:8080/api/v1/devices/switch_auto_garage_door/state \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "off"}'
+```
+
+#### State attributes
+
+```json
+{ "on": false }
+```
+
+#### Rule integration
+
+```toml
+# Trigger when the switch changes
+[trigger]
+type      = "device_state_changed"
+device_id = "switch_auto_garage_door"
+attribute = "on"
+
+# Condition: switch must be on
+[[conditions]]
+type      = "device_state"
+device_id = "switch_auto_garage_door"
+attribute = "on"
+op        = "eq"
+value     = true
+
+# Action: turn the switch on
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_auto_garage_door"
+
+[actions.state]
+command = "on"
 ```
 
 ---

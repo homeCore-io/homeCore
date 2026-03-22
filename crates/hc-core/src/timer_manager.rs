@@ -23,7 +23,7 @@
 //! # States
 //!
 //! ```text
-//! idle --start--> running --elapsed--> fired
+//! idle --start--> running --elapsed--> finished
 //!                    |                   |
 //!                  pause             (repeat: start new cycle)
 //!                    v
@@ -45,7 +45,7 @@
 //! device_id = "timer_garage_close"
 //! attribute = "state"
 //! op        = "eq"
-//! value     = "fired"
+//! value     = "finished"
 //! ```
 
 use chrono::Utc;
@@ -203,7 +203,7 @@ impl TimerManager {
                             device_id = %dev.device_id,
                             "TimerManager: timer elapsed while stopped — firing now"
                         );
-                        self.set_state(&dev.device_id, "fired", None).await;
+                        self.set_state(&dev.device_id, "finished", None).await;
                     }
                 }
                 "paused" => {
@@ -212,7 +212,7 @@ impl TimerManager {
                         "TimerManager: paused timer — waiting for resume command"
                     );
                 }
-                _ => {} // idle / fired / cancelled — nothing to do
+                _ => {} // idle / finished / cancelled — nothing to do
             }
         }
     }
@@ -299,7 +299,7 @@ impl TimerManager {
                     self.spawn_timer_task(device_id, remaining_secs, duration_secs, repeat)
                         .await;
                 } else {
-                    self.set_state(device_id, "fired", None).await;
+                    self.set_state(device_id, "finished", None).await;
                 }
             }
 
@@ -375,7 +375,7 @@ impl TimerManager {
                 let sleep = tokio::time::sleep(tokio::time::Duration::from_secs(rem));
                 tokio::select! {
                     _ = sleep => {
-                        info!(device_id = %id, "Timer fired");
+                        info!(device_id = %id, "Timer finished");
                         fire_timer(&id, &state, &bus).await;
                         if repeat {
                             rem = duration_secs;
@@ -478,7 +478,7 @@ impl TimerManager {
 async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
     let previous = dev.attributes.clone();
-    dev.attributes.insert("state".into(), serde_json::json!("fired"));
+    dev.attributes.insert("state".into(), serde_json::json!("finished"));
     dev.attributes.insert("remaining_secs".into(), serde_json::json!(0_u64));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;

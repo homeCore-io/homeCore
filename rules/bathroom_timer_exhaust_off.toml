@@ -17,7 +17,7 @@ type      = "device_state"
 device_id = "timer_bathroom"
 attribute = "state"
 op        = "eq"
-value     = "fired"
+value     = "finished"
 
 [[actions]]
 type      = "set_device_state"
