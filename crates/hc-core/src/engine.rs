@@ -419,7 +419,7 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
     use TriggerResult::*;
     match (trigger, event) {
         (
-            Trigger::DeviceStateChanged { device_id, attribute },
+            Trigger::DeviceStateChanged { device_id, attribute, to },
             Event::DeviceStateChanged { device_id: eid, current, previous, .. },
         ) => {
             if device_id != eid {
@@ -434,6 +434,12 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                     // Only fire when the attribute value actually changed.
                     if previous.get(attr.as_str()) == current.get(attr.as_str()) {
                         return NoMatch("attribute value unchanged");
+                    }
+                    // If `to` is specified, only fire when the new value matches.
+                    if let Some(expected) = to {
+                        if current.get(attr.as_str()) != Some(expected) {
+                            return NoMatch("attribute did not change to expected value");
+                        }
                     }
                     Matched
                 }

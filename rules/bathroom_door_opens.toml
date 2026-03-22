@@ -12,13 +12,7 @@ priority = 10
 type      = "device_state_changed"
 device_id = "yolink_d88b4c0400064299"
 attribute = "open"
-
-[[conditions]]
-type      = "device_state"
-device_id = "yolink_d88b4c0400064299"
-attribute = "open"
-op        = "eq"
-value     = true
+to        = true
 
 [[actions]]
 type   = "call_service"

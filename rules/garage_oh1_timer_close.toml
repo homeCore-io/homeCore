@@ -12,13 +12,7 @@ priority = 10
 type      = "device_state_changed"
 device_id = "timer_garage_close"
 attribute = "state"
-
-[[conditions]]
-type      = "device_state"
-device_id = "timer_garage_close"
-attribute = "state"
-op        = "eq"
-value     = "finished"
+to        = "finished"
 
 [[conditions]]
 type      = "device_state"

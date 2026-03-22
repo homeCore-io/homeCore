@@ -30,6 +30,10 @@ pub enum Trigger {
         device_id: String,
         /// When `None`, any attribute change fires the trigger.
         attribute: Option<String>,
+        /// When set, the trigger only fires when the attribute changes **to** this
+        /// exact value.  Has no effect when `attribute` is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<JsonValue>,
     },
     MqttMessage {
         topic_pattern: String,
