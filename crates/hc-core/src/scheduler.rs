@@ -7,7 +7,7 @@
 //! without any cloud dependency.
 
 use crate::EventBus;
-use chrono::{Datelike, Local, NaiveTime, Timelike};
+use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
 use hc_types::event::Event;
 use hc_types::rule::{Rule, SunEventType, Trigger};
 use std::sync::Arc;
@@ -124,9 +124,10 @@ pub(crate) fn solar_event_time(
     let zenith_deg: f64 = match event {
         SunEventType::Sunrise | SunEventType::Sunset => 90.833,
         SunEventType::SolarNoon => {
-            // Solar noon is just 12:00 adjusted for longitude.
+            // Solar noon is just 12:00 adjusted for longitude (UTC result).
             let noon_min = 720.0 - 4.0 * lon - equation_of_time(day_of_year);
-            let total_min = noon_min + offset_minutes as f64;
+            let utc_offset_min = Local::now().offset().fix().local_minus_utc() as f64 / 60.0;
+            let total_min = (noon_min + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
             let h = (total_min / 60.0).floor() as u32;
             let m = (total_min % 60.0).abs() as u32;
             return NaiveTime::from_hms_opt(h % 24, m, 0);
@@ -157,7 +158,10 @@ pub(crate) fn solar_event_time(
         SunEventType::SolarNoon => unreachable!(),
     };
 
-    let total_minutes = (event_minutes + offset_minutes as f64).rem_euclid(1440.0);
+    // event_minutes is UTC; convert to local wall-clock time so it can be
+    // compared directly against Local::now().time() in the scheduler.
+    let utc_offset_min = Local::now().offset().fix().local_minus_utc() as f64 / 60.0;
+    let total_minutes = (event_minutes + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
     let h = (total_minutes / 60.0) as u32;
     let m = (total_minutes % 60.0) as u32;
     NaiveTime::from_hms_opt(h, m, 0)
