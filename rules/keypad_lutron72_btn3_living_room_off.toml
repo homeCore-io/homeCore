@@ -3,7 +3,7 @@
 # When button 1 is pressed and the living room group is currently off,
 # turn on the Hue group and light the keypad button LED.
 
-id = "57d7da0a-6cf7-41de-8bad-9477de8cd971"
+id = "26a229bd-4f84-4467-a678-a93974afa543"
 name     = "Keypad lutron_72 Btn3 - Living Room On"
 enabled  = true
 priority = 10
@@ -16,17 +16,17 @@ to        = "press"
 
 [[conditions]]
 type      = "device_state"
-device_id = "hue_001788fffe6841b3_zigbee_connectivity_526f8d77_83a5_4b5a_8948_bf15e3e37321"
+device_id = "hue_001788fffe6841b3_light_019f9c7b_e17d_4bf0_86c6_30610690fd62"
 attribute = "on"
 op        = "eq"
-value     = false
+value     = true
 
 [[actions]]
 type      = "set_device_state"
-device_id = "hue_001788fffe6841b3_zigbee_connectivity_526f8d77_83a5_4b5a_8948_bf15e3e37321"
-state     = { on = true }
+device_id = "hue_001788fffe6841b3_light_019f9c7b_e17d_4bf0_86c6_30610690fd62"
+state     = { on = false }
 
 [[actions]]
 type      = "set_device_state"
 device_id = "lutron_72"
-state     = { set_led = { button = 3, state = 1 } }
+state     = { set_led = { button = 3, state = 0 } }
