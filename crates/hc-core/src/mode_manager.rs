@@ -337,7 +337,7 @@ impl ModeManager {
                                 }
                             }
                         }
-                        Ok(Event::MqttMessage { .. }) | Ok(_) => {}
+                        Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("ModeManager lagged by {n} events");
                         }
