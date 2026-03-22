@@ -180,6 +180,9 @@ end   = "12:00:00"
 - Times are `HH:MM:SS` in 24-hour local time.
 - **Overnight windows** work correctly: if `start > end` the window wraps
   midnight (e.g. `start = "22:00:00"`, `end = "06:00:00"` matches 10 PM – 6 AM).
+- **Prefer `mode_night` over `time_window` for day/night conditions.** Fixed
+  clock times drift with the seasons; `mode_night` tracks actual sunrise/sunset
+  computed from your lat/lon. See [Modes](#modes-coremode) below.
 
 ---
 
@@ -864,6 +867,186 @@ device_id = "switch_auto_garage_door"
 [actions.state]
 command = "on"
 ```
+
+---
+
+### Modes (`core.mode`)
+
+Named boolean modes driven by solar events or user control.
+Device IDs use a `mode_` prefix.
+
+`mode_night` is **built-in** — created automatically on first startup, cannot
+be deleted. It turns ON at sunset and OFF at sunrise using the lat/lon from
+`homecore.toml`. All other modes must be created explicitly.
+
+#### Built-in: `mode_night`
+
+| When | State |
+|---|---|
+| After sunset (+ `on_offset_minutes`) | `on = true` |
+| After sunrise (+ `off_offset_minutes`) | `on = false` |
+
+The correct state is applied immediately on every startup — no waiting for the
+next solar event.
+
+#### Adjusting offsets
+
+Offsets persist across restarts (written back to `config/modes.toml`).
+
+```bash
+# Turn night mode on 30 minutes before sunset
+curl -X PATCH http://localhost:8080/api/v1/devices/mode_night/state \
+  -H 'Content-Type: application/json' \
+  -d '{"on_offset_minutes": -30}'
+
+# Turn night mode off 15 minutes after sunrise
+curl -X PATCH http://localhost:8080/api/v1/devices/mode_night/state \
+  -H 'Content-Type: application/json' \
+  -d '{"off_offset_minutes": 15}'
+```
+
+#### State attributes
+
+```json
+{
+  "on": true,
+  "kind": "solar",
+  "on_offset_minutes": -30,
+  "off_offset_minutes": 0,
+  "sunset_today": "19:18",
+  "sunrise_today": "06:42",
+  "effective_on": "18:48",
+  "effective_off": "06:42"
+}
+```
+
+`effective_on` / `effective_off` — the actual clock times after offsets are
+applied. Useful for verifying the schedule is what you expect.
+
+#### Rule condition: is it currently night?
+
+```toml
+# Passes only while night mode is active (after sunset, before sunrise)
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+```toml
+# Passes only while it is daytime (after sunrise, before sunset)
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = false
+```
+
+#### Rule trigger: fire at mode change
+
+```toml
+# Trigger whenever mode_night turns on or off
+[trigger]
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+```
+
+Add a condition on the same attribute to restrict to one direction:
+
+```toml
+# Fires only when night mode becomes active (sunset)
+[trigger]
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+#### Full example: turn on porch light at sunset, off at sunrise
+
+```toml
+id   = ""
+name = "Porch Light — Night On"
+
+[trigger]
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_porch_light"
+[actions.state]
+on = true
+```
+
+```toml
+id   = ""
+name = "Porch Light — Day Off"
+
+[trigger]
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = false
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_porch_light"
+[actions.state]
+on = false
+```
+
+#### Creating additional modes
+
+```bash
+# Create a manual mode (user/rule controlled only)
+curl -X POST http://localhost:8080/api/v1/modes \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "mode_away", "name": "Away Mode", "kind": "manual"}'
+```
+
+`id` must start with `mode_`. The new entry is appended to `config/modes.toml`
+and hot-reloaded automatically.
+
+#### List / inspect modes
+
+```bash
+curl http://localhost:8080/api/v1/modes
+curl http://localhost:8080/api/v1/modes/mode_night
+```
+
+#### Delete a mode
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/modes/mode_away
+```
+
+`mode_night` cannot be deleted (returns 400). Deleting a mode removes it from
+`modes.toml` and cleans up its device record from the state store.
 
 ---
 
