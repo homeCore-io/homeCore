@@ -1,0 +1,19 @@
+# WLED Deck - On at Night
+#
+# When night mode activates, turn on the deck LED strip and recall preset 12.
+
+id = "8b5265f9-7b35-4b35-9c94-b149b9d1859a"
+name     = "WLED Deck - On at Night"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+to        = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "wled_deck"
+state     = { on = true, preset = 12 }

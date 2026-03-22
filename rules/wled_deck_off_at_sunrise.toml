@@ -1,0 +1,18 @@
+# WLED Deck - Off at Sunrise
+#
+# At sunrise, turn off the deck LED strip.
+
+id = "8fc7b547-1cd7-4cd7-8697-45c6c01aad30"
+name     = "WLED Deck - Off at Sunrise"
+enabled  = true
+priority = 10
+
+[trigger]
+type           = "sun_event"
+event          = "sunrise"
+offset_minutes = 0
+
+[[actions]]
+type      = "set_device_state"
+device_id = "wled_deck"
+state     = { on = false }
