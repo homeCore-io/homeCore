@@ -14,6 +14,8 @@ and rule authors.
 5. [Action: RepeatUntil](#action-repeatuntil)
 6. [Action: Parallel](#action-parallel)
 7. [Worked Examples](#worked-examples)
+8. [Native Device Types](#native-device-types)
+   - [Virtual Switch](#virtual-switch)
 
 ---
 
@@ -739,6 +741,189 @@ device_id = "plug_humidifier"
 [actions.state]
 on = false
 ```
+
+---
+
+## Native Device Types
+
+HomeCore has two categories of native (core-managed) device types in addition to plugin-managed
+devices. Both appear as first-class devices in the state store and are fully visible via
+`GET /api/v1/devices`. They accept commands on the standard
+`homecore/devices/{id}/cmd` MQTT topic and emit `DeviceStateChanged` events so the rule engine
+can trigger on them.
+
+| Plugin ID     | Prefix        | Manager                       | API route       |
+|---------------|---------------|-------------------------------|-----------------|
+| `core.timer`  | `timer_`      | `timer_manager::TimerManager` | `/api/v1/timers`   |
+| `core.switch` | `switch_`     | `switch_manager::SwitchManager` | `/api/v1/switches` |
+
+---
+
+### Virtual Switch
+
+A virtual switch is a software-only boolean flag (`on: true/false`) with no physical device
+behind it. Use it to represent modes, flags, or states that rules need to read and write —
+e.g., "vacation mode", "guest mode", "sleep mode".
+
+#### Creating a switch
+
+```bash
+POST /api/v1/switches
+Content-Type: application/json
+
+{"id": "vacation_mode", "label": "Vacation Mode"}
+```
+
+This creates a device with `device_id = "switch_vacation_mode"`, `plugin_id = "core.switch"`,
+and initial state `{"on": false}`. The device is immediately visible via `GET /api/v1/devices`.
+
+#### Commands
+
+Send commands via `PATCH /api/v1/devices/{id}/state`:
+
+```json
+{ "command": "on" }
+{ "command": "off" }
+{ "command": "toggle" }
+```
+
+Commands that do not change the current state are silently ignored (no spurious
+`DeviceStateChanged` events).
+
+#### Deleting a switch
+
+```bash
+DELETE /api/v1/devices/switch_vacation_mode
+```
+
+#### Attributes
+
+```json
+{ "on": false }
+```
+
+#### Rule integration — trigger on switch change
+
+```toml
+[trigger]
+type      = "device_state_changed"
+device_id = "switch_vacation_mode"
+attribute = "on"
+
+[[conditions]]
+type      = "device_state"
+device_id = "switch_vacation_mode"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+#### Rule integration — read switch in a script condition
+
+```toml
+[[conditions]]
+type   = "script_expression"
+script = 'device_state("switch_vacation_mode")["on"] == true'
+```
+
+#### Rule integration — set a switch from an action
+
+```toml
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_vacation_mode"
+[actions.state]
+command = "on"
+```
+
+Or from a `RunScript` action:
+
+```rhai
+set_device_state("switch_vacation_mode", #{ command: "off" });
+```
+
+#### Worked example: suppress automation during vacation
+
+```toml
+# vacation_lights_off.toml
+# Turn off all lights when vacation mode is enabled.
+
+id       = "vacation-lights-off"
+name     = "Vacation Mode — Lights Off"
+enabled  = true
+priority = 50
+
+[trigger]
+type      = "device_state_changed"
+device_id = "switch_vacation_mode"
+attribute = "on"
+
+[[conditions]]
+type      = "device_state"
+device_id = "switch_vacation_mode"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type = "parallel"
+
+  [[actions.actions]]
+  type      = "set_device_state"
+  device_id = "light_living_room"
+  [actions.actions.state]
+  command = "off"
+
+  [[actions.actions]]
+  type      = "set_device_state"
+  device_id = "light_kitchen"
+  [actions.actions.state]
+  command = "off"
+
+[[actions]]
+type    = "notify"
+channel = "pushover"
+message = "Vacation mode enabled — all lights turned off."
+```
+
+#### Worked example: guest mode suppresses motion alerts
+
+```toml
+# motion_alert.toml — only alert when guest mode is OFF
+
+[trigger]
+type      = "device_state_changed"
+device_id = "sensor_back_yard"
+attribute = "motion"
+
+[[conditions]]
+type      = "device_state"
+device_id = "sensor_back_yard"
+attribute = "motion"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "switch_guest_mode"
+attribute = "on"
+op        = "eq"
+value     = false
+
+[[actions]]
+type    = "notify"
+channel = "pushover"
+message = "Motion in back yard."
+```
+
+#### Implementation
+
+| File | Role |
+|---|---|
+| `crates/hc-core/src/switch_manager.rs` | `SwitchManager` — listens on event bus, handles `on`/`off`/`toggle`, persists state, emits `DeviceStateChanged` |
+| `crates/hc-core/src/lib.rs` | Spawns `SwitchManager` in `Core::start()` |
+| `crates/hc-api/src/handlers.rs` | `create_switch`, `list_switches` handlers |
+| `crates/hc-api/src/lib.rs` | `/api/v1/switches` route |
 
 ---
 

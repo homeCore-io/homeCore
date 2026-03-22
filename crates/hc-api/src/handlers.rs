@@ -194,6 +194,58 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
     }
 }
 
+// ---------- Switches ----------
+
+#[derive(Deserialize)]
+pub struct CreateSwitchBody {
+    /// Slug used to form the device_id: "vacation_mode" → "switch_vacation_mode".
+    pub id: String,
+    pub label: Option<String>,
+}
+
+pub async fn create_switch(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<CreateSwitchBody>,
+) -> impl IntoResponse {
+    // Enforce the switch_ prefix convention.
+    let device_id = if body.id.starts_with("switch_") {
+        body.id.clone()
+    } else {
+        format!("switch_{}", body.id)
+    };
+
+    if let Ok(Some(_)) = s.store.get_device(&device_id).await {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "switch already exists" }))).into_response();
+    }
+
+    let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
+    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.switch");
+    dev.available = true;
+    dev.attributes.insert("on".into(), json!(false));
+
+    match s.store.upsert_device(&dev).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    match s.store.list_devices().await {
+        Ok(devices) => {
+            let switches: Vec<_> = devices
+                .into_iter()
+                .filter(|d| d.plugin_id == "core.switch")
+                .collect();
+            (StatusCode::OK, Json(json!(switches)))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 // ---------- Areas ----------
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {

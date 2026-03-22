@@ -160,6 +160,8 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/:id/history", get(handlers::device_history))
         // Timers (timer devices are also visible via /devices)
         .route("/timers", get(handlers::list_timers).post(handlers::create_timer))
+        // Switches (switch devices are also visible via /devices)
+        .route("/switches", get(handlers::list_switches).post(handlers::create_switch))
         // Areas
         .route("/areas", get(handlers::list_areas).post(handlers::create_area))
         .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))
