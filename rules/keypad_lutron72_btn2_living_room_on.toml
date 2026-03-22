@@ -1,0 +1,32 @@
+# Keypad lutron_72 Button 1 — Living Room On
+#
+# When button 1 is pressed and the living room group is currently off,
+# turn on the Hue group and light the keypad button LED.
+
+id = "49e76f70-339d-4896-8d14-cd8e1c68c510"
+name     = "Keypad lutron_72 Btn1 - Living Room On"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "lutron_72"
+attribute = "button_1"
+to        = "press"
+
+[[conditions]]
+type      = "device_state"
+device_id = "hue_001788fffe6841b3_group_f891081e_3da3_49ac_a504_3cfd558b970e"
+attribute = "on"
+op        = "eq"
+value     = false
+
+[[actions]]
+type      = "set_device_state"
+device_id = "hue_001788fffe6841b3_group_f891081e_3da3_49ac_a504_3cfd558b970e"
+state     = { on = true }
+
+[[actions]]
+type      = "set_device_state"
+device_id = "lutron_72"
+state     = { set_led = { button = 1, state = 1 } }

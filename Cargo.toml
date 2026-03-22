@@ -15,7 +15,7 @@ members = [
     "plugins/plugin-sdk-rs",
     "plugins/examples/virtual-device",
     "plugins/examples/http-poller",
-    "homecore",
+    "homeCore",
 ]
 
 [workspace.dependencies]
