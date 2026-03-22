@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HomeCore launchd service definition.
+  Install to:
+    System daemon (starts before login, requires root):
+      /Library/LaunchDaemons/com.homecore.homecore.plist
+    User agent (starts on user login, no root needed):
+      ~/Library/LaunchAgents/com.homecore.homecore.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homecore.homecore</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@INSTALL_DIR@@/bin/homecore</string>
+    <string>--home</string>
+    <string>@@INSTALL_DIR@@</string>
+    <string>--config</string>
+    <string>config/homecore.toml</string>
+  </array>
+
+  <!-- Working directory — homecore resolves relative paths from here -->
+  <key>WorkingDirectory</key>
+  <string>@@INSTALL_DIR@@</string>
+
+  <!-- Environment variables -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOMECORE_HOME</key>
+    <string>@@INSTALL_DIR@@</string>
+  </dict>
+
+  <!-- Start automatically when launchd loads this plist -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if the process exits for any reason -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Throttle rapid restart loops (seconds between restarts) -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- Log files — absolute paths required by launchd -->
+  <key>StandardOutPath</key>
+  <string>@@INSTALL_DIR@@/logs/homecore-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@INSTALL_DIR@@/logs/homecore-stderr.log</string>
+
+  <!-- Terminate the entire process group on unload so plugin children die too -->
+  <key>EnableTransactions</key>
+  <false/>
+</dict>
+</plist>

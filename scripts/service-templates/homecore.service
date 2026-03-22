@@ -1,0 +1,42 @@
+[Unit]
+Description=HomeCore Home Automation Server
+Documentation=https://github.com/jeubanks/homeCore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@@USER@@
+Group=@@GROUP@@
+WorkingDirectory=@@INSTALL_DIR@@
+Environment="HOMECORE_HOME=@@INSTALL_DIR@@"
+ExecStart=@@INSTALL_DIR@@/bin/homecore --home @@INSTALL_DIR@@ --config config/homecore.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy — homecore supervises plugins internally, so a crash here
+# means homecore itself died; restart promptly.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Kill the entire cgroup on stop so supervised plugin children are also
+# terminated cleanly.
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Logging — captured by journald; view with: journalctl -u homecore -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecore
+
+# Hardening (optional but recommended for production)
+# Uncomment these after verifying homecore runs correctly as a service.
+#NoNewPrivileges=true
+#ProtectSystem=strict
+#ProtectHome=read-only
+#ReadWritePaths=@@INSTALL_DIR@@/data @@INSTALL_DIR@@/logs
+
+[Install]
+WantedBy=multi-user.target
