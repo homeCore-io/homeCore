@@ -31,6 +31,4 @@ value     = true
 [[actions]]
 type      = "set_device_state"
 device_id = "lutron_scene_oh1_door_phantom"
-
-[actions.state]
-activate = true
+state     = { activate = true }
