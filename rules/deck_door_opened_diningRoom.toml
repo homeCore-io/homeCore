@@ -1,0 +1,16 @@
+
+id = "804a7e76-ea96-47d5-9e7c-6a039b7d7eee"
+name     = "Door Opened - Dining Room"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c01000e813f"
+attribute = "open"
+to        = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_any_deck_door_open"
+state     = { on = true }

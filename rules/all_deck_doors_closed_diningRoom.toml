@@ -1,0 +1,48 @@
+# All Deck Doors Closed - Dining Room trigger
+#
+# When the dining room deck door closes, check if all 4 deck doors are now
+# closed.  If so, turn off the any-deck-door-open virtual switch.
+
+id = "41f2444d-f270-4b3b-8afc-9c273b47b15c"
+name     = "All Deck Doors Closed - Dining Room"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c01000e813f"
+attribute = "open"
+to        = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e813f"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e8304"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e82eb"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0200142eb8"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_any_deck_door_open"
+state     = { on = false }

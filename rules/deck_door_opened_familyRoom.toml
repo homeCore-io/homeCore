@@ -1,0 +1,16 @@
+
+id = "eb5cc369-1658-4834-88b0-03e45efc2173"
+name     = "Door Opened - Family Room"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c0200142eb8"
+attribute = "open"
+to        = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_any_deck_door_open"
+state     = { on = true }
