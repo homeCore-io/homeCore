@@ -25,6 +25,22 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+/// Regex-free check: does the file's `id` field contain an empty string?
+/// Matches `id = ""` with any surrounding whitespace.
+fn has_empty_id(content: &str) -> bool {
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("id") {
+            // strip "id", optional spaces, "=", optional spaces, then check for `""`
+            let after_key = t["id".len()..].trim_start();
+            if let Some(after_eq) = after_key.strip_prefix('=') {
+                return after_eq.trim() == r#""""#;
+            }
+        }
+    }
+    false
+}
+
 // ── Public load function ─────────────────────────────────────────────────────
 
 /// Parse every `*.toml` file in `dir` into a `Vec<Rule>`.
@@ -84,9 +100,23 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
 }
 
 /// Parse a single rule TOML file.
+///
+/// If the file contains `id = ""`, a fresh UUID v4 is generated, written back
+/// into the file in place of the empty string, and used for this rule.  This
+/// lets authors create rule files without having to generate a UUID manually.
 pub fn load_file(path: &Path) -> Result<Rule> {
-    let content = std::fs::read_to_string(path)
+    let mut content = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
+
+    if has_empty_id(&content) {
+        let new_id = uuid::Uuid::new_v4();
+        // Replace the first occurrence of id = "" (handles id="" and id = "" etc.)
+        let updated = replace_empty_id(&content, &new_id.to_string());
+        std::fs::write(path, &updated)
+            .with_context(|| format!("writing generated id back to {}", path.display()))?;
+        info!(file = %path.display(), id = %new_id, "Generated missing rule ID and wrote to file");
+        content = updated;
+    }
 
     let mut rule: Rule = toml::from_str(&content)
         .with_context(|| format!("parsing TOML in {}", path.display()))?;
@@ -99,6 +129,31 @@ pub fn load_file(path: &Path) -> Result<Rule> {
     }
 
     Ok(rule)
+}
+
+/// Replace `id = ""` (any whitespace variant) with `id = "{new_id}"` in content.
+fn replace_empty_id(content: &str, new_id: &str) -> String {
+    let mut result = String::with_capacity(content.len() + 40);
+    let mut replaced = false;
+    for line in content.lines() {
+        if !replaced {
+            let t = line.trim();
+            if t.starts_with("id") {
+                let after_key = t["id".len()..].trim_start();
+                if let Some(after_eq) = after_key.strip_prefix('=') {
+                    if after_eq.trim() == r#""""# {
+                        result.push_str(&format!("id = \"{new_id}\""));
+                        result.push('\n');
+                        replaced = true;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
 }
 
 // ── RuleWatcher ──────────────────────────────────────────────────────────────
