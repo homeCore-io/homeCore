@@ -82,10 +82,11 @@ format  = "pretty"
 ansi    = true
 
 [logging.file]
-enabled = false
+enabled = true
 prefix  = "homecore"
 rotation = "daily"
-format  = "json"
+format  = "pretty"
+#format  = "json"
 
 # Dedicated rule/automation log — captures only hc_core at debug level.
 # Clean audit trail: every trigger check, condition result, and action step.
@@ -131,4 +132,10 @@ enabled = true
 id      = "plugin.zwave"
 binary  = "../hc-zwave/target/debug/hc-zwave"
 config  = "../hc-zwave/config/config.toml"
+enabled = true
+
+[[plugins]]
+id      = "plugin.hue"
+binary  = "../hc-hue/target/debug/hc-hue"
+config  = "../hc-hue/config/config.toml"
 enabled = true

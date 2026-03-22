@@ -47,7 +47,37 @@ pub async fn require_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // ── 1. IP whitelist check ─────────────────────────────────────────────
+    // ── 1. JWT validation (preferred) ─────────────────────────────────────
+    // Always try the Bearer token first so that authenticated users on
+    // whitelisted IPs get their real claims (required for change-password
+    // and other identity-sensitive endpoints).
+    let bearer_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|t| t.to_string());
+
+    if let Some(token) = bearer_token {
+        match state.jwt.validate(&token) {
+            Ok(claims) => {
+                request.extensions_mut().insert(claims);
+                return next.run(request).await;
+            }
+            Err(_) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "invalid or expired token" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // ── 2. IP whitelist fallback (no token provided) ───────────────────────
+    // Only grant whitelist access when the client did not present any token.
+    // This ensures whitelisted IPs can call the API without a token while
+    // still receiving their real JWT claims when one is provided.
     if !state.whitelist.is_empty() {
         // Canonicalize IPv4-mapped IPv6 (::ffff:x.x.x.x → x.x.x.x) so that
         // clients connecting to a dual-stack 0.0.0.0 listener match IPv4 entries.
@@ -72,34 +102,11 @@ pub async fn require_auth(
         }
     }
 
-    // ── 2. JWT validation ─────────────────────────────────────────────────
-    let auth_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let token = match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(t) => t.to_string(),
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "missing or malformed Authorization header" })),
-            )
-                .into_response();
-        }
-    };
-
-    match state.jwt.validate(&token) {
-        Ok(claims) => {
-            request.extensions_mut().insert(claims);
-            next.run(request).await
-        }
-        Err(_) => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid or expired token" })),
-        )
-            .into_response(),
-    }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "missing or malformed Authorization header" })),
+    )
+        .into_response()
 }
 
 /// Synthetic Admin claims injected for whitelisted source IPs.
