@@ -47,6 +47,8 @@ port = 8080
 [broker]
 host = "0.0.0.0"
 port = 1883
+# MQTT v5 listener (used by newer devices / Shelly Gen2/Gen3).  Set to null to disable.
+# v5_port = 1884
 # tls_port = 8883
 # cert_path = "config/broker.crt"   # relative to base_dir
 # key_path  = "config/broker.key"   # relative to base_dir
@@ -198,9 +200,6 @@ app_name  = "homecore"
 # level = "warn"           # syslog-only level override (defaults to [logging].level)
 
 # ---------------------------------------------------------------------------
-# Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Plugins
 #
 # HomeCore spawns each enabled plugin as a child process and supervises it
@@ -209,28 +208,34 @@ app_name  = "homecore"
 # ---------------------------------------------------------------------------
 
 [[plugins]]
- id      = "plugin.yolink"
- binary  = "plugins/hc-yolink/bin/hc-yolink"
- args    = ["plugins/hc-yolink/config/config.toml"]
- enabled = true
+id      = "plugin.yolink"
+binary  = "plugins/hc-yolink/bin/hc-yolink"
+config  = "plugins/hc-yolink/config/config.toml"
+enabled = true
 
 [[plugins]]
- id      = "plugin.lutron"
- binary  = "plugins/hc-lutron/bin/hc-lutron"
- args    = ["plugins/hc-lutron/config/config.toml"]
- enabled = true
+id      = "plugin.lutron"
+binary  = "plugins/hc-lutron/bin/hc-lutron"
+config  = "plugins/hc-lutron/config/config.toml"
+enabled = true
 
 [[plugins]]
- id      = "plugin.sonos"
- binary  = "plugins/hc-sonos/bin/hc-sonos"
- args    = ["plugins/hc-sonos/config/config.toml"]
- enabled = true
+id      = "plugin.sonos"
+binary  = "plugins/hc-sonos/bin/hc-sonos"
+config  = "plugins/hc-sonos/config/config.toml"
+enabled = true
 
 [[plugins]]
- id      = "plugin.zwave"
- binary  = "plugins/hc-zwave/bin/hc-zwave"
- args    = ["plugins/hc-zwave/config/config.toml"]
- enabled = true
+id      = "plugin.zwave"
+binary  = "plugins/hc-zwave/bin/hc-zwave"
+config  = "plugins/hc-zwave/config/config.toml"
+enabled = true
+
+[[plugins]]
+id      = "plugin.hue"
+binary  = "plugins/hc-hue/bin/hc-hue"
+config  = "plugins/hc-hue/config/config.toml"
+enabled = false
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
