@@ -24,8 +24,4 @@ actions = [
 [[actions]]
 type      = "set_device_state"
 device_id = "timer_garage_close"
-
-[actions.state]
-command       = "start"
-duration_secs = 600
-label         = "Garage OH1 auto-close"
+state     = { command = "start", duration_secs = 600, label = "Garage OH1 auto-close" }
