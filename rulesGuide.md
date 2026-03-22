@@ -22,7 +22,9 @@ priority = 10                                         # higher fires first
 # ... one or more actions (run in sequence) ...
 ```
 
-Generate a UUID: `python3 -c "import uuid; print(uuid.uuid4())"`
+Set `id = ""` and the engine will generate a UUID on first load and write it
+back into the file automatically. Or generate one manually:
+`python3 -c "import uuid; print(uuid.uuid4())"`
 
 ---
 
