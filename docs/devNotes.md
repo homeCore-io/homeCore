@@ -3514,3 +3514,74 @@ for a in branch {
 ```
 
 This matches the existing `RepeatUntil` pattern in the same file.
+
+
+---
+
+## Plugin Notes — hc-hue
+
+### Device ID types
+
+The Hue bridge registers **multiple HomeCore devices per physical light bulb**.
+Each physical device produces at minimum:
+
+| Type | device_id pattern | Controllable? |
+|------|-------------------|---------------|
+| Light | `hue_{bridge}_light_{rid}` | **Yes** — use this in rules/commands |
+| Zigbee connectivity | `hue_{bridge}_zigbee_connectivity_{rid}` | No — read-only sensor |
+| Device power | `hue_{bridge}_device_power_{rid}` | No — read-only sensor |
+
+**Always use the `light_*` device ID** when writing rules or commands that turn
+a light on/off or change brightness. The `zigbee_connectivity_*` and
+`device_power_*` IDs are auxiliary sensor devices — sending commands to them
+is silently ignored.
+
+To find the correct light device ID:
+
+```sh
+curl -s http://localhost:8080/api/v1/devices \
+  | jq '[.[] | select(.plugin_id == "plugin.hue" and (.device_id | contains("light_"))) | {id: .device_id, name}] | sort_by(.name)'
+```
+
+### Bridge app_key persistence
+
+The Hue bridge requires an **app_key** (username) for all authenticated API
+calls (`/clip/v2/resource/light`, `/clip/v2/resource/grouped_light`, etc.).
+
+If the app_key is not configured, `fetch_lights()` / `fetch_grouped_lights()` /
+`fetch_scenes()` all return empty, which means:
+- No lights, groups, or scenes are registered with HomeCore
+- No MQTT cmd topics are subscribed
+- Commands sent to those devices are silently dropped
+- The heartbeat log will show `lights_total=0 groups_total=0 scenes_total=0`
+
+**After pairing**, the app_key is now automatically written to the `[[bridges]]`
+section of `config/config.toml` so it survives restarts.
+
+To pair (first time or after a config wipe):
+1. Press the link button on the Hue bridge
+2. From hc-tui: select the bridge device → send `{"action": "pair_bridge"}`
+3. Watch the log for `"Bridge app_key saved to config"` — the key is now persisted
+
+### Grouped lights vs individual lights
+
+Hue "rooms" and "zones" map to `grouped_light` resources in the Hue v2 API.
+These appear in HomeCore as `hue_{bridge}_group_{grouped_light_rid}` devices.
+
+Commands to group devices support: `on` (bool), `brightness_pct` (0–100).
+Advanced fields (color, color temp, effect, gradient) are **not** supported by
+the Hue grouped_light endpoint and will be rejected.
+
+To control a group:
+```toml
+[[actions]]
+type      = "set_device_state"
+device_id = "hue_001788fffe6841b3_group_f891081e_3da3_49ac_a504_3cfd558b970e"
+state     = { on = true }
+```
+
+To list all group device IDs:
+```sh
+curl -s http://localhost:8080/api/v1/devices \
+  | jq '[.[] | select(.plugin_id == "plugin.hue" and (.device_id | contains("_group_"))) | {id: .device_id, name}]'
+```
