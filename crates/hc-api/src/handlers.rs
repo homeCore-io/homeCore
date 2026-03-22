@@ -184,6 +184,7 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
             let timers: Vec<_> = devices
                 .into_iter()
                 .filter(|d| d.plugin_id == "core.timer")
+                .map(compute_timer_remaining)
                 .collect();
             (StatusCode::OK, Json(json!(timers)))
         }
@@ -192,6 +193,45 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
             Json(json!({ "error": e.to_string() })),
         ),
     }
+}
+
+pub async fn get_timer(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    _: DevicesRead,
+) -> impl IntoResponse {
+    let device_id = if id.starts_with("timer_") {
+        id.clone()
+    } else {
+        format!("timer_{id}")
+    };
+    match s.store.get_device(&device_id).await {
+        Ok(Some(dev)) => (StatusCode::OK, Json(json!(compute_timer_remaining(dev)))).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "timer not found" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// For a running timer, recompute `remaining_secs` from `started_at` + `duration_secs`
+/// so callers always see an accurate countdown without requiring periodic store writes.
+fn compute_timer_remaining(mut dev: hc_types::device::DeviceState) -> hc_types::device::DeviceState {
+    let is_running = dev.attributes.get("state").and_then(Value::as_str) == Some("running");
+    if !is_running {
+        return dev;
+    }
+    let duration_secs = dev.attributes.get("duration_secs").and_then(Value::as_u64).unwrap_or(0);
+    let started_at = dev
+        .attributes
+        .get("started_at")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    if let Some(started) = started_at {
+        let elapsed = (chrono::Utc::now() - started).num_seconds().max(0) as u64;
+        let remaining = duration_secs.saturating_sub(elapsed);
+        dev.attributes.insert("remaining_secs".into(), json!(remaining));
+    }
+    dev
 }
 
 // ---------- Switches ----------
