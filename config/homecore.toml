@@ -210,20 +210,26 @@ app_name  = "homecore"
 
 [[plugins]]
  id      = "plugin.yolink"
- binary  = "bin/hc-yolink"
- config  = "config/plugins/hc-yolink.toml"
+ binary  = "plugins/hc-yolink/bin/hc-yolink"
+ args    = ["plugins/hc-yolink/config/config.toml"]
  enabled = true
 
 [[plugins]]
  id      = "plugin.lutron"
- binary  = "bin/hc-lutron"
- config  = "config/plugins/hc-lutron.toml"
+ binary  = "plugins/hc-lutron/bin/hc-lutron"
+ args    = ["plugins/hc-lutron/config/config.toml"]
  enabled = true
 
 [[plugins]]
  id      = "plugin.sonos"
- binary  = "bin/hc-sonos"
- config  = "config/plugins/hc-sonos.toml"
+ binary  = "plugins/hc-sonos/bin/hc-sonos"
+ args    = ["plugins/hc-sonos/config/config.toml"]
+ enabled = true
+
+[[plugins]]
+ id      = "plugin.zwave"
+ binary  = "plugins/hc-zwave/bin/hc-zwave"
+ args    = ["plugins/hc-zwave/config/config.toml"]
  enabled = true
 
 # ---------------------------------------------------------------------------
