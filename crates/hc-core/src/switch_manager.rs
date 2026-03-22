@@ -102,12 +102,24 @@ impl SwitchManager {
     // -----------------------------------------------------------------------
 
     async fn handle_cmd(&self, device_id: &str, payload: &[u8]) {
-        let cmd: SwitchCommand = match serde_json::from_slice(payload) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(%device_id, error = %e, "Switch: invalid command payload");
-                return;
+        // Accept both:
+        //   {"command": "on" | "off" | "toggle"}  — explicit command form
+        //   {"on": true | false}                   — state-patch form (from TUI / curl)
+        let cmd: SwitchCommand = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
+            if let Some(on) = v.get("on").and_then(|b| b.as_bool()) {
+                if on { SwitchCommand::On } else { SwitchCommand::Off }
+            } else {
+                match serde_json::from_value(v) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(%device_id, error = %e, "Switch: invalid command payload");
+                        return;
+                    }
+                }
             }
+        } else {
+            warn!(%device_id, "Switch: command payload is not valid JSON");
+            return;
         };
         debug!(%device_id, ?cmd, "Switch command received");
 

@@ -57,6 +57,8 @@ pub struct AppState {
     pub event_log: EventLog,
     /// IP/CIDR ranges that bypass JWT authentication and receive Admin access.
     pub whitelist: Arc<Vec<IpNet>>,
+    /// Path to `config/modes.toml` — used by mode API handlers.
+    pub modes_path: Option<Arc<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -68,6 +70,7 @@ impl AppState {
         rule_file_store: Option<RuleFileStore>,
         jwt: JwtService,
         whitelist: Vec<IpNet>,
+        modes_path: Option<std::path::PathBuf>,
     ) -> Self {
         let plugins = Arc::new(RwLock::new(HashMap::new()));
 
@@ -128,6 +131,7 @@ impl AppState {
             jwt: Arc::new(jwt),
             event_log,
             whitelist: Arc::new(whitelist),
+            modes_path: modes_path.map(|p| Arc::new(p)),
         }
     }
 }
@@ -163,6 +167,9 @@ pub fn router(state: AppState) -> Router {
         .route("/timers/:id", get(handlers::get_timer))
         // Switches (switch devices are also visible via /devices)
         .route("/switches", get(handlers::list_switches).post(handlers::create_switch))
+        // Modes (mode devices are also visible via /devices)
+        .route("/modes", get(handlers::list_modes).post(handlers::create_mode))
+        .route("/modes/:id", get(handlers::get_mode).delete(handlers::delete_mode))
         // Areas
         .route("/areas", get(handlers::list_areas).post(handlers::create_area))
         .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))

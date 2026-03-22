@@ -286,6 +286,109 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
     }
 }
 
+// ---------- Modes ----------
+
+/// `GET /api/v1/modes` — list all mode configs + live device state.
+pub async fn list_modes(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    let path = match s.modes_path.as_ref() {
+        Some(p) => p.as_ref().clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))),
+    };
+    let configs = match hc_core::mode_manager::load_modes(&path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    };
+    let devices = s.store.list_devices().await.unwrap_or_default();
+    let result: Vec<Value> = configs.into_iter().map(|cfg| {
+        let state = devices.iter().find(|d| d.device_id == cfg.id);
+        json!({ "config": cfg, "state": state })
+    }).collect();
+    (StatusCode::OK, Json(json!(result)))
+}
+
+/// `GET /api/v1/modes/:id` — single mode config + live state.
+pub async fn get_mode(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let path = match s.modes_path.as_ref() {
+        Some(p) => p.as_ref().clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))).into_response(),
+    };
+    let configs = match hc_core::mode_manager::load_modes(&path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    match configs.into_iter().find(|c| c.id == id) {
+        Some(cfg) => {
+            let state = s.store.get_device(&id).await.ok().flatten();
+            (StatusCode::OK, Json(json!({ "config": cfg, "state": state }))).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "mode not found" }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateModeBody {
+    pub id:   String,
+    pub name: String,
+    pub kind: hc_core::mode_manager::ModeKind,
+}
+
+/// `POST /api/v1/modes` — create a new mode (appends to modes.toml).
+pub async fn create_mode(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<CreateModeBody>,
+) -> impl IntoResponse {
+    let path = match s.modes_path.as_ref() {
+        Some(p) => p.as_ref().clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))),
+    };
+    if !body.id.starts_with("mode_") {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id must start with 'mode_'" })));
+    }
+    let cfg = hc_core::mode_manager::ModeConfig {
+        id:   body.id,
+        name: body.name,
+        kind: body.kind,
+        on_event:           None,
+        off_event:          None,
+        on_offset_minutes:  0,
+        off_offset_minutes: 0,
+    };
+    match hc_core::mode_manager::append_mode(&path, cfg.clone()) {
+        Ok(_) => (StatusCode::CREATED, Json(json!(cfg))),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
+/// `DELETE /api/v1/modes/:id` — remove a mode.
+/// Rejects `mode_night` (built-in) with 400.
+pub async fn delete_mode(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if id == hc_core::mode_manager::MODE_NIGHT_ID {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "mode_night is a built-in mode and cannot be deleted"
+        }))).into_response();
+    }
+    let path = match s.modes_path.as_ref() {
+        Some(p) => p.as_ref().clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))).into_response(),
+    };
+    if let Err(e) = hc_core::mode_manager::remove_mode(&path, &id) {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+    if let Err(e) = s.store.delete_device(&id).await {
+        tracing::warn!(mode_id = %id, error = %e, "delete_mode: failed to remove device from store");
+    }
+    (StatusCode::NO_CONTENT, Json(json!({}))).into_response()
+}
+
 // ---------- Areas ----------
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {

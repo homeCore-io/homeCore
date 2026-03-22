@@ -100,8 +100,10 @@ fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
 
 /// Compute the local time of a solar event using the sunrise equation.
 ///
+/// Public to `crate` so `ModeManager` can reuse the calculation.
+///
 /// Returns `None` if the event doesn't occur on this day (polar regions).
-fn solar_event_time(
+pub(crate) fn solar_event_time(
     lat: f64,
     lon: f64,
     date: chrono::NaiveDate,

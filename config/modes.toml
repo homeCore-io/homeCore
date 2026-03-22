@@ -1,0 +1,12 @@
+# HomeCore mode definitions.
+# This file is managed automatically — API-created modes are appended here.
+# Edit directly or use POST /api/v1/modes.
+
+[[modes]]
+id   = "mode_night"
+name = "Night Mode"
+kind = "solar"
+on_event  = "sunset"    # solar event that turns night mode ON
+off_event = "sunrise"   # solar event that turns night mode OFF
+# on_offset_minutes  = 0    # negative = before event, positive = after
+# off_offset_minutes = 0

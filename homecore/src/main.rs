@@ -499,8 +499,11 @@ async fn main() -> Result<()> {
         rules
     };
 
+    let modes_path = base_dir.join("config").join("modes.toml");
+
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
-        .with_location(config.location.latitude, config.location.longitude);
+        .with_location(config.location.latitude, config.location.longitude)
+        .with_modes(modes_path.clone());
 
     // Load ecosystem profiles and build the router.  Done before spawning the
     // MQTT client so add_subscription("#") runs first.
@@ -656,6 +659,7 @@ async fn main() -> Result<()> {
         Some(rule_file_store),
         jwt,
         whitelist,
+        Some(modes_path),
     );
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
