@@ -249,6 +249,12 @@ config  = "plugins/hc-zwave/config/config.toml"
 enabled = true
 
 [[plugins]]
+id      = "plugin.wled"
+binary  = "plugins/hc-wled/bin/hc-wled"
+config  = "plugins/hc-wled/config/config.toml"
+enabled = true
+
+[[plugins]]
 id      = "plugin.hue"
 binary  = "plugins/hc-hue/bin/hc-hue"
 config  = "plugins/hc-hue/config/config.toml"
