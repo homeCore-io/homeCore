@@ -139,3 +139,9 @@ id      = "plugin.hue"
 binary  = "../hc-hue/target/debug/hc-hue"
 config  = "../hc-hue/config/config.toml"
 enabled = true
+
+[[plugins]]
+id      = "plugin.wled"
+binary  = "../hc-wled/target/debug/hc-wled"
+config  = "../hc-wled/config/config.toml"
+enabled = true

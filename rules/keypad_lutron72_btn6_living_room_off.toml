@@ -3,15 +3,15 @@
 # When button 1 is pressed and the living room group is currently on,
 # turn off the Hue group and clear the keypad button LED.
 
-id = "9d3596f0-e987-4a92-b709-5d9248e041d8"
-name     = "Keypad lutron_72 Btn1 - Living Room Off"
+id = "12c084ab-f8f3-4271-a96d-97ac7560895c"
+name     = "Keypad lutron_72 Btn6 - Living Room Off"
 enabled  = true
 priority = 10
 
 [trigger]
 type      = "device_state_changed"
 device_id = "lutron_72"
-attribute = "button_1"
+attribute = "button_6"
 to        = "press"
 
 [[conditions]]
