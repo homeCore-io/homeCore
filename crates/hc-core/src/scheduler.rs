@@ -1,10 +1,18 @@
 //! Scheduler — fires time-based triggers onto the event bus.
 //!
-//! Watches all enabled `TimeOfDay` rules and emits a synthetic event at the
-//! right moment so the rule engine can evaluate them normally.
+//! Watches all enabled `TimeOfDay` and `SunEvent` rules and emits a synthetic
+//! event at the right moment so the rule engine can evaluate them normally.
 //!
 //! Solar event support (sunrise/sunset) is computed locally from lat/lon
 //! without any cloud dependency.
+//!
+//! # Catch-up on restart
+//!
+//! On startup the scheduler performs a one-time catch-up pass before entering
+//! the main loop.  Any rule whose trigger time falls within the configured
+//! `catchup_window_minutes` window (i.e. `(now - window, now]` in local time)
+//! is fired immediately.  This handles the common case of a process restart
+//! shortly after a solar or time-of-day trigger was due.
 
 use crate::EventBus;
 use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
@@ -13,31 +21,47 @@ use hc_types::rule::{Rule, SunEventType, Trigger};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct Scheduler {
-    bus: EventBus,
-    latitude: f64,
-    longitude: f64,
+    bus:                    EventBus,
+    latitude:               f64,
+    longitude:              f64,
     /// Shared rule set — reads the live handle each tick so hot-reloaded
     /// time-based rules take effect immediately without a restart.
-    rules: Arc<RwLock<Vec<Rule>>>,
+    rules:                  Arc<RwLock<Vec<Rule>>>,
+    /// How many minutes back from now to search for missed triggers on startup.
+    /// Set to 0 to disable catch-up entirely.
+    catchup_window_minutes: u32,
 }
 
 impl Scheduler {
     pub fn new(
-        bus: EventBus,
-        latitude: f64,
-        longitude: f64,
-        rules: Arc<RwLock<Vec<Rule>>>,
+        bus:                    EventBus,
+        latitude:               f64,
+        longitude:              f64,
+        rules:                  Arc<RwLock<Vec<Rule>>>,
+        catchup_window_minutes: u32,
     ) -> Self {
-        Self { bus, latitude, longitude, rules }
+        Self { bus, latitude, longitude, rules, catchup_window_minutes }
     }
 
     /// Drive the scheduler loop.  Ticks once per minute and fires any rules
     /// whose `TimeOfDay` or `SunEvent` trigger matches the current time.
     pub async fn run(self) {
-        info!(lat = self.latitude, lon = self.longitude, "Scheduler started");
+        info!(
+            lat                    = self.latitude,
+            lon                    = self.longitude,
+            catchup_window_minutes = self.catchup_window_minutes,
+            "Scheduler started"
+        );
+
+        // ── Startup catch-up ────────────────────────────────────────────────
+        if self.catchup_window_minutes > 0 {
+            self.fire_catchup().await;
+        }
+
+        // ── Main polling loop ───────────────────────────────────────────────
         loop {
             let now = Local::now();
             let current_time = now.time().with_second(0).unwrap_or(now.time());
@@ -89,6 +113,89 @@ impl Scheduler {
             let secs_until_next_minute = 60 - now.second() as u64;
             tokio::time::sleep(Duration::from_secs(secs_until_next_minute)).await;
         }
+    }
+
+    /// Catch-up pass: fire any time-based rules whose trigger window was missed
+    /// while the process was down.
+    ///
+    /// Checks `(now - catchup_window_minutes, now]` in local wall-clock time.
+    /// Both `SunEvent` and `TimeOfDay` triggers are considered.
+    async fn fire_catchup(&self) {
+        let now = Local::now();
+        let now_time = now.time();
+        // Round window_start to the minute boundary so a trigger at exactly
+        // (now - window) is included rather than narrowly excluded.
+        let window_start_naive = (now - chrono::Duration::minutes(self.catchup_window_minutes as i64))
+            .time()
+            .with_second(0)
+            .unwrap_or(now_time);
+        let today = now.date_naive();
+        let weekday = now.weekday();
+
+        let rules = self.rules.read().await;
+        let mut fired: u32 = 0;
+
+        for rule in rules.iter() {
+            if !rule.enabled {
+                continue;
+            }
+
+            let fires = match &rule.trigger {
+                Trigger::SunEvent { event, offset_minutes } => {
+                    match solar_event_time(self.latitude, self.longitude, today, *event, *offset_minutes) {
+                        Some(sun_time) => in_catchup_window(sun_time, window_start_naive, now_time),
+                        None => false,
+                    }
+                }
+                Trigger::TimeOfDay { time, days } => {
+                    let day_ok = days.is_empty() || days.contains(&weekday);
+                    day_ok && in_catchup_window(*time, window_start_naive, now_time)
+                }
+                _ => false,
+            };
+
+            if fires {
+                fired += 1;
+                info!(
+                    rule_name              = %rule.name,
+                    rule_id               = %rule.id,
+                    catchup_window_minutes = self.catchup_window_minutes,
+                    "Scheduler catch-up: firing missed time trigger"
+                );
+                if let Err(e) = self.bus.publish(Event::Custom {
+                    timestamp:  chrono::Utc::now(),
+                    event_type: "scheduler_tick".into(),
+                    payload:    serde_json::json!({ "rule_id": rule.id }),
+                }) {
+                    warn!(rule_id = %rule.id, error = %e, "Scheduler catch-up: failed to publish event");
+                }
+            }
+        }
+
+        if fired > 0 {
+            info!(
+                count                  = fired,
+                window_minutes         = self.catchup_window_minutes,
+                "Scheduler catch-up complete"
+            );
+        } else {
+            debug!(window_minutes = self.catchup_window_minutes, "Scheduler catch-up: no missed triggers found");
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns true if `trigger` (seconds zeroed) falls within `(window_start, now]`,
+/// handling the case where the window crosses midnight.
+fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime) -> bool {
+    let t = trigger.with_second(0).unwrap_or(trigger);
+    if window_start <= now {
+        // Normal case: window is contained within a single calendar day.
+        t >= window_start && t <= now
+    } else {
+        // Window crosses midnight (e.g. window_start = 23:55, now = 00:10).
+        t >= window_start || t <= now
     }
 }
 

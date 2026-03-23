@@ -116,6 +116,9 @@ app_name = "homecore"
 [startup]
 plugin_ready_delay_secs = 10
 
+[scheduler]
+catchup_window_minutes = 15
+
 # ---------------------------------------------------------------------------
 # Plugins — paths relative to HOMECORE_HOME = homeCore/homeCore/
 # Plugin repos sit one level up at homeCore/hc-*/

@@ -217,6 +217,17 @@ app_name  = "homecore"
 plugin_ready_delay_secs = 10
 
 # ---------------------------------------------------------------------------
+# Scheduler
+#
+# catchup_window_minutes: on startup the scheduler fires any time-based rules
+# (SunEvent, TimeOfDay) whose trigger fell within this window.  This handles
+# the common case of a brief restart just after sunrise or a scheduled event.
+# Set to 0 to disable.  Default: 15.
+# ---------------------------------------------------------------------------
+[scheduler]
+catchup_window_minutes = 15
+
+# ---------------------------------------------------------------------------
 # Plugins
 #
 # HomeCore spawns each enabled plugin as a child process and supervises it

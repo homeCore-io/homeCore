@@ -64,6 +64,9 @@ pub struct Core {
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
     startup_delay_secs: u64,
+    /// Minutes back from startup to search for missed time-based triggers.
+    /// 0 disables catch-up entirely.  Default: 15.
+    catchup_window_minutes: u32,
 }
 
 impl Core {
@@ -72,7 +75,7 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10 }
+        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15 }
     }
 
     /// Override the plugin startup grace period (default: 10 s).
@@ -104,6 +107,13 @@ impl Core {
 
     pub fn with_modes(mut self, path: std::path::PathBuf) -> Self {
         self.modes_path = Some(path);
+        self
+    }
+
+    /// Set the catch-up window for missed time-based triggers on restart.
+    /// Set to 0 to disable.  Default: 15 minutes.
+    pub fn with_catchup_window(mut self, minutes: u32) -> Self {
+        self.catchup_window_minutes = minutes;
         self
     }
 
@@ -162,6 +172,7 @@ impl Core {
             self.location.latitude,
             self.location.longitude,
             Arc::clone(&rules_handle),
+            self.catchup_window_minutes,
         );
         tokio::spawn(sched.run());
 

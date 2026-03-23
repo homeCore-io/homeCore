@@ -121,6 +121,8 @@ struct AppConfig {
     #[serde(default)]
     startup: StartupSection,
     #[serde(default)]
+    scheduler: SchedulerSection,
+    #[serde(default)]
     logging: LoggingConfig,
     #[serde(default)]
     plugins: Vec<PluginEntry>,
@@ -326,6 +328,25 @@ impl Default for StartupSection {
     fn default() -> Self { Self { plugin_ready_delay_secs: default_startup_delay() } }
 }
 
+/// `[scheduler]` section of homecore.toml.
+#[derive(Deserialize)]
+struct SchedulerSection {
+    /// How many minutes back from startup to search for missed time-based
+    /// triggers (SunEvent and TimeOfDay).  Any rule whose scheduled time falls
+    /// within `(now - window, now]` is fired immediately on startup so that a
+    /// brief process restart does not silently skip an automation.
+    ///
+    /// Set to 0 to disable catch-up entirely.  Default: 15.
+    #[serde(default = "default_catchup_window")]
+    catchup_window_minutes: u32,
+}
+
+fn default_catchup_window() -> u32 { 15 }
+
+impl Default for SchedulerSection {
+    fn default() -> Self { Self { catchup_window_minutes: default_catchup_window() } }
+}
+
 #[derive(Deserialize)]
 struct LocationSection {
     latitude: f64,
@@ -529,7 +550,8 @@ async fn main() -> Result<()> {
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude)
         .with_modes(modes_path.clone())
-        .with_startup_delay(config.startup.plugin_ready_delay_secs);
+        .with_startup_delay(config.startup.plugin_ready_delay_secs)
+        .with_catchup_window(config.scheduler.catchup_window_minutes);
 
     // Load ecosystem profiles and build the router.  Done before spawning the
     // MQTT client so add_subscription("#") runs first.
