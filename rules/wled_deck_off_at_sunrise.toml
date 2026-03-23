@@ -1,6 +1,9 @@
 # WLED Deck - Off at Sunrise
 #
-# At sunrise, turn off the deck LED strip.
+# When night mode ends (sunrise), turn off the deck LED strip.
+# Triggers on mode_night turning off rather than sun_event directly,
+# so HomeCore restarts after sunrise still correctly turn off the lights
+# (mode_manager applies initial solar state at startup with catch-up).
 
 id = "8fc7b547-1cd7-4cd7-8697-45c6c01aad30"
 name     = "WLED Deck - Off at Sunrise"
@@ -8,9 +11,10 @@ enabled  = true
 priority = 10
 
 [trigger]
-type           = "sun_event"
-event          = "sunrise"
-offset_minutes = 0
+type      = "device_state_changed"
+device_id = "mode_night"
+attribute = "on"
+to        = false
 
 [[actions]]
 type      = "set_device_state"
