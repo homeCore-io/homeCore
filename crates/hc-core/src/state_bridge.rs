@@ -116,7 +116,7 @@ impl StateBridge {
         // --- Canonical HomeCore schema handling ---
         let parts: Vec<&str> = topic.splitn(4, '/').collect();
 
-        // homecore/devices/{id}/state | state/partial | availability | cmd
+        // homecore/devices/{id}/state | state/partial | availability | schema | cmd
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "devices" {
             let device_id = parts[2];
             match parts[3] {
@@ -134,6 +134,9 @@ impl StateBridge {
                         "online" | "Online" | "1" | "true"
                     );
                     return self.handle_availability(device_id, available).await;
+                }
+                "schema" => {
+                    return self.handle_device_schema(device_id, payload).await;
                 }
                 _ => {}
             }
@@ -314,6 +317,13 @@ impl StateBridge {
             }
         }
 
+        Ok(())
+    }
+
+    async fn handle_device_schema(&self, device_id: &str, payload: &[u8]) -> Result<()> {
+        let schema: hc_types::DeviceSchema = serde_json::from_slice(payload)?;
+        self.store.upsert_device_schema(device_id, &schema).await?;
+        debug!(device_id, "Device schema stored");
         Ok(())
     }
 

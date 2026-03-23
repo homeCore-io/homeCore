@@ -76,6 +76,11 @@ level = "debug"
 # hc_mqtt_client = "debug"
 # hc_broker      = "warn"
 
+# Live log streaming over WebSocket (GET /api/v1/logs/stream).
+[logging.stream]
+enabled          = true
+ring_buffer_size = 500
+
 [logging.stderr]
 enabled = true
 format  = "pretty"

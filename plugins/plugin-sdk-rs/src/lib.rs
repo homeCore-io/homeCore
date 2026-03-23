@@ -41,6 +41,22 @@ impl DevicePublisher {
             .await
             .context("DevicePublisher::set_available failed")
     }
+
+    /// Publish a device capability schema (retained) so HomeCore stores it and
+    /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
+    pub async fn register_device_schema(
+        &self,
+        device_id: &str,
+        schema: &hc_types::DeviceSchema,
+    ) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/schema");
+        let payload = serde_json::to_vec(schema)
+            .context("serialising device schema")?;
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .context("DevicePublisher::register_device_schema failed")
+    }
 }
 
 /// Connection configuration for a plugin.
@@ -177,6 +193,22 @@ impl PluginClient {
             .context("register_device_typed failed")?;
         info!(device_id, device_type, "Device registered (typed)");
         Ok(())
+    }
+
+    /// Publish a device capability schema (retained) so HomeCore stores it and
+    /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
+    pub async fn register_device_schema(
+        &self,
+        device_id: &str,
+        schema: &hc_types::DeviceSchema,
+    ) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/schema");
+        let payload = serde_json::to_vec(schema)
+            .context("serialising device schema")?;
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .context("register_device_schema failed")
     }
 
     /// Return a [`DevicePublisher`] that can publish state concurrently with `run()`.

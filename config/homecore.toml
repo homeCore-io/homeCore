@@ -160,6 +160,12 @@ level = "info"
 # hc_state       = "info"
 # hc_topic_map   = "debug"
 
+# Live log streaming over WebSocket (GET /api/v1/logs/stream).
+# ring_buffer_size: lines of history sent to new subscribers.
+[logging.stream]
+enabled          = true
+ring_buffer_size = 500
+
 # Stderr output (enabled by default)
 [logging.stderr]
 enabled = true
