@@ -63,6 +63,7 @@ pub struct Core {
     router: Option<EcosystemRouter>,
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
+    startup_delay_secs: u64,
 }
 
 impl Core {
@@ -71,7 +72,17 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None }
+        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10 }
+    }
+
+    /// Override the plugin startup grace period (default: 10 s).
+    ///
+    /// During this window after startup the mode manager waits before
+    /// publishing initial mode states, giving plugins time to connect and
+    /// subscribe to their cmd topics.
+    pub fn with_startup_delay(mut self, secs: u64) -> Self {
+        self.startup_delay_secs = secs;
+        self
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
@@ -139,6 +150,7 @@ impl Core {
                 self.state.clone(),
                 self.location,
                 modes_path,
+                self.startup_delay_secs,
             );
             tokio::spawn(mode_mgr.start());
         }

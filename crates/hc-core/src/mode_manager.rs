@@ -263,6 +263,7 @@ pub struct ModeManager {
     state:     StateStore,
     location:  LocationConfig,
     modes_path: PathBuf,
+    startup_delay_secs: u64,
 }
 
 impl ModeManager {
@@ -271,8 +272,9 @@ impl ModeManager {
         state:     StateStore,
         location:  LocationConfig,
         modes_path: PathBuf,
+        startup_delay_secs: u64,
     ) -> Self {
-        Self { bus, state, location, modes_path }
+        Self { bus, state, location, modes_path, startup_delay_secs }
     }
 
     pub async fn start(self) {
@@ -288,7 +290,16 @@ impl ModeManager {
             }
         };
 
-        // Set correct on/off state immediately on startup.
+        // Wait for plugins to connect and subscribe before publishing initial
+        // mode states.  Without this delay, commands triggered by the initial
+        // state (e.g. "mode_night on → turn on wled_deck") are published before
+        // the plugin has subscribed to its cmd topic and are silently dropped.
+        if self.startup_delay_secs > 0 {
+            info!(secs = self.startup_delay_secs, "ModeManager: waiting for plugins to initialise");
+            tokio::time::sleep(Duration::from_secs(self.startup_delay_secs)).await;
+        }
+
+        // Set correct on/off state after plugins are ready.
         self.apply_initial_states(&modes).await;
 
         let (reload_tx, mut reload_rx) = mpsc::channel::<()>(4);
