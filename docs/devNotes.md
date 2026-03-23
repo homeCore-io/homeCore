@@ -1296,8 +1296,8 @@ All `CallService` actions in the process share a single `reqwest::Client` (initi
 |---|---|---|
 | `DeviceStateChanged` | `device_id`; optional `attribute` | Any MQTT state publish for that device. Add `attribute` to narrow to one field (e.g. `"on"`). |
 | `MqttMessage` | `topic_pattern` | Raw MQTT message on a matching topic. Supports `+` (one level) and `#` (rest of path). |
-| `TimeOfDay` | `time` (HH:MM), `days` (array of day names) | Scheduler fires at the given time on specified days. |
-| `SunEvent` | `event` (`"Sunrise"` or `"Sunset"`), `offset_minutes` | Computed locally from lat/lon in `config/homecore.toml`. |
+| `TimeOfDay` | `time` (HH:MM), `days` (array of day names) | Scheduler fires at the given local time on specified days. Caught up on restart — see below. |
+| `SunEvent` | `event` (`"sunrise"` or `"sunset"`), `offset_minutes` | Computed locally from lat/lon in `config/homecore.toml`. Caught up on restart — see below. |
 | `WebhookReceived` | `path` | POST to `/api/v1/webhooks/{path}`. **No auth required.** The path acts as the shared secret. Request body (JSON) is forwarded as `body` in the event payload and accessible in `ScriptExpression` conditions via `event.body`. |
 | `ManualTrigger` | — | Never fires automatically — only via the `/test` endpoint. |
 
@@ -1326,6 +1326,31 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 | `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
+
+### Scheduler catch-up on restart
+
+**Problem:** The scheduler polls every minute. If HomeCore restarts after a `SunEvent` or `TimeOfDay` trigger has already fired for the day, that trigger is silently lost — the rule won't run until the next occurrence (next day for most solar rules).
+
+**Solution:** On startup, the scheduler walks all enabled rules and fires any `SunEvent` or `TimeOfDay` trigger whose computed time falls within a configurable catch-up window ending at `now`.
+
+**Configuration:**
+
+```toml
+# homecore.toml (and homecore.dev.toml)
+[scheduler]
+catchup_window_minutes = 15   # default; set 0 to disable
+```
+
+**Behaviour:**
+
+- On startup, the window `(now − catchup_window_minutes, now]` is checked once.
+- Any rule whose trigger time falls inside that window fires immediately (same `scheduler_tick` event as normal).
+- `SunEvent` triggers are evaluated against today's computed solar time using the configured lat/lon.
+- `TimeOfDay` triggers additionally check the `days` array — a trigger set for weekdays-only won't fire on a weekend.
+- If the window crosses midnight (e.g. a 15-min window starting at 23:52), both sides are handled correctly.
+- `DeviceStateChanged`, `MqttMessage`, `WebhookReceived`, and `ManualTrigger` are **not** caught up — only time-based triggers.
+
+**Example:** sunrise is at 06:42. HomeCore restarts at 06:50. With `catchup_window_minutes = 15`, the window is `[06:35, 06:50]`. Sunrise (06:42) falls inside → the deck-off rule fires immediately on startup rather than being skipped until tomorrow.
 
 ---
 
