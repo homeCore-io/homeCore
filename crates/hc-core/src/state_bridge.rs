@@ -276,6 +276,7 @@ impl StateBridge {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("registration missing name"))?;
         let area = json["area"].as_str().map(str::to_string);
+        let device_type = json["device_type"].as_str().map(str::to_string);
 
         match self.store.get_device(device_id).await? {
             Some(mut existing) => {
@@ -285,6 +286,9 @@ impl StateBridge {
                 existing.plugin_id = plugin_id.to_string();
                 if area.is_some() {
                     existing.area = area;
+                }
+                if let Some(dt) = device_type {
+                    existing.device_type = Some(dt);
                 }
                 existing.name = new_name.to_string();
 
@@ -312,6 +316,7 @@ impl StateBridge {
                 // First registration — create the device record.
                 let mut device = DeviceState::new(device_id, new_name, plugin_id);
                 device.area = area;
+                device.device_type = device_type;
                 self.store.upsert_device(&device).await?;
                 info!(device_id, name = new_name, plugin_id, "Device registered");
             }

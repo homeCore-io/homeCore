@@ -19,6 +19,10 @@ pub struct DeviceState {
     pub plugin_id: String,
     /// Optional area/room assignment.
     pub area: Option<String>,
+    /// Device type tag from plugin registration (e.g. "switch", "scene", "binary_sensor").
+    /// `None` for devices registered before this field was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
     /// Whether the device is currently reachable.
     pub available: bool,
     /// All reported attributes and their current values.
@@ -35,6 +39,7 @@ impl DeviceState {
             name: name.into(),
             plugin_id: plugin_id.into(),
             area: None,
+            device_type: None,
             available: false,
             attributes: HashMap::new(),
             last_seen: Utc::now(),
