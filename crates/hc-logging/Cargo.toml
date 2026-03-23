@@ -8,5 +8,8 @@ tracing            = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 tracing-appender   = "0.2"
 serde              = { workspace = true }
+serde_json         = { workspace = true }
 anyhow             = { workspace = true }
 chrono             = { workspace = true }
+tokio              = { workspace = true }
+hc-types           = { path = "../hc-types" }

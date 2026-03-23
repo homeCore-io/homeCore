@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 fn default_level() -> String { "info".into() }
 fn default_true() -> bool { true }
+fn default_ring_size() -> usize { 500 }
 fn default_log_dir() -> String { String::new() }
 fn default_prefix() -> String { "homecore".into() }
 fn default_rules_prefix() -> String { "rules".into() }
@@ -37,6 +38,10 @@ pub struct LoggingConfig {
     /// regardless of the global log level.  Disabled by default.
     #[serde(default)]
     pub rules_file: RulesFileConfig,
+
+    /// Live log streaming over WebSocket (GET /api/v1/logs/stream).
+    #[serde(default)]
+    pub stream: LoggingStreamConfig,
 }
 
 impl Default for LoggingConfig {
@@ -48,6 +53,29 @@ impl Default for LoggingConfig {
             file: FileConfig::default(),
             syslog: SyslogConfig::default(),
             rules_file: RulesFileConfig::default(),
+            stream: LoggingStreamConfig::default(),
+        }
+    }
+}
+
+// ── stream ──────────────────────────────────────────────────────────────────
+
+/// Configuration for the live log streaming WebSocket endpoint.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoggingStreamConfig {
+    /// Enable the log streaming endpoint (GET /api/v1/logs/stream).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Number of recent log lines to buffer in memory for new subscribers.
+    #[serde(default = "default_ring_size")]
+    pub ring_buffer_size: usize,
+}
+
+impl Default for LoggingStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ring_buffer_size: default_ring_size(),
         }
     }
 }

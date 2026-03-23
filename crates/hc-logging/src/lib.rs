@@ -20,10 +20,12 @@
 //! tracing::info!("HomeCore starting");
 //! ```
 
+pub mod broadcast_layer;
 pub mod config;
 pub mod filter;
 pub mod syslog_layer;
 
+pub use broadcast_layer::{BroadcastLayer, LogRing, LogSender};
 pub use config::LoggingConfig;
 
 impl LoggingConfig {
@@ -64,11 +66,29 @@ pub struct LoggingHandle {
 
 type DynLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>;
 
+/// Initialize the global `tracing` subscriber from a [`LoggingConfig`],
+/// also wiring in a [`BroadcastLayer`] for the log-streaming WebSocket.
+///
+/// Returns the logging handle (keep alive for process lifetime) plus the
+/// broadcast sender and ring buffer to pass to the API layer.
+pub fn init_with_broadcast(
+    config: &LoggingConfig,
+    ring_capacity: usize,
+) -> Result<(LoggingHandle, LogSender, LogRing)> {
+    let (broadcast_layer, tx, ring) = BroadcastLayer::new(ring_capacity);
+    let handle = init_inner(config, Some(broadcast_layer))?;
+    Ok((handle, tx, ring))
+}
+
 /// Initialize the global `tracing` subscriber from a [`LoggingConfig`].
 ///
 /// Call this exactly once, early in `main()`, before spawning any tasks.
 /// If the global subscriber is already set this returns an error.
 pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
+    init_inner(config, None)
+}
+
+fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Result<LoggingHandle> {
     let mut layers: Vec<DynLayer> = Vec::new();
     let mut file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
     let mut rules_file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
@@ -126,6 +146,11 @@ pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
     if layers.is_empty() {
         let filter = build_filter(config, None);
         layers.push(build_stderr_layer(&StderrConfig::default(), filter));
+    }
+
+    // ── broadcast layer (optional, for WS log streaming) ──────────────────
+    if let Some(bl) = broadcast {
+        layers.push(bl.boxed());
     }
 
     Registry::default()

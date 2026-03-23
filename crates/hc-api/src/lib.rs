@@ -22,11 +22,13 @@ pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod event_log;
 pub mod handlers;
+pub mod logs;
 pub mod rule_file_store;
 pub mod ws;
 
 use auth_middleware::require_auth;
 use event_log::EventLog;
+use logs::LogStreamState;
 use rule_file_store::RuleFileStore;
 
 /// Registered plugin record stored in-memory.
@@ -59,6 +61,9 @@ pub struct AppState {
     pub whitelist: Arc<Vec<IpNet>>,
     /// Path to `config/modes.toml` — used by mode API handlers.
     pub modes_path: Option<Arc<std::path::PathBuf>>,
+    /// Log streaming state (broadcast channel + ring buffer).
+    /// None when the log streaming feature is not configured.
+    pub log_stream: Option<LogStreamState>,
 }
 
 impl AppState {
@@ -132,7 +137,15 @@ impl AppState {
             event_log,
             whitelist: Arc::new(whitelist),
             modes_path: modes_path.map(|p| Arc::new(p)),
+            log_stream: None,
         }
+    }
+
+    /// Attach log streaming state (broadcast channel + ring buffer) obtained
+    /// from the `BroadcastLayer` created during logging initialisation.
+    pub fn with_log_stream(mut self, state: LogStreamState) -> Self {
+        self.log_stream = Some(state);
+        self
     }
 }
 
@@ -145,6 +158,8 @@ pub fn router(state: AppState) -> Router {
         // WebSocket stream authenticates via ?token= query param (browsers can't
         // set Authorization headers during WS upgrade).
         .route("/events/stream", get(ws::ws_events_handler))
+        // Log streaming WebSocket — same auth pattern as /events/stream.
+        .route("/logs/stream", get(logs::log_stream_handler))
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/:path", post(handlers::receive_webhook));
@@ -162,6 +177,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device).delete(handlers::delete_device))
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
+        .route("/devices/:id/schema", get(handlers::get_device_schema))
         // Timers (timer devices are also visible via /devices)
         .route("/timers", get(handlers::list_timers).post(handlers::create_timer))
         .route("/timers/:id", get(handlers::get_timer))

@@ -18,11 +18,13 @@ use uuid::Uuid;
 pub mod device_store;
 pub mod history;
 pub mod rule_store;
+pub mod schema_store;
 pub mod user_store;
 
 use device_store::DeviceStore;
 use history::HistoryStore;
 use rule_store::RuleStore;
+use schema_store::SchemaStore;
 use user_store::UserStore;
 
 /// Combined handle to both storage back-ends.
@@ -31,6 +33,7 @@ pub struct StateStore {
     devices: Arc<DeviceStore>,
     rules: Arc<RuleStore>,
     history: Arc<HistoryStore>,
+    schemas: Arc<SchemaStore>,
     users: Arc<UserStore>,
 }
 
@@ -41,7 +44,7 @@ impl StateStore {
         let state_path = state_db_path.to_string();
         let history_path = history_db_path.to_string();
 
-        let (devices, rules, history, users) = tokio::task::spawn_blocking(move || {
+        let (devices, rules, history, schemas, users) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
                 std::fs::create_dir_all(parent)
@@ -59,8 +62,9 @@ impl StateStore {
             let devices = DeviceStore::new(Arc::clone(&db))?;
             let rules = RuleStore::new(Arc::clone(&db))?;
             let history = HistoryStore::open(&history_path)?;
+            let schemas = SchemaStore::new(Arc::clone(&db))?;
             let users = UserStore::new(Arc::clone(&db))?;
-            Ok::<_, anyhow::Error>((devices, rules, history, users))
+            Ok::<_, anyhow::Error>((devices, rules, history, schemas, users))
         })
         .await??;
 
@@ -68,6 +72,7 @@ impl StateStore {
             devices: Arc::new(devices),
             rules: Arc::new(rules),
             history: Arc::new(history),
+            schemas: Arc::new(schemas),
             users: Arc::new(users),
         })
     }
@@ -94,6 +99,35 @@ impl StateStore {
 
     pub async fn list_devices(&self) -> Result<Vec<DeviceState>> {
         let store = Arc::clone(&self.devices);
+        tokio::task::spawn_blocking(move || store.list()).await?
+    }
+
+    // --- Device schemas ---
+
+    pub async fn upsert_device_schema(
+        &self,
+        device_id: &str,
+        schema: &hc_types::DeviceSchema,
+    ) -> Result<()> {
+        let store = Arc::clone(&self.schemas);
+        let id = device_id.to_string();
+        let s = schema.clone();
+        tokio::task::spawn_blocking(move || store.upsert(&id, &s)).await?
+    }
+
+    pub async fn get_device_schema(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<hc_types::DeviceSchema>> {
+        let store = Arc::clone(&self.schemas);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.get(&id)).await?
+    }
+
+    pub async fn list_device_schemas(
+        &self,
+    ) -> Result<Vec<(String, hc_types::DeviceSchema)>> {
+        let store = Arc::clone(&self.schemas);
         tokio::task::spawn_blocking(move || store.list()).await?
     }
 

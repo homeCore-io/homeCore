@@ -1,7 +1,7 @@
 mod plugin_launcher;
 
 use anyhow::Result;
-use hc_api::{rule_file_store::RuleFileStore, AppState};
+use hc_api::{logs::LogStreamState, rule_file_store::RuleFileStore, AppState};
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{rule_loader, Core, EventBus};
@@ -430,7 +430,10 @@ async fn main() -> Result<()> {
     //
     // _logging_handle must remain in scope until the end of main() so the
     // background file-writer thread stays alive.
-    let _logging_handle = hc_logging::init(&config.logging)?;
+    // We also wire in a BroadcastLayer so the log-streaming WebSocket endpoint
+    // can replay recent lines and subscribe to live log events.
+    let (_logging_handle, log_tx, log_ring) =
+        hc_logging::init_with_broadcast(&config.logging, config.logging.stream.ring_buffer_size)?;
 
     info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
 
@@ -683,7 +686,8 @@ async fn main() -> Result<()> {
         jwt,
         whitelist,
         Some(modes_path),
-    );
+    )
+    .with_log_stream(LogStreamState { tx: log_tx, ring: log_ring });
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())

@@ -1,7 +1,7 @@
 //! axum route handlers for all REST endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -27,9 +27,34 @@ pub async fn health() -> impl IntoResponse {
 
 // ---------- Devices ----------
 
-pub async fn list_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+#[derive(Deserialize, Default)]
+pub struct DeviceListQuery {
+    #[serde(default)]
+    pub include_schema: bool,
+}
+
+pub async fn list_devices(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Query(params): Query<DeviceListQuery>,
+) -> impl IntoResponse {
     match s.store.list_devices().await {
-        Ok(devices) => (StatusCode::OK, Json(json!(devices))),
+        Ok(devices) => {
+            if !params.include_schema {
+                return (StatusCode::OK, Json(json!(devices)));
+            }
+            // Build augmented list with optional schema field.
+            let mut out: Vec<serde_json::Value> = Vec::with_capacity(devices.len());
+            for device in devices {
+                let mut entry = serde_json::to_value(&device).unwrap_or(json!({}));
+                let schema = s.store.get_device_schema(&device.device_id).await
+                    .ok()
+                    .flatten();
+                entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
+                out.push(entry);
+            }
+            (StatusCode::OK, Json(json!(out)))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -45,6 +70,18 @@ pub async fn get_device(
     match s.store.get_device(&id).await {
         Ok(Some(device)) => (StatusCode::OK, Json(json!(device))),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
+pub async fn get_device_schema(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.store.get_device_schema(&id).await {
+        Ok(Some(schema)) => (StatusCode::OK, Json(json!(schema))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "schema not found" }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
     }
 }

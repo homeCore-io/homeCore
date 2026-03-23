@@ -7,5 +7,10 @@
 
 pub mod device;
 pub mod event;
+pub mod log_line;
 pub mod mqtt;
 pub mod rule;
+pub mod schema;
+
+pub use log_line::LogLine;
+pub use schema::{AttributeKind, AttributeSchema, DeviceSchema};
