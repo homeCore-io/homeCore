@@ -119,6 +119,8 @@ struct AppConfig {
     #[serde(default)]
     notify: NotifySection,
     #[serde(default)]
+    startup: StartupSection,
+    #[serde(default)]
     logging: LoggingConfig,
     #[serde(default)]
     plugins: Vec<PluginEntry>,
@@ -302,6 +304,26 @@ struct ClientAclConfig {
 struct NotifySection {
     #[serde(default)]
     channels: Vec<ChannelConfig>,
+}
+
+/// `[startup]` section of homecore.toml.
+#[derive(Deserialize)]
+struct StartupSection {
+    /// Seconds to wait after launch before publishing initial mode states.
+    ///
+    /// Plugins need time to connect and subscribe to their cmd topics.
+    /// If a rule fires during this window (e.g. mode_night already on at
+    /// restart) and the target plugin hasn't subscribed yet, the command is
+    /// silently dropped.  Increase this value if you have plugins with long
+    /// startup times.  Default: 10 s.
+    #[serde(default = "default_startup_delay")]
+    plugin_ready_delay_secs: u64,
+}
+
+fn default_startup_delay() -> u64 { 10 }
+
+impl Default for StartupSection {
+    fn default() -> Self { Self { plugin_ready_delay_secs: default_startup_delay() } }
 }
 
 #[derive(Deserialize)]
@@ -503,7 +525,8 @@ async fn main() -> Result<()> {
 
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude)
-        .with_modes(modes_path.clone());
+        .with_modes(modes_path.clone())
+        .with_startup_delay(config.startup.plugin_ready_delay_secs);
 
     // Load ecosystem profiles and build the router.  Done before spawning the
     // MQTT client so add_subscription("#") runs first.

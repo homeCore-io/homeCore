@@ -198,6 +198,19 @@ app_name  = "homecore"
 # level = "warn"           # syslog-only level override (defaults to [logging].level)
 
 # ---------------------------------------------------------------------------
+# Startup
+#
+# Controls the plugin-ready grace period.  HomeCore waits this many seconds
+# after launch before publishing initial mode states (e.g. mode_night).
+# This ensures plugins have time to connect and subscribe to their cmd
+# topics before any rule-triggered commands are sent.
+#
+# Increase if you have plugins with long startup times.
+# ---------------------------------------------------------------------------
+[startup]
+plugin_ready_delay_secs = 10
+
+# ---------------------------------------------------------------------------
 # Plugins
 #
 # HomeCore spawns each enabled plugin as a child process and supervises it
