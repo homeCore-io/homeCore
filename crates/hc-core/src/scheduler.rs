@@ -67,6 +67,8 @@ impl Scheduler {
             let current_time = now.time().with_second(0).unwrap_or(now.time());
             let current_day = now.weekday();
 
+            debug!(current_time = %current_time, "Scheduler tick");
+
             // Hold the read lock only for the duration of the tick evaluation.
             {
                 let rules = self.rules.read().await;
@@ -88,8 +90,17 @@ impl Scheduler {
                                 *event,
                                 *offset_minutes,
                             ) {
+                                debug!(
+                                    rule_name    = %rule.name,
+                                    event        = ?event,
+                                    sun_time     = %sun_time,
+                                    current_time = %current_time,
+                                    matches      = times_match(sun_time, current_time),
+                                    "Scheduler: SunEvent check"
+                                );
                                 times_match(sun_time, current_time)
                             } else {
+                                debug!(rule_name = %rule.name, event = ?event, "Scheduler: SunEvent returned None (polar?)");
                                 false
                             }
                         }
@@ -122,13 +133,13 @@ impl Scheduler {
     /// Both `SunEvent` and `TimeOfDay` triggers are considered.
     async fn fire_catchup(&self) {
         let now = Local::now();
-        let now_time = now.time();
-        // Round window_start to the minute boundary so a trigger at exactly
-        // (now - window) is included rather than narrowly excluded.
-        let window_start_naive = (now - chrono::Duration::minutes(self.catchup_window_minutes as i64))
-            .time()
-            .with_second(0)
-            .unwrap_or(now_time);
+        // Strip seconds and nanoseconds from both endpoints so in_catchup_window
+        // comparisons are at minute granularity (matches how trigger times are stored).
+        let now_time = NaiveTime::from_hms_opt(now.hour(), now.minute(), 0)
+            .unwrap_or_else(|| now.time());
+        let window_start_dt = now - chrono::Duration::minutes(self.catchup_window_minutes as i64);
+        let window_start_naive = NaiveTime::from_hms_opt(window_start_dt.hour(), window_start_dt.minute(), 0)
+            .unwrap_or_else(|| window_start_dt.time());
         let today = now.date_naive();
         let weekday = now.weekday();
 
@@ -189,7 +200,10 @@ impl Scheduler {
 /// Returns true if `trigger` (seconds zeroed) falls within `(window_start, now]`,
 /// handling the case where the window crosses midnight.
 fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime) -> bool {
-    let t = trigger.with_second(0).unwrap_or(trigger);
+    // Callers pass window_start and now already stripped to minute precision.
+    // Strip trigger to minute precision too for a consistent comparison.
+    let t = NaiveTime::from_hms_opt(trigger.hour(), trigger.minute(), 0)
+        .unwrap_or(trigger);
     if window_start <= now {
         // Normal case: window is contained within a single calendar day.
         t >= window_start && t <= now
@@ -199,10 +213,15 @@ fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime
     }
 }
 
-/// Returns true if `trigger_time` matches `current_time` within a 1-minute window.
+/// Returns true if `trigger_time` and `current_time` share the same hour and minute.
+///
+/// Intentionally ignores seconds and sub-second precision: the scheduler ticks
+/// once per minute, so a minute-level comparison is both correct and sufficient.
+/// Using `==` after `with_second(0)` would fail because `Local::now().time()` carries
+/// non-zero nanoseconds that `with_second` preserves, while `solar_event_time` and
+/// TOML-parsed times use `from_hms_opt` which produces zero nanoseconds.
 fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
-    let trigger_minute = trigger_time.with_second(0).unwrap_or(trigger_time);
-    trigger_minute == current_time
+    trigger_time.hour() == current_time.hour() && trigger_time.minute() == current_time.minute()
 }
 
 /// Compute the local time of a solar event using the sunrise equation.
