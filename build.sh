@@ -13,10 +13,14 @@ esac
 echo "==> Building HomeCore ($PROFILE)"
 cargo build $CARGO_FLAG --manifest-path "$ROOT/Cargo.toml"
 
-# Add plugin directories here as they are created.
+# Plugin repos live under ../plugins/ relative to core/.
 PLUGINS=(
-  "plugins/hc-yolink"
-  "plugins/hc-lutron"
+  "../plugins/hc-yolink"
+  "../plugins/hc-lutron"
+  "../plugins/hc-sonos"
+  "../plugins/hc-hue"
+  "../plugins/hc-wled"
+  "../plugins/hc-zwave"
 )
 
 for plugin in "${PLUGINS[@]}"; do
