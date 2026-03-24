@@ -274,35 +274,69 @@ Event types: `device_state_changed`, `device_availability_changed`, `rule_fired`
 
 ---
 
-## Crate / module layout
+## Repository layout
+
+The workspace root (`/home/john/RustroverProjects/homeCore/`) is **not** a git repo.
+Each sub-directory is its own independent git repository. `workspace.toml` at the root is
+the authoritative repo list (used by `scripts/workspace-clone.sh`).
 
 ```
-homecore/                          # workspace root
-├── Cargo.toml                     # workspace members
-├── config/
-│   └── homecore.toml              # broker addr, ACL, topic maps, auth
+homeCore/                          # container dir (no git)
+├── workspace.toml                 # authoritative repo list
+├── scripts/
+│   ├── run-dev.sh                 # build all + start server (debug)
+│   ├── deploy.sh                  # build + install to /var/tmp/homeCore
+│   └── workspace-clone.sh
 │
-├── crates/
-│   ├── hc-broker/                 # rumqttd embedded broker + TLS config
-│   ├── hc-mqtt-client/            # rumqttc async client, topic router → event bus
-│   ├── hc-topic-map/              # pattern-based topic translation, Rhai transforms
-│   ├── hc-core/                   # rule engine, scheduler, internal event bus
-│   ├── hc-state/                  # device registry, redb state store, time-series
-│   ├── hc-api/                    # axum HTTP server, WebSocket, OpenAPI generation
-│   ├── hc-auth/                   # JWT (REST), MQTT credential management
-│   ├── hc-scripting/              # Rhai runtime, WASM component interface
-│   └── hc-types/                  # shared types: Event, DeviceState, Rule, MqttMsg
+├── core/                          # main HomeCore server (git repo: jeubanks/homeCore)
+│   ├── Cargo.toml / Cargo.lock    # workspace with all crates
+│   ├── build.sh                   # local build helper
+│   ├── config/
+│   │   ├── homecore.toml          # prod config
+│   │   ├── homecore.dev.toml      # dev config (plugin paths: ../plugins/hc-*/target/debug/*)
+│   │   ├── modes.toml             # solar + named boolean mode definitions
+│   │   └── profiles/              # ecosystem profiles (shelly-gen2, tasmota, zigbee2mqtt…)
+│   │       └── examples/          # reference profiles (not auto-loaded)
+│   ├── crates/
+│   │   ├── hc-types/              # shared types: Event, DeviceState, Rule, MqttMsg
+│   │   ├── hc-broker/             # rumqttd embedded broker + TLS config
+│   │   ├── hc-mqtt-client/        # rumqttc async client → internal event bus
+│   │   ├── hc-topic-map/          # pattern-based topic translation, Rhai transforms
+│   │   ├── hc-core/               # rule engine, scheduler, mode/timer/switch managers
+│   │   ├── hc-state/              # device registry (redb), history (SQLite), schemas
+│   │   ├── hc-api/                # axum HTTP + WebSocket server, all REST handlers
+│   │   ├── hc-auth/               # JWT HS256, Argon2id passwords, MQTT bcrypt creds
+│   │   ├── hc-scripting/          # Rhai sandboxed runtime (conditions + action scripts)
+│   │   ├── hc-logging/            # tracing setup, rolling files, log stream ring buffer
+│   │   └── hc-notify/             # notification delivery (Pushover, email)
+│   ├── src/                       # homecore binary crate (main.rs)
+│   ├── plugins/
+│   │   ├── plugin-sdk-rs/         # Rust plugin SDK
+│   │   ├── plugin-sdk-py/         # Python plugin SDK
+│   │   ├── plugin-sdk-js/         # Node.js plugin SDK
+│   │   └── examples/
+│   │       ├── virtual-device/    # software-only test device (Rust)
+│   │       └── http-poller/       # generic HTTP polling adapter (Rust)
+│   ├── rules/                     # live automation rules (TOML, hot-reloaded)
+│   │   └── examples/              # documented rule patterns (OR/AND, multi-trigger…)
+│   ├── tests/
+│   │   └── integration_test.rs    # end-to-end: virtual device → rule → command
+│   └── docs/
+│       └── devNotes.md            # developer reference (API, rule patterns, device types)
 │
-├── plugins/
-│   ├── plugin-sdk-rs/             # Rust plugin SDK (rumqttc + schema helpers)
-│   ├── plugin-sdk-py/             # Python plugin SDK (paho-mqtt + helpers)
-│   ├── plugin-sdk-js/             # Node.js plugin SDK (mqtt.js + helpers)
-│   └── examples/
-│       ├── virtual-device/        # software-only test device (Rust)
-│       └── http-poller/           # generic HTTP polling adapter (Rust)
+├── plugins/                       # device adapter plugins (each is its own git repo)
+│   ├── hc-yolink/                 # YoLink cloud MQTT bridge
+│   ├── hc-lutron/                 # Lutron RadioRA2 telnet bridge
+│   ├── hc-sonos/                  # Sonos UPnP bridge
+│   ├── hc-hue/                    # Philips Hue bridge
+│   ├── hc-wled/                   # WLED LED controller
+│   ├── hc-zwave/                  # Z-Wave JS WebSocket bridge
+│   └── hc-plugin-template/        # starter template for new plugins
 │
-└── docs/
-    └── openapi.yaml               # authoritative API contract
+└── clients/                       # UI and API consumers (each is its own git repo)
+    ├── hc-web/                    # Flutter web dashboard (all phases complete)
+    ├── hc-tui/                    # Terminal UI (ratatui)
+    └── hc-mcp/                    # MCP server for Claude integration (not yet started)
 ```
 
 ---
@@ -313,58 +347,78 @@ homecore/                          # workspace root
 |---|---|---|
 | Language | Rust (stable) | No GC pauses, memory safety, Tokio ecosystem |
 | Async runtime | `tokio` | Mature, performant, shared across all crates |
-| Embedded MQTT broker | `rumqttd` | Pure Rust, Tokio-native, TLS, ACL |
-| Internal MQTT client | `rumqttc` | Async, same Tokio runtime |
+| Embedded MQTT broker | `rumqttd` 0.19 | Pure Rust, Tokio-native, TLS, ACL |
+| Internal MQTT client | `rumqttc` 0.24 | Async, same Tokio runtime |
 | External broker (optional) | Mosquitto / EMQX | Config: point `broker.external_url` at it |
-| HTTP + WebSocket | `axum` | Tower middleware, ergonomic, WS support |
-| State / device registry | `redb` | Pure Rust, embedded, ACID, no extra process |
-| Time-series history | SQLite via `rusqlite` | Simple range queries, wide tooling |
-| Scripting | `rhai` | Rust-native, sandboxed, no FFI, fast startup |
-| WASM plugin interface | `wasmtime` | For untrusted third-party plugins |
+| HTTP + WebSocket | `axum` 0.7 | Tower middleware, ergonomic, WS support |
+| State / device registry | `redb` 2 | Pure Rust, embedded, ACID, no extra process |
+| Time-series history | SQLite via `rusqlite` 0.31 | Simple range queries, wide tooling |
+| Scripting | `rhai` 1 (sync feature) | Rust-native, sandboxed, no FFI, fast startup |
 | Serialization | `serde` + `serde_json` | Universal |
-| Config format | TOML | Human-friendly, Rust standard |
-| Auth (REST) | JWT RS256 | Stateless, plugin-scoped claims |
-| OpenAPI generation | `utoipa` | Derive macros on handlers |
+| Config format | `toml` 0.8 | Human-friendly, Rust standard |
+| Auth (REST) | JWT HS256 (`jsonwebtoken`) | Symmetric HMAC-SHA256; Argon2id for passwords |
+| Auth (MQTT) | bcrypt credentials per plugin | Per-plugin credentials enforced at broker ACL |
+| Notifications | `hc-notify` crate | Pushover + email (lettre); triggered by rule actions |
+| OpenAPI generation | `utoipa` 4 | Derive macros on handlers |
+| File-change watching | `notify` 6 | Hot-reload for rules and modes.toml |
 | Error handling | `anyhow` (bins) + `thiserror` (libs) | Standard pattern |
-| Logging | `tracing` + `tracing-subscriber` | Structured, async-aware |
-| Testing | `tokio::test`, `mockall`, integration tests | Unit + integration |
+| Logging | `tracing` + `tracing-appender` | Structured, async-aware, rolling files |
+| Testing | `tokio::test`, integration tests | Unit + end-to-end integration test |
 
 ---
 
-## Build / development phases
+## Implementation status
 
-### Phase 1 — Solid kernel (target: working end-to-end with one real device)
-- [ ] Workspace scaffold, all crate stubs
-- [ ] `hc-types`: `Event`, `DeviceState`, `Rule`, `MqttMessage` types
-- [ ] `hc-broker`: embed `rumqttd`, config-driven TLS + ACL
-- [ ] `hc-mqtt-client`: subscribe to `homecore/#`, bridge to internal channel
-- [ ] `hc-state`: `redb`-backed device registry, get/set/watch
-- [ ] `hc-core`: basic rule engine (device-state trigger only), action executor
-- [ ] `hc-auth`: JWT issuance + validation, MQTT credential store
-- [ ] `hc-api`: axum server, `/health`, `/devices`, `/automations` CRUD, WS stream
-- [ ] `plugin-sdk-rs`: minimal Rust SDK, virtual-device example
-- [ ] Integration test: virtual device → MQTT → rule fires → command back
+### Phase 1 — Solid kernel ✅ Complete
+- [x] Workspace scaffold, all crate stubs
+- [x] `hc-types`: `Event`, `DeviceState`, `Rule`, `MqttMessage` types
+- [x] `hc-broker`: embed `rumqttd`, config-driven TLS + ACL
+- [x] `hc-mqtt-client`: subscribe to `homecore/#`, bridge to internal channel
+- [x] `hc-state`: `redb`-backed device registry, get/set/watch
+- [x] `hc-core`: rule engine, action executor
+- [x] `hc-auth`: JWT HS256 issuance + validation, MQTT credential store, Argon2id passwords
+- [x] `hc-api`: axum server, `/health`, `/devices`, `/automations` CRUD, WS stream
+- [x] `plugin-sdk-rs`: Rust SDK + `PluginClient` / `DevicePublisher` helpers
+- [x] Integration test: virtual device → MQTT → rule fires → command back (`tests/integration_test.rs`)
 
-### Phase 2 — Rule engine depth
-- [ ] Time/solar triggers (local solar calc, no cloud)
-- [ ] Rhai condition expressions and action scripts
-- [ ] Action sequences: `Delay`, `Parallel`, `RepeatUntil`
-- [ ] Rule dry-run / test mode endpoint
-- [ ] Rule import/export as JSON
+### Phase 2 — Rule engine depth ✅ Complete
+- [x] Time/solar triggers (local solar calc, no cloud) — nanosecond comparison bug fixed 2026-03-24
+- [x] Scheduler catch-up window: fires missed triggers within N minutes of restart
+- [x] Rhai condition expressions (`ScriptExpression`) and action scripts (`RunScript`)
+- [x] `RunScript` side effects: `set_device_state`, `notify`, `http_get/post`, `publish_mqtt`
+- [x] Time helpers in Rhai: `current_hour()`, `current_minute()`, `current_weekday()`
+- [x] Action sequences: `Delay`, `Parallel`, `RepeatUntil`, `Conditional`
+- [x] Rule dry-run / test mode (`POST /automations/{id}/test`)
+- [x] Rule import/export JSON (`/automations/import`, `/automations/export`)
+- [x] Rules stored as TOML files, hot-reloaded on filesystem change
+- [x] Auto-generated UUIDs: `id = ""` in rule file → UUID written back on first load
+- [x] Verbose rule engine logging: per-trigger, per-condition, per-action with timing
 
-### Phase 3 — Topic mapper + ecosystem
-- [ ] `hc-topic-map`: pattern matching, Rhai payload transforms
-- [ ] Tasmota and Shelly built-in profiles
-- [ ] `plugin-sdk-py` and `plugin-sdk-js`
-- [ ] Scenes API
-- [ ] WebSocket event filtering (subscribe to specific device/type)
+### Phase 3 — Topic mapper + ecosystem ✅ Complete
+- [x] `hc-topic-map`: pattern matching, Rhai payload transforms, `partial` flag, `apply_field_map`
+- [x] Tasmota, Shelly Gen1/2, Zigbee2MQTT reference profiles in `config/profiles/examples/`
+- [x] `plugin-sdk-py` and `plugin-sdk-js`
+- [x] Scenes API (native + plugin scenes; activate via MQTT cmd)
+- [x] WebSocket event filtering (`?device_id=` and `?event_types=` query params)
+- [x] Device capability schema: plugins register JSON schema; `GET /devices/{id}/schema`
 
-### Phase 4 — Hardening
-- [ ] WASM plugin sandbox via `wasmtime`
-- [ ] Multi-user: per-user JWT scopes
-- [ ] Backup/restore (redb snapshot + config export)
-- [ ] Metrics endpoint (`/metrics`, Prometheus format)
-- [ ] HA clustering exploration (Raft via `openraft` if needed)
+### Phase 3 additions (beyond original plan)
+- [x] `hc-logging` crate: tracing setup, rolling file sink, log stream ring buffer
+- [x] `hc-notify` crate: Pushover + email notifications from rule actions
+- [x] `ModeManager`: solar modes (`mode_night`, `mode_day`) + named boolean modes; `modes.toml` hot-reload
+- [x] `TimerManager`: virtual countdown timer devices; start/pause/resume/cancel/restart commands
+- [x] `SwitchManager`: virtual on/off switch devices (software flags for rules)
+- [x] `GET /logs/stream` WebSocket: live log tail with `level` and `module` filters
+- [x] Multi-user: user CRUD, roles (`admin` / `user` / `read_only`), per-role API permissions
+- [x] `ZWave` node name → device name sync via `state_bridge`
+- [x] Plugin `device_type` field: persisted from registration; used to filter scenes from device list
+- [x] IP whitelist auth bypass for local clients; JWT always takes priority when Bearer token present
+
+### Phase 4 — Hardening (remaining)
+- [ ] **Metrics endpoint** (`/metrics`, Prometheus format) — low effort, high value for monitoring
+- [ ] **Backup/restore** — `POST /system/backup` exporting redb snapshot + config
+- [ ] WASM plugin sandbox (`wasmtime`) — only needed for untrusted third-party plugins
+- [ ] HA clustering (`openraft`) — premature; single-node is sufficient for home use
 
 ---
 
