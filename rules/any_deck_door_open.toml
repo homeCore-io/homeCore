@@ -18,6 +18,11 @@ op        = "eq"
 value     = true
 
 [[actions]]
+type      = "set_device_state"
+device_id = "timer_deck_lights_off"
+state = { command = "cancel" }
+
+[[actions]]
 type = "set_device_state"
 device_id = "lutron_scene_deck_on_phantom"
 state = { activate = true }

@@ -126,36 +126,36 @@ catchup_window_minutes = 15
 
 [[plugins]]
 id      = "plugin.yolink"
-binary  = "../hc-yolink/target/debug/hc-yolink"
-config  = "../hc-yolink/config/config.toml"
+binary  = "../plugins/hc-yolink/target/debug/hc-yolink"
+config  = "../plugins/hc-yolink/config/config.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.lutron"
-binary  = "../hc-lutron/target/debug/hc-lutron"
-config  = "../hc-lutron/config/config.toml"
+binary  = "../plugins/hc-lutron/target/debug/hc-lutron"
+config  = "../plugins/hc-lutron/config/config.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.sonos"
-binary  = "../hc-sonos/target/debug/hc-sonos"
-config  = "../hc-sonos/config/config.toml"
+binary  = "../plugins/hc-sonos/target/debug/hc-sonos"
+config  = "../plugins/hc-sonos/config/config.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.zwave"
-binary  = "../hc-zwave/target/debug/hc-zwave"
-config  = "../hc-zwave/config/config.toml"
+binary  = "../plugins/hc-zwave/target/debug/hc-zwave"
+config  = "../plugins/hc-zwave/config/config.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.hue"
-binary  = "../hc-hue/target/debug/hc-hue"
-config  = "../hc-hue/config/config.toml"
+binary  = "../plugins/hc-hue/target/debug/hc-hue"
+config  = "../plugins/hc-hue/config/config.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.wled"
-binary  = "../hc-wled/target/debug/hc-wled"
-config  = "../hc-wled/config/config.toml"
+binary  = "../plugins/hc-wled/target/debug/hc-wled"
+config  = "../plugins/hc-wled/config/config.toml"
 enabled = true

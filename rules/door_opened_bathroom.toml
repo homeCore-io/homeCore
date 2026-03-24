@@ -2,9 +2,10 @@
 #
 # When the bathroom door opens: stop the Sonos and start a 5-minute countdown.
 # The timer firing will turn off the exhaust fan.
-
-id       = "ba000001-0004-0004-0004-000000000004"
-name     = "Bathroom - Door Opens"
+# Why is hot-reload not working
+#
+id = "d12062ac-32f8-41c5-9dab-38adc0de6dd0"
+name     = "Door Opened - Bathroom"
 enabled  = true
 priority = 10
 

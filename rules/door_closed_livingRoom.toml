@@ -3,8 +3,8 @@
 # When the living room deck door closes, check if all 4 deck doors are now
 # closed.  If so, turn off the any-deck-door-open virtual switch.
 
-id = "cd949143-8706-418a-be1d-2ed9d580c1b1"
-name     = "All Deck Doors Closed - Living Room"
+id = "25b4af30-4131-4b04-8991-54ee5c8bbbcc"
+name     = "Door Closed - Living Room"
 enabled  = true
 priority = 10
 
