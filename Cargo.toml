@@ -1,3 +1,8 @@
+[package]
+name    = "homecore"
+version = "0.1.0"
+edition = "2021"
+
 [workspace]
 resolver = "2"
 members = [
@@ -15,7 +20,6 @@ members = [
     "plugins/plugin-sdk-rs",
     "plugins/examples/virtual-device",
     "plugins/examples/http-poller",
-    "homeCore",
 ]
 
 [workspace.dependencies]
@@ -42,3 +46,26 @@ utoipa            = { version = "4", features = ["axum_extras"] }
 argon2            = { version = "0.5", features = ["password-hash"] }
 async-trait       = "0.1"
 notify            = "6"
+
+[dependencies]
+hc-broker      = { path = "crates/hc-broker" }
+hc-mqtt-client = { path = "crates/hc-mqtt-client" }
+hc-state       = { path = "crates/hc-state" }
+hc-core        = { path = "crates/hc-core" }
+hc-auth        = { path = "crates/hc-auth" }
+hc-api         = { path = "crates/hc-api" }
+hc-types       = { path = "crates/hc-types" }
+hc-topic-map   = { path = "crates/hc-topic-map" }
+hc-notify      = { path = "crates/hc-notify" }
+hc-logging     = { path = "crates/hc-logging" }
+ipnet              = { workspace = true }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+toml               = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+chrono             = { workspace = true }
+serde_json         = { workspace = true }
+rumqttc            = { workspace = true }
