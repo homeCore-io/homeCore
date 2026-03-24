@@ -159,17 +159,33 @@ pub async fn delete_device(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct HistoryQuery {
+    /// Start of time window (RFC-3339 / ISO-8601 UTC). Defaults to 24 hours ago.
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    /// End of time window (RFC-3339 / ISO-8601 UTC). Defaults to now.
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
+    /// Filter to a single attribute name (e.g. `?attribute=on`).
+    pub attribute: Option<String>,
+    /// Maximum number of entries returned (default 500, max 5 000).
+    pub limit: Option<u32>,
+}
+
 pub async fn device_history(
     State(s): State<AppState>,
     _: DevicesRead,
     Path(id): Path<String>,
+    Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let from = chrono::Utc::now() - chrono::Duration::hours(24);
-    let to = chrono::Utc::now();
-    match s.store.query_history(&id, from, to, 500).await {
+    let now = chrono::Utc::now();
+    let from = params.from.unwrap_or_else(|| now - chrono::Duration::hours(24));
+    let to = params.to.unwrap_or(now);
+    let limit = params.limit.unwrap_or(500).min(5_000);
+
+    match s.store.query_history(&id, from, to, params.attribute.as_deref(), limit).await {
         Ok(entries) => (StatusCode::OK, Json(json!(entries.iter().map(|e| json!({
-            "attribute": e.attribute,
-            "value": e.value,
+            "attribute":   e.attribute,
+            "value":       e.value,
             "recorded_at": e.recorded_at,
         })).collect::<Vec<_>>()))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),

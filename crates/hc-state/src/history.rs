@@ -63,42 +63,70 @@ impl HistoryStore {
     }
 
     /// Query history for a device in a time range.
+    ///
+    /// `attribute` — when `Some`, restricts results to that attribute only.
+    /// `limit`     — max rows returned; caller should cap this (e.g. 5 000).
     pub fn query(
         &self,
         device_id: &str,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
+        attribute: Option<&str>,
         limit: u32,
     ) -> Result<Vec<HistoryEntry>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT device_id, attribute, value, recorded_at
-             FROM state_history
-             WHERE device_id = ?1 AND recorded_at >= ?2 AND recorded_at <= ?3
-             ORDER BY recorded_at DESC
-             LIMIT ?4",
-        )?;
-        let rows = stmt.query_map(
-            params![device_id, from.to_rfc3339(), to.to_rfc3339(), limit],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?;
 
         let mut out = Vec::new();
-        for row in rows {
-            let (did, attr, val_str, ts_str) = row?;
-            let value: JsonValue = serde_json::from_str(&val_str).unwrap_or(JsonValue::Null);
-            let recorded_at = DateTime::parse_from_rfc3339(&ts_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            out.push(HistoryEntry { device_id: did, attribute: attr, value, recorded_at });
+
+        macro_rules! push_rows {
+            ($stmt:expr, $params:expr) => {
+                for row in $stmt.query_map($params, |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })? {
+                    let (did, attr, val_str, ts_str) = row?;
+                    let value: JsonValue =
+                        serde_json::from_str(&val_str).unwrap_or(JsonValue::Null);
+                    let recorded_at = DateTime::parse_from_rfc3339(&ts_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    out.push(HistoryEntry { device_id: did, attribute: attr, value, recorded_at });
+                }
+            };
         }
+
+        // Use two distinct prepared statements so each branch uses the index cleanly.
+        if let Some(attr) = attribute {
+            let mut stmt = conn.prepare(
+                "SELECT device_id, attribute, value, recorded_at
+                 FROM state_history
+                 WHERE device_id = ?1 AND attribute = ?2
+                       AND recorded_at >= ?3 AND recorded_at <= ?4
+                 ORDER BY recorded_at DESC
+                 LIMIT ?5",
+            )?;
+            push_rows!(
+                stmt,
+                params![device_id, attr, from.to_rfc3339(), to.to_rfc3339(), limit]
+            );
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT device_id, attribute, value, recorded_at
+                 FROM state_history
+                 WHERE device_id = ?1 AND recorded_at >= ?2 AND recorded_at <= ?3
+                 ORDER BY recorded_at DESC
+                 LIMIT ?4",
+            )?;
+            push_rows!(
+                stmt,
+                params![device_id, from.to_rfc3339(), to.to_rfc3339(), limit]
+            );
+        }
+
         Ok(out)
     }
 }

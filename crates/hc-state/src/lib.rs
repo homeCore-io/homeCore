@@ -220,11 +220,16 @@ impl StateStore {
         device_id: &str,
         from: chrono::DateTime<chrono::Utc>,
         to: chrono::DateTime<chrono::Utc>,
+        attribute: Option<&str>,
         limit: u32,
     ) -> Result<Vec<history::HistoryEntry>> {
         let store = Arc::clone(&self.history);
         let did = device_id.to_string();
-        tokio::task::spawn_blocking(move || store.query(&did, from, to, limit)).await?
+        let attr = attribute.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            store.query(&did, from, to, attr.as_deref(), limit)
+        })
+        .await?
     }
 
     // --- Users ---

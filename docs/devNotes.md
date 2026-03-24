@@ -540,6 +540,60 @@ Sub-module targets can be used for finer control, e.g.:
 
 ---
 
+## Device history API (`GET /devices/{id}/history`)
+
+Returns time-series state change records for a device, stored in `data/history.db`.
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `from` | ISO-8601 UTC | 24 hours ago | Start of window (inclusive) |
+| `to` | ISO-8601 UTC | now | End of window (inclusive) |
+| `attribute` | string | — | Filter to a single attribute name |
+| `limit` | integer | 500 | Max entries returned (capped at 5 000) |
+
+### Examples
+
+```sh
+# Last 24 hours, all attributes (default)
+curl -s "http://localhost:8080/api/v1/devices/DEVICE_ID/history" \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Last 7 days
+curl -s "http://localhost:8080/api/v1/devices/DEVICE_ID/history?from=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)&to=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Specific attribute only (e.g. just the on/off history)
+curl -s "http://localhost:8080/api/v1/devices/DEVICE_ID/history?attribute=on" \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Specific attribute, last 48 hours, up to 2000 entries
+curl -s "http://localhost:8080/api/v1/devices/DEVICE_ID/history?attribute=humidity&limit=2000&from=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+### Response shape
+
+```json
+[
+  { "attribute": "on",    "value": true,  "recorded_at": "2026-03-24T07:05:00Z" },
+  { "attribute": "on",    "value": false, "recorded_at": "2026-03-24T06:12:00Z" },
+  { "attribute": "power_w", "value": 12.4, "recorded_at": "2026-03-24T06:12:00Z" }
+]
+```
+
+Results are ordered newest-first. Every attribute change is a separate row.
+
+### Notes
+
+- History is appended on every `DeviceStateChanged` event; each changed attribute gets its own row.
+- The `from`/`to` window uses `recorded_at` (UTC). Pass RFC-3339 format: `2026-03-24T00:00:00Z`.
+- Use `?attribute=on` to plot a single boolean or numeric sensor without noise from other attributes.
+- The 5 000 row cap prevents accidental large transfers; use a narrower time window if you need more.
+
+---
+
 ## State database — resetting between runs
 
 The server writes two databases under `data/` in the base directory (current
