@@ -1846,6 +1846,111 @@ Integration tests live in `homecore/tests/`. The existing `integration_test.rs` 
 
 ---
 
+## Prometheus metrics (`GET /metrics`)
+
+HomeCore exposes a Prometheus-compatible text endpoint at `/api/v1/metrics`.
+No authentication is required — Prometheus scrapers cannot set `Authorization`
+headers easily.  If you need access control, put HomeCore behind a reverse proxy
+(Caddy, nginx) and restrict the `/metrics` path there.
+
+### Quick check
+
+```sh
+# Raw text output (no auth needed)
+curl -s http://localhost:8080/api/v1/metrics
+
+# Pretty-print metric names only
+curl -s http://localhost:8080/api/v1/metrics | grep '^homecore_'
+```
+
+### Exposed metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `homecore_uptime_seconds` | gauge | Seconds since process start |
+| `homecore_devices_total` | gauge | Registered devices (timers, switches, modes included) |
+| `homecore_rules_total` | gauge | Total automation rules (enabled + disabled) |
+| `homecore_rules_enabled_total` | gauge | Enabled automation rules only |
+| `homecore_plugins_total` | gauge | Currently registered plugins |
+| `homecore_rule_fires_total` | counter | Rule fire events since process start |
+| `homecore_device_state_changes_total` | counter | Device state change events since process start |
+| `homecore_scene_activations_total` | counter | Scene activations since process start |
+| `homecore_events_total{type="…"}` | counter | All internal bus events, broken down by type |
+
+Gauges are refreshed from live state on every scrape.
+Counters accumulate since process start and reset on restart.
+
+#### `homecore_events_total` label values
+
+`device_state_changed`, `device_availability_changed`, `rule_fired`,
+`scene_activated`, `plugin_registered`, `plugin_offline`,
+`device_name_changed`, `mqtt_message`, `custom`, `system_alert`
+
+### Prometheus scrape config
+
+Add to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: homecore
+    static_configs:
+      - targets: ['YOUR_HOMECORE_HOST:8080']
+    metrics_path: /api/v1/metrics
+    scrape_interval: 30s
+```
+
+Replace `YOUR_HOMECORE_HOST` with the machine running HomeCore (e.g. `192.168.1.10`).
+
+### Grafana dashboard suggestions
+
+A simple dashboard covering the most useful panels:
+
+| Panel | Query | Visualization |
+|---|---|---|
+| Uptime | `homecore_uptime_seconds` | Stat |
+| Devices | `homecore_devices_total` | Stat |
+| Rules (enabled / total) | `homecore_rules_enabled_total`, `homecore_rules_total` | Gauge |
+| Rule fires / min | `rate(homecore_rule_fires_total[1m]) * 60` | Time series |
+| Device changes / min | `rate(homecore_device_state_changes_total[1m]) * 60` | Time series |
+| Events breakdown | `rate(homecore_events_total[5m])` | Time series (by `type` label) |
+
+### Running Prometheus + Grafana locally (Docker)
+
+```sh
+# prometheus.yml — save to /tmp/prom/prometheus.yml
+# (contents: scrape config from above with target: localhost:8080)
+mkdir -p /tmp/prom
+
+cat > /tmp/prom/prometheus.yml << 'EOF'
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: homecore
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+    metrics_path: /api/v1/metrics
+EOF
+
+# Start Prometheus
+docker run -d --name prometheus -p 9090:9090 -v /tmp/prom:/etc/prometheus prom/prometheus
+
+# Start Grafana (default login: admin / admin)
+docker run -d --name grafana -p 3000:3000 grafana/grafana
+
+# Open Grafana → Add data source → Prometheus → URL: http://host.docker.internal:9090
+```
+
+Once connected, create a dashboard using the queries from the table above.
+
+### Security note
+
+`/api/v1/metrics` is intentionally unauthenticated so Prometheus scrapers work
+without token management.  On a home network this is acceptable.  To restrict
+access, use a Caddy `basicauth` block or `allow_hosts` directive in front of
+the `/api/v1/metrics` path.
+
+---
+
 ## Useful one-liners for manual testing
 
 ```sh

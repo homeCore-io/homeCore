@@ -46,6 +46,7 @@ utoipa            = { version = "4", features = ["axum_extras"] }
 argon2            = { version = "0.5", features = ["password-hash"] }
 async-trait       = "0.1"
 notify            = "6"
+prometheus        = { version = "0.13", default-features = false, features = ["process"] }
 
 [dependencies]
 hc-broker      = { path = "crates/hc-broker" }

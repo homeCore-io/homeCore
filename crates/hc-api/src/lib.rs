@@ -23,12 +23,14 @@ pub mod auth_middleware;
 pub mod event_log;
 pub mod handlers;
 pub mod logs;
+pub mod metrics;
 pub mod rule_file_store;
 pub mod ws;
 
 use auth_middleware::require_auth;
 use event_log::EventLog;
 use logs::LogStreamState;
+use metrics::MetricsCollector;
 use rule_file_store::RuleFileStore;
 
 /// Registered plugin record stored in-memory.
@@ -64,6 +66,9 @@ pub struct AppState {
     /// Log streaming state (broadcast channel + ring buffer).
     /// None when the log streaming feature is not configured.
     pub log_stream: Option<LogStreamState>,
+    /// Prometheus metrics collector — counters updated by background task,
+    /// gauges refreshed on every `/metrics` scrape.
+    pub metrics: std::sync::Arc<MetricsCollector>,
 }
 
 impl AppState {
@@ -126,7 +131,11 @@ impl AppState {
             });
         }
 
-        Self {
+        let metrics = std::sync::Arc::new(
+            MetricsCollector::new().expect("failed to register Prometheus metrics"),
+        );
+
+        let state = Self {
             store,
             event_bus,
             publish,
@@ -138,7 +147,13 @@ impl AppState {
             whitelist: Arc::new(whitelist),
             modes_path: modes_path.map(|p| Arc::new(p)),
             log_stream: None,
-        }
+            metrics,
+        };
+
+        // Spawn background task to increment metrics counters from bus events.
+        metrics::spawn_metrics_listener(&state, Arc::clone(&state.metrics));
+
+        state
     }
 
     /// Attach log streaming state (broadcast channel + ring buffer) obtained
@@ -154,6 +169,7 @@ pub fn router(state: AppState) -> Router {
     // Public routes — no auth required (auth is handled inside the handler).
     let public = Router::new()
         .route("/health", get(handlers::health))
+        .route("/metrics", get(metrics::metrics_handler))
         .route("/auth/login", post(auth_handlers::login))
         // WebSocket stream authenticates via ?token= query param (browsers can't
         // set Authorization headers during WS upgrade).
