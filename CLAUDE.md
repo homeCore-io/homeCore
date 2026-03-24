@@ -225,7 +225,7 @@ All endpoints are under `/api/v1/`. Full OpenAPI 3.1 spec lives at `GET /api/v1/
 GET    /api/v1/devices                    list all devices + current state
 GET    /api/v1/devices/{id}               single device + schema
 PATCH  /api/v1/devices/{id}/state         command a device
-GET    /api/v1/devices/{id}/history       time-series state (query: from, to, limit)
+GET    /api/v1/devices/{id}/history       time-series state (query: from, to, attribute, limit)
 
 # Areas (rooms / zones)
 GET    /api/v1/areas
@@ -415,7 +415,8 @@ homeCore/                          # container dir (no git)
 - [x] IP whitelist auth bypass for local clients; JWT always takes priority when Bearer token present
 
 ### Phase 4 — Hardening (remaining)
-- [ ] **Metrics endpoint** (`/metrics`, Prometheus format) — low effort, high value for monitoring
+- [x] **Metrics endpoint** — `GET /api/v1/metrics` Prometheus text 0.0.4; 9 metrics (uptime, devices, rules, plugins, counters for fires/state-changes/scenes/events); no auth required
+- [x] **Device history query flexibility** — `GET /devices/{id}/history` accepts `?from=`, `?to=`, `?attribute=`, `?limit=` (default 500, cap 5 000)
 - [ ] **Backup/restore** — `POST /system/backup` exporting redb snapshot + config
 - [ ] WASM plugin sandbox (`wasmtime`) — only needed for untrusted third-party plugins
 - [ ] HA clustering (`openraft`) — premature; single-node is sufficient for home use
