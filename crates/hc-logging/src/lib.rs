@@ -52,10 +52,38 @@ impl LoggingConfig {
 }
 
 use anyhow::Result;
-use config::{FileConfig, OutputFormat, RotationStrategy, StderrConfig};
+use config::{FileConfig, OutputFormat, RotationStrategy, StderrConfig, TimeDisplay};
 use filter::build_filter;
 use syslog_layer::SyslogLayer;
 use tracing_subscriber::{prelude::*, Registry};
+use tracing_subscriber::fmt::time::FormatTime;
+
+// ── timestamp formatter ────────────────────────────────────────────────────
+
+/// Timestamp formatter for tracing layers.
+///
+/// `Local` → `2026-03-25T09:32:00.123-05:00`
+/// `Utc`   → `2026-03-25T14:32:00.123Z`
+#[derive(Clone, Debug)]
+struct HcTimer {
+    utc: bool,
+}
+
+impl HcTimer {
+    fn from_display(display: &TimeDisplay) -> Self {
+        Self { utc: matches!(display, TimeDisplay::Utc) }
+    }
+}
+
+impl FormatTime for HcTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        if self.utc {
+            write!(w, "{}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"))
+        } else {
+            write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+        }
+    }
+}
 
 /// Returned by [`init`].  Must be kept alive for the entire process lifetime.
 /// Dropping it flushes and closes the background file-writer threads.
@@ -93,10 +121,13 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
     let mut file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
     let mut rules_file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
 
+    let timer = HcTimer::from_display(&config.time_display);
+    let use_local_time = matches!(config.time_display, TimeDisplay::Local);
+
     // ── stderr ────────────────────────────────────────────────────────────
     if config.stderr.enabled {
         let filter = build_filter(config, None);
-        layers.push(build_stderr_layer(&config.stderr, filter));
+        layers.push(build_stderr_layer(&config.stderr, filter, timer.clone()));
     }
 
     // ── rolling file ──────────────────────────────────────────────────────
@@ -105,7 +136,7 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
             eprintln!("hc-logging: cannot create log dir {}: {e}", config.file.dir);
         });
         let filter = build_filter(config, None);
-        let (layer, guard) = build_file_layer(&config.file, filter);
+        let (layer, guard) = build_file_layer(&config.file, filter, timer.clone());
         file_guard = Some(guard);
         layers.push(layer);
     }
@@ -127,7 +158,7 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
             max_size_mb: 100,
             format: config.rules_file.format.clone(),
         };
-        let (layer, guard) = build_file_layer(&cfg, filter);
+        let (layer, guard) = build_file_layer(&cfg, filter, timer.clone());
         rules_file_guard = Some(guard);
         layers.push(layer);
     }
@@ -135,7 +166,7 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
     // ── syslog ────────────────────────────────────────────────────────────
     if config.syslog.enabled {
         let filter = build_filter(config, config.syslog.level.as_deref());
-        match SyslogLayer::new(&config.syslog) {
+        match SyslogLayer::new(&config.syslog, use_local_time) {
             Ok(layer) => layers.push(layer.with_filter(filter).boxed()),
             Err(e)    => eprintln!("hc-logging: syslog init failed ({e}); skipping syslog output"),
         }
@@ -145,7 +176,7 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
     // there is always at least one output.
     if layers.is_empty() {
         let filter = build_filter(config, None);
-        layers.push(build_stderr_layer(&StderrConfig::default(), filter));
+        layers.push(build_stderr_layer(&StderrConfig::default(), filter, timer.clone()));
     }
 
     // ── broadcast layer (optional, for WS log streaming) ──────────────────
@@ -163,22 +194,29 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
 
 // ── layer builders ─────────────────────────────────────────────────────────
 
-fn build_stderr_layer(cfg: &StderrConfig, filter: tracing_subscriber::EnvFilter) -> DynLayer {
+fn build_stderr_layer(
+    cfg: &StderrConfig,
+    filter: tracing_subscriber::EnvFilter,
+    timer: HcTimer,
+) -> DynLayer {
     let ansi = cfg.ansi;
     match cfg.format {
         OutputFormat::Json => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .json()
             .with_writer(std::io::stderr)
             .with_ansi(ansi)
             .with_filter(filter)
             .boxed(),
         OutputFormat::Compact => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .compact()
             .with_writer(std::io::stderr)
             .with_ansi(ansi)
             .with_filter(filter)
             .boxed(),
         OutputFormat::Pretty => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .pretty()
             .with_writer(std::io::stderr)
             .with_ansi(ansi)
@@ -190,6 +228,7 @@ fn build_stderr_layer(cfg: &StderrConfig, filter: tracing_subscriber::EnvFilter)
 fn build_file_layer(
     cfg: &FileConfig,
     filter: tracing_subscriber::EnvFilter,
+    timer: HcTimer,
 ) -> (DynLayer, tracing_appender::non_blocking::WorkerGuard) {
     use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
@@ -204,18 +243,21 @@ fn build_file_layer(
 
     let layer: DynLayer = match cfg.format {
         OutputFormat::Json => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .json()
             .with_writer(non_blocking)
             .with_ansi(false)
             .with_filter(filter)
             .boxed(),
         OutputFormat::Compact => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .compact()
             .with_writer(non_blocking)
             .with_ansi(false)
             .with_filter(filter)
             .boxed(),
         OutputFormat::Pretty => tracing_subscriber::fmt::layer()
+            .with_timer(timer)
             .pretty()
             .with_writer(non_blocking)
             .with_ansi(false)

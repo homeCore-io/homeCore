@@ -13,6 +13,23 @@ fn default_syslog_port() -> u16 { 514 }
 fn default_facility() -> String { "user".into() }
 fn default_app_name() -> String { "homecore".into() }
 
+/// Whether timestamps in log output use the local system timezone or UTC.
+///
+/// ```toml
+/// [logging]
+/// time_display = "local"   # default — shows local time with offset
+/// time_display = "utc"     # ISO 8601 Z suffix
+/// ```
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeDisplay {
+    /// Local system timezone (e.g. `2026-03-25T09:32:00.123-05:00`).
+    #[default]
+    Local,
+    /// UTC (e.g. `2026-03-25T14:32:00.123Z`).
+    Utc,
+}
+
 /// Top-level `[logging]` config section.
 #[derive(Debug, Deserialize, Clone)]
 pub struct LoggingConfig {
@@ -24,6 +41,12 @@ pub struct LoggingConfig {
     /// names), e.g. `hc_core = "debug"`.  Equivalent to RUST_LOG directives.
     #[serde(default)]
     pub targets: HashMap<String, String>,
+
+    /// Timestamp display mode for all log outputs: "local" (default) | "utc".
+    /// Applies to stderr, rolling files, and the rules file.
+    /// Syslog timestamps follow their respective RFC format using this setting.
+    #[serde(default)]
+    pub time_display: TimeDisplay,
 
     #[serde(default)]
     pub stderr: StderrConfig,
@@ -49,6 +72,7 @@ impl Default for LoggingConfig {
         Self {
             level: default_level(),
             targets: HashMap::new(),
+            time_display: TimeDisplay::Local,
             stderr: StderrConfig::default(),
             file: FileConfig::default(),
             syslog: SyslogConfig::default(),

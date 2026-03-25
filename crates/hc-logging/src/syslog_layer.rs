@@ -45,16 +45,19 @@ impl Transport {
 // ── layer ──────────────────────────────────────────────────────────────────
 
 pub struct SyslogLayer {
-    transport: Transport,
-    facility:  u8,
-    app_name:  String,
-    protocol:  SyslogProtocol,
-    hostname:  String,
-    pid:       u32,
+    transport:      Transport,
+    facility:       u8,
+    app_name:       String,
+    protocol:       SyslogProtocol,
+    hostname:       String,
+    pid:            u32,
+    use_local_time: bool,
 }
 
 impl SyslogLayer {
-    pub fn new(config: &SyslogConfig) -> anyhow::Result<Self> {
+    /// `use_local_time`: when `true`, timestamps use the local system timezone;
+    /// when `false`, timestamps are UTC (the former default behaviour).
+    pub fn new(config: &SyslogConfig, use_local_time: bool) -> anyhow::Result<Self> {
         let addr = format!("{}:{}", config.host, config.port);
         let transport = match config.transport {
             SyslogTransport::Udp => {
@@ -75,6 +78,7 @@ impl SyslogLayer {
             protocol: config.protocol.clone(),
             hostname: read_hostname(),
             pid:      std::process::id(),
+            use_local_time,
         })
     }
 
@@ -94,7 +98,12 @@ impl SyslogLayer {
 
     fn format_rfc3164(&self, level: &Level, target: &str, message: &str) -> String {
         let pri = self.pri(level);
-        let ts = chrono::Utc::now().format("%b %e %H:%M:%S");
+        // RFC 3164 timestamp has no timezone indicator; use local or UTC per config.
+        let ts = if self.use_local_time {
+            chrono::Local::now().format("%b %e %H:%M:%S").to_string()
+        } else {
+            chrono::Utc::now().format("%b %e %H:%M:%S").to_string()
+        };
         format!(
             "<{pri}>{ts} {host} {app}[{pid}]: [{target}] {message}",
             host    = self.hostname,
@@ -105,7 +114,12 @@ impl SyslogLayer {
 
     fn format_rfc5424(&self, level: &Level, target: &str, message: &str) -> String {
         let pri = self.pri(level);
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // RFC 5424 uses RFC 3339; include offset for local, Z for UTC.
+        let ts = if self.use_local_time {
+            chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+        } else {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
         // Version=1, structured-data="-", msgid="-"
         format!(
             "<{pri}>1 {ts} {host} {app} {pid} - - [{target}] {message}",
