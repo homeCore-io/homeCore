@@ -1848,47 +1848,223 @@ Fires a rule on a repeating schedule using a **6-field cron expression** evaluat
 {second} {minute} {hour} {day-of-month} {month} {day-of-week}
 ```
 
-| Common pattern | Expression | Notes |
-|---|---|---|
-| Every day at 09:30 | `0 30 9 * * *` | second=0 required |
-| Every 15 minutes | `0 */15 * * * *` | `*/N` = every N |
-| Every hour | `0 0 * * * *` | |
-| Mon–Fri at 08:00 | `0 0 8 * * Mon-Fri` | Day-of-week names OK |
-| First of each month at midnight | `0 0 0 1 * *` | |
-| Every weekday at 17:30 | `0 30 17 * * Mon,Tue,Wed,Thu,Fri` | |
+The **second field is required** — this distinguishes Cron from `TimeOfDay`.  For most automations you want the second to be `0`.  Named day-of-week values (`Mon`, `Tue`, … `Sun`) and month names (`Jan` … `Dec`) are accepted.  Ranges (`Mon-Fri`), lists (`Mon,Wed,Fri`), and step values (`*/15`) are all supported.
 
-**TOML example:**
+#### Expression quick reference
+
+| Pattern | Expression | Notes |
+|---|---|---|
+| Every day at 09:30 | `0 30 9 * * *` | |
+| Every 15 minutes | `0 */15 * * * *` | fires at :00 :15 :30 :45 |
+| Every hour on the hour | `0 0 * * * *` | |
+| Weekdays at 08:00 | `0 0 8 * * Mon-Fri` | range syntax |
+| Weekdays at 17:30 | `0 30 17 * * Mon-Fri` | |
+| Saturday and Sunday at 10:00 | `0 0 10 * * Sat,Sun` | list syntax |
+| First of each month at midnight | `0 0 0 1 * *` | |
+| Every 10 minutes, weekdays only | `0 */10 * * * Mon-Fri` | combined step + range |
+| Twice a day (08:00 and 20:00) | `0 0 8,20 * * *` | list in hour field |
+| Every 5 minutes between 06:00–22:00 | use TimeWindow condition | see below |
+
+#### Basic example — daily notification
 
 ```toml
-id = ""
-name    = "Daily Morning Check"
+id      = ""
+name    = "Daily Morning Status"
 enabled = true
 priority = 10
+tags    = ["daily", "notifications"]
 
 [trigger]
 type       = "cron"
-expression = "0 0 7 * * *"   # every day at 07:00 local time
+expression = "0 0 7 * * *"   # 07:00 every day, local time
 
 [[actions]]
 type    = "notify"
 channel = "telegram"
-message = "Good morning — HomeCore daily check"
+message = "Good morning — homeCore daily check"
 ```
 
-**Behaviour:**
-- The scheduler ticks once per minute and checks all cron rules.
-- Catch-up on restart: any firing within `catchup_window_minutes` is fired immediately.
-- Invalid expressions log a `WARN` at the time of evaluation and never fire — the rule is not disabled.
-- Cron rules coexist with `TimeOfDay` and `SunEvent` rules; they all use the same scheduler tick.
+#### Example — weekday evening scene
+
+```toml
+id      = ""
+name    = "Weekday Evening Lights On"
+enabled = true
+priority = 20
+tags    = ["lighting", "schedule"]
+
+[trigger]
+type       = "cron"
+expression = "0 0 18 * * Mon-Fri"   # 18:00 Mon–Fri
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light_living_room"
+state     = { "on" = true, "brightness" = 200 }
+```
+
+#### Example — periodic check with conditions
+
+Cron rules run conditions just like any other trigger.  Use a `TimeWindow` condition to restrict a high-frequency cron to certain hours, or `DeviceState` to make it conditional on current state.
+
+```toml
+id      = ""
+name    = "Night Light Check (every 30 min)"
+enabled = true
+priority = 5
+tags    = ["lighting"]
+
+# Every 30 minutes, all day
+[trigger]
+type       = "cron"
+expression = "0 */30 * * * *"
+
+# Only act between 22:00 and 06:00
+[[conditions]]
+type  = "time_window"
+start = "22:00"
+end   = "06:00"
+
+# Only if the hallway light is still on
+[[conditions]]
+type      = "device_state"
+device_id = "light_hallway"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light_hallway"
+state     = { "on" = false }
+```
+
+#### Example — monthly report (1st of month)
+
+```toml
+id      = ""
+name    = "Monthly Energy Report"
+enabled = true
+priority = 1
+
+[trigger]
+type       = "cron"
+expression = "0 0 8 1 * *"   # 1st of each month at 08:00
+
+[[actions]]
+type    = "call_service"
+url     = "http://localhost:9000/reports/monthly"
+method  = "POST"
+body    = {}
+```
+
+#### Creating a Cron rule via REST
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "00000000-0000-0000-0000-000000000000",
+    "name": "Hourly sensor check",
+    "enabled": true,
+    "priority": 5,
+    "tags": ["monitoring"],
+    "trigger": {
+      "type": "cron",
+      "expression": "0 0 * * * *"
+    },
+    "conditions": [],
+    "actions": [
+      {
+        "type": "call_service",
+        "url": "http://localhost:9000/health",
+        "method": "GET",
+        "body": {}
+      }
+    ]
+  }' | jq '{id, name}'
+```
+
+Filter all cron rules:
+
+```sh
+curl -s "http://localhost:8080/api/v1/automations?trigger=cron" \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].name'
+```
+
+#### Cron vs TimeOfDay — when to use which
+
+| Need | Use |
+|---|---|
+| Simple daily time, specific days of week | `TimeOfDay` — simpler TOML, clearer intent |
+| Every N minutes | `Cron` — TimeOfDay can't do sub-hour |
+| Multiple times per day | `Cron` with list (`0 0 8,12,18 * * *`) |
+| First of month, day-of-month patterns | `Cron` |
+| Weekday vs weekend differentiation | Either — Cron has cleaner range syntax |
+
+#### Behaviour notes
+
+- The scheduler ticks once per minute; Cron is evaluated on each tick (same loop as `TimeOfDay` and `SunEvent`).
+- **Catch-up on restart:** any Cron firing within `catchup_window_minutes` of the restart time fires immediately.
+- **Invalid expressions** log a `WARN` at evaluation time and the rule never fires.  The rule is not automatically disabled — fix the expression and the rule recovers on the next tick.
+- All Cron expressions use local wall-clock time (same timezone as the `TimeOfDay` trigger).
+
+#### Debugging cron rules
+
+Check if a cron rule has fired recently:
+
+```sh
+# View last 20 evaluations (conditions passed/failed, timing)
+curl -s http://localhost:8080/api/v1/automations/<ID>/history \
+  -H "Authorization: Bearer $TOKEN" | jq '.[] | {timestamp, conditions_passed, actions_ran, eval_ms}'
+```
+
+Check for stale/errored cron rules:
+
+```sh
+curl -s "http://localhost:8080/api/v1/automations?trigger=cron&stale=true" \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].error'
+```
 
 ---
 
 ### Condition negation — `Condition::Not`
 
-Wraps any condition and inverts its result.  Useful for "device NOT in state X" without resorting to a `ScriptExpression`.
+Wraps any condition and inverts its result.  Useful for expressing "NOT in state X" without a `ScriptExpression`.
+
+All conditions in a rule AND together.  `Not` lets you express negative constraints in the same declarative style as positive ones — no Rhai required.
+
+#### TOML syntax
 
 ```toml
-# Fire when vacation switch is OFF (not on)
+[[conditions]]
+type = "not"
+
+[conditions.condition]
+# any condition type goes here
+type      = "device_state"
+device_id = "switch_vacation"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+Note the TOML indentation: `[conditions.condition]` is a **table** (singular), not an array entry — it's the wrapped condition object, not a list.
+
+#### Example — only fire when vacation mode is OFF
+
+```toml
+id      = ""
+name    = "Evening Lights (skip when on vacation)"
+enabled = true
+priority = 20
+
+[trigger]
+type       = "cron"
+expression = "0 0 18 * * *"
+
+# Only proceed when the vacation switch is OFF
 [[conditions]]
 type = "not"
 
@@ -1898,9 +2074,152 @@ device_id = "switch_vacation"
 attribute = "on"
 op        = "eq"
 value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light_living_room"
+state     = { "on" = true, "brightness" = 180 }
 ```
 
-The `Not` wrapper is recursive — it can wrap any condition type including another `Not` (double-negation).  The dry-run test endpoint (`POST /automations/{id}/test`) correctly negates inner condition results.
+#### Example — fire only OUTSIDE a time window
+
+`TimeWindow` passes when the current time is *inside* the window.  Negate it to restrict a rule to *outside* a window — for example, suppress a notification during sleep hours.
+
+```toml
+[[conditions]]
+type = "not"
+
+[conditions.condition]
+type  = "time_window"
+start = "22:00"
+end   = "08:00"
+```
+
+This rule only proceeds between 08:00 and 22:00.  The `TimeWindow` condition would normally pass during 22:00–08:00; `Not` flips it.
+
+#### Example — combining multiple Not conditions
+
+All conditions still AND together.  Here a cron rule fires only when the door has been closed for at most 5 minutes (not yet elapsed) AND the house is occupied:
+
+```toml
+[trigger]
+type       = "cron"
+expression = "0 */5 * * * *"   # every 5 minutes
+
+# Door must have been CLOSED recently (< 5 min since attribute last changed)
+# i.e. NOT elapsed 300 seconds — catch it in the first polling window
+[[conditions]]
+type = "not"
+
+[conditions.condition]
+type          = "time_elapsed"
+device_id     = "yolink_front_door"
+attribute     = "open"
+duration_secs = 300
+
+# And the house is not in away mode
+[[conditions]]
+type = "not"
+
+[conditions.condition]
+type      = "device_state"
+device_id = "switch_away_mode"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+#### JSON API format
+
+```json
+{
+  "type": "not",
+  "condition": {
+    "type": "device_state",
+    "device_id": "switch_vacation",
+    "attribute": "on",
+    "op": "eq",
+    "value": true
+  }
+}
+```
+
+Full rule via REST:
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "00000000-0000-0000-0000-000000000000",
+    "name": "Motion alert (not during sleep hours)",
+    "enabled": true,
+    "priority": 10,
+    "tags": ["security"],
+    "trigger": {
+      "type": "device_state_changed",
+      "device_id": "hue_motion_hallway",
+      "attribute": "motion",
+      "to": true
+    },
+    "conditions": [
+      {
+        "type": "not",
+        "condition": {
+          "type": "time_window",
+          "start": "22:00",
+          "end": "07:00"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "notify",
+        "channel": "telegram",
+        "message": "Motion detected in hallway"
+      }
+    ]
+  }' | jq '{id, name}'
+```
+
+#### Dry-run test with Not conditions
+
+`POST /automations/{id}/test` correctly evaluates and inverts `Not` conditions.  The `passed` field in the response reflects the final (negated) result; `actual` shows the inner condition's value.
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations/<ID>/test \
+  -H "Authorization: Bearer $TOKEN" | jq '.conditions'
+```
+
+```json
+[
+  {
+    "condition": { "type": "not", "condition": { "type": "device_state", ... } },
+    "passed": true,
+    "actual": null,
+    "expected": null,
+    "elapsed_ms": null,
+    "reason": null
+  }
+]
+```
+
+#### `Not` vs `ScriptExpression` — when to use which
+
+| Pattern | Recommended approach |
+|---|---|
+| Device attribute NOT equal to a value | `Not` wrapping `DeviceState` with `op=eq` |
+| NOT inside a time window | `Not` wrapping `TimeWindow` |
+| Device state has NOT been stable long enough | `Not` wrapping `TimeElapsed` |
+| Multiple negations combined | Multiple `Not` conditions (AND logic) |
+| Complex boolean logic (`A AND (B OR C)`) | `ScriptExpression` |
+| Negating a Rhai expression directly | `ScriptExpression` — `!some_fn()` |
+
+#### Notes
+
+- Nesting is supported: `Not` can wrap another `Not` (double-negation, passes through unchanged).
+- The inner condition is evaluated at the same point in the rule lifecycle — the device cache snapshot is shared.
+- Log output shows `rule.condition: Not  inner=false  result=true` at debug level.
 
 ---
 
@@ -2787,6 +3106,149 @@ Once connected, create a dashboard using the queries from the table above.
 without token management.  On a home network this is acceptable.  To restrict
 access, use a Caddy `basicauth` block or `allow_hosts` directive in front of
 the `/api/v1/metrics` path.
+
+---
+
+## Graceful shutdown
+
+HomeCore handles **SIGTERM** and **SIGINT** (Ctrl-C) gracefully.  When a signal is received:
+
+1. The rule engine stops accepting new events.
+2. Any rule action tasks that are currently executing are allowed to finish (up to 10 seconds).
+3. The HTTP/WebSocket server stops accepting new connections and drains in-flight requests.
+4. The scheduler wakes from its sleep and exits cleanly.
+5. The process returns `0`.
+
+### What happens during the drain window
+
+- In-flight rule action tasks keep running.  If a rule action sequence is mid-execution (e.g. in the middle of a `Delay` or waiting for a `CallService` HTTP response), it is given up to **10 seconds** to complete.
+- After 10 seconds, any remaining tasks are abandoned and the engine force-stops.  A `WARN` log line is emitted with the count of abandoned tasks.
+- New events arriving during the drain are ignored — no new rule evaluations are started.
+- HTTP connections that are already open are drained normally by axum; new connections are refused.
+- MQTT publishing still works during the drain (the publish handle is still alive), so rule actions that call `set_device_state` or `publish_mqtt` can complete successfully.
+
+### Sending a shutdown signal manually
+
+```sh
+# Graceful stop by PID
+kill -TERM $(pgrep homecore)
+
+# Or press Ctrl-C in the terminal where homecore is running
+
+# Verify clean shutdown in logs:
+# INFO Rule engine: shutdown signal received — stopping event loop
+# INFO Scheduler: shutdown signal received — stopping
+# INFO API server: shutdown signal received — draining connections
+# INFO Rule engine stopped
+```
+
+### systemd service integration
+
+A proper systemd unit sends SIGTERM and waits for the process to exit.  HomeCore handles this natively — no `KillSignal` override needed.
+
+```ini
+# /etc/systemd/system/homecore.service
+[Unit]
+Description=HomeCore Home Automation Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=homecore
+WorkingDirectory=/opt/homecore
+ExecStart=/opt/homecore/bin/homecore
+Restart=on-failure
+RestartSec=5s
+
+# Give HomeCore up to 15 seconds to finish in-flight work.
+# The 10-second engine drain + a few seconds buffer.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+# Install and enable
+sudo systemctl daemon-reload
+sudo systemctl enable homecore
+sudo systemctl start homecore
+
+# Graceful stop
+sudo systemctl stop homecore
+
+# Reload after config change (stop + start; rules hot-reload without restart)
+sudo systemctl restart homecore
+
+# Tail logs
+sudo journalctl -fu homecore
+```
+
+### Docker container integration
+
+`docker stop` sends SIGTERM to PID 1 and waits for the container to exit (default 10 seconds, configurable with `--time`).  To ensure HomeCore's drain window fits within Docker's timeout, use `--stop-timeout 15`:
+
+```sh
+# Start
+docker run -d \
+  --name homecore \
+  --stop-timeout 15 \
+  -v /opt/homecore:/data \
+  -e HOMECORE_HOME=/data \
+  -p 8080:8080 \
+  homecore:latest
+
+# Graceful stop (waits up to 15s for in-flight work)
+docker stop homecore
+
+# Force-kill immediately (skips drain — avoid in production)
+docker kill homecore
+```
+
+If using Docker Compose, set `stop_grace_period`:
+
+```yaml
+services:
+  homecore:
+    image: homecore:latest
+    stop_grace_period: 15s
+    environment:
+      HOMECORE_HOME: /data
+    volumes:
+      - homecore-data:/data
+    ports:
+      - "8080:8080"
+```
+
+### Verifying clean shutdown in logs
+
+A clean shutdown produces this sequence:
+
+```
+INFO  Received SIGTERM — initiating graceful shutdown
+INFO  Rule engine: shutdown signal received — stopping event loop
+INFO  Scheduler: shutdown signal received — stopping
+INFO  API server: shutdown signal received — draining connections
+INFO  Rule engine stopped
+```
+
+If the drain timed out you will see:
+
+```
+WARN  Rule engine: shutdown drain timed out — forcing stop  in_flight=2
+```
+
+This means two rule action tasks were still running at the 10-second mark.  Common causes: `CallService` with a slow upstream, `Delay` with a duration longer than 10 seconds, or `RepeatUntil` still iterating.  Consider reducing timeouts on external service calls or breaking long `Delay` sequences into smaller chunks if clean shutdown under 10 seconds is required.
+
+### Checking for in-flight tasks in metrics
+
+The Prometheus endpoint is still served during the drain window.  You can monitor in-flight activity before stopping:
+
+```sh
+# Watch rule fires and state changes in real time
+watch -n1 'curl -s http://localhost:8080/api/v1/metrics | grep homecore_rule'
+```
 
 ---
 
