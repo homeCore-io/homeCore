@@ -8,7 +8,7 @@ use axum::{
 };
 use hc_state::StateStore;
 use hc_types::device::Area;
-use hc_types::rule::{Rule, Scene};
+use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -17,6 +17,7 @@ use crate::auth_middleware::{
     AreasRead, AreasWrite, AutomationsRead, AutomationsWrite, DevicesRead, DevicesWrite,
     PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
 };
+use crate::group_store::RuleGroup;
 use crate::AppState;
 
 // ---------- Health ----------
@@ -576,8 +577,14 @@ pub async fn delete_area(
 
 #[derive(Deserialize, Default)]
 pub struct AutomationListQuery {
-    /// Filter by tag — only returns rules that have this tag in their `tags` list.
+    /// Filter by tag — only rules that have this tag.
     pub tag: Option<String>,
+    /// Filter by trigger type (snake_case variant name, e.g. `device_state_changed`).
+    pub trigger: Option<String>,
+    /// Filter to rules that reference this device_id in their trigger, conditions, or actions.
+    pub device_id: Option<String>,
+    /// When `true`, return only rules that have an `error` field set (broken / stale rules).
+    pub stale: Option<bool>,
 }
 
 pub async fn list_automations(
@@ -588,15 +595,76 @@ pub async fn list_automations(
     match &s.rules_handle {
         Some(rh) => {
             let rules = rh.read().await;
-            let result: Vec<_> = if let Some(ref tag) = params.tag {
-                rules.iter().filter(|r| r.tags.contains(tag)).cloned().collect()
-            } else {
-                rules.clone()
-            };
+            let result: Vec<_> = rules.iter().filter(|r| {
+                if let Some(ref tag) = params.tag {
+                    if !r.tags.contains(tag) { return false; }
+                }
+                if let Some(ref trig) = params.trigger {
+                    if trigger_type_name(&r.trigger) != trig.as_str() { return false; }
+                }
+                if let Some(ref did) = params.device_id {
+                    if !rule_references_device(r, did) { return false; }
+                }
+                if params.stale == Some(true) && r.error.is_none() {
+                    return false;
+                }
+                true
+            }).cloned().collect();
             (StatusCode::OK, Json(json!(result)))
         }
         None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
     }
+}
+
+/// Snake-case name of a `Trigger` variant — matches the serde `type` field value.
+fn trigger_type_name(trigger: &Trigger) -> &'static str {
+    match trigger {
+        Trigger::DeviceStateChanged { .. } => "device_state_changed",
+        Trigger::MqttMessage { .. }        => "mqtt_message",
+        Trigger::TimeOfDay { .. }          => "time_of_day",
+        Trigger::SunEvent { .. }           => "sun_event",
+        Trigger::WebhookReceived { .. }    => "webhook_received",
+        Trigger::ManualTrigger             => "manual_trigger",
+        Trigger::CustomEvent { .. }        => "custom_event",
+        Trigger::SystemStarted             => "system_started",
+    }
+}
+
+/// Returns `true` if `device_id` appears anywhere in the rule's trigger,
+/// conditions, or actions (including nested action groups).
+fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
+    let in_trigger = match &rule.trigger {
+        Trigger::DeviceStateChanged { device_id: d, .. } => d == device_id,
+        _ => false,
+    };
+    if in_trigger { return true; }
+
+    for cond in &rule.conditions {
+        let matches = match cond {
+            Condition::DeviceState { device_id: d, .. } => d == device_id,
+            Condition::TimeElapsed { device_id: d, .. } => d == device_id,
+            _ => false,
+        };
+        if matches { return true; }
+    }
+
+    actions_reference_device(&rule.actions, device_id)
+}
+
+fn actions_reference_device(actions: &[Action], device_id: &str) -> bool {
+    for action in actions {
+        let found = match action {
+            Action::SetDeviceState { device_id: d, .. } => d == device_id,
+            Action::Parallel { actions: inner }          => actions_reference_device(inner, device_id),
+            Action::RepeatUntil { actions: inner, .. }   => actions_reference_device(inner, device_id),
+            Action::Conditional { then_actions, else_actions, .. } =>
+                actions_reference_device(then_actions, device_id)
+                || actions_reference_device(else_actions, device_id),
+            _ => false,
+        };
+        if found { return true; }
+    }
+    false
 }
 
 pub async fn create_automation(
@@ -1076,18 +1144,25 @@ pub async fn patch_automation(
 
 #[derive(Deserialize, Default)]
 pub struct BulkPatchQuery {
-    /// Apply only to rules that have this tag.  Omit to apply to all rules.
+    /// Apply only to rules that have this tag.  Ignored when `ids` is present in the body.
     pub tag: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct BulkPatchBody {
+    /// When present, apply only to these specific rule IDs (overrides `?tag=`).
+    #[serde(default)]
+    pub ids: Option<Vec<Uuid>>,
     pub enabled: Option<bool>,
 }
 
 /// `PATCH /api/v1/automations[?tag=<tag>]`
 ///
-/// Bulk enable/disable all rules (or all rules with a given tag).
+/// Bulk enable/disable rules, selecting targets in priority order:
+/// 1. `ids` field in body — explicit list of rule UUIDs (ignores `?tag=`)
+/// 2. `?tag=<tag>` query param — all rules with that tag
+/// 3. No selector — all rules
+///
 /// Returns `{ "updated": N, "rules": [...] }`.
 pub async fn bulk_patch_automations(
     State(s): State<AppState>,
@@ -1103,10 +1178,14 @@ pub async fn bulk_patch_automations(
     {
         let mut rules = rh.write().await;
         for rule in rules.iter_mut() {
-            let matches = params.tag.as_ref()
-                .map(|tag| rule.tags.contains(tag))
-                .unwrap_or(true);
-            if matches {
+            let selected = if let Some(ref ids) = patch.ids {
+                ids.contains(&rule.id)
+            } else if let Some(ref tag) = params.tag {
+                rule.tags.contains(tag)
+            } else {
+                true
+            };
+            if selected {
                 if let Some(enabled) = patch.enabled {
                     rule.enabled = enabled;
                 }
@@ -1156,6 +1235,208 @@ pub async fn automation_history(
         .unwrap_or_default();
 
     (StatusCode::OK, Json(json!(history))).into_response()
+}
+
+// ---------- Clone automation ----------
+
+/// `POST /api/v1/automations/{id}/clone`
+///
+/// Duplicates a rule with a new UUID.  The clone is disabled by default
+/// to prevent accidental double-firing until the operator reviews it.
+/// Returns `201 Created` with the new rule body.
+pub async fn clone_automation(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    let original = {
+        let rules = rh.read().await;
+        match rules.iter().find(|r| r.id == id).cloned() {
+            Some(r) => r,
+            None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+        }
+    };
+
+    let mut cloned = original.clone();
+    cloned.id      = Uuid::new_v4();
+    cloned.name    = format!("Copy of {}", original.name);
+    cloned.enabled = false; // disabled until operator reviews
+    cloned.error   = None;
+
+    if let Some(fs) = &s.rule_file_store {
+        if let Err(e) = fs.write_rule(&cloned) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    rh.write().await.push(cloned.clone());
+    (StatusCode::CREATED, Json(json!(cloned))).into_response()
+}
+
+// ---------- Rule groups ----------
+
+/// `GET /api/v1/automations/groups`
+pub async fn list_groups(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    match &s.rule_groups {
+        Some(rg) => {
+            let groups = rg.read().await;
+            (StatusCode::OK, Json(json!(*groups))).into_response()
+        }
+        None => (StatusCode::OK, Json(json!([]))).into_response(),
+    }
+}
+
+/// `POST /api/v1/automations/groups`
+pub async fn create_group(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Json(mut group): Json<RuleGroup>,
+) -> impl IntoResponse {
+    let Some(rg) = &s.rule_groups else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "group store not available" }))).into_response();
+    };
+    group.id = Uuid::new_v4();
+    let mut groups = rg.write().await;
+    groups.push(group.clone());
+    if let Some(gs) = &s.group_store {
+        if let Err(e) = gs.save(&groups) {
+            tracing::warn!(error = %e, "create_group: failed to persist groups");
+        }
+    }
+    (StatusCode::CREATED, Json(json!(group))).into_response()
+}
+
+/// `GET /api/v1/automations/groups/{id}`
+pub async fn get_group(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(rg) = &s.rule_groups else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    let groups = rg.read().await;
+    match groups.iter().find(|g| g.id == id).cloned() {
+        Some(g) => (StatusCode::OK, Json(json!(g))).into_response(),
+        None    => (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response(),
+    }
+}
+
+/// `PATCH /api/v1/automations/groups/{id}`
+///
+/// Update group metadata (name, description, rule_ids).  Does not toggle rules.
+#[derive(Deserialize)]
+pub struct GroupPatch {
+    pub name:        Option<String>,
+    pub description: Option<String>,
+    pub rule_ids:    Option<Vec<Uuid>>,
+}
+
+pub async fn patch_group(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<GroupPatch>,
+) -> impl IntoResponse {
+    let Some(rg) = &s.rule_groups else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    let mut groups = rg.write().await;
+    let Some(g) = groups.iter_mut().find(|g| g.id == id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    if let Some(name) = patch.name            { g.name        = name; }
+    if let Some(desc) = patch.description     { g.description = Some(desc); }
+    if let Some(ids)  = patch.rule_ids        { g.rule_ids    = ids; }
+    let updated = g.clone();
+    if let Some(gs) = &s.group_store {
+        if let Err(e) = gs.save(&groups) {
+            tracing::warn!(error = %e, "patch_group: failed to persist groups");
+        }
+    }
+    (StatusCode::OK, Json(json!(updated))).into_response()
+}
+
+/// `DELETE /api/v1/automations/groups/{id}`
+pub async fn delete_group(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(rg) = &s.rule_groups else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    let mut groups = rg.write().await;
+    let before = groups.len();
+    groups.retain(|g| g.id != id);
+    if groups.len() == before {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    }
+    if let Some(gs) = &s.group_store {
+        if let Err(e) = gs.save(&groups) {
+            tracing::warn!(error = %e, "delete_group: failed to persist groups");
+        }
+    }
+    (StatusCode::OK, Json(json!({ "deleted": true }))).into_response()
+}
+
+/// `POST /api/v1/automations/groups/{id}/enable`
+/// `POST /api/v1/automations/groups/{id}/disable`
+///
+/// Apply `enabled = true/false` to every rule in the group.
+pub async fn set_group_enabled(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path((id, action)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let enabled = match action.as_str() {
+        "enable"  => true,
+        "disable" => false,
+        other => return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("unknown action '{other}'; use enable or disable") }))).into_response(),
+    };
+
+    let Some(rg) = &s.rule_groups else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    let groups = rg.read().await;
+    let Some(group) = groups.iter().find(|g| g.id == id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+    };
+    let rule_ids = group.rule_ids.clone();
+    drop(groups);
+
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    let mut updated = Vec::new();
+    {
+        let mut rules = rh.write().await;
+        for rule in rules.iter_mut() {
+            if rule_ids.contains(&rule.id) {
+                rule.enabled = enabled;
+                updated.push(rule.clone());
+            }
+        }
+    }
+
+    if let Some(fs) = &s.rule_file_store {
+        for rule in &updated {
+            if let Err(e) = fs.write_rule(rule) {
+                tracing::warn!(rule_id = %rule.id, error = %e, "set_group_enabled: failed to write rule file");
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "enabled": enabled, "updated": updated.len(), "rules": updated }))).into_response()
 }
 
 // ---------- Webhooks ----------

@@ -22,6 +22,7 @@ pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
 pub mod event_log;
+pub mod group_store;
 pub mod handlers;
 pub mod logs;
 pub mod metrics;
@@ -31,6 +32,7 @@ pub mod ws;
 use auth_middleware::require_auth;
 use backup::BackupPaths;
 use event_log::EventLog;
+use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
 use metrics::MetricsCollector;
 use rule_file_store::RuleFileStore;
@@ -77,6 +79,10 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Per-rule ring buffer of recent evaluation results; provided by the rule engine.
     pub fire_history: Option<hc_core::FireHistoryHandle>,
+    /// Named rule groups (id, name, description, rule_ids).
+    pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
+    /// Persistent store for rule groups (groups.json in rules dir).
+    pub group_store: Option<Arc<GroupStore>>,
 }
 
 impl AppState {
@@ -159,6 +165,8 @@ impl AppState {
             backup_paths: None,
             started_at: chrono::Utc::now(),
             fire_history: None,
+            rule_groups: None,
+            group_store: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -183,6 +191,13 @@ impl AppState {
     /// Attach the rule fire history handle from the rule engine.
     pub fn with_fire_history(mut self, handle: hc_core::FireHistoryHandle) -> Self {
         self.fire_history = Some(handle);
+        self
+    }
+
+    /// Attach the rule group store and pre-loaded groups.
+    pub fn with_group_store(mut self, gs: GroupStore, groups: Vec<RuleGroup>) -> Self {
+        self.group_store  = Some(Arc::new(gs));
+        self.rule_groups  = Some(Arc::new(RwLock::new(groups)));
         self
     }
 }
@@ -240,8 +255,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/automations/:id/test", post(handlers::test_automation))
         .route("/automations/:id/history", get(handlers::automation_history))
+        .route("/automations/:id/clone", post(handlers::clone_automation))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
+        // Rule groups
+        .route("/automations/groups", get(handlers::list_groups).post(handlers::create_group))
+        .route("/automations/groups/:id", get(handlers::get_group).patch(handlers::patch_group).delete(handlers::delete_group))
+        .route("/automations/groups/:id/:action", post(handlers::set_group_enabled))
         // Scenes
         .route("/scenes", get(handlers::list_scenes).post(handlers::create_scene))
         .route("/scenes/:id/activate", post(handlers::activate_scene))

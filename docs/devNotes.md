@@ -680,8 +680,8 @@ Every protected API route enforces a scope before the handler body runs.  The sc
 |---------------------|-----------|
 | `devices:read`      | `GET /devices`, `GET /devices/{id}`, `GET /devices/{id}/history`, `GET /events` |
 | `devices:write`     | `PATCH /devices/{id}/state` |
-| `automations:read`  | `GET /automations`, `GET /automations/{id}`, `POST /automations/{id}/test`, `GET /automations/export` |
-| `automations:write` | `POST /automations`, `PUT /automations/{id}`, `PATCH /automations/{id}`, `DELETE /automations/{id}`, `POST /automations/import` |
+| `automations:read`  | `GET /automations`, `GET /automations/{id}`, `POST /automations/{id}/test`, `GET /automations/export`, `GET /automations/groups`, `GET /automations/groups/{id}`, `GET /automations/{id}/history` |
+| `automations:write` | `POST /automations`, `PUT /automations/{id}`, `PATCH /automations/{id}`, `PATCH /automations`, `DELETE /automations/{id}`, `POST /automations/import`, `POST /automations/{id}/clone`, `POST /automations/groups`, `PATCH /automations/groups/{id}`, `DELETE /automations/groups/{id}`, `POST /automations/groups/{id}/enable`, `POST /automations/groups/{id}/disable` |
 | `areas:read`        | `GET /areas` |
 | `areas:write`       | `POST /areas`, `PUT /areas/{id}/devices` |
 | `scenes:read`       | `GET /scenes` |
@@ -1265,10 +1265,131 @@ curl -s -X PATCH http://localhost:8080/api/v1/automations \
 
 The bulk `PATCH` response is `{ "updated": N, "rules": [...] }` where `rules` contains the full updated rule objects.
 
+**Bulk patch by explicit ID list** — when `ids` is present in the body, `?tag=` is ignored:
+
+```sh
+curl -s -X PATCH http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["UUID1", "UUID2", "UUID3"], "enabled": false}' | jq .updated
+```
+
 **Design note:** Tags are free-form strings. There are no pre-defined categories. Suggested conventions:
 - Area groups: `"deck"`, `"garage"`, `"bedroom"`
 - Functional groups: `"door-alerts"`, `"morning-routine"`, `"vacation"`
 - Maintenance: `"disabled-pending-fix"`, `"seasonal"`
+
+---
+
+### Automation list filters
+
+`GET /automations` accepts the following query parameters (combinable):
+
+| Parameter | Example | Behaviour |
+|---|---|---|
+| `tag` | `?tag=deck` | Only rules containing this tag |
+| `trigger` | `?trigger=device_state_changed` | Only rules with this trigger type |
+| `device_id` | `?device_id=yolink_abc123` | Only rules that reference this device (trigger, conditions, or actions) |
+| `stale` | `?stale=true` | Only rules with an `error` field set (broken / references deleted device) |
+
+```sh
+# All rules that fire on a specific device
+curl -s "http://localhost:8080/api/v1/automations?device_id=yolink_d88b4c01000e82eb" \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].name'
+
+# All time-of-day rules
+curl -s "http://localhost:8080/api/v1/automations?trigger=time_of_day" \
+  -H "Authorization: Bearer $TOKEN" | jq '.[].name'
+
+# Broken rules only
+curl -s "http://localhost:8080/api/v1/automations?stale=true" \
+  -H "Authorization: Bearer $TOKEN" | jq '.[] | {name, error}'
+
+# Combine: deck tag + device filter
+curl -s "http://localhost:8080/api/v1/automations?tag=deck&device_id=yolink_abc123" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Valid `trigger` values: `device_state_changed` `mqtt_message` `time_of_day` `sun_event` `webhook_received` `manual_trigger` `custom_event` `system_started`
+
+---
+
+### Clone a rule (`POST /automations/{id}/clone`)
+
+Duplicates an existing rule with a new UUID. The clone is disabled by default.
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations/RULE_ID/clone \
+  -H "Authorization: Bearer $TOKEN" | jq '{id, name, enabled}'
+# → { "id": "new-uuid", "name": "Copy of Original Name", "enabled": false }
+```
+
+Use case: create a variant of an existing rule (e.g. a second door-alert for a different threshold) without re-entering all the trigger/condition/action JSON.
+
+---
+
+### Rule groups
+
+Rule groups are named bundles of rule IDs that can be enabled or disabled together with a single API call. Unlike tags (which are stored on each rule), groups are stored in `rules/groups.json` and reference rules by UUID.
+
+A rule can belong to multiple groups. Groups do not affect rule evaluation order or priorities.
+
+**CRUD:**
+
+```sh
+# List all groups
+curl -s http://localhost:8080/api/v1/automations/groups \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Create a group
+curl -s -X POST http://localhost:8080/api/v1/automations/groups \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "",
+    "name": "Vacation Mode",
+    "description": "Rules to pause while away",
+    "rule_ids": ["UUID1", "UUID2", "UUID3"]
+  }' | jq
+
+# Get a group
+curl -s http://localhost:8080/api/v1/automations/groups/GROUP_ID \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Update group metadata (name, description, or rule_ids)
+curl -s -X PATCH http://localhost:8080/api/v1/automations/groups/GROUP_ID \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"rule_ids": ["UUID1", "UUID2", "UUID4"]}' | jq
+
+# Delete a group (does not affect the rules themselves)
+curl -s -X DELETE http://localhost:8080/api/v1/automations/groups/GROUP_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Enable / disable all rules in a group:**
+
+```sh
+# Disable (leave for vacation)
+curl -s -X POST http://localhost:8080/api/v1/automations/groups/GROUP_ID/disable \
+  -H "Authorization: Bearer $TOKEN" | jq .updated
+
+# Re-enable on return
+curl -s -X POST http://localhost:8080/api/v1/automations/groups/GROUP_ID/enable \
+  -H "Authorization: Bearer $TOKEN" | jq .updated
+```
+
+Response: `{ "enabled": true, "updated": N, "rules": [...] }` where `rules` contains the full updated rule objects.
+
+**Groups vs. tags — when to use each:**
+
+| | Tags | Groups |
+|---|---|---|
+| Stored in | Each rule file | `rules/groups.json` |
+| Survives rule rename | Yes | Yes (by UUID) |
+| One rule, many groups | Yes | Yes |
+| Bulk toggle via API | `PATCH /automations?tag=X` | `POST /automations/groups/ID/enable` |
+| Best for | Open-ended labelling | Named presets (vacation mode, maintenance) |
 
 ---
 

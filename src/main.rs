@@ -1,7 +1,7 @@
 mod plugin_launcher;
 
 use anyhow::Result;
-use hc_api::{logs::LogStreamState, rule_file_store::RuleFileStore, AppState};
+use hc_api::{group_store::{GroupStore, groups_path}, logs::LogStreamState, rule_file_store::RuleFileStore, AppState};
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{rule_loader, Core, EventBus};
@@ -699,6 +699,13 @@ async fn main() -> Result<()> {
     }
 
     let rule_file_store = RuleFileStore::new(&rules_dir);
+
+    let group_store = GroupStore::new(groups_path(&rules_dir));
+    let groups = group_store.load().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "Failed to load rule groups — starting with empty group list");
+        Vec::new()
+    });
+
     let backup_paths = hc_api::backup::BackupPaths {
         state_db_path:   std::path::PathBuf::from(&config.storage.state_db_path),
         history_db_path: std::path::PathBuf::from(&config.storage.history_db_path),
@@ -717,7 +724,8 @@ async fn main() -> Result<()> {
     )
     .with_log_stream(LogStreamState { tx: log_tx, ring: log_ring })
     .with_backup_paths(backup_paths)
-    .with_fire_history(fire_history);
+    .with_fire_history(fire_history)
+    .with_group_store(group_store, groups);
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())
