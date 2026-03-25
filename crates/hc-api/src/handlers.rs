@@ -153,10 +153,32 @@ pub async fn delete_device(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match s.store.delete_device(&id).await {
-        Ok(true)  => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response(),
-        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+        Ok(true) => {}
     }
+
+    // Nullify references to this device in all rule files, then return a summary.
+    let affected_rules = if let Some(rfs) = &s.rule_file_store {
+        match crate::rule_file_store::nullify_device_refs(&rfs.dir, &id) {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::warn!(device_id = %id, error = %e, "delete_device: failed to nullify rule refs");
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    (StatusCode::OK, Json(json!({
+        "deleted": true,
+        "affected_rules": affected_rules,
+    }))).into_response()
 }
 
 #[derive(Deserialize, Default)]

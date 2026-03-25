@@ -45,18 +45,17 @@ fn has_empty_id(content: &str) -> bool {
 
 /// Parse every `*.toml` file in `dir` into a `Vec<Rule>`.
 ///
-/// Returns an error (without modifying any state) when:
-/// - Any file fails to parse (all errors are logged as warnings first)
-/// - Duplicate rule IDs are found across files
+/// Never returns `Err` due to individual file parse failures or duplicate IDs.
+/// Instead, broken files produce a disabled stub rule with `error` set so the
+/// problem is visible in the API and logs without preventing startup or reload.
 ///
-/// The caller should keep the existing in-memory rules on error.
+/// The only failure modes are I/O errors reading the directory itself.
 pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
 
     let mut rules = Vec::new();
-    let mut errors: Vec<(PathBuf, anyhow::Error)> = Vec::new();
 
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("reading rules directory {}", dir.display()))?;
@@ -69,27 +68,22 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
         match load_file(&path) {
             Ok(rule) => rules.push(rule),
             Err(e) => {
-                warn!(file = %path.display(), error = %e, "Rule file parse error");
-                errors.push((path, e));
+                warn!(file = %path.display(), error = %e, "Rule file parse error — inserting disabled stub");
+                rules.push(broken_stub(&path, &e));
             }
         }
     }
 
-    if !errors.is_empty() {
-        return Err(anyhow::anyhow!(
-            "{} rule file(s) failed to parse — keeping existing rules unchanged",
-            errors.len()
-        ));
-    }
-
-    // Duplicate UUID check.
+    // Duplicate UUID check — keep the first occurrence, stub the rest.
     let mut seen: HashSet<uuid::Uuid> = HashSet::new();
-    for rule in &rules {
+    for rule in rules.iter_mut() {
         if !seen.insert(rule.id) {
-            return Err(anyhow::anyhow!(
-                "Duplicate rule ID {} found across rule files — keeping existing rules unchanged",
-                rule.id
-            ));
+            let msg = format!("duplicate rule ID {} — rule disabled until ID is fixed", rule.id);
+            warn!(rule_name = %rule.name, rule_id = %rule.id, "Duplicate rule ID found");
+            rule.enabled = false;
+            rule.error   = Some(msg);
+            // Assign a fresh ID so the stub doesn't conflict in the set.
+            rule.id = uuid::Uuid::new_v4();
         }
     }
 
@@ -97,6 +91,35 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
     rules.sort_by(|a, b| b.priority.cmp(&a.priority));
 
     Ok(rules)
+}
+
+/// Build a disabled placeholder `Rule` for a file that could not be parsed.
+///
+/// Uses a UUID v5 derived from the file path so the stub has a stable ID
+/// across reloads (the broken file doesn't change between reloads).
+fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
+    use hc_types::rule::{Action, Condition, Trigger};
+
+    // Stable UUID from the absolute path so repeated reloads yield the same ID.
+    let path_bytes = path.to_string_lossy();
+    let stub_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, path_bytes.as_bytes());
+
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    Rule {
+        id:         stub_id,
+        name:       format!("{name} [BROKEN]"),
+        enabled:    false,
+        priority:   0,
+        trigger:    Trigger::ManualTrigger,
+        conditions: Vec::<Condition>::new(),
+        actions:    Vec::<Action>::new(),
+        error:      Some(format!("parse error: {err}")),
+    }
 }
 
 /// Parse a single rule TOML file.

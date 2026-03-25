@@ -17,7 +17,7 @@
 //! `spawn_blocking`.  Rule files are small; the I/O is negligible.
 
 use anyhow::{Context, Result};
-use hc_types::rule::Rule;
+use hc_types::rule::{Action, Condition, Rule, Trigger};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -138,6 +138,131 @@ pub fn slugify(name: &str) -> String {
 /// Resolve the path of a rule file given its name, without reading the file.
 pub fn rule_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{}.toml", slugify(name)))
+}
+
+// ── Device-deletion cascading ─────────────────────────────────────────────────
+
+/// Scan every rule file and replace all references to `device_id` with a
+/// `"DELETED:{device_id}"` placeholder.  Affected rules are disabled and
+/// annotated with `error`.
+///
+/// Returns the names of rules that were modified and written back to disk.
+pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let placeholder = format!("DELETED:{device_id}");
+    let mut affected = Vec::new();
+
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("scanning rules directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(mut rule) = toml::from_str::<Rule>(&content) else { continue };
+
+        if rule_references_device(&rule, device_id) {
+            replace_device_refs(&mut rule, device_id, &placeholder);
+            rule.enabled = false;
+            rule.error   = Some(format!("references deleted device: {device_id}"));
+
+            let updated = toml::to_string_pretty(&rule)
+                .with_context(|| format!("serialising rule {}", rule.name))?;
+            std::fs::write(&path, updated)
+                .with_context(|| format!("writing {}", path.display()))?;
+
+            tracing::warn!(
+                rule_name = %rule.name,
+                rule_id   = %rule.id,
+                device_id = %device_id,
+                "Rule disabled: references deleted device"
+            );
+            affected.push(rule.name.clone());
+        }
+    }
+
+    Ok(affected)
+}
+
+/// Returns `true` if any trigger, condition, or action in `rule` directly
+/// references `device_id` (does not search inside Rhai script strings).
+fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
+    trigger_references_device(&rule.trigger, device_id)
+        || rule.conditions.iter().any(|c| condition_references_device(c, device_id))
+        || rule.actions.iter().any(|a| action_references_device(a, device_id))
+}
+
+fn trigger_references_device(trigger: &Trigger, device_id: &str) -> bool {
+    matches!(trigger, Trigger::DeviceStateChanged { device_id: id, .. } if id == device_id)
+}
+
+fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
+    matches!(cond, Condition::DeviceState { device_id: id, .. } if id == device_id)
+}
+
+fn action_references_device(action: &Action, device_id: &str) -> bool {
+    match action {
+        Action::SetDeviceState { device_id: id, .. } => id == device_id,
+        Action::Parallel { actions } => actions.iter().any(|a| action_references_device(a, device_id)),
+        Action::RepeatUntil { actions, .. } => actions.iter().any(|a| action_references_device(a, device_id)),
+        Action::Conditional { then_actions, else_actions, .. } => {
+            then_actions.iter().any(|a| action_references_device(a, device_id))
+                || else_actions.iter().any(|a| action_references_device(a, device_id))
+        }
+        _ => false,
+    }
+}
+
+/// Mutably replace all occurrences of `device_id` with `placeholder` in a rule.
+fn replace_device_refs(rule: &mut Rule, device_id: &str, placeholder: &str) {
+    replace_in_trigger(&mut rule.trigger, device_id, placeholder);
+    for cond in &mut rule.conditions {
+        replace_in_condition(cond, device_id, placeholder);
+    }
+    for action in &mut rule.actions {
+        replace_in_action(action, device_id, placeholder);
+    }
+}
+
+fn replace_in_trigger(trigger: &mut Trigger, device_id: &str, placeholder: &str) {
+    if let Trigger::DeviceStateChanged { device_id: id, .. } = trigger {
+        if id == device_id {
+            *id = placeholder.to_string();
+        }
+    }
+}
+
+fn replace_in_condition(cond: &mut Condition, device_id: &str, placeholder: &str) {
+    if let Condition::DeviceState { device_id: id, .. } = cond {
+        if id == device_id {
+            *id = placeholder.to_string();
+        }
+    }
+}
+
+fn replace_in_action(action: &mut Action, device_id: &str, placeholder: &str) {
+    match action {
+        Action::SetDeviceState { device_id: id, .. } => {
+            if id == device_id {
+                *id = placeholder.to_string();
+            }
+        }
+        Action::Parallel { actions } => {
+            for a in actions { replace_in_action(a, device_id, placeholder); }
+        }
+        Action::RepeatUntil { actions, .. } => {
+            for a in actions { replace_in_action(a, device_id, placeholder); }
+        }
+        Action::Conditional { then_actions, else_actions, .. } => {
+            for a in then_actions { replace_in_action(a, device_id, placeholder); }
+            for a in else_actions { replace_in_action(a, device_id, placeholder); }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,11 @@ pub struct Rule {
     pub conditions: Vec<Condition>,
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Set by the loader when the rule file fails to parse, or by the API when a
+    /// referenced device is deleted.  Rules with an error are never executed.
+    /// The value is a human-readable description of the problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What causes a rule to be evaluated.
