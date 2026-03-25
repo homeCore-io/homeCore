@@ -455,7 +455,7 @@ impl RuleEngine {
                 Ok(result)
             }
 
-            Condition::TimeElapsed { device_id, attribute, duration_ms } => {
+            Condition::TimeElapsed { device_id, attribute, duration_secs } => {
                 let changed_at = self
                     .attr_changed_at
                     .get(device_id.as_str())
@@ -472,26 +472,26 @@ impl RuleEngine {
                     return Ok(false);
                 };
 
-                let elapsed_ms = (Utc::now() - changed_at).num_milliseconds().max(0) as u64;
-                let result = elapsed_ms >= *duration_ms;
+                let elapsed_secs = (Utc::now() - changed_at).num_seconds().max(0) as u64;
+                let result = elapsed_secs >= *duration_secs;
                 if result {
                     debug!(
                         rule_name,
-                        cond        = format!("{}/{}", idx + 1, total),
+                        cond          = format!("{}/{}", idx + 1, total),
                         device_id,
                         attribute,
-                        elapsed_ms,
-                        duration_ms,
+                        elapsed_secs,
+                        duration_secs,
                         "rule.condition: TimeElapsed pass"
                     );
                 } else {
                     info!(
                         rule_name,
-                        cond        = format!("{}/{}", idx + 1, total),
+                        cond          = format!("{}/{}", idx + 1, total),
                         device_id,
                         attribute,
-                        elapsed_ms,
-                        duration_ms,
+                        elapsed_secs,
+                        duration_secs,
                         "rule.condition: TimeElapsed FAIL"
                     );
                 }

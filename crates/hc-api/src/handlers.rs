@@ -872,7 +872,7 @@ async fn eval_condition_dry_detail(
                 reason: if result.is_none() { Some("script error".into()) } else { None },
             }
         }
-        Condition::TimeElapsed { device_id, attribute: _, duration_ms } => {
+        Condition::TimeElapsed { device_id, attribute: _, duration_secs } => {
             let device = match store.get_device(device_id).await {
                 Ok(Some(d)) => d,
                 Ok(None) => return ConditionDetail {
@@ -887,14 +887,14 @@ async fn eval_condition_dry_detail(
                 },
             };
             // Dry-run uses last_seen as the conservative elapsed baseline.
-            let elapsed = (chrono::Utc::now() - device.last_seen).num_milliseconds().max(0);
-            let passed = elapsed as u64 >= *duration_ms;
+            let elapsed_secs = (chrono::Utc::now() - device.last_seen).num_seconds().max(0);
+            let passed = elapsed_secs as u64 >= *duration_secs;
             ConditionDetail {
                 condition: cond_json, passed,
                 actual: None, expected: None,
-                elapsed_ms: Some(elapsed),
+                elapsed_ms: Some(elapsed_secs * 1000),
                 reason: if !passed {
-                    Some(format!("only {elapsed}ms elapsed, need {duration_ms}ms"))
+                    Some(format!("only {elapsed_secs}s elapsed, need {duration_secs}s"))
                 } else {
                     None
                 },

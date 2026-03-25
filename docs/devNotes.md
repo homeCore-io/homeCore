@@ -2019,14 +2019,14 @@ message = "Front door opened at 22:15"
 
 ## `TimeElapsed` condition
 
-Check that a device attribute has not changed for at least N milliseconds — useful for "door open for more than 10 minutes" patterns without a separate timer device.
+Check that a device attribute has not changed for at least N **seconds** — useful for "door open for more than 10 minutes" patterns without a separate timer device.
 
 ```toml
 [[conditions]]
-type        = "time_elapsed"
-device_id   = "yolink_abc123_door"
-attribute   = "open"
-duration_ms = 600000   # 10 minutes
+type          = "time_elapsed"
+device_id     = "yolink_abc123_door"
+attribute     = "open"
+duration_secs = 600   # 10 minutes
 ```
 
 The elapsed time is measured from the last *observed value change* for that specific attribute, tracked in the rule engine's in-memory cache. On first evaluation after a restart, `DeviceState.last_seen` is used as a conservative baseline (so a 10-minute elapsed condition will be true if the device hasn't been seen in 10+ minutes).
@@ -2041,10 +2041,10 @@ attribute = "open"
 to        = true
 
 [[conditions]]
-type        = "time_elapsed"
-device_id   = "yolink_abc123_door"
-attribute   = "open"
-duration_ms = 600000
+type          = "time_elapsed"
+device_id     = "yolink_abc123_door"
+attribute     = "open"
+duration_secs = 600
 
 [[actions]]
 type    = "notify"
