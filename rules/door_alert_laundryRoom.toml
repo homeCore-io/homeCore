@@ -1,0 +1,35 @@
+# Laundry Room Door - Open Too Long Alert
+#
+# Fires when the laundry room door is still open after 10 minutes.
+# The open rule (door_opened_laundryRoom.toml) turns on the garage light;
+# this rule is a Telegram reminder that the door hasn't been closed.
+
+id = "0f3aaa39-4e40-41c9-b19b-4c8b0f6ef3bf"
+name     = "Door Alert - Laundry Room Open 10min"
+enabled  = true
+priority = 5
+tags     = ["garage", "door-alerts"]
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c0200142e3c"
+attribute = "open"
+to        = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0200142e3c"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type          = "time_elapsed"
+device_id     = "yolink_d88b4c0200142e3c"
+attribute     = "open"
+duration_secs = 600
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Laundry room door has been open for 10+ minutes"

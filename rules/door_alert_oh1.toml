@@ -1,0 +1,35 @@
+# Garage OH1 Door - Open Too Long Alert
+#
+# Fires when the OH1 overhead door is still open after 10 minutes.
+# The auto-close timer (oh1_timer_close.toml) handles the actual close sequence;
+# this rule is a Telegram alert to the owner if the door hasn't closed.
+
+id = "841818bd-f732-46df-bbb3-5c444f97846f"
+name     = "Door Alert - OH1 Open 10min"
+enabled  = true
+priority = 5
+tags     = ["garage", "door-alerts"]
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c01000cf2e5"
+attribute = "open"
+to        = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000cf2e5"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type          = "time_elapsed"
+device_id     = "yolink_d88b4c01000cf2e5"
+attribute     = "open"
+duration_secs = 600
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Garage door (OH1) has been open for 10+ minutes"
