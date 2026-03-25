@@ -71,6 +71,19 @@ pub enum Trigger {
     /// changed while homeCore was not running (e.g. a door left open across a
     /// restart).  Pair with `DeviceState` conditions to guard the action.
     SystemStarted,
+    /// Fires on a cron schedule using a 6-field expression:
+    /// `{second} {minute} {hour} {day-of-month} {month} {day-of-week}`
+    ///
+    /// Examples:
+    /// - `"0 30 9 * * *"` — every day at 09:30:00
+    /// - `"0 */15 * * * *"` — every 15 minutes
+    /// - `"0 0 8 * * Mon"` — 08:00 on Mondays
+    ///
+    /// The schedule is evaluated in local wall-clock time.  Invalid expressions
+    /// cause the rule to never fire (an error is logged at startup validation).
+    Cron {
+        expression: String,
+    },
 }
 
 /// Solar event types for time-based triggers.
@@ -115,6 +128,26 @@ pub enum Condition {
         attribute: String,
         /// Minimum elapsed seconds since the attribute last changed.
         duration_secs: u64,
+    },
+    /// Inverts the result of the wrapped condition.
+    ///
+    /// Useful for "device is NOT in state X" without needing a `ne` operator
+    /// on a ScriptExpression, or for negating a `TimeWindow`/`TimeElapsed` check.
+    ///
+    /// Example: fire when a switch is NOT on:
+    /// ```toml
+    /// [[conditions]]
+    /// type = "not"
+    ///
+    /// [conditions.condition]
+    /// type = "device_state"
+    /// device_id = "switch_vacation"
+    /// attribute = "on"
+    /// op = "eq"
+    /// value = true
+    /// ```
+    Not {
+        condition: Box<Condition>,
     },
 }
 

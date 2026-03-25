@@ -1310,7 +1310,7 @@ curl -s "http://localhost:8080/api/v1/automations?tag=deck&device_id=yolink_abc1
   -H "Authorization: Bearer $TOKEN" | jq
 ```
 
-Valid `trigger` values: `device_state_changed` `mqtt_message` `time_of_day` `sun_event` `webhook_received` `manual_trigger` `custom_event` `system_started`
+Valid `trigger` values: `device_state_changed` `mqtt_message` `time_of_day` `sun_event` `webhook_received` `manual_trigger` `custom_event` `system_started` `cron`
 
 ---
 
@@ -1779,8 +1779,11 @@ All `CallService` actions in the process share a single `reqwest::Client` (initi
 | `ManualTrigger` | — | Never fires automatically — only via the `/test` endpoint. |
 | `CustomEvent` | `event_type` | Fires when a `FireEvent` action emits the matching `event_type` on the internal bus. Enables clean rule chaining: one rule fires an event, one or more rules react to it — no MQTT round-trip. See worked example above. |
 | `SystemStarted` | — | Fires **once** immediately after the rule engine finishes pre-populating its device cache on startup. Use this to catch state that changed while homeCore was not running (e.g. a door left open across a restart). Pair with `DeviceState` conditions to guard the action. See startup gap pattern below. |
+| `Cron` | `expression` | Fires on a repeating cron schedule using a **6-field expression**: `{sec} {min} {hour} {dom} {month} {dow}`. Evaluated in local wall-clock time. Invalid expressions log a warning and never fire. See cron section below. |
 
 ### Condition type reference
+
+All conditions AND together — every one must pass.
 
 All conditions AND together — every one must pass.
 
@@ -1790,6 +1793,7 @@ All conditions AND together — every one must pass.
 | `TimeWindow` | `start`, `end` (HH:MM) | Is the current wall-clock time within the window? Handles midnight wrap. |
 | `TimeElapsed` | `device_id`, `attribute`, `duration_secs` | Has the attribute been in its current value for at least `duration_secs` seconds? Reads from an in-memory per-attribute timestamp cache — zero I/O. Pre-populated from `last_seen` at startup (conservative baseline). See below for door-open alert pattern. |
 | `ScriptExpression` | `script` | Rhai expression — must return `true` or `false`. |
+| `Not` | `condition` | Inverts the result of the wrapped condition. Useful for "device is NOT in state X" without a ScriptExpression. Nesting is supported (double-negation valid but unusual). |
 
 ### Action type reference
 
@@ -1829,9 +1833,74 @@ catchup_window_minutes = 15   # default; set 0 to disable
 - `TimeOfDay` triggers additionally check the `days` array — a trigger set for weekdays-only won't fire on a weekend.
 - If the window crosses midnight (e.g. a 15-min window starting at 23:52), both sides are handled correctly.
 - `DeviceStateChanged`, `MqttMessage`, `WebhookReceived`, `CustomEvent`, and `ManualTrigger` are **not** caught up — only time-based triggers.
+- `Cron` triggers **are** caught up — any firing within the window fires immediately.
 - For state that may have changed while homeCore was offline, use `Trigger::SystemStarted` instead — see startup gap pattern below.
 
 **Example:** sunrise is at 06:42. HomeCore restarts at 06:50. With `catchup_window_minutes = 15`, the window is `[06:35, 06:50]`. Sunrise (06:42) falls inside → the deck-off rule fires immediately on startup rather than being skipped until tomorrow.
+
+---
+
+### Cron trigger — `Trigger::Cron`
+
+Fires a rule on a repeating schedule using a **6-field cron expression** evaluated in local wall-clock time.
+
+```
+{second} {minute} {hour} {day-of-month} {month} {day-of-week}
+```
+
+| Common pattern | Expression | Notes |
+|---|---|---|
+| Every day at 09:30 | `0 30 9 * * *` | second=0 required |
+| Every 15 minutes | `0 */15 * * * *` | `*/N` = every N |
+| Every hour | `0 0 * * * *` | |
+| Mon–Fri at 08:00 | `0 0 8 * * Mon-Fri` | Day-of-week names OK |
+| First of each month at midnight | `0 0 0 1 * *` | |
+| Every weekday at 17:30 | `0 30 17 * * Mon,Tue,Wed,Thu,Fri` | |
+
+**TOML example:**
+
+```toml
+id = ""
+name    = "Daily Morning Check"
+enabled = true
+priority = 10
+
+[trigger]
+type       = "cron"
+expression = "0 0 7 * * *"   # every day at 07:00 local time
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Good morning — HomeCore daily check"
+```
+
+**Behaviour:**
+- The scheduler ticks once per minute and checks all cron rules.
+- Catch-up on restart: any firing within `catchup_window_minutes` is fired immediately.
+- Invalid expressions log a `WARN` at the time of evaluation and never fire — the rule is not disabled.
+- Cron rules coexist with `TimeOfDay` and `SunEvent` rules; they all use the same scheduler tick.
+
+---
+
+### Condition negation — `Condition::Not`
+
+Wraps any condition and inverts its result.  Useful for "device NOT in state X" without resorting to a `ScriptExpression`.
+
+```toml
+# Fire when vacation switch is OFF (not on)
+[[conditions]]
+type = "not"
+
+[conditions.condition]
+type      = "device_state"
+device_id = "switch_vacation"
+attribute = "on"
+op        = "eq"
+value     = true
+```
+
+The `Not` wrapper is recursive — it can wrap any condition type including another `Not` (double-negation).  The dry-run test endpoint (`POST /automations/{id}/test`) correctly negates inner condition results.
 
 ---
 

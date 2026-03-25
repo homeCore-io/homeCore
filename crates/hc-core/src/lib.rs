@@ -6,7 +6,7 @@ use hc_topic_map::EcosystemRouter;
 use hc_types::event::Event;
 use hc_types::rule::Rule;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::info;
 
 pub mod engine;
@@ -69,6 +69,9 @@ pub struct Core {
     /// Minutes back from startup to search for missed time-based triggers.
     /// 0 disables catch-up entirely.  Default: 15.
     catchup_window_minutes: u32,
+    /// Optional shutdown receiver — when `true` is sent the engine and scheduler
+    /// will stop gracefully.  If not provided a never-firing channel is created.
+    shutdown_rx: Option<watch::Receiver<bool>>,
 }
 
 impl Core {
@@ -77,7 +80,7 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15 }
+        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15, shutdown_rx: None }
     }
 
     /// Override the plugin startup grace period (default: 10 s).
@@ -119,6 +122,13 @@ impl Core {
         self
     }
 
+    /// Attach a shutdown receiver.  When the sender sends `true`, the rule
+    /// engine and scheduler will stop gracefully.
+    pub fn with_shutdown(mut self, rx: watch::Receiver<bool>) -> Self {
+        self.shutdown_rx = Some(rx);
+        self
+    }
+
     /// Start all background tasks.
     ///
     /// Returns `(rules_handle, fire_history_handle)`:
@@ -140,6 +150,11 @@ impl Core {
         }
         tokio::spawn(bridge.run());
 
+        // If no external shutdown was provided, create a never-firing watch so
+        // the engine and scheduler signatures remain uniform.
+        let (_, default_rx) = watch::channel(false);
+        let shutdown_rx = self.shutdown_rx.unwrap_or(default_rx);
+
         // Rule engine.
         let engine = engine::RuleEngine::new(
             self.bus.clone(),
@@ -150,7 +165,7 @@ impl Core {
         );
         let rules_handle = engine.rules_handle();
         let fire_history = engine.fire_history_handle();
-        tokio::spawn(engine.run());
+        tokio::spawn(engine.run(shutdown_rx.clone()));
 
         // Timer manager: virtual countdown timer devices.
         let timer_mgr = timer_manager::TimerManager::new(self.bus.clone(), self.state.clone());
@@ -181,7 +196,7 @@ impl Core {
             Arc::clone(&rules_handle),
             self.catchup_window_minutes,
         );
-        tokio::spawn(sched.run());
+        tokio::spawn(sched.run(shutdown_rx.clone()));
 
         Ok((rules_handle, fire_history))
     }

@@ -37,7 +37,9 @@ use hc_types::event::Event;
 use hc_types::rule::{CompareOp, Condition, Rule, Trigger};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -83,6 +85,9 @@ pub struct RuleEngine {
     /// Per-rule ring buffer of the last `HISTORY_RING_SIZE` evaluation attempts.
     /// Exposed to the API layer via `fire_history_handle()`.
     fire_history: FireHistoryHandle,
+    /// Count of rule action tasks currently executing in spawned tokio tasks.
+    /// Used during graceful shutdown to wait for in-flight work to complete.
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl RuleEngine {
@@ -102,6 +107,7 @@ impl RuleEngine {
             device_cache: Arc::new(DashMap::new()),
             attr_changed_at: Arc::new(DashMap::new()),
             fire_history: Arc::new(DashMap::new()),
+            in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -115,8 +121,17 @@ impl RuleEngine {
         Arc::clone(&self.fire_history)
     }
 
-    /// Drive the rule engine until the bus is dropped.
-    pub async fn run(self) {
+    /// Returns a handle to the in-flight task counter, used for graceful shutdown.
+    pub fn in_flight_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.in_flight)
+    }
+
+    /// Drive the rule engine until the bus is dropped or `shutdown` fires.
+    ///
+    /// When `shutdown` is `true`, the engine stops accepting new events and
+    /// waits up to 10 seconds for any in-flight rule action tasks to complete
+    /// before returning.
+    pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         // Pre-populate device cache from current state store so condition checks
         // work correctly for devices that haven't changed since last restart.
         match self.state.list_devices().await {
@@ -153,17 +168,42 @@ impl RuleEngine {
         });
         info!("Rule engine started");
         loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if let Err(e) = self.handle_event(&event).await {
-                        warn!(error = %e, "Rule engine error handling event");
+            tokio::select! {
+                biased;
+                // Check for shutdown first so we don't keep processing events
+                // when a stop has been requested.
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        info!("Rule engine: shutdown signal received — stopping event loop");
+                        break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Rule engine lagged by {n} events");
+                result = rx.recv() => {
+                    match result {
+                        Ok(event) => {
+                            if let Err(e) = self.handle_event(&event).await {
+                                warn!(error = %e, "Rule engine error handling event");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Rule engine lagged by {n} events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+        }
+
+        // Drain in-flight rule action tasks (up to 10 seconds).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let n = self.in_flight.load(Ordering::SeqCst);
+            if n == 0 { break; }
+            if Instant::now() >= deadline {
+                warn!(in_flight = n, "Rule engine: shutdown drain timed out — forcing stop");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         info!("Rule engine stopped");
     }
@@ -329,14 +369,16 @@ impl RuleEngine {
             "rule.eval"
         );
 
-        let actions   = rule.actions.clone();
-        let publish   = self.publish.clone();
-        let exec_bus  = Some(self.bus.clone());
-        let bus       = self.bus.clone();
-        let rule_id   = rule.id.to_string();
-        let rule_name = rule.name.clone();
-        let notify    = self.notify.clone();
+        let actions    = rule.actions.clone();
+        let publish    = self.publish.clone();
+        let exec_bus   = Some(self.bus.clone());
+        let bus        = self.bus.clone();
+        let rule_id    = rule.id.to_string();
+        let rule_name  = rule.name.clone();
+        let notify     = self.notify.clone();
+        let in_flight  = Arc::clone(&self.in_flight);
 
+        in_flight.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let action_start = Instant::now();
             debug!(
@@ -369,6 +411,7 @@ impl RuleEngine {
                 rule_id,
                 rule_name,
             });
+            in_flight.fetch_sub(1, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -507,6 +550,22 @@ impl RuleEngine {
                 Ok(result)
             }
 
+            Condition::Not { condition } => {
+                let inner = Box::pin(
+                    self.evaluate_one(rule_name, idx, total, condition, snapshot)
+                )
+                .await?;
+                let result = !inner;
+                debug!(
+                    rule_name,
+                    cond   = format!("{}/{}", idx + 1, total),
+                    inner,
+                    result,
+                    "rule.condition: Not"
+                );
+                Ok(result)
+            }
+
             Condition::TimeElapsed { device_id, attribute, duration_secs } => {
                 let changed_at = self
                     .attr_changed_at
@@ -582,6 +641,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::ManualTrigger             => "ManualTrigger",
         Trigger::CustomEvent { .. }        => "CustomEvent",
         Trigger::SystemStarted             => "SystemStarted",
+        Trigger::Cron { .. }               => "Cron",
     }
 }
 
@@ -655,7 +715,7 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
         (Trigger::MqttMessage { topic_pattern }, Event::MqttMessage { topic, .. }) => {
             if mqtt_topic_matches(topic_pattern, topic) { Matched } else { NoMatch("topic pattern mismatch") }
         }
-        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. }, _) => NoMatch("handled by scheduler"),
+        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. } | Trigger::Cron { .. }, _) => NoMatch("handled by scheduler"),
         (Trigger::WebhookReceived { path: trigger_path }, Event::Custom { event_type, payload, .. }) => {
             if event_type != "webhook" {
                 return NoMatch("not a webhook event");

@@ -627,6 +627,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::ManualTrigger             => "manual_trigger",
         Trigger::CustomEvent { .. }        => "custom_event",
         Trigger::SystemStarted             => "system_started",
+        Trigger::Cron { .. }               => "cron",
     }
 }
 
@@ -640,15 +641,21 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
     if in_trigger { return true; }
 
     for cond in &rule.conditions {
-        let matches = match cond {
-            Condition::DeviceState { device_id: d, .. } => d == device_id,
-            Condition::TimeElapsed { device_id: d, .. } => d == device_id,
-            _ => false,
-        };
-        if matches { return true; }
+        if condition_references_device(cond, device_id) {
+            return true;
+        }
     }
 
     actions_reference_device(&rule.actions, device_id)
+}
+
+fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
+    match cond {
+        Condition::DeviceState { device_id: d, .. }  => d == device_id,
+        Condition::TimeElapsed { device_id: d, .. }  => d == device_id,
+        Condition::Not { condition }                 => condition_references_device(condition, device_id),
+        _ => false,
+    }
 }
 
 fn actions_reference_device(actions: &[Action], device_id: &str) -> bool {
@@ -985,6 +992,15 @@ async fn eval_condition_dry_detail(
                     None
                 },
             }
+        }
+        Condition::Not { condition: inner } => {
+            let mut inner_detail = Box::pin(eval_condition_dry_detail(inner, store)).await;
+            inner_detail.passed = !inner_detail.passed;
+            inner_detail.condition = cond_json;
+            if inner_detail.reason.is_none() && !inner_detail.passed {
+                inner_detail.reason = Some("negated condition passed (outer Not fails)".into());
+            }
+            inner_detail
         }
     }
 }

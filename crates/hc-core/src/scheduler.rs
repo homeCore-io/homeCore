@@ -16,8 +16,10 @@
 
 use crate::EventBus;
 use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
+use cron::Schedule;
 use hc_types::event::Event;
 use hc_types::rule::{Rule, SunEventType, Trigger};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -47,8 +49,10 @@ impl Scheduler {
     }
 
     /// Drive the scheduler loop.  Ticks once per minute and fires any rules
-    /// whose `TimeOfDay` or `SunEvent` trigger matches the current time.
-    pub async fn run(self) {
+    /// whose `TimeOfDay`, `SunEvent`, or `Cron` trigger matches the current time.
+    ///
+    /// Stops cleanly when `shutdown` receives `true`.
+    pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         info!(
             lat                    = self.latitude,
             lon                    = self.longitude,
@@ -104,6 +108,9 @@ impl Scheduler {
                                 false
                             }
                         }
+                        Trigger::Cron { expression } => {
+                            cron_fires_now(expression, &now, &rule.name)
+                        }
                         _ => false,
                     };
 
@@ -120,9 +127,17 @@ impl Scheduler {
                 }
             } // read lock released here
 
-            // Sleep until the start of the next minute.
+            // Sleep until the start of the next minute, waking early on shutdown.
             let secs_until_next_minute = 60 - now.second() as u64;
-            tokio::time::sleep(Duration::from_secs(secs_until_next_minute)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(secs_until_next_minute)) => {}
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        info!("Scheduler: shutdown signal received — stopping");
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -142,6 +157,9 @@ impl Scheduler {
             .unwrap_or_else(|| window_start_dt.time());
         let today = now.date_naive();
         let weekday = now.weekday();
+        // Keep DateTime versions for cron window check.
+        let now_dt = now;
+        let window_start_dt_full = window_start_dt;
 
         let rules = self.rules.read().await;
         let mut fired: u32 = 0;
@@ -161,6 +179,9 @@ impl Scheduler {
                 Trigger::TimeOfDay { time, days } => {
                     let day_ok = days.is_empty() || days.contains(&weekday);
                     day_ok && in_catchup_window(*time, window_start_naive, now_time)
+                }
+                Trigger::Cron { expression } => {
+                    cron_fired_in_window(expression, &window_start_dt_full, &now_dt, &rule.name)
                 }
                 _ => false,
             };
@@ -210,6 +231,51 @@ fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime
     } else {
         // Window crosses midnight (e.g. window_start = 23:55, now = 00:10).
         t >= window_start || t <= now
+    }
+}
+
+// ── Cron helpers ──────────────────────────────────────────────────────────────
+
+/// Returns `true` if the cron expression fires within the current minute.
+///
+/// Parses the expression, then asks the schedule for its next occurrence after
+/// one minute ago.  If that next occurrence falls within the current minute
+/// (same hour + minute) the rule fires.
+fn cron_fires_now(expression: &str, now: &chrono::DateTime<Local>, rule_name: &str) -> bool {
+    match Schedule::from_str(expression) {
+        Ok(schedule) => {
+            let prev = *now - chrono::Duration::minutes(1);
+            let current_time = now.time().with_second(0).unwrap_or(now.time());
+            schedule
+                .after(&prev)
+                .next()
+                .map(|next| times_match(next.time(), current_time))
+                .unwrap_or(false)
+        }
+        Err(e) => {
+            warn!(rule_name, expression, error = %e, "Scheduler: invalid cron expression — rule will never fire");
+            false
+        }
+    }
+}
+
+/// Returns `true` if the cron expression fired at least once in `(window_start, now]`.
+fn cron_fired_in_window(
+    expression: &str,
+    window_start: &chrono::DateTime<Local>,
+    now: &chrono::DateTime<Local>,
+    rule_name: &str,
+) -> bool {
+    match Schedule::from_str(expression) {
+        Ok(schedule) => schedule
+            .after(window_start)
+            .next()
+            .map(|next| next <= *now)
+            .unwrap_or(false),
+        Err(e) => {
+            warn!(rule_name, expression, error = %e, "Scheduler catch-up: invalid cron expression — skipping");
+            false
+        }
     }
 }
 

@@ -48,6 +48,7 @@ async-trait       = "0.1"
 notify            = "6"
 prometheus        = { version = "0.13", default-features = false, features = ["process"] }
 dashmap           = "6"
+cron              = "0.12"
 
 [dependencies]
 hc-broker      = { path = "crates/hc-broker" }

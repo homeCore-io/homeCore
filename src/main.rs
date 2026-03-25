@@ -16,6 +16,27 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 use uuid::Uuid;
 
+/// Wait for SIGTERM or SIGINT and return.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        let mut int = signal(SignalKind::interrupt())
+            .expect("failed to register SIGINT handler");
+        tokio::select! {
+            _ = term.recv() => { info!("Received SIGTERM — initiating graceful shutdown"); }
+            _ = int.recv()  => { info!("Received SIGINT — initiating graceful shutdown"); }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl-C");
+        info!("Received Ctrl-C — initiating graceful shutdown");
+    }
+}
+
 // ── base directory resolution ───────────────────────────────────────────────
 
 /// Determine the HomeCore installation directory.
@@ -547,11 +568,25 @@ async fn main() -> Result<()> {
 
     let modes_path = base_dir.join("config").join("modes.toml");
 
+    // ── Graceful shutdown channel ──────────────────────────────────────────
+    //
+    // `shutdown_tx` is used by the signal handler task to broadcast to the
+    // rule engine, scheduler, and HTTP server.  `shutdown_rx` is cloned for
+    // each subsystem.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Spawn a task that waits for SIGTERM/SIGINT and then sends the shutdown signal.
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude)
         .with_modes(modes_path.clone())
         .with_startup_delay(config.startup.plugin_ready_delay_secs)
-        .with_catchup_window(config.scheduler.catchup_window_minutes);
+        .with_catchup_window(config.scheduler.catchup_window_minutes)
+        .with_shutdown(shutdown_rx.clone());
 
     // Load ecosystem profiles and build the router.  Done before spawning the
     // MQTT client so add_subscription("#") runs first.
@@ -726,7 +761,7 @@ async fn main() -> Result<()> {
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups);
-    hc_api::serve(&config.server.host, config.server.port, app_state).await?;
+    hc_api::serve(&config.server.host, config.server.port, app_state, shutdown_rx).await?;
 
     Ok(())
 }
