@@ -16,6 +16,9 @@ pub struct Rule {
     pub enabled: bool,
     /// Higher priority rules are evaluated first (descending sort).
     pub priority: i32,
+    /// Optional tags for grouping and bulk operations (e.g. "deck", "vacation").
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub trigger: Trigger,
     /// All conditions must pass (short-circuit AND logic).
     #[serde(default)]
@@ -57,6 +60,12 @@ pub enum Trigger {
         path: String,
     },
     ManualTrigger,
+    /// Fires when a `FireEvent` action emits the matching `event_type` on the
+    /// internal event bus.  Enables clean rule chaining (fan-out) without
+    /// duplicating action lists: one rule fires the event, others react to it.
+    CustomEvent {
+        event_type: String,
+    },
 }
 
 /// Solar event types for time-based triggers.

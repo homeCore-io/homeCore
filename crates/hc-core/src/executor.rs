@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::EventBus;
+
 /// Shared HTTP client — initialised once, reused for every `CallService` action.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -29,15 +31,20 @@ fn http_client() -> &'static reqwest::Client {
 /// (built from the DashMap cache in the engine). It is passed through to all
 /// script-based actions (RunScript, Conditional, RepeatUntil) so every script
 /// within a single rule firing sees the same consistent state without any I/O.
+///
+/// `event_bus` is optional; when present, `FireEvent` actions publish directly
+/// to the internal bus in addition to MQTT, enabling `Trigger::CustomEvent`
+/// chaining within the same process.
 pub async fn execute_actions(
     actions: Vec<Action>,
     publish: Option<PublishHandle>,
     notify: Option<Arc<NotificationService>>,
     device_snapshot: HashMap<String, JsonValue>,
+    event_bus: Option<EventBus>,
 ) -> Result<()> {
     let total = actions.len();
     for (idx, action) in actions.into_iter().enumerate() {
-        execute_one(action, idx, total, publish.clone(), notify.clone(), device_snapshot.clone()).await?;
+        execute_one(action, idx, total, publish.clone(), notify.clone(), device_snapshot.clone(), event_bus.clone()).await?;
     }
     Ok(())
 }
@@ -49,6 +56,7 @@ async fn execute_one(
     publish: Option<PublishHandle>,
     notify: Option<Arc<NotificationService>>,
     device_snapshot: HashMap<String, JsonValue>,
+    event_bus: Option<EventBus>,
 ) -> Result<()> {
     let label = format!("action[{}/{}]", idx + 1, total);
     match action {
@@ -68,8 +76,9 @@ async fn execute_one(
                     let p = publish.clone();
                     let n = notify.clone();
                     let snap = device_snapshot.clone();
+                    let bus = event_bus.clone();
                     debug!("action: Parallel[{}/{}] — {:?}", i + 1, count, action_type_name(&a));
-                    tokio::spawn(run_single_action(a, p, n, snap))
+                    tokio::spawn(run_single_action(a, p, n, snap, bus))
                 })
                 .collect();
             for h in handles {
@@ -78,7 +87,7 @@ async fn execute_one(
             debug!(label, "action: Parallel — all done");
         }
 
-        other => run_single_action(other, publish, notify, device_snapshot).await?,
+        other => run_single_action(other, publish, notify, device_snapshot, event_bus).await?,
     }
     Ok(())
 }
@@ -88,6 +97,7 @@ async fn run_single_action(
     publish: Option<PublishHandle>,
     notify: Option<Arc<NotificationService>>,
     device_snapshot: HashMap<String, JsonValue>,
+    event_bus: Option<EventBus>,
 ) -> Result<()> {
     match action {
         Action::Delay { duration_ms } => {
@@ -99,7 +109,7 @@ async fn run_single_action(
             let count = actions.len();
             debug!(parallel_count = count, "action: Parallel (nested)");
             for a in actions {
-                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone())).await?;
+                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone(), event_bus.clone())).await?;
             }
         }
 
@@ -125,7 +135,7 @@ async fn run_single_action(
                     break;
                 }
                 for a in &actions {
-                    Box::pin(run_single_action(a.clone(), publish.clone(), notify.clone(), device_snapshot.clone())).await?;
+                    Box::pin(run_single_action(a.clone(), publish.clone(), notify.clone(), device_snapshot.clone(), event_bus.clone())).await?;
                 }
                 if delay > 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
@@ -167,10 +177,21 @@ async fn run_single_action(
 
         Action::FireEvent { event_type, payload } => {
             debug!(event_type, "action: FireEvent");
-            if let Some(ph) = publish {
+            if let Some(ref ph) = publish {
                 let topic = format!("homecore/events/{event_type}");
                 ph.publish_json(&topic, &payload, false).await?;
-                debug!(event_type, "action: FireEvent — published");
+                debug!(event_type, "action: FireEvent — published to MQTT");
+            }
+            // Also emit directly to the internal event bus so rules with
+            // `Trigger::CustomEvent { event_type }` can react within the same process.
+            if let Some(ref bus) = event_bus {
+                let ev = hc_types::event::Event::Custom {
+                    timestamp: chrono::Utc::now(),
+                    event_type: event_type.clone(),
+                    payload: payload.clone(),
+                };
+                let _ = bus.publish(ev);
+                debug!(event_type, "action: FireEvent — emitted to internal bus");
             }
         }
 
@@ -280,7 +301,7 @@ async fn run_single_action(
             let branch = if passed { then_actions } else { else_actions };
             debug!(passed, branch = branch_name, actions = branch.len(), "action: Conditional — branch selected");
             for a in branch {
-                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone())).await?;
+                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone(), event_bus.clone())).await?;
             }
         }
 
@@ -415,7 +436,7 @@ mod tests {
             max_iterations: Some(10),
             interval_ms: None,
         };
-        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot(), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -426,12 +447,12 @@ mod tests {
             max_iterations: Some(3),
             interval_ms: None,
         };
-        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot(), None).await.unwrap();
     }
 
     #[tokio::test]
     async fn delay_action_completes() {
-        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, None, empty_snapshot()).await.unwrap();
+        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, None, empty_snapshot(), None).await.unwrap();
     }
 
     fn call_service(url: &str, method: &str) -> Action {
@@ -458,7 +479,7 @@ mod tests {
             retries: None,
             response_event: None,
         };
-        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot(), None).await.unwrap();
         mock.assert_async().await;
     }
 
@@ -469,7 +490,7 @@ mod tests {
 
         let result = execute_actions(
             vec![call_service(&format!("{}/gone", server.url()), "GET")],
-            None, None, empty_snapshot(),
+            None, None, empty_snapshot(), None,
         ).await;
         assert!(result.is_err());
     }
@@ -488,7 +509,7 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot(), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -505,7 +526,7 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        let result = execute_actions(vec![action], None, None, empty_snapshot()).await;
+        let result = execute_actions(vec![action], None, None, empty_snapshot(), None).await;
         assert!(result.is_err());
     }
 
@@ -513,7 +534,7 @@ mod tests {
     async fn call_service_unsupported_method_returns_error() {
         let result = execute_actions(
             vec![call_service("http://localhost/x", "CONNECT")],
-            None, None, empty_snapshot(),
+            None, None, empty_snapshot(), None,
         ).await;
         assert!(result.is_err());
     }

@@ -75,6 +75,8 @@ pub struct AppState {
     pub backup_paths: Option<BackupPaths>,
     /// Wall-clock time the server started, for uptime calculation.
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Per-rule ring buffer of recent evaluation results; provided by the rule engine.
+    pub fire_history: Option<hc_core::FireHistoryHandle>,
 }
 
 impl AppState {
@@ -156,6 +158,7 @@ impl AppState {
             metrics,
             backup_paths: None,
             started_at: chrono::Utc::now(),
+            fire_history: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -174,6 +177,12 @@ impl AppState {
     /// Attach file paths used by `POST /system/backup`.
     pub fn with_backup_paths(mut self, paths: BackupPaths) -> Self {
         self.backup_paths = Some(paths);
+        self
+    }
+
+    /// Attach the rule fire history handle from the rule engine.
+    pub fn with_fire_history(mut self, handle: hc_core::FireHistoryHandle) -> Self {
+        self.fire_history = Some(handle);
         self
     }
 }
@@ -221,7 +230,7 @@ pub fn router(state: AppState) -> Router {
         .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))
         .route("/areas/:id/devices", put(handlers::set_area_devices))
         // Automations
-        .route("/automations", get(handlers::list_automations).post(handlers::create_automation))
+        .route("/automations", get(handlers::list_automations).post(handlers::create_automation).patch(handlers::bulk_patch_automations))
         .route(
             "/automations/:id",
             get(handlers::get_automation)
@@ -230,6 +239,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(handlers::delete_automation),
         )
         .route("/automations/:id/test", post(handlers::test_automation))
+        .route("/automations/:id/history", get(handlers::automation_history))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
         // Scenes

@@ -46,6 +46,7 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
         name: "test_rule".into(),
         enabled: true,
         priority: 0,
+        tags: vec![],
         trigger: Trigger::DeviceStateChanged {
             device_id: "test_light".into(),
             attribute: Some("on".into()),
@@ -57,6 +58,7 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
             payload: r#"{"action":"toggle_confirmed"}"#.into(),
             retain: false,
         }],
+        error: None,
     };
     store.upsert_rule(&rule).await?;
 

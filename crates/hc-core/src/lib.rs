@@ -18,6 +18,8 @@ pub mod state_bridge;
 pub mod switch_manager;
 pub mod timer_manager;
 
+pub use engine::{FireHistoryHandle, RuleFiring};
+
 /// Shared handle to the internal event bus.
 #[derive(Clone)]
 pub struct EventBus {
@@ -117,11 +119,15 @@ impl Core {
         self
     }
 
-    /// Start all background tasks.  Returns the live rules handle.
+    /// Start all background tasks.
+    ///
+    /// Returns `(rules_handle, fire_history_handle)`:
+    /// - `rules_handle` — live rule set, updated by the API and hot-reload watcher
+    /// - `fire_history_handle` — per-rule ring buffer of recent evaluation results
     pub async fn start(
         self,
         rules: Vec<Rule>,
-    ) -> Result<std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>> {
+    ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle)> {
         info!("HomeCore kernel starting");
 
         // State bridge: MqttMessage → DeviceStateChanged + store writes.
@@ -143,6 +149,7 @@ impl Core {
             self.notify.clone(),
         );
         let rules_handle = engine.rules_handle();
+        let fire_history = engine.fire_history_handle();
         tokio::spawn(engine.run());
 
         // Timer manager: virtual countdown timer devices.
@@ -176,6 +183,6 @@ impl Core {
         );
         tokio::spawn(sched.run());
 
-        Ok(rules_handle)
+        Ok((rules_handle, fire_history))
     }
 }

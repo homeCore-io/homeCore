@@ -115,6 +115,7 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         name:       format!("{name} [BROKEN]"),
         enabled:    false,
         priority:   0,
+        tags:       Vec::new(),
         trigger:    Trigger::ManualTrigger,
         conditions: Vec::<Condition>::new(),
         actions:    Vec::<Action>::new(),

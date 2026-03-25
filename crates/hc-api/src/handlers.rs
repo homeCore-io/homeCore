@@ -574,9 +574,27 @@ pub async fn delete_area(
 // writes a TOML file on disk) *and* directly update the handle so the change
 // is immediately visible — no need to wait for the hot-reload watcher.
 
-pub async fn list_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
+#[derive(Deserialize, Default)]
+pub struct AutomationListQuery {
+    /// Filter by tag — only returns rules that have this tag in their `tags` list.
+    pub tag: Option<String>,
+}
+
+pub async fn list_automations(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Query(params): Query<AutomationListQuery>,
+) -> impl IntoResponse {
     match &s.rules_handle {
-        Some(rh) => (StatusCode::OK, Json(json!(rh.read().await.clone()))),
+        Some(rh) => {
+            let rules = rh.read().await;
+            let result: Vec<_> = if let Some(ref tag) = params.tag {
+                rules.iter().filter(|r| r.tags.contains(tag)).cloned().collect()
+            } else {
+                rules.clone()
+            };
+            (StatusCode::OK, Json(json!(result)))
+        }
         None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
     }
 }
@@ -1052,6 +1070,92 @@ pub async fn patch_automation(
     }
 
     (StatusCode::OK, Json(json!(rule))).into_response()
+}
+
+// ---------- Bulk automation PATCH ----------
+
+#[derive(Deserialize, Default)]
+pub struct BulkPatchQuery {
+    /// Apply only to rules that have this tag.  Omit to apply to all rules.
+    pub tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct BulkPatchBody {
+    pub enabled: Option<bool>,
+}
+
+/// `PATCH /api/v1/automations[?tag=<tag>]`
+///
+/// Bulk enable/disable all rules (or all rules with a given tag).
+/// Returns `{ "updated": N, "rules": [...] }`.
+pub async fn bulk_patch_automations(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Query(params): Query<BulkPatchQuery>,
+    Json(patch): Json<BulkPatchBody>,
+) -> impl IntoResponse {
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    let mut updated = Vec::new();
+    {
+        let mut rules = rh.write().await;
+        for rule in rules.iter_mut() {
+            let matches = params.tag.as_ref()
+                .map(|tag| rule.tags.contains(tag))
+                .unwrap_or(true);
+            if matches {
+                if let Some(enabled) = patch.enabled {
+                    rule.enabled = enabled;
+                }
+                updated.push(rule.clone());
+            }
+        }
+    }
+
+    // Persist each changed rule to its TOML file.
+    if let Some(fs) = &s.rule_file_store {
+        for rule in &updated {
+            if let Err(e) = fs.write_rule(rule) {
+                tracing::warn!(rule_id = %rule.id, error = %e, "bulk_patch: failed to write rule file");
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "updated": updated.len(), "rules": updated }))).into_response()
+}
+
+// ---------- Automation fire history ----------
+
+/// `GET /api/v1/automations/{id}/history`
+///
+/// Returns the last 20 evaluation records for the rule (newest last).
+/// Each record contains `timestamp`, `conditions_passed`, `actions_ran`, and `eval_ms`.
+pub async fn automation_history(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(fh) = &s.fire_history else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "fire history not available" }))).into_response();
+    };
+
+    // Verify rule exists.
+    if let Some(rh) = &s.rules_handle {
+        let rules = rh.read().await;
+        if !rules.iter().any(|r| r.id == id) {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response();
+        }
+    }
+
+    let history: Vec<_> = fh
+        .get(&id)
+        .map(|buf| buf.iter().cloned().collect())
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(json!(history))).into_response()
 }
 
 // ---------- Webhooks ----------

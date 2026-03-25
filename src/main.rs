@@ -628,7 +628,7 @@ async fn main() -> Result<()> {
         core = core.with_notify(svc);
     }
 
-    let rules_handle = core.start(rules).await?;
+    let (rules_handle, fire_history) = core.start(rules).await?;
 
     // ── Hot-reload watcher for rule TOML files ─────────────────────────────
     // Must be kept alive for the duration of the process.
@@ -716,7 +716,8 @@ async fn main() -> Result<()> {
         Some(modes_path),
     )
     .with_log_stream(LogStreamState { tx: log_tx, ring: log_ring })
-    .with_backup_paths(backup_paths);
+    .with_backup_paths(backup_paths)
+    .with_fire_history(fire_history);
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())

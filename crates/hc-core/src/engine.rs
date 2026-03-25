@@ -36,11 +36,29 @@ use hc_state::StateStore;
 use hc_types::event::Event;
 use hc_types::rule::{CompareOp, Condition, Rule, Trigger};
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+const HISTORY_RING_SIZE: usize = 20;
+
+/// A single recorded rule evaluation attempt (conditions + actions).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleFiring {
+    pub timestamp: chrono::DateTime<Utc>,
+    /// `true` when all conditions passed and actions were dispatched.
+    pub conditions_passed: bool,
+    /// Number of actions in the rule (0 when conditions failed).
+    pub actions_ran: usize,
+    /// Milliseconds spent evaluating conditions.
+    pub eval_ms: u64,
+}
+
+/// Per-rule ring buffer of recent firings; keyed by rule `Uuid`.
+pub type FireHistoryHandle = Arc<DashMap<Uuid, VecDeque<RuleFiring>>>;
 
 pub struct RuleEngine {
     bus:    EventBus,
@@ -62,6 +80,9 @@ pub struct RuleEngine {
     /// devices at startup (conservative baseline); updated on every
     /// `DeviceStateChanged` for attributes whose value actually changed.
     attr_changed_at: Arc<DashMap<String, HashMap<String, DateTime<Utc>>>>,
+    /// Per-rule ring buffer of the last `HISTORY_RING_SIZE` evaluation attempts.
+    /// Exposed to the API layer via `fire_history_handle()`.
+    fire_history: FireHistoryHandle,
 }
 
 impl RuleEngine {
@@ -80,12 +101,18 @@ impl RuleEngine {
             notify,
             device_cache: Arc::new(DashMap::new()),
             attr_changed_at: Arc::new(DashMap::new()),
+            fire_history: Arc::new(DashMap::new()),
         }
     }
 
     /// Returns a handle to update the live rule set without restart.
     pub fn rules_handle(&self) -> Arc<RwLock<Vec<Rule>>> {
         Arc::clone(&self.rules)
+    }
+
+    /// Returns a handle to the rule fire history ring buffers.
+    pub fn fire_history_handle(&self) -> FireHistoryHandle {
+        Arc::clone(&self.fire_history)
     }
 
     /// Drive the rule engine until the bus is dropped.
@@ -249,25 +276,39 @@ impl RuleEngine {
         // so there are no redundant DashMap → HashMap conversions.
         let snapshot = self.snapshot_from_cache();
 
-        match self.evaluate_conditions(rule, &snapshot).await? {
-            Some(failed_idx) => {
-                let eval_ms = eval_start.elapsed().as_millis();
-                info!(
-                    rule_name   = %rule.name,
-                    rule_id     = %rule.id,
-                    fired       = false,
-                    reason      = "condition_failed",
-                    failed_cond = failed_idx,
-                    conditions  = rule.conditions.len(),
-                    eval_ms,
-                    "rule.eval"
-                );
-                return Ok(());
+        let maybe_failed = self.evaluate_conditions(rule, &snapshot).await?;
+        let conditions_passed = maybe_failed.is_none();
+        let eval_ms = eval_start.elapsed().as_millis() as u64;
+        let actions_ran = if conditions_passed { rule.actions.len() } else { 0 };
+
+        // Record in the per-rule fire history ring buffer (max HISTORY_RING_SIZE).
+        {
+            let mut buf = self.fire_history.entry(rule.id).or_default();
+            if buf.len() >= HISTORY_RING_SIZE {
+                buf.pop_front();
             }
-            None => {}
+            buf.push_back(RuleFiring {
+                timestamp: Utc::now(),
+                conditions_passed,
+                actions_ran,
+                eval_ms,
+            });
         }
 
-        let eval_ms = eval_start.elapsed().as_millis();
+        if let Some(failed_idx) = maybe_failed {
+            info!(
+                rule_name   = %rule.name,
+                rule_id     = %rule.id,
+                fired       = false,
+                reason      = "condition_failed",
+                failed_cond = failed_idx,
+                conditions  = rule.conditions.len(),
+                eval_ms,
+                "rule.eval"
+            );
+            return Ok(());
+        }
+
         info!(
             rule_name  = %rule.name,
             rule_id    = %rule.id,
@@ -278,12 +319,13 @@ impl RuleEngine {
             "rule.eval"
         );
 
-        let actions  = rule.actions.clone();
-        let publish  = self.publish.clone();
-        let bus      = self.bus.clone();
-        let rule_id  = rule.id.to_string();
+        let actions   = rule.actions.clone();
+        let publish   = self.publish.clone();
+        let exec_bus  = Some(self.bus.clone());
+        let bus       = self.bus.clone();
+        let rule_id   = rule.id.to_string();
         let rule_name = rule.name.clone();
-        let notify   = self.notify.clone();
+        let notify    = self.notify.clone();
 
         tokio::spawn(async move {
             let action_start = Instant::now();
@@ -293,7 +335,7 @@ impl RuleEngine {
                 count     = actions.len(),
                 "rule.actions: starting"
             );
-            match execute_actions(actions, publish, notify, snapshot).await {
+            match execute_actions(actions, publish, notify, snapshot, exec_bus).await {
                 Ok(()) => {
                     let action_ms = action_start.elapsed().as_millis();
                     info!(
@@ -528,6 +570,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::SunEvent { .. }           => "SunEvent",
         Trigger::WebhookReceived { .. }    => "WebhookReceived",
         Trigger::ManualTrigger             => "ManualTrigger",
+        Trigger::CustomEvent { .. }        => "CustomEvent",
     }
 }
 
@@ -611,6 +654,9 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             } else {
                 NoMatch("webhook path mismatch")
             }
+        }
+        (Trigger::CustomEvent { event_type }, Event::Custom { event_type: et, .. }) => {
+            if event_type == et { Matched } else { NoMatch("event_type mismatch") }
         }
         (Trigger::ManualTrigger, _) => NoMatch("manual trigger only fires via API"),
         _ => NoMatch("event type does not match trigger type"),
