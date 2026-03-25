@@ -419,6 +419,10 @@ homeCore/                          # container dir (no git)
 - [x] **Device history query flexibility** — `GET /devices/{id}/history` accepts `?from=`, `?to=`, `?attribute=`, `?limit=` (default 500, cap 5 000)
 - [x] **Device deletion cascading** — `DELETE /devices/{id}` patches rule files replacing device refs with `DELETED:` placeholder, disables affected rules, returns `{ affected_rules: [...] }`; broken rule files produce disabled stubs at load time (never blocks startup)
 - [x] **Backup/restore** — `POST /system/backup` streams a zip archive (state.redb, history.db, config, rules); Admin-only; restore by unzipping and copying files back
+- [x] **System status** — `GET /system/status` returns uptime, version, rule/device/plugin counts, DB file sizes
+- [x] **Telegram notification channel** — `type = "telegram"` in `[[notify.channels]]`; `channel = "all"` fans out to all registered channels
+- [x] **`TimeElapsed` condition** — `type = "time_elapsed"` checks ms since attribute last changed; per-attribute timestamp cache in rule engine; dry-run uses `last_seen` baseline
+- [x] **Rule test detail** — `POST /automations/{id}/test` now returns `actual`, `expected`, `elapsed_ms`, `reason` per condition
 - [ ] WASM plugin sandbox (`wasmtime`) — only needed for untrusted third-party plugins
 - [ ] HA clustering (`openraft`) — premature; single-node is sufficient for home use
 

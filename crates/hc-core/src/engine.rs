@@ -29,6 +29,7 @@
 use crate::executor::execute_actions;
 use crate::EventBus;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use hc_notify::NotificationService;
 use hc_state::StateStore;
@@ -54,6 +55,13 @@ pub struct RuleEngine {
     /// rule evaluation, so condition checks are always reading current state
     /// without any blocking I/O.
     device_cache: Arc<DashMap<String, HashMap<String, JsonValue>>>,
+    /// Per-attribute last-changed timestamps, used by `Condition::TimeElapsed`.
+    ///
+    /// `attr_changed_at[device_id][attribute]` = wall-clock time the attribute
+    /// last received a different value.  Pre-populated from `last_seen` on all
+    /// devices at startup (conservative baseline); updated on every
+    /// `DeviceStateChanged` for attributes whose value actually changed.
+    attr_changed_at: Arc<DashMap<String, HashMap<String, DateTime<Utc>>>>,
 }
 
 impl RuleEngine {
@@ -71,6 +79,7 @@ impl RuleEngine {
             publish,
             notify,
             device_cache: Arc::new(DashMap::new()),
+            attr_changed_at: Arc::new(DashMap::new()),
         }
     }
 
@@ -87,6 +96,16 @@ impl RuleEngine {
             Ok(devices) => {
                 let count = devices.len();
                 for d in devices {
+                    // Seed attr_changed_at with last_seen as a conservative
+                    // baseline — better than treating every attribute as
+                    // "just changed" on first restart.
+                    let baseline = d.last_seen;
+                    let ts_map: HashMap<String, DateTime<Utc>> = d
+                        .attributes
+                        .keys()
+                        .map(|k| (k.clone(), baseline))
+                        .collect();
+                    self.attr_changed_at.insert(d.device_id.clone(), ts_map);
                     self.device_cache.insert(d.device_id, d.attributes.into_iter().collect());
                 }
                 info!(count, "Rule engine: device cache pre-populated");
@@ -115,6 +134,23 @@ impl RuleEngine {
     async fn handle_event(&self, event: &Event) -> Result<()> {
         // ── 1. Update device cache (no lock needed — DashMap is concurrent) ──
         if let Event::DeviceStateChanged { device_id, current, .. } = event {
+            let now = Utc::now();
+            // Update attr_changed_at for attributes whose value actually changed.
+            {
+                let prev_attrs = self.device_cache.get(device_id.as_str());
+                let mut ts_entry = self.attr_changed_at
+                    .entry(device_id.clone())
+                    .or_default();
+                for (k, new_v) in current {
+                    let changed = prev_attrs
+                        .as_ref()
+                        .and_then(|p| p.get(k.as_str()))
+                        .map_or(true, |old_v| old_v != new_v);
+                    if changed {
+                        ts_entry.insert(k.clone(), now);
+                    }
+                }
+            }
             self.device_cache
                 .entry(device_id.clone())
                 .and_modify(|attrs| {
@@ -416,6 +452,49 @@ impl RuleEngine {
                     result,
                     "rule.condition: ScriptExpression result"
                 );
+                Ok(result)
+            }
+
+            Condition::TimeElapsed { device_id, attribute, duration_ms } => {
+                let changed_at = self
+                    .attr_changed_at
+                    .get(device_id.as_str())
+                    .and_then(|ts| ts.get(attribute.as_str()).copied());
+
+                let Some(changed_at) = changed_at else {
+                    info!(
+                        rule_name,
+                        cond      = format!("{}/{}", idx + 1, total),
+                        device_id,
+                        attribute,
+                        "rule.condition: TimeElapsed FAIL — attribute not tracked (device never seen)"
+                    );
+                    return Ok(false);
+                };
+
+                let elapsed_ms = (Utc::now() - changed_at).num_milliseconds().max(0) as u64;
+                let result = elapsed_ms >= *duration_ms;
+                if result {
+                    debug!(
+                        rule_name,
+                        cond        = format!("{}/{}", idx + 1, total),
+                        device_id,
+                        attribute,
+                        elapsed_ms,
+                        duration_ms,
+                        "rule.condition: TimeElapsed pass"
+                    );
+                } else {
+                    info!(
+                        rule_name,
+                        cond        = format!("{}/{}", idx + 1, total),
+                        device_id,
+                        attribute,
+                        elapsed_ms,
+                        duration_ms,
+                        "rule.condition: TimeElapsed FAIL"
+                    );
+                }
                 Ok(result)
             }
         }

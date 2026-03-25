@@ -73,6 +73,8 @@ pub struct AppState {
     pub metrics: std::sync::Arc<MetricsCollector>,
     /// File paths required to produce a backup archive.
     pub backup_paths: Option<BackupPaths>,
+    /// Wall-clock time the server started, for uptime calculation.
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl AppState {
@@ -153,6 +155,7 @@ impl AppState {
             log_stream: None,
             metrics,
             backup_paths: None,
+            started_at: chrono::Utc::now(),
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -238,6 +241,7 @@ pub fn router(state: AppState) -> Router {
         // Events
         .route("/events", get(handlers::list_events))
         // System
+        .route("/system/status", get(handlers::system_status))
         .route("/system/backup", post(backup::backup_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 

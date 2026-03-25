@@ -1959,6 +1959,103 @@ Integration tests live in `homecore/tests/`. The existing `integration_test.rs` 
 
 ---
 
+## System status (`GET /system/status`)
+
+`GET /api/v1/system/status` returns a live snapshot of server health. Requires any authenticated role (Admin, User, or ReadOnly). No auth required from whitelisted IPs.
+
+```sh
+curl -s http://localhost:8080/api/v1/system/status \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Response:
+
+```json
+{
+  "version":          "0.1.0",
+  "uptime_seconds":   3728,
+  "started_at":       "2026-03-24T14:00:00Z",
+  "rules_total":      35,
+  "rules_enabled":    33,
+  "devices_total":    87,
+  "plugins_active":   5,
+  "state_db_bytes":   1048576,
+  "history_db_bytes": 52428800
+}
+```
+
+---
+
+## Telegram notification channel
+
+Add a Telegram bot channel in `homecore.toml`:
+
+```toml
+[[notify.channels]]
+name      = "telegram"
+type      = "telegram"
+bot_token = "123456789:ABCDEFGHIJabcdefghij"
+chat_id   = "-1001234567890"   # group/channel: negative; personal: positive
+# markdown = true              # optional — MarkdownV2 formatting
+```
+
+**Getting your chat_id:**
+1. Add the bot to your group/channel, or start a DM with it
+2. Send any message to it, then call `https://api.telegram.org/bot{TOKEN}/getUpdates`
+3. Copy the `chat.id` from the response
+
+**Rule usage** — same as any other channel:
+
+```toml
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Front door opened at 22:15"
+```
+
+**`channel = "all"`** fans the message to every configured channel simultaneously. Any individual channel failure is logged but does not stop delivery to the others.
+
+---
+
+## `TimeElapsed` condition
+
+Check that a device attribute has not changed for at least N milliseconds — useful for "door open for more than 10 minutes" patterns without a separate timer device.
+
+```toml
+[[conditions]]
+type        = "time_elapsed"
+device_id   = "yolink_abc123_door"
+attribute   = "open"
+duration_ms = 600000   # 10 minutes
+```
+
+The elapsed time is measured from the last *observed value change* for that specific attribute, tracked in the rule engine's in-memory cache. On first evaluation after a restart, `DeviceState.last_seen` is used as a conservative baseline (so a 10-minute elapsed condition will be true if the device hasn't been seen in 10+ minutes).
+
+**Typical pattern** — alert if a door stays open too long:
+
+```toml
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_abc123_door"
+attribute = "open"
+to        = true
+
+[[conditions]]
+type        = "time_elapsed"
+device_id   = "yolink_abc123_door"
+attribute   = "open"
+duration_ms = 600000
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Deck door has been open for 10+ minutes"
+```
+
+Note: `TimeElapsed` is a condition, not a trigger — the rule still needs a trigger to re-evaluate. For a pure "fire after N minutes" pattern, combine with a `RepeatUntil` or use a `TimerManager` timer.
+
+---
+
 ## Backup (`POST /system/backup`)
 
 `POST /api/v1/system/backup` creates a zip archive of all persistent state and returns it as a streaming download.  Requires Admin role.

@@ -31,10 +31,12 @@
 pub mod channel;
 pub mod email;
 pub mod pushover;
+pub mod telegram;
 
 pub use channel::NotifyChannel;
 pub use email::{EmailChannel, EmailConfig};
 pub use pushover::{PushoverChannel, PushoverConfig};
+pub use telegram::{TelegramChannel, TelegramConfig};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -64,6 +66,7 @@ pub struct ChannelConfig {
 pub enum ProviderConfig {
     Email(EmailConfig),
     Pushover(PushoverConfig),
+    Telegram(TelegramConfig),
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +121,10 @@ impl NotificationService {
                     info!(channel = %name, "Registered Pushover notification channel");
                     svc.register(name, PushoverChannel::new(pc));
                 }
+                ProviderConfig::Telegram(tc) => {
+                    info!(channel = %name, "Registered Telegram notification channel");
+                    svc.register(name, TelegramChannel::new(tc));
+                }
             }
         }
         svc
@@ -125,9 +132,27 @@ impl NotificationService {
 
     /// Send via the named channel.
     ///
-    /// Returns an error if the channel name is not registered, or if the
-    /// underlying provider returns an error.
+    /// The special channel name `"all"` fans the message out to every
+    /// registered channel.  Any individual channel errors are logged but do
+    /// not prevent delivery to the remaining channels.
+    ///
+    /// Returns an error if a specific channel name is not registered, or if
+    /// the underlying provider returns an error.
     pub async fn notify(&self, channel: &str, title: &str, message: &str) -> Result<()> {
+        if channel == "all" {
+            let mut last_err: Option<anyhow::Error> = None;
+            for (name, ch) in &self.channels {
+                if let Err(e) = ch.send(title, message).await {
+                    warn!(channel = %name, error = %e, "notify_all: channel delivery failed");
+                    last_err = Some(e);
+                }
+            }
+            return if let Some(e) = last_err {
+                Err(e.context("one or more notify_all channels failed"))
+            } else {
+                Ok(())
+            };
+        }
         let ch = self
             .channels
             .get(channel)

@@ -88,6 +88,20 @@ pub enum Condition {
     ScriptExpression {
         script: String,
     },
+    /// True when a device attribute has not changed for at least `duration_ms`
+    /// milliseconds.  Useful for "door open > 10 minutes" patterns without
+    /// requiring a separate timer device.
+    ///
+    /// The elapsed time is measured from the last observed value change for
+    /// the specific attribute, tracked by the rule engine's in-memory cache.
+    /// On first evaluation after restart (before any change has been seen),
+    /// the condition uses `DeviceState.last_seen` as a conservative baseline.
+    TimeElapsed {
+        device_id: String,
+        attribute: String,
+        /// Minimum elapsed milliseconds since the attribute last changed.
+        duration_ms: u64,
+    },
 }
 
 /// Comparison operators for `Condition::DeviceState`.

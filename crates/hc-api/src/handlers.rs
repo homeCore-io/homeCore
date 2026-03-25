@@ -25,6 +25,48 @@ pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
 }
 
+// ---------- System status ----------
+
+pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
+    let uptime_secs = (chrono::Utc::now() - s.started_at).num_seconds().max(0);
+
+    let (rules_total, rules_enabled) = if let Some(rh) = &s.rules_handle {
+        let rules = rh.read().await;
+        let total = rules.len();
+        let enabled = rules.iter().filter(|r| r.enabled).count();
+        (total, enabled)
+    } else {
+        (0, 0)
+    };
+
+    let devices_total = s.store.list_devices().await.map(|d| d.len()).unwrap_or(0);
+
+    let plugins_active = {
+        let map = s.plugins.read().await;
+        map.values().filter(|p| p.status == "active").count()
+    };
+
+    let (state_db_bytes, history_db_bytes) = if let Some(bp) = &s.backup_paths {
+        let state_sz = std::fs::metadata(&bp.state_db_path).map(|m| m.len()).unwrap_or(0);
+        let hist_sz  = std::fs::metadata(&bp.history_db_path).map(|m| m.len()).unwrap_or(0);
+        (state_sz, hist_sz)
+    } else {
+        (0, 0)
+    };
+
+    Json(json!({
+        "version":           env!("CARGO_PKG_VERSION"),
+        "uptime_seconds":    uptime_secs,
+        "started_at":        s.started_at,
+        "rules_total":       rules_total,
+        "rules_enabled":     rules_enabled,
+        "devices_total":     devices_total,
+        "plugins_active":    plugins_active,
+        "state_db_bytes":    state_db_bytes,
+        "history_db_bytes":  history_db_bytes,
+    }))
+}
+
 // ---------- Devices ----------
 
 #[derive(Deserialize, Default)]
@@ -731,14 +773,11 @@ pub async fn test_automation(
     let mut all_pass = true;
 
     for condition in &rule.conditions {
-        let passed = eval_condition_dry(condition, &s.store).await.unwrap_or(false);
-        if !passed {
+        let detail = eval_condition_dry_detail(condition, &s.store).await;
+        if !detail.passed {
             all_pass = false;
         }
-        condition_results.push(json!({
-            "condition": serde_json::to_value(condition).unwrap_or(serde_json::Value::Null),
-            "passed": passed,
-        }));
+        condition_results.push(serde_json::to_value(&detail).unwrap_or(serde_json::Value::Null));
     }
 
     (StatusCode::OK, Json(json!({
@@ -751,36 +790,115 @@ pub async fn test_automation(
     })))
 }
 
-async fn eval_condition_dry(
+#[derive(serde::Serialize)]
+struct ConditionDetail {
+    condition: serde_json::Value,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+async fn eval_condition_dry_detail(
     condition: &hc_types::rule::Condition,
     store: &StateStore,
-) -> Option<bool> {
+) -> ConditionDetail {
     use hc_types::rule::Condition;
+    let cond_json = serde_json::to_value(condition).unwrap_or(serde_json::Value::Null);
+
     match condition {
         Condition::DeviceState { device_id, attribute, op, value } => {
             let device = match store.get_device(device_id).await {
                 Ok(Some(d)) => d,
-                _ => return None,
+                Ok(None) => return ConditionDetail {
+                    condition: cond_json, passed: false, actual: None,
+                    expected: Some(value.clone()), elapsed_ms: None,
+                    reason: Some(format!("device '{device_id}' not found")),
+                },
+                Err(e) => return ConditionDetail {
+                    condition: cond_json, passed: false, actual: None,
+                    expected: Some(value.clone()), elapsed_ms: None,
+                    reason: Some(format!("store error: {e}")),
+                },
             };
-            let actual = device.attributes.get(attribute)?;
-            Some(compare_values(actual, op, value))
+            match device.attributes.get(attribute) {
+                None => ConditionDetail {
+                    condition: cond_json, passed: false, actual: None,
+                    expected: Some(value.clone()), elapsed_ms: None,
+                    reason: Some(format!("attribute '{attribute}' not present")),
+                },
+                Some(actual) => {
+                    let passed = compare_values(actual, op, value);
+                    ConditionDetail {
+                        condition: cond_json, passed,
+                        actual: Some(actual.clone()),
+                        expected: Some(value.clone()),
+                        elapsed_ms: None, reason: None,
+                    }
+                }
+            }
         }
         Condition::TimeWindow { start, end } => {
             let now = chrono::Local::now().time();
-            if start <= end {
-                Some(now >= *start && now <= *end)
+            let passed = if start <= end {
+                now >= *start && now <= *end
             } else {
-                Some(now >= *start || now <= *end)
+                now >= *start || now <= *end
+            };
+            ConditionDetail {
+                condition: cond_json, passed,
+                actual: Some(json!(now.to_string())),
+                expected: Some(json!(format!("{start}–{end}"))),
+                elapsed_ms: None, reason: None,
             }
         }
         Condition::ScriptExpression { script } => {
             let script = script.clone();
-            tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || {
                 hc_scripting::ScriptRuntime::new().eval_condition(&script).ok()
             })
             .await
             .ok()
-            .flatten()
+            .flatten();
+            ConditionDetail {
+                condition: cond_json,
+                passed: result.unwrap_or(false),
+                actual: None, expected: None, elapsed_ms: None,
+                reason: if result.is_none() { Some("script error".into()) } else { None },
+            }
+        }
+        Condition::TimeElapsed { device_id, attribute: _, duration_ms } => {
+            let device = match store.get_device(device_id).await {
+                Ok(Some(d)) => d,
+                Ok(None) => return ConditionDetail {
+                    condition: cond_json, passed: false, actual: None, expected: None,
+                    elapsed_ms: None,
+                    reason: Some(format!("device '{device_id}' not found")),
+                },
+                Err(e) => return ConditionDetail {
+                    condition: cond_json, passed: false, actual: None, expected: None,
+                    elapsed_ms: None,
+                    reason: Some(format!("store error: {e}")),
+                },
+            };
+            // Dry-run uses last_seen as the conservative elapsed baseline.
+            let elapsed = (chrono::Utc::now() - device.last_seen).num_milliseconds().max(0);
+            let passed = elapsed as u64 >= *duration_ms;
+            ConditionDetail {
+                condition: cond_json, passed,
+                actual: None, expected: None,
+                elapsed_ms: Some(elapsed),
+                reason: if !passed {
+                    Some(format!("only {elapsed}ms elapsed, need {duration_ms}ms"))
+                } else {
+                    None
+                },
+            }
         }
     }
 }
