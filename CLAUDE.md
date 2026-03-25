@@ -417,6 +417,7 @@ homeCore/                          # container dir (no git)
 ### Phase 4 — Hardening (remaining)
 - [x] **Metrics endpoint** — `GET /api/v1/metrics` Prometheus text 0.0.4; 9 metrics (uptime, devices, rules, plugins, counters for fires/state-changes/scenes/events); no auth required
 - [x] **Device history query flexibility** — `GET /devices/{id}/history` accepts `?from=`, `?to=`, `?attribute=`, `?limit=` (default 500, cap 5 000)
+- [x] **Device deletion cascading** — `DELETE /devices/{id}` patches rule files replacing device refs with `DELETED:` placeholder, disables affected rules, returns `{ affected_rules: [...] }`; broken rule files produce disabled stubs at load time (never blocks startup)
 - [ ] **Backup/restore** — `POST /system/backup` exporting redb snapshot + config
 - [ ] WASM plugin sandbox (`wasmtime`) — only needed for untrusted third-party plugins
 - [ ] HA clustering (`openraft`) — premature; single-node is sufficient for home use

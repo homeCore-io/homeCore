@@ -909,6 +909,65 @@ and point HomeCore at it:
 
 ---
 
+## Broken rules and device deletion cascading
+
+### Broken rule files
+
+HomeCore never fails to start because of a broken rule file.  If a `.toml` file
+in `rules/` fails to parse, the loader creates a disabled **stub rule** in its
+place:
+
+- `enabled: false`
+- `error: "parse error: ..."` — the full parse error message
+- `name: "{filename} [BROKEN]"`
+- Stable UUID derived from the file path (same across reloads)
+- `trigger: ManualTrigger` — the stub can never fire
+
+The broken stub appears in `GET /automations` so you can see what failed.
+Fix the TOML file and save — the hot-reload watcher replaces the stub with the
+corrected rule within 200 ms.
+
+Duplicate IDs across rule files follow the same pattern: the second occurrence
+is stubbed with `error: "duplicate rule ID ..."` and a fresh random UUID.
+
+```sh
+# Find all broken/errored rules
+curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKEN" \
+  | jq '[.[] | select(.error != null) | {name, error, enabled}]'
+```
+
+### Device deletion cascading
+
+When you delete a device (`DELETE /api/v1/devices/{id}`), HomeCore automatically
+scans all rule files and patches any rules that reference that device:
+
+1. Every `device_id` occurrence in triggers, conditions, and actions is replaced
+   with `"DELETED:{original_id}"`.
+2. The rule is set to `enabled: false`.
+3. `error: "references deleted device: {id}"` is written into the rule file.
+4. The patched file is written back to disk (hot-reload picks it up immediately).
+
+The response is `200 OK` with a summary:
+
+```json
+{ "deleted": true, "affected_rules": ["wled_deck_off_at_sunrise", "porch_light_on"] }
+```
+
+If no rules referenced the device, `affected_rules` is an empty array and the
+behavior is unchanged from before.
+
+**To re-enable a rule after replacing a deleted device:** edit the rule file,
+change `"DELETED:old_id"` to the new device's ID, remove the `error` field, and
+set `enabled = true`.  The hot-reload watcher picks up the change immediately.
+
+```sh
+# List rules disabled due to deleted devices
+curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKEN" \
+  | jq '[.[] | select(.error | strings | startswith("references deleted")) | {name, error}]'
+```
+
+---
+
 ## Working with rules during development
 
 Rules are the core of HomeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
