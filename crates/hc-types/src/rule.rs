@@ -66,6 +66,11 @@ pub enum Trigger {
     CustomEvent {
         event_type: String,
     },
+    /// Fires once immediately after the rule engine has finished pre-populating
+    /// its device cache on startup.  Use this to handle state that may have
+    /// changed while homeCore was not running (e.g. a door left open across a
+    /// restart).  Pair with `DeviceState` conditions to guard the action.
+    SystemStarted,
 }
 
 /// Solar event types for time-based triggers.

@@ -141,6 +141,16 @@ impl RuleEngine {
         }
 
         let mut rx = self.bus.subscribe();
+        // Emit system_started after subscribing so SystemStarted rules fire on
+        // the first loop iteration.  This is the only window where the device
+        // cache is fully populated but no events have been processed yet — the
+        // ideal moment to catch state that changed during a restart (e.g. a
+        // door left open).
+        let _ = self.bus.publish(Event::Custom {
+            timestamp: Utc::now(),
+            event_type: "system_started".to_string(),
+            payload: serde_json::json!({}),
+        });
         info!("Rule engine started");
         loop {
             match rx.recv().await {
@@ -571,6 +581,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::WebhookReceived { .. }    => "WebhookReceived",
         Trigger::ManualTrigger             => "ManualTrigger",
         Trigger::CustomEvent { .. }        => "CustomEvent",
+        Trigger::SystemStarted             => "SystemStarted",
     }
 }
 
@@ -657,6 +668,9 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
         }
         (Trigger::CustomEvent { event_type }, Event::Custom { event_type: et, .. }) => {
             if event_type == et { Matched } else { NoMatch("event_type mismatch") }
+        }
+        (Trigger::SystemStarted, Event::Custom { event_type, .. }) => {
+            if event_type == "system_started" { Matched } else { NoMatch("not a system_started event") }
         }
         (Trigger::ManualTrigger, _) => NoMatch("manual trigger only fires via API"),
         _ => NoMatch("event type does not match trigger type"),

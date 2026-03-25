@@ -1,0 +1,26 @@
+# Laundry Room Door - Startup Open Check
+#
+# Fires once at startup if the laundry room door was already open when
+# homeCore started.  Complements door_alert_laundryRoom.toml which requires
+# a DeviceStateChanged event to trigger.
+
+id = "c829dc15-e7d7-48c4-9fcc-8f757d8d7ab6"
+name     = "Startup Check - Laundry Room Door Open"
+enabled  = true
+priority = 5
+tags     = ["garage", "door-alerts", "startup"]
+
+[trigger]
+type = "system_started"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0200142e3c"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Laundry room door was open when homeCore started"

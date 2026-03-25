@@ -1646,6 +1646,7 @@ All `CallService` actions in the process share a single `reqwest::Client` (initi
 | `WebhookReceived` | `path` | POST to `/api/v1/webhooks/{path}`. **No auth required.** The path acts as the shared secret. Request body (JSON) is forwarded as `body` in the event payload and accessible in `ScriptExpression` conditions via `event.body`. |
 | `ManualTrigger` | — | Never fires automatically — only via the `/test` endpoint. |
 | `CustomEvent` | `event_type` | Fires when a `FireEvent` action emits the matching `event_type` on the internal bus. Enables clean rule chaining: one rule fires an event, one or more rules react to it — no MQTT round-trip. See worked example above. |
+| `SystemStarted` | — | Fires **once** immediately after the rule engine finishes pre-populating its device cache on startup. Use this to catch state that changed while homeCore was not running (e.g. a door left open across a restart). Pair with `DeviceState` conditions to guard the action. See startup gap pattern below. |
 
 ### Condition type reference
 
@@ -1695,9 +1696,143 @@ catchup_window_minutes = 15   # default; set 0 to disable
 - `SunEvent` triggers are evaluated against today's computed solar time using the configured lat/lon.
 - `TimeOfDay` triggers additionally check the `days` array — a trigger set for weekdays-only won't fire on a weekend.
 - If the window crosses midnight (e.g. a 15-min window starting at 23:52), both sides are handled correctly.
-- `DeviceStateChanged`, `MqttMessage`, `WebhookReceived`, and `ManualTrigger` are **not** caught up — only time-based triggers.
+- `DeviceStateChanged`, `MqttMessage`, `WebhookReceived`, `CustomEvent`, and `ManualTrigger` are **not** caught up — only time-based triggers.
+- For state that may have changed while homeCore was offline, use `Trigger::SystemStarted` instead — see startup gap pattern below.
 
 **Example:** sunrise is at 06:42. HomeCore restarts at 06:50. With `catchup_window_minutes = 15`, the window is `[06:35, 06:50]`. Sunrise (06:42) falls inside → the deck-off rule fires immediately on startup rather than being skipped until tomorrow.
+
+---
+
+### Startup gap — `Trigger::SystemStarted`
+
+**Problem:** `DeviceStateChanged` only fires when a device state *changes*. If a door is left open when homeCore restarts, the open-door alert rules never trigger — there is no change event, just retained state that was already there.
+
+**Solution:** `Trigger::SystemStarted` fires once immediately after the rule engine finishes pre-populating its device cache (before any events are processed). Pair it with `DeviceState` conditions to guard the action — the trigger fires for every `SystemStarted` rule, so the conditions are what make it selective.
+
+**TOML pattern:**
+
+```toml
+id = ""
+name     = "Startup Check - Garage Deck Door Open"
+enabled  = true
+priority = 5
+tags     = ["door-alerts", "startup"]
+
+[trigger]
+type = "system_started"
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e82eb"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Garage deck door was open when homeCore started"
+```
+
+**Rules to pair:** each `door_alert_*.toml` rule covers the ongoing case (door open → 10+ min → alert on each heartbeat); the matching `startup_check_*.toml` rule covers the cold-start gap. Together they ensure an open door is never silently missed regardless of when homeCore last restarted.
+
+**Timing:** the `system_started` event is published to the internal bus after the device cache is pre-populated but before any MQTT events arrive. This means `DeviceState` conditions read from the freshly-populated cache — the same values that were persisted before the last shutdown.
+
+---
+
+### `RepeatUntil` + `TimeElapsed` — "wait until condition, then act"
+
+Two patterns exist for "do something after N minutes". Pick based on whether you need a persistent delay (survives restarts) or an in-process polling loop.
+
+---
+
+#### Pattern A — `TimeElapsed` condition (event-driven, preferred for device state)
+
+**Use when:** you want to check *after* a state change whether enough time has passed. Requires an event to re-evaluate — the rule does not loop itself.
+
+**How it works:**
+1. A `DeviceStateChanged` trigger fires when the device state changes.
+2. A `TimeElapsed` condition checks if the attribute has been in its current value for at least N seconds. Returns false until the threshold is reached.
+3. Subsequent events (e.g. YoLink heartbeats, ~15-30 min) re-trigger the rule. The first evaluation after the threshold passes fires the actions.
+
+```toml
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_abc123"
+attribute = "open"
+to        = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_abc123"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type          = "time_elapsed"
+device_id     = "yolink_abc123"
+attribute     = "open"
+duration_secs = 600   # 10 minutes
+
+[[actions]]
+type    = "notify"
+channel = "telegram"
+message = "Door has been open for 10+ minutes"
+```
+
+**Tradeoffs:**
+- Zero timers, zero goroutines — purely reactive.
+- Alert fires at the *next event after* the threshold, not exactly at the threshold.
+- For YoLink door sensors (heartbeat ~15-30 min), the alert may arrive up to 30 min late.
+- Does not survive restarts by itself — combine with a `SystemStarted` rule if needed.
+
+---
+
+#### Pattern B — `RepeatUntil` with `Delay` (in-process countdown)
+
+**Use when:** you need the action to fire at an exact time (not just "eventually"), or there is no periodic heartbeat to drive re-evaluation.
+
+**How it works:** The rule fires immediately on trigger. A `Delay` + loop waits for the condition to become true (or times out). Because the entire loop runs inside a single tokio task, it does not survive process restarts.
+
+```toml
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_abc123"
+attribute = "open"
+to        = true
+
+[[actions]]
+type           = "repeat_until"
+# Stop when the door closes or after 20 iterations (100 min)
+condition      = 'device_state("yolink_abc123")["open"] == false'
+max_iterations = 20
+interval_ms    = 300000   # 5 minutes
+
+  [[actions.actions]]
+  type    = "notify"
+  channel = "telegram"
+  message = "Door still open — check again in 5 minutes"
+```
+
+> **Warning:** `RepeatUntil` conditions do not have access to `device_state()` by default — they run in a plain `ScriptRuntime`. The example above uses a `RunScript` action inside the loop to do the actual state check. See the RepeatUntil section below for details.
+
+**Tradeoffs:**
+- Fires exactly at each interval.
+- Blocked by process restart — if homeCore restarts while the loop is running, the loop is lost.
+- More complex to write correctly (off-by-one on `max_iterations`, no `device_state()` in condition).
+- Best for short-lived loops (≤ 30 min) or cases where exact timing matters.
+
+---
+
+#### Which to use?
+
+| Situation | Recommended |
+|---|---|
+| Door / sensor open > N minutes, heartbeat-driven device | `TimeElapsed` condition |
+| Need exact timing (fire at T+10:00, not T+15-30) | `RepeatUntil` + `Delay` |
+| State may persist across homeCore restarts | `SystemStarted` + `DeviceState` condition |
+| Repeating reminder every N minutes until resolved | `RepeatUntil` with notification inside loop |
 
 ---
 
