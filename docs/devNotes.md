@@ -4565,3 +4565,144 @@ The `StateStore` parameter was completely removed from `executor.rs` — the exe
 - `crates/hc-core/src/executor.rs` — removed `StateStore` param, added `device_snapshot: HashMap<String, JsonValue>` threaded through all call sites
 - `core/Cargo.toml` — added `dashmap = "6"` to workspace dependencies
 - `crates/hc-core/Cargo.toml` — added `dashmap = { workspace = true }`
+
+---
+
+## Plugin Notes — hc-yolink
+
+### Device name sync
+
+`detect_name_changes()` in `bridge.rs` runs on every poll tick (default 3600s).
+It fetches fresh names from the YoLink API and re-registers changed devices with
+HomeCore.
+
+**Bug fixed (commit d68d632):** In-memory device name was previously updated via
+`mem::replace` _before_ calling `register_device`. If the MQTT publish failed,
+the in-memory name was permanently set to the new value, so future ticks saw no
+diff and the rename was silently lost forever.
+
+**Fix:** Snapshot `(hc_id, device_type, old_name)` first; call `register_device`;
+only update `self.devices[idx].info.name` inside the `Ok(_)` branch. Failures
+are logged as warnings and retried on the next tick.
+
+**Startup sync:** `try_start()` calls `get_device_list()` and re-registers ALL
+devices with current YoLink API names. A plugin restart immediately syncs all
+names — no need to wait for the next poll tick.
+
+---
+
+## Plugin Notes — hc-lutron
+
+### Scenes availability
+
+Lutron scene devices are registered with `device_type = "scene"`.
+
+**Bug fixed (commit a3126a4):** Scenes were showing as offline because
+`publish_availability(true)` was never called for them.
+
+**Fix:** `publish_availability(true)` is now called for every scene in both:
+- `main.rs` startup registration loop
+- `bridge.rs` `register_all_devices()` (called on every LIP reconnect)
+
+Scenes have no hardware availability signal so they are always marked online
+when the LIP connection is up.
+
+---
+
+## Core — DeviceState device_type field
+
+Added `device_type: Option<String>` to `DeviceState` in `hc-types`
+(commit 4572de2). Populated from the `device_type` field in plugin registration
+JSON. Uses `#[serde(default)]` so old records deserialize as `None`.
+
+**Known values:**
+- `"scene"` — Lutron scenes, Hue scenes
+- `"switch"`, `"shade"`, `"keypad"`, `"pico_remote"`, `"binary_sensor"` — Lutron
+- `"timeclock_event"` — Lutron timeclock events
+- `"hue_light"`, `"hue_group"` — Hue plugin devices
+
+**Usage:** `GET /api/v1/devices` — check the `device_type` field to filter or
+categorize devices. The hc-web Devices page excludes `device_type == "scene"`;
+the Scenes page includes them alongside native HC scenes.
+
+---
+
+## Plugin Notes — hc-hue (scenes)
+
+### Unified activate payload
+
+`{"activate": true}` is now accepted by hc-hue as an alternative to
+`{"action": "activate_scene"}` (commit c1b99e4). This allows plugin scenes
+to be activated from hc-web using the same code path as Lutron scenes.
+
+---
+
+## hc-web Notes
+
+Tech stack: Flutter 3.41.5 · Dart 3.11.3 · Riverpod 2.x · go_router 13.x
+Binary at `/home/john/flutter/bin/flutter` (not in PATH).
+
+Build & deploy:
+```sh
+cd /home/john/RustroverProjects/homeCore/clients/hc-web
+/home/john/flutter/bin/flutter build web --release
+```
+Caddy serves `build/web` directly — no restart needed. Hard-refresh browser
+(Ctrl+Shift+R) to bypass cache.
+
+### Scenes (commit a1e99ae)
+
+The Scenes page aggregates two sources:
+1. **Native HC scenes** — from `GET /api/v1/scenes`
+2. **Plugin scenes** — devices from `devicesProvider` where `deviceType == "scene"`
+
+Plugin scenes (Lutron, Hue) activate via
+`PATCH /devices/{id}/state {"activate": true}`. They show a "Plugin scene"
+label, have no editor, and cannot be deleted from the UI.
+
+`DeviceState.deviceType` is read from the `device_type` field in the API
+response and preserved through WebSocket copy-constructors.
+
+### Dashboard (commit b37dc34)
+
+Recent Events panel removed — the dedicated Events page covers this.
+WebSocket toast notifications for `rule_fired` and `scene_activated` are kept.
+
+### Auth reload fix (commit b37dc34)
+
+Router redirect changed from:
+```dart
+final isLoggedIn = ref.read(authProvider).valueOrNull ?? false;
+```
+to:
+```dart
+final isLoggedIn = await ref.read(authProvider.future);
+```
+
+This waits for the token check in SharedPreferences before deciding to redirect,
+preventing a spurious redirect to `/login` on hard reload.
+
+A `_RouterNotifier` (`ChangeNotifier` wrapping `authProvider`) is passed as
+`refreshListenable` so the router re-evaluates after login/logout.
+
+### Nav bar on device detail (commit b37dc34)
+
+`/devices/:id` and `/devices/:id/history` routes were outside the `ShellRoute`,
+hiding the nav bar. Moved inside so the nav bar stays visible on detail pages.
+
+### Back/cancel navigation (commit b37dc34)
+
+All list→detail and list→editor navigation uses `context.push()` instead of
+`context.go()`, giving a proper back stack. Editor AppBars have an explicit
+**Cancel** button (`context.pop()`). After save, editors call `context.pop()`
+instead of `context.go('/scenes')` / `context.go('/automations')`.
+
+### Modes display fix (commit a5f3a44)
+
+`GET /api/v1/modes` returns each item as:
+```json
+{ "config": { "id": "...", "kind": "...", ... }, "state": { "attributes": { "on": ..., ... } } }
+```
+
+`ModeState.fromJson` was reading from a flat top-level object. Fixed to read
+`id`/`kind`/offsets from `config` and `on`/solar times from `state.attributes`.
