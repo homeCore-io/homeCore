@@ -1114,6 +1114,54 @@ curl -s -X POST http://localhost:8080/api/v1/automations/RULE_ID/test \
   -H "Authorization: Bearer $TOKEN" | jq
 ```
 
+Response includes per-condition detail: `actual`, `expected`, `elapsed_ms`, and a human-readable `reason` on failure.
+
+---
+
+### Rule fire history (`GET /automations/{id}/history`)
+
+The engine records the last **20 evaluations** for every rule in an in-memory ring buffer — regardless of whether the rule fired or conditions blocked it. This is the fastest way to debug why a rule "isn't firing."
+
+```sh
+curl -s http://localhost:8080/api/v1/automations/RULE_ID/history \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Each entry contains:
+
+| Field | Description |
+|---|---|
+| `timestamp` | When the trigger was matched and conditions evaluated |
+| `conditions_passed` | `true` if all conditions passed and actions were dispatched |
+| `actions_ran` | Number of actions in the rule (0 when conditions blocked execution) |
+| `eval_ms` | Milliseconds spent evaluating conditions |
+
+**Example response:**
+
+```json
+[
+  {
+    "timestamp": "2026-03-24T14:30:01Z",
+    "conditions_passed": false,
+    "actions_ran": 0,
+    "eval_ms": 1
+  },
+  {
+    "timestamp": "2026-03-24T14:42:15Z",
+    "conditions_passed": true,
+    "actions_ran": 2,
+    "eval_ms": 2
+  }
+]
+```
+
+Entries are returned oldest-first. The buffer clears on restart — it is purely diagnostic, not persisted.
+
+**Interpreting results:**
+- Many entries with `conditions_passed: false` → the trigger fires correctly but a condition blocks it. Use `POST /test` to see which condition fails and why.
+- No entries at all → the trigger has never matched. Check that the `device_id` and `attribute` in the trigger are correct.
+- The buffer is empty but the rule exists → the rule has never had its trigger fire since the last restart.
+
 ---
 
 ### Export and import rules
@@ -1131,6 +1179,85 @@ curl -s -X POST http://localhost:8080/api/v1/automations/import \
   -H "Content-Type: application/json" \
   -d @rules-backup.json | jq
 ```
+
+---
+
+### Rule tags
+
+Tags are optional string labels on a rule. They enable filtering and bulk operations without having to know individual rule IDs — useful once you have dozens of rules.
+
+**Adding tags to a rule (TOML):**
+
+```toml
+id       = "..."
+name     = "Deck door open alert"
+enabled  = true
+priority = 10
+tags     = ["deck", "door-alerts"]
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_deck_door"
+attribute = "open"
+```
+
+**Adding tags via the API** — include `"tags"` in any `PUT` or `POST` body:
+
+```sh
+curl -s -X PUT http://localhost:8080/api/v1/automations/RULE_ID \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Deck door open alert",
+    "enabled": true,
+    "priority": 10,
+    "tags": ["deck", "door-alerts"],
+    "trigger": { "type": "DeviceStateChanged", "device_id": "yolink_deck_door", "attribute": "open" },
+    "conditions": [],
+    "actions": [{ "type": "Notify", "channel": "telegram", "message": "Deck door is open" }]
+  }' | jq
+```
+
+**Filter the automations list by tag:**
+
+```sh
+# List only deck rules
+curl -s "http://localhost:8080/api/v1/automations?tag=deck" \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# Count door-alert rules
+curl -s "http://localhost:8080/api/v1/automations?tag=door-alerts" \
+  -H "Authorization: Bearer $TOKEN" | jq length
+```
+
+**Bulk enable/disable by tag:**
+
+```sh
+# Vacation mode — disable all "vacation-sensitive" rules at once
+curl -s -X PATCH "http://localhost:8080/api/v1/automations?tag=vacation-sensitive" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}' | jq .updated
+
+# Re-enable them when you're home
+curl -s -X PATCH "http://localhost:8080/api/v1/automations?tag=vacation-sensitive" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}' | jq .updated
+
+# Disable ALL rules (no tag filter = all rules)
+curl -s -X PATCH http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+The bulk `PATCH` response is `{ "updated": N, "rules": [...] }` where `rules` contains the full updated rule objects.
+
+**Design note:** Tags are free-form strings. There are no pre-defined categories. Suggested conventions:
+- Area groups: `"deck"`, `"garage"`, `"bedroom"`
+- Functional groups: `"door-alerts"`, `"morning-routine"`, `"vacation"`
+- Maintenance: `"disabled-pending-fix"`, `"seasonal"`
 
 ---
 
@@ -1314,6 +1441,111 @@ The path is the only authentication mechanism for webhooks. Keep it long and ran
 
 ---
 
+### Worked example — CustomEvent trigger (rule chaining / fan-out)
+
+`Trigger::CustomEvent` fires when a `FireEvent` action emits a matching `event_type` on the internal bus. Use this pattern to collapse duplicate action lists into a single "scene" rule that multiple trigger rules call.
+
+**Problem:** 8 keypad buttons each need to run the same Lutron scene. Without CustomEvent you'd copy the scene logic into every keypad rule — 8 identical action lists.
+
+**Solution:** one "scene" rule reacts to a custom event; each keypad rule fires the event.
+
+**Step 1 — create the scene rule** (reacts to a custom event):
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Scene: Evening Deck",
+    "enabled": true,
+    "priority": 10,
+    "tags": ["deck", "scenes"],
+    "trigger": {
+      "type": "CustomEvent",
+      "event_type": "scene_evening_deck"
+    },
+    "conditions": [],
+    "actions": [
+      { "type": "SetDeviceState", "device_id": "lutron_scene_deck_evening", "state": { "activate": true } },
+      { "type": "SetDeviceState", "device_id": "wled_deck_strip",           "state": { "on": true, "brightness": 60 } }
+    ]
+  }' | jq
+```
+
+**Step 2 — each keypad button fires the event** (one of N identical trigger rules):
+
+```sh
+curl -s -X POST http://localhost:8080/api/v1/automations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Keypad: Deck button 3 → Evening",
+    "enabled": true,
+    "priority": 20,
+    "tags": ["keypad", "deck"],
+    "trigger": {
+      "type": "DeviceStateChanged",
+      "device_id": "keypad_deck",
+      "attribute": "button_3",
+      "to": true
+    },
+    "conditions": [],
+    "actions": [
+      {
+        "type": "FireEvent",
+        "event_type": "scene_evening_deck",
+        "payload": { "source": "keypad_deck_button_3" }
+      }
+    ]
+  }' | jq
+```
+
+Now buttons 1–8, a webhook, a time trigger, or any other source can activate the scene by firing `scene_evening_deck` — without duplicating the Lutron + WLED action list.
+
+**How it works under the hood:**
+
+`FireEvent` publishes to two places simultaneously:
+1. `homecore/events/scene_evening_deck` on MQTT (external subscribers, event log)
+2. `Event::Custom { event_type: "scene_evening_deck" }` on the internal EventBus (zero-latency, same process)
+
+The `CustomEvent` trigger listens to the internal bus path — no MQTT round-trip through the broker.
+
+**TOML example** (for the scene rule):
+
+```toml
+id       = ""
+name     = "Scene: Evening Deck"
+enabled  = true
+priority = 10
+tags     = ["deck", "scenes"]
+
+[trigger]
+type       = "custom_event"
+event_type = "scene_evening_deck"
+
+[[actions]]
+type      = "set_device_state"
+device_id = "lutron_scene_deck_evening"
+state     = { activate = true }
+
+[[actions]]
+type      = "set_device_state"
+device_id = "wled_deck_strip"
+state     = { on = true, brightness = 60 }
+```
+
+**Testing:** fire the event manually via the API:
+
+```sh
+# Trigger the scene rule directly (no need for a physical keypad press)
+curl -s -X POST http://localhost:8080/api/v1/webhooks/test-scene \
+  -H "Content-Type: application/json" \
+  -d '{}'
+# — or — fire via the event bus using a ManualTrigger rule that emits the event
+```
+
+---
+
 ### Worked example — CallService (outbound HTTP)
 
 Use `CallService` when a rule needs to reach out to an external service — a Slack webhook, a REST API, a cloud bridge, etc.
@@ -1407,12 +1639,13 @@ All `CallService` actions in the process share a single `reqwest::Client` (initi
 
 | `type` value | Required fields | When it fires |
 |---|---|---|
-| `DeviceStateChanged` | `device_id`; optional `attribute` | Any MQTT state publish for that device. Add `attribute` to narrow to one field (e.g. `"on"`). |
+| `DeviceStateChanged` | `device_id`; optional `attribute`; optional `to` | Any MQTT state publish for that device. Add `attribute` to narrow to one field (e.g. `"on"`). Add `to` to require a specific new value. |
 | `MqttMessage` | `topic_pattern` | Raw MQTT message on a matching topic. Supports `+` (one level) and `#` (rest of path). |
 | `TimeOfDay` | `time` (HH:MM), `days` (array of day names) | Scheduler fires at the given local time on specified days. Caught up on restart — see below. |
 | `SunEvent` | `event` (`"sunrise"` or `"sunset"`), `offset_minutes` | Computed locally from lat/lon in `config/homecore.toml`. Caught up on restart — see below. |
 | `WebhookReceived` | `path` | POST to `/api/v1/webhooks/{path}`. **No auth required.** The path acts as the shared secret. Request body (JSON) is forwarded as `body` in the event payload and accessible in `ScriptExpression` conditions via `event.body`. |
 | `ManualTrigger` | — | Never fires automatically — only via the `/test` endpoint. |
+| `CustomEvent` | `event_type` | Fires when a `FireEvent` action emits the matching `event_type` on the internal bus. Enables clean rule chaining: one rule fires an event, one or more rules react to it — no MQTT round-trip. See worked example above. |
 
 ### Condition type reference
 
@@ -1422,6 +1655,7 @@ All conditions AND together — every one must pass.
 |---|---|---|
 | `DeviceState` | `device_id`, `attribute`, `op`, `value` | Current value of a device attribute in the DB. Ops: `Eq` `Ne` `Gt` `Gte` `Lt` `Lte` |
 | `TimeWindow` | `start`, `end` (HH:MM) | Is the current wall-clock time within the window? Handles midnight wrap. |
+| `TimeElapsed` | `device_id`, `attribute`, `duration_secs` | Has the attribute been in its current value for at least `duration_secs` seconds? Reads from an in-memory per-attribute timestamp cache — zero I/O. Pre-populated from `last_seen` at startup (conservative baseline). See below for door-open alert pattern. |
 | `ScriptExpression` | `script` | Rhai expression — must return `true` or `false`. |
 
 ### Action type reference
@@ -1433,7 +1667,7 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 | `SetDeviceState` | `device_id`, `state` | Publishes to `homecore/devices/{id}/cmd` — device plugin applies it. |
 | `PublishMqtt` | `topic`, `payload`, `retain` | Raw MQTT publish. |
 | `CallService` | `url`, `method`, `body`, `timeout_ms?`, `retries?`, `response_event?` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. `timeout_ms` defaults to 10 000. `retries` retries on network errors and 5xx only (4xx fails immediately); backoff: 500 ms → 1 000 ms → 2 000 ms → 4 000 ms. If `response_event` is set, the response body (JSON) is published to `homecore/events/{response_event}` so downstream rules can react to it. |
-| `FireEvent` | `event_type`, `payload` | Emits a custom event on the internal bus — visible in WS stream and event log. |
+| `FireEvent` | `event_type`, `payload` | Publishes to `homecore/events/{event_type}` on MQTT **and** emits directly to the internal EventBus. Any rule with `Trigger::CustomEvent { event_type }` reacts instantly (same process, no broker round-trip). Visible in the WS event stream and event log. |
 | `RunScript` | `script` | Sandboxed Rhai script. |
 | `Notify` | `channel`, `message`, `title?` | Delivers via the named channel in `[notify]` config. `title` defaults to `"HomeCore Alert"`. Returns a warning (not an error) if the channel is missing or delivery fails, so the rule sequence continues. |
 | `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
@@ -2226,6 +2460,9 @@ the `/api/v1/metrics` path.
 # Health check (no auth needed)
 curl -s http://localhost:8080/api/v1/health | jq
 
+# System status (uptime, rule/device counts, DB sizes)
+curl -s http://localhost:8080/api/v1/system/status -H "Authorization: Bearer $TOKEN" | jq
+
 # List everything
 curl -s http://localhost:8080/api/v1/devices     -H "Authorization: Bearer $TOKEN" | jq
 curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKEN" | jq
@@ -2234,8 +2471,21 @@ curl -s http://localhost:8080/api/v1/areas       -H "Authorization: Bearer $TOKE
 curl -s http://localhost:8080/api/v1/plugins     -H "Authorization: Bearer $TOKEN" | jq
 curl -s http://localhost:8080/api/v1/events      -H "Authorization: Bearer $TOKEN" | jq
 
+# Filter rules by tag
+curl -s "http://localhost:8080/api/v1/automations?tag=deck" -H "Authorization: Bearer $TOKEN" | jq
+
+# Bulk disable a group of rules (e.g. for maintenance)
+curl -s -X PATCH "http://localhost:8080/api/v1/automations?tag=door-alerts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+
 # Dry-run a rule without executing it
 curl -s -X POST http://localhost:8080/api/v1/automations/RULE_ID/test \
+  -H "Authorization: Bearer $TOKEN" | jq
+
+# View last 20 evaluations of a rule (debug why it isn't firing)
+curl -s http://localhost:8080/api/v1/automations/RULE_ID/history \
   -H "Authorization: Bearer $TOKEN" | jq
 
 # Fire a webhook (no auth needed — path is the secret)
