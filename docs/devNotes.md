@@ -328,7 +328,18 @@ All logging config lives under the `[logging]` top-level section in `config/home
 # Global default log level applied to all crates unless overridden.
 # Values: error | warn | info | debug | trace
 level = "info"
+
+# Timestamp display mode for all log outputs (stderr, file, rules file, syslog).
+# "local" — local system timezone with UTC offset  (default)
+#           e.g. 2026-03-25T09:32:00.123-05:00
+# "utc"   — UTC with Z suffix
+#           e.g. 2026-03-25T14:32:00.123Z
+time_display = "local"
 ```
+
+Applies uniformly to every active output channel — there is no per-output timezone override.
+Syslog RFC 3164 has no timezone field in its timestamp, so "local" vs "utc" controls only which
+clock is read; the format stays `MMM DD HH:MM:SS`.
 
 #### `[logging.targets]` — per-crate level overrides
 

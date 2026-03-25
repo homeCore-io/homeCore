@@ -70,7 +70,7 @@ whitelist = [
 # ---------------------------------------------------------------------------
 [logging]
 level = "debug"
-# time_display = "local"   # "local" (default) | "utc"
+time_display = "local"   # "local" (default) | "utc"
 
 [logging.targets]
 # hc_core        = "debug"
