@@ -1,12 +1,40 @@
 //! Rule engine — listens on the event bus, evaluates rules, dispatches actions.
+//!
+//! # Performance design
+//!
+//! ## In-memory device cache
+//! A `DashMap<device_id, attributes>` is populated at startup from the state
+//! store and updated synchronously on every `DeviceStateChanged` event *before*
+//! rule evaluation begins.  Condition checks never call `spawn_blocking` or
+//! touch redb — they read directly from the DashMap.
+//!
+//! ## Early RwLock release
+//! The rules `RwLock` is held only long enough to clone the current `Vec<Rule>`
+//! into a local snapshot (no I/O during the clone).  All trigger matching and
+//! condition evaluation runs against the snapshot after the lock is released,
+//! so hot-reload is never blocked while rules are being evaluated.
+//!
+//! ## Single device snapshot per rule
+//! For rules that contain Rhai scripts (ScriptExpression, RunScript,
+//! Conditional) the `DashMap` is converted to a `HashMap` exactly once per
+//! rule firing and passed through to all script evaluations.  This replaces the
+//! previous pattern of calling `list_devices()` (a `spawn_blocking` redb scan)
+//! once per script site.
+//!
+//! ## No redundant sort
+//! `load_all()` already stores rules in priority-descending order.  The
+//! matching vec preserves that order so re-sorting on every matched event is
+//! unnecessary.
 
 use crate::executor::execute_actions;
 use crate::EventBus;
 use anyhow::Result;
+use dashmap::DashMap;
 use hc_notify::NotificationService;
 use hc_state::StateStore;
 use hc_types::event::Event;
 use hc_types::rule::{CompareOp, Condition, Rule, Trigger};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,20 +42,27 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 pub struct RuleEngine {
-    bus: EventBus,
-    rules: Arc<RwLock<Vec<Rule>>>,
-    state: StateStore,
+    bus:    EventBus,
+    rules:  Arc<RwLock<Vec<Rule>>>,
+    state:  StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
-    notify: Option<Arc<NotificationService>>,
+    notify:  Option<Arc<NotificationService>>,
+    /// In-memory device attribute cache.
+    ///
+    /// Keyed by `device_id`; value is the full attributes map for that device.
+    /// Updated synchronously on every `DeviceStateChanged` event before any
+    /// rule evaluation, so condition checks are always reading current state
+    /// without any blocking I/O.
+    device_cache: Arc<DashMap<String, HashMap<String, JsonValue>>>,
 }
 
 impl RuleEngine {
     pub fn new(
-        bus: EventBus,
-        rules: Vec<Rule>,
-        state: StateStore,
+        bus:     EventBus,
+        rules:   Vec<Rule>,
+        state:   StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
-        notify: Option<Arc<NotificationService>>,
+        notify:  Option<Arc<NotificationService>>,
     ) -> Self {
         Self {
             bus,
@@ -35,6 +70,7 @@ impl RuleEngine {
             state,
             publish,
             notify,
+            device_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -45,6 +81,19 @@ impl RuleEngine {
 
     /// Drive the rule engine until the bus is dropped.
     pub async fn run(self) {
+        // Pre-populate device cache from current state store so condition checks
+        // work correctly for devices that haven't changed since last restart.
+        match self.state.list_devices().await {
+            Ok(devices) => {
+                let count = devices.len();
+                for d in devices {
+                    self.device_cache.insert(d.device_id, d.attributes.into_iter().collect());
+                }
+                info!(count, "Rule engine: device cache pre-populated");
+            }
+            Err(e) => warn!(error = %e, "Rule engine: failed to pre-populate device cache"),
+        }
+
         let mut rx = self.bus.subscribe();
         info!("Rule engine started");
         loop {
@@ -64,14 +113,34 @@ impl RuleEngine {
     }
 
     async fn handle_event(&self, event: &Event) -> Result<()> {
-        let rules = self.rules.read().await;
+        // ── 1. Update device cache (no lock needed — DashMap is concurrent) ──
+        if let Event::DeviceStateChanged { device_id, current, .. } = event {
+            self.device_cache
+                .entry(device_id.clone())
+                .and_modify(|attrs| {
+                    for (k, v) in current {
+                        attrs.insert(k.clone(), v.clone());
+                    }
+                })
+                .or_insert_with(|| current.clone());
+        }
 
-        // Scheduler tick events are dispatched to a specific rule by ID.
+        // ── 2. Snapshot rules, release the lock immediately ──────────────────
+        //
+        // The clone is O(N * sizeof(Rule)) and happens synchronously while
+        // holding the lock — no I/O.  All evaluation below runs against the
+        // snapshot after the lock is dropped.
+        let rules_snapshot: Vec<Rule> = {
+            let guard = self.rules.read().await;
+            guard.clone()
+        };
+
+        // ── 3. Scheduler tick — O(1) id lookup in snapshot ───────────────────
         if let Event::Custom { event_type, payload, .. } = event {
             if event_type == "scheduler_tick" {
                 if let Some(rule_id_str) = payload.get("rule_id").and_then(|v| v.as_str()) {
                     if let Ok(rule_id) = uuid::Uuid::parse_str(rule_id_str) {
-                        if let Some(rule) = rules.iter().find(|r| r.id == rule_id && r.enabled) {
+                        if let Some(rule) = rules_snapshot.iter().find(|r| r.id == rule_id && r.enabled) {
                             debug!(
                                 rule_name = %rule.name,
                                 rule_id   = %rule.id,
@@ -89,9 +158,12 @@ impl RuleEngine {
 
         log_incoming_event(event);
 
-        // Check every enabled rule's trigger, log each result.
+        // ── 4. Trigger matching ───────────────────────────────────────────────
+        //
+        // rules_snapshot is already sorted by priority descending (load_all
+        // does this), so matching preserves that order — no re-sort needed.
         let mut matching: Vec<&Rule> = Vec::new();
-        for rule in rules.iter() {
+        for rule in rules_snapshot.iter() {
             if !rule.enabled {
                 debug!(rule_name = %rule.name, "rule.trigger: SKIP (disabled)");
                 continue;
@@ -125,8 +197,6 @@ impl RuleEngine {
             return Ok(());
         }
 
-        // Higher priority rules fire first.
-        matching.sort_by(|a, b| b.priority.cmp(&a.priority));
         debug!(count = matching.len(), "rule.trigger: {} rule(s) matched, evaluating conditions", matching.len());
 
         for rule in matching {
@@ -138,24 +208,27 @@ impl RuleEngine {
     async fn fire_rule(&self, rule: &Rule) -> Result<()> {
         let eval_start = Instant::now();
 
-        match self.evaluate_conditions(rule).await? {
+        // Build the device snapshot once for this entire rule evaluation.
+        // All ScriptExpression conditions and script actions share this snapshot
+        // so there are no redundant DashMap → HashMap conversions.
+        let snapshot = self.snapshot_from_cache();
+
+        match self.evaluate_conditions(rule, &snapshot).await? {
             Some(failed_idx) => {
                 let eval_ms = eval_start.elapsed().as_millis();
                 info!(
-                    rule_name       = %rule.name,
-                    rule_id         = %rule.id,
-                    fired           = false,
-                    reason          = "condition_failed",
-                    failed_cond     = failed_idx,
-                    conditions      = rule.conditions.len(),
+                    rule_name   = %rule.name,
+                    rule_id     = %rule.id,
+                    fired       = false,
+                    reason      = "condition_failed",
+                    failed_cond = failed_idx,
+                    conditions  = rule.conditions.len(),
                     eval_ms,
                     "rule.eval"
                 );
                 return Ok(());
             }
-            None => {
-                // All conditions passed (or there were none).
-            }
+            None => {}
         }
 
         let eval_ms = eval_start.elapsed().as_millis();
@@ -169,13 +242,12 @@ impl RuleEngine {
             "rule.eval"
         );
 
-        let actions = rule.actions.clone();
-        let publish = self.publish.clone();
-        let state = self.state.clone();
-        let bus = self.bus.clone();
-        let rule_id = rule.id.to_string();
+        let actions  = rule.actions.clone();
+        let publish  = self.publish.clone();
+        let bus      = self.bus.clone();
+        let rule_id  = rule.id.to_string();
         let rule_name = rule.name.clone();
-        let notify = self.notify.clone();
+        let notify   = self.notify.clone();
 
         tokio::spawn(async move {
             let action_start = Instant::now();
@@ -185,7 +257,7 @@ impl RuleEngine {
                 count     = actions.len(),
                 "rule.actions: starting"
             );
-            match execute_actions(actions, publish, state, notify).await {
+            match execute_actions(actions, publish, notify, snapshot).await {
                 Ok(()) => {
                     let action_ms = action_start.elapsed().as_millis();
                     info!(
@@ -217,7 +289,11 @@ impl RuleEngine {
     ///
     /// Returns `None` if all conditions pass (fire the rule).
     /// Returns `Some(i)` if condition `i` failed (skip the rule).
-    async fn evaluate_conditions(&self, rule: &Rule) -> Result<Option<usize>> {
+    async fn evaluate_conditions(
+        &self,
+        rule: &Rule,
+        snapshot: &HashMap<String, JsonValue>,
+    ) -> Result<Option<usize>> {
         if rule.conditions.is_empty() {
             debug!(rule_name = %rule.name, "rule.conditions: none — auto-pass");
             return Ok(None);
@@ -230,7 +306,9 @@ impl RuleEngine {
         );
 
         for (i, cond) in rule.conditions.iter().enumerate() {
-            let passed = self.evaluate_one(&rule.name, i, rule.conditions.len(), cond).await?;
+            let passed = self
+                .evaluate_one(&rule.name, i, rule.conditions.len(), cond, snapshot)
+                .await?;
             if !passed {
                 return Ok(Some(i));
             }
@@ -246,20 +324,22 @@ impl RuleEngine {
         idx: usize,
         total: usize,
         condition: &Condition,
+        snapshot: &HashMap<String, JsonValue>,
     ) -> Result<bool> {
         match condition {
             Condition::DeviceState { device_id, attribute, op, value } => {
-                let device = self.state.get_device(device_id).await?;
-                let Some(device) = device else {
+                // Read from in-memory cache — no spawn_blocking, no redb I/O.
+                let entry = self.device_cache.get(device_id.as_str());
+                let Some(attrs) = entry else {
                     info!(
                         rule_name,
                         cond      = format!("{}/{}", idx + 1, total),
                         device_id,
-                        "rule.condition: FAIL — device not found"
+                        "rule.condition: FAIL — device not found in cache"
                     );
                     return Ok(false);
                 };
-                let Some(actual) = device.attributes.get(attribute) else {
+                let Some(actual) = attrs.get(attribute.as_str()) else {
                     info!(
                         rule_name,
                         cond      = format!("{}/{}", idx + 1, total),
@@ -273,23 +353,23 @@ impl RuleEngine {
                 if result {
                     debug!(
                         rule_name,
-                        cond     = format!("{}/{}", idx + 1, total),
+                        cond      = format!("{}/{}", idx + 1, total),
                         device_id,
                         attribute,
-                        op       = ?op,
-                        expected = %value,
-                        actual   = %actual,
+                        op        = ?op,
+                        expected  = %value,
+                        actual    = %actual,
                         "rule.condition: pass"
                     );
                 } else {
                     info!(
                         rule_name,
-                        cond     = format!("{}/{}", idx + 1, total),
+                        cond      = format!("{}/{}", idx + 1, total),
                         device_id,
                         attribute,
-                        op       = ?op,
-                        expected = %value,
-                        actual   = %actual,
+                        op        = ?op,
+                        expected  = %value,
+                        actual    = %actual,
                         "rule.condition: FAIL"
                     );
                 }
@@ -323,12 +403,11 @@ impl RuleEngine {
                     script = %snippet,
                     "rule.condition: ScriptExpression — evaluating"
                 );
-                // Snapshot all device states so the script can call device_state("id").
-                let snapshot = device_snapshot(&self.state).await;
+                // Use the pre-built snapshot — no extra DashMap iteration.
+                let snap   = snapshot.clone();
                 let script = script.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    hc_scripting::ScriptRuntime::new_with_devices(snapshot)
-                        .eval_condition(&script)
+                    hc_scripting::ScriptRuntime::new_with_devices(snap).eval_condition(&script)
                 })
                 .await??;
                 debug!(
@@ -341,28 +420,25 @@ impl RuleEngine {
             }
         }
     }
+
+    /// Convert the DashMap cache to a `HashMap<device_id, {attrs}>` suitable
+    /// for injection into Rhai scripts via `device_state("id")`.
+    fn snapshot_from_cache(&self) -> HashMap<String, JsonValue> {
+        self.device_cache
+            .iter()
+            .map(|entry| {
+                let attrs = JsonValue::Object(
+                    entry.value().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                );
+                (entry.key().clone(), attrs)
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Build a device-id → attributes snapshot for Rhai script access.
-async fn device_snapshot(state: &StateStore) -> HashMap<String, serde_json::Value> {
-    match state.list_devices().await {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|d| {
-                let attrs = serde_json::Value::Object(d.attributes.into_iter().collect());
-                (d.device_id, attrs)
-            })
-            .collect(),
-        Err(e) => {
-            warn!(error = %e, "device_snapshot: list_devices failed; scripts will see empty state");
-            HashMap::new()
-        }
-    }
-}
 
 /// Short human-readable label for the trigger variant (for log fields).
 fn trigger_type(trigger: &Trigger) -> &'static str {
@@ -380,7 +456,6 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
 fn log_incoming_event(event: &Event) {
     match event {
         Event::DeviceStateChanged { device_id, current, previous, .. } => {
-            // Only log attributes that actually changed.
             let changes: Vec<String> = current
                 .keys()
                 .filter(|k| previous.get(*k) != current.get(*k))
@@ -431,11 +506,9 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                     if !current.contains_key(attr.as_str()) {
                         return NoMatch("attribute not in device state");
                     }
-                    // Only fire when the attribute value actually changed.
                     if previous.get(attr.as_str()) == current.get(attr.as_str()) {
                         return NoMatch("attribute value unchanged");
                     }
-                    // If `to` is specified, only fire when the new value matches.
                     if let Some(expected) = to {
                         if current.get(attr.as_str()) != Some(expected) {
                             return NoMatch("attribute did not change to expected value");
@@ -447,13 +520,8 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
         }
         (_, Event::DeviceStateChanged { .. }) => NoMatch("wrong trigger type for DeviceStateChanged event"),
         (Trigger::MqttMessage { topic_pattern }, Event::MqttMessage { topic, .. }) => {
-            if mqtt_topic_matches(topic_pattern, topic) {
-                Matched
-            } else {
-                NoMatch("topic pattern mismatch")
-            }
+            if mqtt_topic_matches(topic_pattern, topic) { Matched } else { NoMatch("topic pattern mismatch") }
         }
-        // Scheduler emits Custom{event_type:"scheduler_tick"} — handled separately above.
         (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. }, _) => NoMatch("handled by scheduler"),
         (Trigger::WebhookReceived { path: trigger_path }, Event::Custom { event_type, payload, .. }) => {
             if event_type != "webhook" {
@@ -485,7 +553,7 @@ fn mqtt_topic_matches(pattern: &str, topic: &str) -> bool {
     }
 }
 
-fn compare(actual: &serde_json::Value, op: &CompareOp, expected: &serde_json::Value) -> bool {
+fn compare(actual: &JsonValue, op: &CompareOp, expected: &JsonValue) -> bool {
     match op {
         CompareOp::Eq  => actual == expected,
         CompareOp::Ne  => actual != expected,
@@ -502,7 +570,7 @@ fn compare(actual: &serde_json::Value, op: &CompareOp, expected: &serde_json::Va
     }
 }
 
-fn num_cmp(a: &serde_json::Value, b: &serde_json::Value) -> Option<std::cmp::Ordering> {
+fn num_cmp(a: &JsonValue, b: &JsonValue) -> Option<std::cmp::Ordering> {
     let af = a.as_f64()?;
     let bf = b.as_f64()?;
     af.partial_cmp(&bf)

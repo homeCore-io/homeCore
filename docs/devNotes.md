@@ -3828,3 +3828,67 @@ To list all group device IDs:
 curl -s http://localhost:8080/api/v1/devices \
   | jq '[.[] | select(.plugin_id == "plugin.hue" and (.device_id | contains("_group_"))) | {id: .device_id, name}]'
 ```
+
+---
+
+## Rule engine performance architecture
+
+### Problem (pre-optimization)
+
+Under the original design every rule evaluation incurred:
+
+1. **RwLock held across all I/O** — `rules_guard` was kept alive while iterating conditions, calling `spawn_blocking` for each `DeviceState` condition, and during action execution. This serialized all rule evaluations and hot-reload behind a single lock.
+2. **Per-condition `spawn_blocking`** — each `Condition::DeviceState` check called `state.get_device()` which dispatched to the blocking thread pool and opened a `redb` read transaction. A rule with 4 device conditions = 4 thread-pool dispatches + 4 DB transactions.
+3. **Redundant device snapshot** — `device_snapshot()` in the executor called `state.list_devices()` (another `spawn_blocking`) for each rule fire, then again inside `ScriptExpression` and `Conditional` evaluations — potentially 3× per rule.
+4. **Redundant sort** — `matching.sort_by(priority)` ran on every event even though `load_all()` already returns rules in priority order.
+
+### Solution: DashMap cache + early lock release + single snapshot
+
+```
+Event bus
+  │
+  ▼
+handle_event()
+  ├── on DeviceStateChanged: update DashMap cache (lock-free concurrent write)
+  │
+  ├── { let snapshot = rules.read().clone() }   ← RwLock held for <1µs, no I/O
+  │
+  └── for each matching rule:
+        fire_rule(snapshot_from_cache())         ← single HashMap built from DashMap
+          ├── evaluate_conditions(device_snapshot)  ← zero I/O, zero spawn_blocking
+          └── execute_actions(device_snapshot)      ← threaded to all script sites
+```
+
+**DashMap cache** (`Arc<DashMap<String, HashMap<String, JsonValue>>>`):
+- Pre-populated at startup from `state.list_devices()`
+- Updated on every `DeviceStateChanged` event before rule evaluation
+- `Condition::DeviceState` reads directly from cache — no async, no DB, no thread pool
+
+**Early RwLock release**:
+```rust
+let rules_snapshot: Vec<Rule> = self.rules.read().clone();
+// lock dropped here — hot-reload can proceed immediately
+for rule in &rules_snapshot { ... }
+```
+
+**Single snapshot propagation**: `snapshot_from_cache()` converts DashMap to a plain `HashMap<String, JsonValue>` once per rule fire. This HashMap is passed as a value through:
+- `evaluate_conditions` → `evaluate_one` (ScriptExpression uses it directly)
+- `execute_actions` → `execute_one` → RunScript, Conditional, RepeatUntil
+
+The `StateStore` parameter was completely removed from `executor.rs` — the executor is now pure in-memory.
+
+### Performance impact (estimated)
+
+| Scenario | Before | After |
+|---|---|---|
+| Simple rule (1 DeviceState condition) | ~2–5ms (spawn_blocking + redb) | ~10µs (DashMap lookup) |
+| Complex rule (4 conditions + script) | ~10–20ms | ~50µs |
+| Rule hot-reload under load | Blocked until all evaluations finish | Hot-reload proceeds immediately |
+| 50 rules firing simultaneously | Serialized via RwLock | Fully concurrent |
+
+### Files changed
+
+- `crates/hc-core/src/engine.rs` — DashMap field, cache pre-population, early lock release, `snapshot_from_cache()`
+- `crates/hc-core/src/executor.rs` — removed `StateStore` param, added `device_snapshot: HashMap<String, JsonValue>` threaded through all call sites
+- `core/Cargo.toml` — added `dashmap = "6"` to workspace dependencies
+- `crates/hc-core/Cargo.toml` — added `dashmap = { workspace = true }`

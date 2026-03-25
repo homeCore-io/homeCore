@@ -4,7 +4,6 @@ use anyhow::{anyhow, Result};
 use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
 use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
-use hc_state::StateStore;
 use hc_types::rule::Action;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -25,15 +24,20 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 /// Execute a list of actions sequentially, honouring `Parallel` and `Delay`.
+///
+/// `device_snapshot` is a pre-built in-memory snapshot of all device attributes
+/// (built from the DashMap cache in the engine). It is passed through to all
+/// script-based actions (RunScript, Conditional, RepeatUntil) so every script
+/// within a single rule firing sees the same consistent state without any I/O.
 pub async fn execute_actions(
     actions: Vec<Action>,
     publish: Option<PublishHandle>,
-    state: StateStore,
     notify: Option<Arc<NotificationService>>,
+    device_snapshot: HashMap<String, JsonValue>,
 ) -> Result<()> {
     let total = actions.len();
     for (idx, action) in actions.into_iter().enumerate() {
-        execute_one(action, idx, total, publish.clone(), state.clone(), notify.clone()).await?;
+        execute_one(action, idx, total, publish.clone(), notify.clone(), device_snapshot.clone()).await?;
     }
     Ok(())
 }
@@ -43,8 +47,8 @@ async fn execute_one(
     idx: usize,
     total: usize,
     publish: Option<PublishHandle>,
-    state: StateStore,
     notify: Option<Arc<NotificationService>>,
+    device_snapshot: HashMap<String, JsonValue>,
 ) -> Result<()> {
     let label = format!("action[{}/{}]", idx + 1, total);
     match action {
@@ -62,10 +66,10 @@ async fn execute_one(
                 .enumerate()
                 .map(|(i, a)| {
                     let p = publish.clone();
-                    let s = state.clone();
                     let n = notify.clone();
+                    let snap = device_snapshot.clone();
                     debug!("action: Parallel[{}/{}] — {:?}", i + 1, count, action_type_name(&a));
-                    tokio::spawn(run_single_action(a, p, s, n))
+                    tokio::spawn(run_single_action(a, p, n, snap))
                 })
                 .collect();
             for h in handles {
@@ -74,7 +78,7 @@ async fn execute_one(
             debug!(label, "action: Parallel — all done");
         }
 
-        other => run_single_action(other, publish, state, notify).await?,
+        other => run_single_action(other, publish, notify, device_snapshot).await?,
     }
     Ok(())
 }
@@ -82,8 +86,8 @@ async fn execute_one(
 async fn run_single_action(
     action: Action,
     publish: Option<PublishHandle>,
-    state: StateStore,
     notify: Option<Arc<NotificationService>>,
+    device_snapshot: HashMap<String, JsonValue>,
 ) -> Result<()> {
     match action {
         Action::Delay { duration_ms } => {
@@ -95,7 +99,7 @@ async fn run_single_action(
             let count = actions.len();
             debug!(parallel_count = count, "action: Parallel (nested)");
             for a in actions {
-                Box::pin(run_single_action(a, publish.clone(), state.clone(), notify.clone())).await?;
+                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone())).await?;
             }
         }
 
@@ -106,8 +110,9 @@ async fn run_single_action(
             debug!(condition = %snippet, limit, delay_ms = delay, "action: RepeatUntil — starting");
             for i in 0..limit {
                 let cond_script = condition.clone();
+                let snap = device_snapshot.clone();
                 let done = tokio::task::spawn_blocking(move || {
-                    ScriptRuntime::new().eval_condition(&cond_script)
+                    ScriptRuntime::new_with_devices(snap).eval_condition(&cond_script)
                 })
                 .await??;
                 debug!(iteration = i + 1, done, "action: RepeatUntil — condition check");
@@ -120,7 +125,7 @@ async fn run_single_action(
                     break;
                 }
                 for a in &actions {
-                    Box::pin(run_single_action(a.clone(), publish.clone(), state.clone(), notify.clone())).await?;
+                    Box::pin(run_single_action(a.clone(), publish.clone(), notify.clone(), device_snapshot.clone())).await?;
                 }
                 if delay > 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
@@ -239,7 +244,7 @@ async fn run_single_action(
         Action::RunScript { script } => {
             let snippet = if script.len() > 80 { &script[..80] } else { &script };
             debug!(script = %snippet, "action: RunScript — starting");
-            let snapshot = device_snapshot(&state).await;
+            let snapshot = device_snapshot.clone();
             let script_clone = script.clone();
             // Collect side effects synchronously inside spawn_blocking, then
             // execute them asynchronously here after the script returns.
@@ -265,19 +270,17 @@ async fn run_single_action(
         Action::Conditional { condition, then_actions, else_actions } => {
             let snippet = if condition.len() > 80 { &condition[..80] } else { &condition };
             debug!(condition = %snippet, "action: Conditional — evaluating");
-            let snapshot = device_snapshot(&state).await;
+            let snap = device_snapshot.clone();
             let cond = condition.clone();
             let passed = tokio::task::spawn_blocking(move || {
-                ScriptRuntime::new_with_devices(snapshot).eval_condition(&cond)
+                ScriptRuntime::new_with_devices(snap).eval_condition(&cond)
             })
             .await??;
             let branch_name = if passed { "then" } else { "else" };
             let branch = if passed { then_actions } else { else_actions };
             debug!(passed, branch = branch_name, actions = branch.len(), "action: Conditional — branch selected");
-            // Iterate directly with Box::pin to avoid recursive Send issues,
-            // same pattern as RepeatUntil.
             for a in branch {
-                Box::pin(run_single_action(a, publish.clone(), state.clone(), notify.clone())).await?;
+                Box::pin(run_single_action(a, publish.clone(), notify.clone(), device_snapshot.clone())).await?;
             }
         }
 
@@ -391,22 +394,6 @@ async fn execute_script_effect(
     Ok(())
 }
 
-/// Snapshot all device attributes for Rhai script access via `device_state("id")`.
-async fn device_snapshot(state: &StateStore) -> HashMap<String, serde_json::Value> {
-    match state.list_devices().await {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|d| {
-                let attrs = serde_json::Value::Object(d.attributes.into_iter().collect());
-                (d.device_id, attrs)
-            })
-            .collect(),
-        Err(e) => {
-            warn!(error = %e, "device_snapshot: list_devices failed; scripts will see empty state");
-            HashMap::new()
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -415,45 +402,36 @@ async fn device_snapshot(state: &StateStore) -> HashMap<String, serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hc_state::StateStore;
 
-    async fn dummy_store() -> StateStore {
-        StateStore::open(
-            &format!("/tmp/test-exec-{}.redb", uuid::Uuid::new_v4()),
-            &format!("/tmp/test-exec-{}.db", uuid::Uuid::new_v4()),
-        )
-        .await
-        .unwrap()
+    fn empty_snapshot() -> HashMap<String, JsonValue> {
+        HashMap::new()
     }
 
     #[tokio::test]
     async fn repeat_until_exits_when_condition_true_immediately() {
-        let store = dummy_store().await;
         let action = Action::RepeatUntil {
             condition: "true".into(),
             actions: vec![Action::Delay { duration_ms: 0 }],
             max_iterations: Some(10),
             interval_ms: None,
         };
-        execute_actions(vec![action], None, store, None).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
     async fn repeat_until_respects_max_iterations() {
-        let store = dummy_store().await;
         let action = Action::RepeatUntil {
             condition: "false".into(),
             actions: vec![Action::Delay { duration_ms: 0 }],
             max_iterations: Some(3),
             interval_ms: None,
         };
-        execute_actions(vec![action], None, store, None).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
     async fn delay_action_completes() {
-        let store = dummy_store().await;
-        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, store, None).await.unwrap();
+        execute_actions(vec![Action::Delay { duration_ms: 1 }], None, None, empty_snapshot()).await.unwrap();
     }
 
     fn call_service(url: &str, method: &str) -> Action {
@@ -472,7 +450,6 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let mock = server.mock("POST", "/hook").with_status(200).create_async().await;
 
-        let store = dummy_store().await;
         let action = Action::CallService {
             url: format!("{}/hook", server.url()),
             method: "POST".into(),
@@ -481,7 +458,7 @@ mod tests {
             retries: None,
             response_event: None,
         };
-        execute_actions(vec![action], None, store, None).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
         mock.assert_async().await;
     }
 
@@ -490,8 +467,10 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         server.mock("GET", "/gone").with_status(404).create_async().await;
 
-        let store = dummy_store().await;
-        let result = execute_actions(vec![call_service(&format!("{}/gone", server.url()), "GET")], None, store, None).await;
+        let result = execute_actions(
+            vec![call_service(&format!("{}/gone", server.url()), "GET")],
+            None, None, empty_snapshot(),
+        ).await;
         assert!(result.is_err());
     }
 
@@ -501,7 +480,6 @@ mod tests {
         let _m1 = server.mock("POST", "/retry").with_status(500).create_async().await;
         let _m2 = server.mock("POST", "/retry").with_status(200).create_async().await;
 
-        let store = dummy_store().await;
         let action = Action::CallService {
             url: format!("{}/retry", server.url()),
             method: "POST".into(),
@@ -510,7 +488,7 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        execute_actions(vec![action], None, store, None).await.unwrap();
+        execute_actions(vec![action], None, None, empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
@@ -519,7 +497,6 @@ mod tests {
         let _m1 = server.mock("GET", "/fail").with_status(500).create_async().await;
         let _m2 = server.mock("GET", "/fail").with_status(500).create_async().await;
 
-        let store = dummy_store().await;
         let action = Action::CallService {
             url: format!("{}/fail", server.url()),
             method: "GET".into(),
@@ -528,20 +505,16 @@ mod tests {
             retries: Some(1),
             response_event: None,
         };
-        let result = execute_actions(vec![action], None, store, None).await;
+        let result = execute_actions(vec![action], None, None, empty_snapshot()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn call_service_unsupported_method_returns_error() {
-        let store = dummy_store().await;
         let result = execute_actions(
             vec![call_service("http://localhost/x", "CONNECT")],
-            None,
-            store,
-            None,
-        )
-        .await;
+            None, None, empty_snapshot(),
+        ).await;
         assert!(result.is_err());
     }
 }
