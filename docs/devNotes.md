@@ -1959,6 +1959,65 @@ Integration tests live in `homecore/tests/`. The existing `integration_test.rs` 
 
 ---
 
+## Backup (`POST /system/backup`)
+
+`POST /api/v1/system/backup` creates a zip archive of all persistent state and returns it as a streaming download.  Requires Admin role.
+
+### What's included
+
+| Archive path | Source |
+|---|---|
+| `state.redb` | redb database — device registry, scenes, areas, users |
+| `history.db` | SQLite time-series state history |
+| `config/homecore.toml` | Main configuration file (if present) |
+| `config/modes.toml` | Modes configuration (if present) |
+| `rules/*.toml` | All rule files (sorted alphabetically) |
+
+### Download via curl
+
+```sh
+TOKEN="your-jwt-token"
+curl -s -X POST http://localhost:8080/api/v1/system/backup \
+  -H "Authorization: Bearer $TOKEN" \
+  --output homecore-backup-$(date +%Y%m%d).zip
+```
+
+The server sets `Content-Disposition: attachment; filename="homecore-backup-{timestamp}.zip"` automatically.
+
+### Restore from backup
+
+1. Stop HomeCore.
+2. Unzip the archive.
+3. Copy files to their configured paths:
+   ```sh
+   cp state.redb   /path/to/data/state.redb
+   cp history.db   /path/to/data/history.db
+   cp config/homecore.toml  /path/to/config/homecore.toml
+   cp config/modes.toml     /path/to/config/modes.toml
+   cp rules/*.toml          /path/to/rules/
+   ```
+4. Start HomeCore.
+
+### Safety notes
+
+- **redb** uses MVCC/copy-on-write — the file copy is always consistent between transactions.  No checkpoint is required before backup.
+- **SQLite** history is append-only — the file copy is safe at any point.
+- The backup handler reads files directly from disk in a `spawn_blocking` task.  In-flight writes that have not yet been flushed by the OS are included normally.
+- Backup does **not** include logs (`logs/`) or plugin binaries — those are ephemeral.
+
+### Automated daily backup (cron example)
+
+```sh
+# /etc/cron.d/homecore-backup
+0 3 * * * root TOKEN=$(cat /etc/homecore/backup-token) && \
+  curl -sfX POST http://localhost:8080/api/v1/system/backup \
+    -H "Authorization: Bearer $TOKEN" \
+    --output /var/backups/homecore/homecore-$(date +\%Y\%m\%d).zip && \
+  find /var/backups/homecore -name "*.zip" -mtime +30 -delete
+```
+
+---
+
 ## Prometheus metrics (`GET /metrics`)
 
 HomeCore exposes a Prometheus-compatible text endpoint at `/api/v1/metrics`.

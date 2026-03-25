@@ -699,6 +699,12 @@ async fn main() -> Result<()> {
     }
 
     let rule_file_store = RuleFileStore::new(&rules_dir);
+    let backup_paths = hc_api::backup::BackupPaths {
+        state_db_path:   std::path::PathBuf::from(&config.storage.state_db_path),
+        history_db_path: std::path::PathBuf::from(&config.storage.history_db_path),
+        config_path:     config_path.clone(),
+        rules_dir:       rules_dir.clone(),
+    };
     let app_state = AppState::new(
         store,
         bus,
@@ -709,7 +715,8 @@ async fn main() -> Result<()> {
         whitelist,
         Some(modes_path),
     )
-    .with_log_stream(LogStreamState { tx: log_tx, ring: log_ring });
+    .with_log_stream(LogStreamState { tx: log_tx, ring: log_ring })
+    .with_backup_paths(backup_paths);
     hc_api::serve(&config.server.host, config.server.port, app_state).await?;
 
     Ok(())

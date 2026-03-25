@@ -20,6 +20,7 @@ use tracing::info;
 
 pub mod auth_handlers;
 pub mod auth_middleware;
+pub mod backup;
 pub mod event_log;
 pub mod handlers;
 pub mod logs;
@@ -28,6 +29,7 @@ pub mod rule_file_store;
 pub mod ws;
 
 use auth_middleware::require_auth;
+use backup::BackupPaths;
 use event_log::EventLog;
 use logs::LogStreamState;
 use metrics::MetricsCollector;
@@ -69,6 +71,8 @@ pub struct AppState {
     /// Prometheus metrics collector — counters updated by background task,
     /// gauges refreshed on every `/metrics` scrape.
     pub metrics: std::sync::Arc<MetricsCollector>,
+    /// File paths required to produce a backup archive.
+    pub backup_paths: Option<BackupPaths>,
 }
 
 impl AppState {
@@ -148,6 +152,7 @@ impl AppState {
             modes_path: modes_path.map(|p| Arc::new(p)),
             log_stream: None,
             metrics,
+            backup_paths: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -160,6 +165,12 @@ impl AppState {
     /// from the `BroadcastLayer` created during logging initialisation.
     pub fn with_log_stream(mut self, state: LogStreamState) -> Self {
         self.log_stream = Some(state);
+        self
+    }
+
+    /// Attach file paths used by `POST /system/backup`.
+    pub fn with_backup_paths(mut self, paths: BackupPaths) -> Self {
+        self.backup_paths = Some(paths);
         self
     }
 }
@@ -226,6 +237,8 @@ pub fn router(state: AppState) -> Router {
         .route("/plugins/:id", delete(handlers::deregister_plugin))
         // Events
         .route("/events", get(handlers::list_events))
+        // System
+        .route("/system/backup", post(backup::backup_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()
