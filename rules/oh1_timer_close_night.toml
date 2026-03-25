@@ -1,0 +1,43 @@
+# Garage OH1 - Timer Close
+#
+# When the auto-close timer fires: if the auto-close virtual switch is on
+# and the door is still open, activate the scene to close the door.
+
+id = "20e9331a-8e2f-4144-8490-955f4ddbd4cf"
+name     = "OH1 Timer Close - Night"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "timer_garage_close"
+attribute = "state"
+to        = "finished"
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "switch_auto_garage_door"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000cf2e5"
+attribute = "open"
+op        = "eq"
+value     = true
+
+[[actions]]
+type = "parallel"
+actions = [
+    { type = "set_device_state", device_id = "lutron_scene_oh1_door_phantom", state = { activate = true } },
+    { type = "set_device_state", device_id = "lutron_scene_outside_off_phantom", state = { activate = true } },
+]
