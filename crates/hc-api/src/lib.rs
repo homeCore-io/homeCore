@@ -227,7 +227,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/users/:id", delete(auth_handlers::delete_user))
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
         // Devices
-        .route("/devices", get(handlers::list_devices))
+        .route("/devices", get(handlers::list_devices).patch(handlers::bulk_patch_devices).delete(handlers::bulk_delete_devices))
         .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device).delete(handlers::delete_device))
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))

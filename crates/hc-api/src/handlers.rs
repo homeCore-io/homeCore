@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -75,6 +75,10 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
 pub struct DeviceListQuery {
     #[serde(default)]
     pub include_schema: bool,
+    /// Maximum number of devices to return (default: all).
+    pub limit: Option<usize>,
+    /// Number of devices to skip before returning results (default: 0).
+    pub offset: Option<usize>,
 }
 
 pub async fn list_devices(
@@ -82,28 +86,33 @@ pub async fn list_devices(
     _: DevicesRead,
     Query(params): Query<DeviceListQuery>,
 ) -> impl IntoResponse {
-    match s.store.list_devices().await {
-        Ok(devices) => {
-            if !params.include_schema {
-                return (StatusCode::OK, Json(json!(devices)));
-            }
-            // Build augmented list with optional schema field.
-            let mut out: Vec<serde_json::Value> = Vec::with_capacity(devices.len());
-            for device in devices {
-                let mut entry = serde_json::to_value(&device).unwrap_or(json!({}));
-                let schema = s.store.get_device_schema(&device.device_id).await
-                    .ok()
-                    .flatten();
-                entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
-                out.push(entry);
-            }
-            (StatusCode::OK, Json(json!(out)))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
+    let all_devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    let total = all_devices.len();
+    let offset = params.offset.unwrap_or(0);
+    let page: Vec<_> = all_devices.into_iter().skip(offset).take(params.limit.unwrap_or(usize::MAX)).collect();
+
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
+        headers.insert("X-Total-Count", v);
     }
+
+    if !params.include_schema {
+        return (StatusCode::OK, headers, Json(json!(page))).into_response();
+    }
+
+    // Build augmented list with optional schema field.
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(page.len());
+    for device in page {
+        let mut entry = serde_json::to_value(&device).unwrap_or(json!({}));
+        let schema = s.store.get_device_schema(&device.device_id).await.ok().flatten();
+        entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
+        out.push(entry);
+    }
+    (StatusCode::OK, headers, Json(json!(out))).into_response()
 }
 
 pub async fn get_device(
@@ -221,6 +230,109 @@ pub async fn delete_device(
 
     (StatusCode::OK, Json(json!({
         "deleted": true,
+        "affected_rules": affected_rules,
+    }))).into_response()
+}
+
+/// `PATCH /api/v1/devices`
+///
+/// Bulk update device metadata.  Currently supports bulk area assignment.
+///
+/// Body: `{ "ids": ["device_id_1", ...], "area": "living_room" }`
+///
+/// - `ids` — required, list of device IDs to update.
+/// - `area` — set the area for all listed devices. Pass `null` to clear.
+///
+/// Returns `{ "updated": N, "not_found": ["id", ...] }`.
+pub async fn bulk_patch_devices(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        None => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "ids array required" }))).into_response(),
+    };
+
+    let new_area: Option<Option<String>> = if body.get("area").is_some() {
+        Some(match body["area"].as_str() {
+            Some(a) => Some(a.to_string()),
+            None if body["area"].is_null() => None,
+            _ => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "area must be a string or null" }))).into_response(),
+        })
+    } else {
+        None // no area key — nothing to do yet (future: other bulk fields)
+    };
+
+    let mut updated = 0usize;
+    let mut not_found: Vec<String> = Vec::new();
+
+    for id in &ids {
+        match s.store.get_device(id).await {
+            Ok(Some(mut device)) => {
+                if let Some(ref area) = new_area {
+                    device.area = area.clone();
+                }
+                if let Err(e) = s.store.upsert_device(&device).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                }
+                updated += 1;
+            }
+            Ok(None) => not_found.push(id.clone()),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "updated": updated, "not_found": not_found }))).into_response()
+}
+
+/// `DELETE /api/v1/devices`
+///
+/// Bulk delete devices.
+///
+/// Body: `{ "ids": ["device_id_1", ...] }`
+///
+/// Each device is deleted and rule file references are nullified (same as single DELETE).
+/// Returns `{ "deleted": N, "not_found": ["id", ...], "affected_rules": ["rule name", ...] }`.
+pub async fn bulk_delete_devices(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        None => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "ids array required" }))).into_response(),
+    };
+
+    let mut deleted = 0usize;
+    let mut not_found: Vec<String> = Vec::new();
+    let mut affected_rules: Vec<String> = Vec::new();
+
+    for id in &ids {
+        match s.store.delete_device(id).await {
+            Ok(false) => not_found.push(id.clone()),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+            Ok(true) => {
+                deleted += 1;
+                if let Some(rfs) = &s.rule_file_store {
+                    match crate::rule_file_store::nullify_device_refs(&rfs.dir, id) {
+                        Ok(names) => {
+                            for name in names {
+                                if !affected_rules.contains(&name) {
+                                    affected_rules.push(name);
+                                }
+                            }
+                        }
+                        Err(e) => tracing::warn!(device_id = %id, error = %e, "bulk_delete_devices: failed to nullify rule refs"),
+                    }
+                }
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({
+        "deleted": deleted,
+        "not_found": not_found,
         "affected_rules": affected_rules,
     }))).into_response()
 }
@@ -697,6 +809,10 @@ pub struct AutomationListQuery {
     /// the default — this field is accepted for API forward-compatibility but is a no-op.
     #[serde(default)]
     pub sort: Option<String>,
+    /// Maximum number of automations to return (default: all).
+    pub limit: Option<usize>,
+    /// Number of automations to skip before returning results (default: 0).
+    pub offset: Option<usize>,
 }
 
 pub async fn list_automations(
@@ -707,7 +823,7 @@ pub async fn list_automations(
     match &s.rules_handle {
         Some(rh) => {
             let rules = rh.read().await;
-            let result: Vec<_> = rules.iter().filter(|r| {
+            let filtered: Vec<_> = rules.iter().filter(|r| {
                 if let Some(ref tag) = params.tag {
                     if !r.tags.contains(tag) { return false; }
                 }
@@ -722,9 +838,18 @@ pub async fn list_automations(
                 }
                 true
             }).cloned().collect();
-            (StatusCode::OK, Json(json!(result)))
+
+            let total = filtered.len();
+            let offset = params.offset.unwrap_or(0);
+            let page: Vec<_> = filtered.into_iter().skip(offset).take(params.limit.unwrap_or(usize::MAX)).collect();
+
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
+                headers.insert("X-Total-Count", v);
+            }
+            (StatusCode::OK, headers, Json(json!(page))).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
+        None => (StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new(), Json(json!({ "error": "rule engine not available" }))).into_response(),
     }
 }
 
