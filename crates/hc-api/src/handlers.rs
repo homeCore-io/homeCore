@@ -7,10 +7,11 @@ use axum::{
     Json,
 };
 use hc_state::StateStore;
-use hc_types::device::Area;
+use hc_types::device::{Area, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 use crate::auth_middleware::{
@@ -509,9 +510,51 @@ pub async fn delete_mode(
 
 // ---------- Areas ----------
 
+fn normalize_area_name(name: &str) -> String {
+    name.trim().to_string()
+}
+
+fn area_id_from_name(name: &str) -> Uuid {
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("homecore:area:{}", name).as_bytes())
+}
+
+fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for device in devices {
+        let Some(area) = device.area.as_deref() else {
+            continue;
+        };
+        let normalized = normalize_area_name(area);
+        if normalized.is_empty() {
+            continue;
+        }
+        grouped
+            .entry(normalized)
+            .or_default()
+            .push(device.device_id.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(name, device_ids)| Area {
+            id: area_id_from_name(&name),
+            name,
+            device_ids,
+        })
+        .collect()
+}
+
+async fn find_area_by_id(store: &StateStore, id: Uuid) -> Result<Option<Area>, String> {
+    let devices = store.list_devices().await.map_err(|e| e.to_string())?;
+    Ok(derive_areas_from_devices(&devices)
+        .into_iter()
+        .find(|a| a.id == id))
+}
+
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {
-    match s.store.list_areas().await {
-        Ok(areas) => (StatusCode::OK, Json(json!(areas))),
+    match s.store.list_devices().await {
+        Ok(devices) => (StatusCode::OK, Json(json!(derive_areas_from_devices(&devices)))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
     }
 }
@@ -526,9 +569,22 @@ pub async fn create_area(
     _: AreasWrite,
     Json(body): Json<CreateAreaBody>,
 ) -> impl IntoResponse {
-    let area = Area { id: Uuid::new_v4(), name: body.name, device_ids: vec![] };
-    match s.store.upsert_area(&area).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(area))),
+    let name = normalize_area_name(&body.name);
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "area name cannot be empty" })));
+    }
+
+    // Canonical model: areas are derived from device.area.
+    // This endpoint validates/declares the area name and returns its stable ID.
+    match s.store.list_devices().await {
+        Ok(_) => {
+            let area = Area {
+                id: area_id_from_name(&name),
+                name,
+                device_ids: vec![],
+            };
+            (StatusCode::CREATED, Json(json!(area)))
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
     }
 }
@@ -544,16 +600,46 @@ pub async fn patch_area(
     Path(id): Path<Uuid>,
     Json(body): Json<PatchAreaBody>,
 ) -> impl IntoResponse {
-    let mut area = match s.store.get_area(id).await {
+    let new_name = normalize_area_name(&body.name);
+    if new_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "area name cannot be empty" }))).into_response();
+    }
+
+    let area = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
-        Err(e)    => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     };
-    area.name = body.name;
-    match s.store.upsert_area(&area).await {
-        Ok(_) => (StatusCode::OK, Json(json!(area))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+
+    let mut devices = match s.store.list_devices().await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    for device in &mut devices {
+        if device
+            .area
+            .as_deref()
+            .map(normalize_area_name)
+            .as_deref()
+            == Some(area.name.as_str())
+        {
+            device.area = Some(new_name.clone());
+            if let Err(e) = s.store.upsert_device(device).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+        }
     }
+
+    (
+        StatusCode::OK,
+        Json(json!(Area {
+            id: area_id_from_name(&new_name),
+            name: new_name,
+            device_ids: area.device_ids,
+        })),
+    )
+        .into_response()
 }
 
 pub async fn delete_area(
@@ -561,11 +647,33 @@ pub async fn delete_area(
     _: AreasWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    match s.store.delete_area(id).await {
-        Ok(true)  => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
-        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    let area = match find_area_by_id(&s.store, id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+
+    let mut devices = match s.store.list_devices().await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    for device in &mut devices {
+        if device
+            .area
+            .as_deref()
+            .map(normalize_area_name)
+            .as_deref()
+            == Some(area.name.as_str())
+        {
+            device.area = None;
+            if let Err(e) = s.store.upsert_device(device).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+        }
     }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ---------- Automations (Rules) ----------
@@ -1093,16 +1201,54 @@ pub async fn set_area_devices(
     Path(id): Path<Uuid>,
     Json(device_ids): Json<Vec<String>>,
 ) -> impl IntoResponse {
-    let mut area = match s.store.get_area(id).await {
+    let area = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+
+    let desired: HashSet<String> = device_ids.into_iter().collect();
+    let mut devices = match s.store.list_devices().await {
+        Ok(v) => v,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     };
-    area.device_ids = device_ids;
-    match s.store.upsert_area(&area).await {
-        Ok(_) => (StatusCode::OK, Json(json!(area))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+
+    for device in &mut devices {
+        let in_desired = desired.contains(&device.device_id);
+        let in_area = device
+            .area
+            .as_deref()
+            .map(normalize_area_name)
+            .as_deref()
+            == Some(area.name.as_str());
+
+        if in_desired {
+            if !in_area {
+                device.area = Some(area.name.clone());
+                if let Err(e) = s.store.upsert_device(device).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                }
+            }
+        } else if in_area {
+            device.area = None;
+            if let Err(e) = s.store.upsert_device(device).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            }
+        }
     }
+
+    // Return the updated derived area membership.
+    let refreshed = match find_area_by_id(&s.store, id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => Area {
+            id,
+            name: area.name,
+            device_ids: vec![],
+        },
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    };
+
+    (StatusCode::OK, Json(json!(refreshed))).into_response()
 }
 
 // ---------- Automation PATCH (enable/disable/priority) ----------
