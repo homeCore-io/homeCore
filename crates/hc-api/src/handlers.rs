@@ -693,6 +693,10 @@ pub struct AutomationListQuery {
     pub device_id: Option<String>,
     /// When `true`, return only rules that have an `error` field set (broken / stale rules).
     pub stale: Option<bool>,
+    /// Sort order.  Currently only `"priority"` (descending) is supported and is also
+    /// the default — this field is accepted for API forward-compatibility but is a no-op.
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 pub async fn list_automations(
@@ -727,15 +731,16 @@ pub async fn list_automations(
 /// Snake-case name of a `Trigger` variant — matches the serde `type` field value.
 fn trigger_type_name(trigger: &Trigger) -> &'static str {
     match trigger {
-        Trigger::DeviceStateChanged { .. } => "device_state_changed",
-        Trigger::MqttMessage { .. }        => "mqtt_message",
-        Trigger::TimeOfDay { .. }          => "time_of_day",
-        Trigger::SunEvent { .. }           => "sun_event",
-        Trigger::WebhookReceived { .. }    => "webhook_received",
-        Trigger::ManualTrigger             => "manual_trigger",
-        Trigger::CustomEvent { .. }        => "custom_event",
-        Trigger::SystemStarted             => "system_started",
-        Trigger::Cron { .. }               => "cron",
+        Trigger::DeviceStateChanged { .. }        => "device_state_changed",
+        Trigger::MqttMessage { .. }               => "mqtt_message",
+        Trigger::TimeOfDay { .. }                 => "time_of_day",
+        Trigger::SunEvent { .. }                  => "sun_event",
+        Trigger::WebhookReceived { .. }           => "webhook_received",
+        Trigger::ManualTrigger                    => "manual_trigger",
+        Trigger::CustomEvent { .. }               => "custom_event",
+        Trigger::SystemStarted                    => "system_started",
+        Trigger::Cron { .. }                      => "cron",
+        Trigger::DeviceAvailabilityChanged { .. } => "device_availability_changed",
     }
 }
 
@@ -744,6 +749,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
 fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
     let in_trigger = match &rule.trigger {
         Trigger::DeviceStateChanged { device_id: d, .. } => d == device_id,
+        Trigger::DeviceAvailabilityChanged { device_id: d, .. } => d == device_id,
         _ => false,
     };
     if in_trigger { return true; }
@@ -787,6 +793,13 @@ pub async fn create_automation(
     _: AutomationsWrite,
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
+    // Validate priority is within practical range.
+    if rule.priority < -1000 || rule.priority > 1000 {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "priority must be between -1000 and 1000"
+        }))).into_response();
+    }
+
     rule.id = Uuid::new_v4();
 
     // Write file first — if this fails the in-memory state is unchanged.
@@ -825,6 +838,13 @@ pub async fn update_automation(
     Path(id): Path<Uuid>,
     Json(mut rule): Json<Rule>,
 ) -> impl IntoResponse {
+    // Validate priority is within practical range.
+    if rule.priority < -1000 || rule.priority > 1000 {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "priority must be between -1000 and 1000"
+        }))).into_response();
+    }
+
     rule.id = id;
 
     let Some(rh) = &s.rules_handle else {
@@ -948,6 +968,36 @@ pub async fn activate_scene(
     }
 
     (StatusCode::OK, Json(json!({ "activated": scene.name })))
+}
+
+// ---------- Scene export / import ----------
+
+/// `GET /api/v1/scenes/export`
+/// Returns all scenes as a JSON array (ready to re-import).
+pub async fn export_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoResponse {
+    match s.store.list_scenes().await {
+        Ok(scenes) => (StatusCode::OK, Json(json!(scenes))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `POST /api/v1/scenes/import`
+/// Accepts a JSON array of scenes; assigns fresh UUIDs and saves each one.
+/// Returns `{ imported: N }`.
+pub async fn import_scenes(
+    State(s): State<AppState>,
+    _: ScenesWrite,
+    Json(scenes): Json<Vec<hc_types::rule::Scene>>,
+) -> impl IntoResponse {
+    let mut count = 0usize;
+    for mut scene in scenes {
+        scene.id = Uuid::new_v4();
+        if let Err(e) = s.store.upsert_scene(&scene).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+        count += 1;
+    }
+    (StatusCode::CREATED, Json(json!({ "imported": count }))).into_response()
 }
 
 // ---------- Automation dry-run ----------

@@ -30,6 +30,11 @@ pub struct Rule {
     /// The value is a human-readable description of the problem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional per-rule cooldown period.  After this rule fires, it will not
+    /// fire again until at least this many seconds have elapsed.  Useful for
+    /// preventing rapid re-triggering on noisy sensors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<u64>,
 }
 
 /// What causes a rule to be evaluated.
@@ -80,9 +85,17 @@ pub enum Trigger {
     /// - `"0 0 8 * * Mon"` — 08:00 on Mondays
     ///
     /// The schedule is evaluated in local wall-clock time.  Invalid expressions
-    /// cause the rule to never fire (an error is logged at startup validation).
+    /// are caught at startup and the rule is disabled with an error message.
     Cron {
         expression: String,
+    },
+    /// Fires when a device's availability (online/offline) changes.
+    DeviceAvailabilityChanged {
+        device_id: String,
+        /// When set, only fires when availability changes **to** this value.
+        /// `true` = device came online; `false` = device went offline.
+        #[serde(default)]
+        to: Option<bool>,
     },
 }
 
@@ -237,6 +250,16 @@ pub enum Action {
         #[serde(default)]
         else_actions: Vec<Action>,
     },
+    /// Stops further rules in the current event's evaluation chain.
+    ///
+    /// Rules with a lower priority than the current rule will not be evaluated
+    /// for this event.  This is useful for "first match wins" patterns where a
+    /// high-priority rule should prevent lower-priority catch-all rules from
+    /// also firing.
+    ///
+    /// This action is consumed by the engine before spawning the task; it acts
+    /// as a signal to break the matching loop, not as an executor action.
+    StopRuleChain,
 }
 
 /// A named snapshot of device states that can be activated as a unit.

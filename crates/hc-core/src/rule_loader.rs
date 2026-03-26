@@ -111,15 +111,16 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         .to_string();
 
     Rule {
-        id:         stub_id,
-        name:       format!("{name} [BROKEN]"),
-        enabled:    false,
-        priority:   0,
-        tags:       Vec::new(),
-        trigger:    Trigger::ManualTrigger,
-        conditions: Vec::<Condition>::new(),
-        actions:    Vec::<Action>::new(),
-        error:      Some(format!("parse error: {err}")),
+        id:           stub_id,
+        name:         format!("{name} [BROKEN]"),
+        enabled:      false,
+        priority:     0,
+        tags:         Vec::new(),
+        trigger:      Trigger::ManualTrigger,
+        conditions:   Vec::<Condition>::new(),
+        actions:      Vec::<Action>::new(),
+        error:        Some(format!("parse error: {err}")),
+        cooldown_secs: None,
     }
 }
 
@@ -178,6 +179,40 @@ fn replace_empty_id(content: &str, new_id: &str) -> String {
         result.push('\n');
     }
     result
+}
+
+/// Write a single rule back to its TOML file in `dir`.
+///
+/// The file is named after the rule's `name` field (slugified).  Used by
+/// startup validation (e.g. cron expression checking) to persist a disabled
+/// rule with its `error` field set.
+pub fn write_rule(dir: &Path, rule: &Rule) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating rules directory {}", dir.display()))?;
+
+    let slug = slugify(&rule.name);
+    let path = dir.join(format!("{slug}.toml"));
+
+    let content = toml::to_string_pretty(rule)
+        .context("serializing rule to TOML")?;
+
+    std::fs::write(&path, &content)
+        .with_context(|| format!("writing rule file {}", path.display()))?;
+
+    Ok(path)
+}
+
+/// Convert a display name to a filesystem-safe slug.
+/// (Duplicated from hc-api's RuleFileStore to keep hc-core self-contained.)
+fn slugify(name: &str) -> String {
+    let raw: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    raw.split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 // ── RuleWatcher ──────────────────────────────────────────────────────────────

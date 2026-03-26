@@ -264,6 +264,8 @@ pub fn router(state: AppState) -> Router {
         .route("/automations/groups/:id/:action", post(handlers::set_group_enabled))
         // Scenes
         .route("/scenes", get(handlers::list_scenes).post(handlers::create_scene))
+        .route("/scenes/export", get(handlers::export_scenes))
+        .route("/scenes/import", post(handlers::import_scenes))
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))

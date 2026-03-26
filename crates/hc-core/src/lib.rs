@@ -4,10 +4,11 @@ use anyhow::Result;
 use hc_notify::NotificationService;
 use hc_topic_map::EcosystemRouter;
 use hc_types::event::Event;
-use hc_types::rule::Rule;
+use hc_types::rule::{Rule, Trigger};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use tracing::info;
+use tracing::{info, warn};
 
 pub mod engine;
 pub mod executor;
@@ -72,6 +73,10 @@ pub struct Core {
     /// Optional shutdown receiver — when `true` is sent the engine and scheduler
     /// will stop gracefully.  If not provided a never-firing channel is created.
     shutdown_rx: Option<watch::Receiver<bool>>,
+    /// Seconds to wait for in-flight tasks during graceful shutdown.  Default: 10.
+    drain_timeout_secs: u64,
+    /// Directory containing rule TOML files — used for cron validation write-back.
+    rules_dir: Option<std::path::PathBuf>,
 }
 
 impl Core {
@@ -80,7 +85,7 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15, shutdown_rx: None }
+        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15, shutdown_rx: None, drain_timeout_secs: 10, rules_dir: None }
     }
 
     /// Override the plugin startup grace period (default: 10 s).
@@ -129,6 +134,18 @@ impl Core {
         self
     }
 
+    /// Override the graceful shutdown drain timeout for the rule engine (default: 10 s).
+    pub fn with_drain_timeout(mut self, secs: u64) -> Self {
+        self.drain_timeout_secs = secs;
+        self
+    }
+
+    /// Set the rules directory path (used for cron validation write-back).
+    pub fn with_rules_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.rules_dir = Some(dir);
+        self
+    }
+
     /// Start all background tasks.
     ///
     /// Returns `(rules_handle, fire_history_handle)`:
@@ -155,14 +172,36 @@ impl Core {
         let (_, default_rx) = watch::channel(false);
         let shutdown_rx = self.shutdown_rx.unwrap_or(default_rx);
 
+        // ── Cron expression validation ────────────────────────────────────────
+        //
+        // Iterate loaded rules; for any Cron trigger with an invalid expression,
+        // set rule.error and disable the rule, then persist to disk.
+        let mut validated_rules = rules.clone();
+        for rule in &mut validated_rules {
+            if let Trigger::Cron { expression } = &rule.trigger {
+                if cron::Schedule::from_str(expression).is_err() {
+                    let msg = format!("invalid cron expression: {expression}");
+                    warn!(rule_id = %rule.id, rule_name = %rule.name, error = %msg, "cron validation failed — disabling rule");
+                    rule.error = Some(msg);
+                    rule.enabled = false;
+                    if let Some(ref dir) = self.rules_dir {
+                        if let Err(e) = rule_loader::write_rule(dir, rule) {
+                            warn!(rule_id = %rule.id, error = %e, "cron validation: failed to persist disabled rule");
+                        }
+                    }
+                }
+            }
+        }
+
         // Rule engine.
         let engine = engine::RuleEngine::new(
             self.bus.clone(),
-            rules.clone(),
+            validated_rules,
             self.state.clone(),
             self.publish.clone(),
             self.notify.clone(),
-        );
+        )
+        .with_drain_timeout(self.drain_timeout_secs);
         let rules_handle = engine.rules_handle();
         let fire_history = engine.fire_history_handle();
         tokio::spawn(engine.run(shutdown_rx.clone()));

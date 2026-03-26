@@ -221,6 +221,17 @@ app_name  = "homecore"
 plugin_ready_delay_secs = 10
 
 # ---------------------------------------------------------------------------
+# Shutdown
+#
+# drain_timeout_secs: when HomeCore receives SIGTERM or SIGINT it stops
+# accepting new events and waits up to this many seconds for any rule action
+# tasks that are currently executing to finish before forcing a stop.
+# Default: 10.
+# ---------------------------------------------------------------------------
+[shutdown]
+drain_timeout_secs = 10
+
+# ---------------------------------------------------------------------------
 # Scheduler
 #
 # catchup_window_minutes: on startup the scheduler fires any time-based rules

@@ -197,7 +197,11 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
 }
 
 fn trigger_references_device(trigger: &Trigger, device_id: &str) -> bool {
-    matches!(trigger, Trigger::DeviceStateChanged { device_id: id, .. } if id == device_id)
+    match trigger {
+        Trigger::DeviceStateChanged { device_id: id, .. } => id == device_id,
+        Trigger::DeviceAvailabilityChanged { device_id: id, .. } => id == device_id,
+        _ => false,
+    }
 }
 
 fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
@@ -229,10 +233,14 @@ fn replace_device_refs(rule: &mut Rule, device_id: &str, placeholder: &str) {
 }
 
 fn replace_in_trigger(trigger: &mut Trigger, device_id: &str, placeholder: &str) {
-    if let Trigger::DeviceStateChanged { device_id: id, .. } = trigger {
-        if id == device_id {
-            *id = placeholder.to_string();
+    match trigger {
+        Trigger::DeviceStateChanged { device_id: id, .. } => {
+            if id == device_id { *id = placeholder.to_string(); }
         }
+        Trigger::DeviceAvailabilityChanged { device_id: id, .. } => {
+            if id == device_id { *id = placeholder.to_string(); }
+        }
+        _ => {}
     }
 }
 

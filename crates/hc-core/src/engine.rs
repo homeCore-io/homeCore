@@ -88,6 +88,11 @@ pub struct RuleEngine {
     /// Count of rule action tasks currently executing in spawned tokio tasks.
     /// Used during graceful shutdown to wait for in-flight work to complete.
     in_flight: Arc<AtomicUsize>,
+    /// Per-rule last-fire timestamps for cooldown enforcement.
+    /// `cooldown_map[rule_id]` = wall-clock time the rule last fired.
+    cooldown_map: Arc<DashMap<Uuid, Instant>>,
+    /// Seconds to wait for in-flight tasks to complete during graceful shutdown.
+    drain_timeout_secs: u64,
 }
 
 impl RuleEngine {
@@ -108,7 +113,15 @@ impl RuleEngine {
             attr_changed_at: Arc::new(DashMap::new()),
             fire_history: Arc::new(DashMap::new()),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            cooldown_map: Arc::new(DashMap::new()),
+            drain_timeout_secs: 10,
         }
+    }
+
+    /// Override the graceful shutdown drain timeout (default: 10 s).
+    pub fn with_drain_timeout(mut self, secs: u64) -> Self {
+        self.drain_timeout_secs = secs;
+        self
     }
 
     /// Returns a handle to update the live rule set without restart.
@@ -194,8 +207,8 @@ impl RuleEngine {
             }
         }
 
-        // Drain in-flight rule action tasks (up to 10 seconds).
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Drain in-flight rule action tasks (up to drain_timeout_secs).
+        let deadline = Instant::now() + Duration::from_secs(self.drain_timeout_secs);
         loop {
             let n = self.in_flight.load(Ordering::SeqCst);
             if n == 0 { break; }
@@ -259,7 +272,7 @@ impl RuleEngine {
                                 rule_id   = %rule.id,
                                 "rule.trigger: scheduler_tick matched"
                             );
-                            self.fire_rule(rule).await?;
+                            let _ = self.fire_rule(rule).await?;
                         } else {
                             debug!(rule_id = %rule_id_str, "rule.trigger: scheduler_tick — no matching enabled rule");
                         }
@@ -313,12 +326,38 @@ impl RuleEngine {
         debug!(count = matching.len(), "rule.trigger: {} rule(s) matched, evaluating conditions", matching.len());
 
         for rule in matching {
-            self.fire_rule(rule).await?;
+            let stop = self.fire_rule(rule).await?;
+            if stop {
+                debug!(
+                    rule_name = %rule.name,
+                    rule_id   = %rule.id,
+                    "rule.trigger: StopRuleChain — halting further rule evaluation for this event"
+                );
+                break;
+            }
         }
         Ok(())
     }
 
-    async fn fire_rule(&self, rule: &Rule) -> Result<()> {
+    /// Fire a rule, returning `Ok(true)` if the rule chain should stop (StopRuleChain action).
+    async fn fire_rule(&self, rule: &Rule) -> Result<bool> {
+        // ── Cooldown check ────────────────────────────────────────────────────
+        if let Some(cooldown_secs) = rule.cooldown_secs {
+            if let Some(last_fire) = self.cooldown_map.get(&rule.id) {
+                let elapsed = last_fire.elapsed().as_secs();
+                if elapsed < cooldown_secs {
+                    debug!(
+                        rule_name     = %rule.name,
+                        rule_id       = %rule.id,
+                        elapsed_secs  = elapsed,
+                        cooldown_secs,
+                        "rule.cooldown: skipping — within cooldown window"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
         let eval_start = Instant::now();
 
         // Build the device snapshot once for this entire rule evaluation.
@@ -356,7 +395,7 @@ impl RuleEngine {
                 eval_ms,
                 "rule.eval"
             );
-            return Ok(());
+            return Ok(false);
         }
 
         info!(
@@ -368,6 +407,14 @@ impl RuleEngine {
             eval_ms,
             "rule.eval"
         );
+
+        // Check if any action is StopRuleChain — must be determined before spawning.
+        let stop_chain = rule.actions.iter().any(|a| matches!(a, hc_types::rule::Action::StopRuleChain));
+
+        // Update cooldown map immediately after confirming the rule fires.
+        if rule.cooldown_secs.is_some() {
+            self.cooldown_map.insert(rule.id, Instant::now());
+        }
 
         let actions       = rule.actions.clone();
         let action_count  = actions.len();
@@ -417,7 +464,7 @@ impl RuleEngine {
             });
             in_flight.fetch_sub(1, Ordering::SeqCst);
         });
-        Ok(())
+        Ok(stop_chain)
     }
 
     /// Evaluate all conditions for a rule.
@@ -637,15 +684,16 @@ impl RuleEngine {
 /// Short human-readable label for the trigger variant (for log fields).
 fn trigger_type(trigger: &Trigger) -> &'static str {
     match trigger {
-        Trigger::DeviceStateChanged { .. } => "DeviceStateChanged",
-        Trigger::MqttMessage { .. }        => "MqttMessage",
-        Trigger::TimeOfDay { .. }          => "TimeOfDay",
-        Trigger::SunEvent { .. }           => "SunEvent",
-        Trigger::WebhookReceived { .. }    => "WebhookReceived",
-        Trigger::ManualTrigger             => "ManualTrigger",
-        Trigger::CustomEvent { .. }        => "CustomEvent",
-        Trigger::SystemStarted             => "SystemStarted",
-        Trigger::Cron { .. }               => "Cron",
+        Trigger::DeviceStateChanged { .. }        => "DeviceStateChanged",
+        Trigger::MqttMessage { .. }               => "MqttMessage",
+        Trigger::TimeOfDay { .. }                 => "TimeOfDay",
+        Trigger::SunEvent { .. }                  => "SunEvent",
+        Trigger::WebhookReceived { .. }           => "WebhookReceived",
+        Trigger::ManualTrigger                    => "ManualTrigger",
+        Trigger::CustomEvent { .. }               => "CustomEvent",
+        Trigger::SystemStarted                    => "SystemStarted",
+        Trigger::Cron { .. }                      => "Cron",
+        Trigger::DeviceAvailabilityChanged { .. } => "DeviceAvailabilityChanged",
     }
 }
 
@@ -737,6 +785,21 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             if event_type == "system_started" { Matched } else { NoMatch("not a system_started event") }
         }
         (Trigger::ManualTrigger, _) => NoMatch("manual trigger only fires via API"),
+        (
+            Trigger::DeviceAvailabilityChanged { device_id, to },
+            Event::DeviceAvailabilityChanged { device_id: ev_device, available, .. },
+        ) => {
+            if device_id != ev_device {
+                return NoMatch("device_id mismatch");
+            }
+            if let Some(expected) = to {
+                if expected != available {
+                    return NoMatch("availability mismatch");
+                }
+            }
+            Matched
+        }
+        (_, Event::DeviceAvailabilityChanged { .. }) => NoMatch("wrong trigger type for DeviceAvailabilityChanged event"),
         _ => NoMatch("event type does not match trigger type"),
     }
 }

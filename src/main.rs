@@ -142,6 +142,8 @@ struct AppConfig {
     #[serde(default)]
     startup: StartupSection,
     #[serde(default)]
+    shutdown: ShutdownConfig,
+    #[serde(default)]
     scheduler: SchedulerSection,
     #[serde(default)]
     logging: LoggingConfig,
@@ -347,6 +349,21 @@ fn default_startup_delay() -> u64 { 10 }
 
 impl Default for StartupSection {
     fn default() -> Self { Self { plugin_ready_delay_secs: default_startup_delay() } }
+}
+
+/// `[shutdown]` section of homecore.toml.
+#[derive(Deserialize)]
+struct ShutdownConfig {
+    /// Seconds to wait for in-flight rule action tasks to finish during graceful
+    /// shutdown before forcing a stop.  Default: 10 s.
+    #[serde(default = "default_drain_timeout")]
+    drain_timeout_secs: u64,
+}
+
+fn default_drain_timeout() -> u64 { 10 }
+
+impl Default for ShutdownConfig {
+    fn default() -> Self { Self { drain_timeout_secs: default_drain_timeout() } }
 }
 
 /// `[scheduler]` section of homecore.toml.
@@ -585,7 +602,9 @@ async fn main() -> Result<()> {
         .with_location(config.location.latitude, config.location.longitude)
         .with_modes(modes_path.clone())
         .with_startup_delay(config.startup.plugin_ready_delay_secs)
+        .with_drain_timeout(config.shutdown.drain_timeout_secs)
         .with_catchup_window(config.scheduler.catchup_window_minutes)
+        .with_rules_dir(rules_dir.clone())
         .with_shutdown(shutdown_rx.clone());
 
     // Load ecosystem profiles and build the router.  Done before spawning the

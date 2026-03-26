@@ -321,6 +321,12 @@ async fn run_single_action(
                 }
             }
         }
+
+        Action::StopRuleChain => {
+            // No-op in the executor — this action is consumed by the engine
+            // layer to break the rule evaluation loop before the task is spawned.
+            debug!("action: StopRuleChain (no-op in executor)");
+        }
     }
     Ok(())
 }
@@ -341,6 +347,7 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::Parallel { .. }       => "Parallel",
         Action::RepeatUntil { .. }    => "RepeatUntil",
         Action::Conditional { .. }    => "Conditional",
+        Action::StopRuleChain         => "StopRuleChain",
     }
 }
 
