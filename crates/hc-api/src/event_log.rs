@@ -161,6 +161,8 @@ mod tests {
             timestamp: Utc::now(),
             rule_id: rule_id.to_string(),
             rule_name: "test rule".to_string(),
+            trigger_type: "ManualTrigger".to_string(),
+            action_count: 0,
         }
     }
 
@@ -170,6 +172,7 @@ mod tests {
             device_id: device_id.to_string(),
             previous: Default::default(),
             current: Default::default(),
+            changed: Default::default(),
         }
     }
 

@@ -241,11 +241,24 @@ impl StateBridge {
         let current = device.attributes.clone();
         debug!(device_id, "Device state updated");
 
+        // Compute which attribute keys actually changed (added, updated, or removed).
+        let mut changed: Vec<String> = current
+            .keys()
+            .filter(|k| previous.get(*k) != current.get(*k))
+            .cloned()
+            .collect();
+        for k in previous.keys() {
+            if !current.contains_key(k) && !changed.contains(k) {
+                changed.push(k.clone());
+            }
+        }
+
         let _ = self.bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             previous,
             current,
+            changed,
         });
 
         Ok(())

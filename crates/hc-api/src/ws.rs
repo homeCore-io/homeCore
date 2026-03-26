@@ -130,6 +130,19 @@ async fn handle_socket(
     loop {
         match rx.recv().await {
             Ok(event) => {
+                // Skip raw MQTT messages unless the client explicitly requests them
+                // via ?type=mqtt_message.  They are internal plumbing; every device
+                // state publish generates one and they add no actionable information.
+                if matches!(&event, hc_types::event::Event::MqttMessage { .. }) {
+                    let explicitly_requested = type_filter
+                        .as_deref()
+                        .map(|types| types.iter().any(|t| t == "mqtt_message"))
+                        .unwrap_or(false);
+                    if !explicitly_requested {
+                        continue;
+                    }
+                }
+
                 // Apply device_id filter.
                 if let Some(ref wanted_device) = device_filter {
                     if !event_device_id(&event).map(|d| d == wanted_device).unwrap_or(false) {

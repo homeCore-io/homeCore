@@ -369,7 +369,9 @@ impl RuleEngine {
             "rule.eval"
         );
 
-        let actions    = rule.actions.clone();
+        let actions       = rule.actions.clone();
+        let action_count  = actions.len();
+        let trigger_type_str = trigger_type(&rule.trigger).to_string();
         let publish    = self.publish.clone();
         let exec_bus   = Some(self.bus.clone());
         let bus        = self.bus.clone();
@@ -384,7 +386,7 @@ impl RuleEngine {
             debug!(
                 rule_name = %rule_name,
                 rule_id   = %rule_id,
-                count     = actions.len(),
+                count     = action_count,
                 "rule.actions: starting"
             );
             match execute_actions(actions, publish, notify, snapshot, exec_bus).await {
@@ -410,6 +412,8 @@ impl RuleEngine {
                 timestamp: chrono::Utc::now(),
                 rule_id,
                 rule_name,
+                trigger_type: trigger_type_str,
+                action_count,
             });
             in_flight.fetch_sub(1, Ordering::SeqCst);
         });

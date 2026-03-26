@@ -452,11 +452,18 @@ impl ModeManager {
             return;
         }
 
+        let current = dev.attributes;
+        let changed: Vec<String> = current.keys()
+            .filter(|k| previous.get(*k) != current.get(*k))
+            .chain(previous.keys().filter(|k| !current.contains_key(*k)))
+            .cloned()
+            .collect();
         let _ = self.bus.publish(Event::DeviceStateChanged {
             timestamp: chrono::Utc::now(),
             device_id: mode.id.clone(),
             previous,
-            current: dev.attributes,
+            current,
+            changed,
         });
     }
 

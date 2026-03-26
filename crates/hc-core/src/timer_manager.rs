@@ -462,11 +462,18 @@ impl TimerManager {
             warn!(%device_id, error = %e, "Timer: failed to persist state");
             return;
         }
+        let current = dev.attributes;
+        let changed: Vec<String> = current.keys()
+            .filter(|k| previous.get(*k) != current.get(*k))
+            .chain(previous.keys().filter(|k| !current.contains_key(*k)))
+            .cloned()
+            .collect();
         let _ = self.bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             previous,
-            current: dev.attributes,
+            current,
+            changed,
         });
     }
 }
@@ -482,11 +489,18 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     dev.attributes.insert("remaining_secs".into(), serde_json::json!(0_u64));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
+    let current = dev.attributes;
+    let changed: Vec<String> = current.keys()
+        .filter(|k| previous.get(*k) != current.get(*k))
+        .chain(previous.keys().filter(|k| !current.contains_key(*k)))
+        .cloned()
+        .collect();
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
         previous,
-        current: dev.attributes,
+        current,
+        changed,
     });
 }
 
@@ -506,11 +520,18 @@ async fn reset_for_repeat(
     dev.attributes.insert("remaining_secs".into(), serde_json::json!(duration_secs));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
+    let current = dev.attributes;
+    let changed: Vec<String> = current.keys()
+        .filter(|k| previous.get(*k) != current.get(*k))
+        .chain(previous.keys().filter(|k| !current.contains_key(*k)))
+        .cloned()
+        .collect();
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
         previous,
-        current: dev.attributes,
+        current,
+        changed,
     });
 }
 

@@ -18,6 +18,8 @@ pub enum Event {
         device_id: String,
         previous: HashMap<String, serde_json::Value>,
         current: HashMap<String, serde_json::Value>,
+        /// Attribute keys whose values changed (added, updated, or removed).
+        changed: Vec<String>,
     },
     /// A device came online or went offline.
     DeviceAvailabilityChanged {
@@ -30,6 +32,10 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         rule_id: String,
         rule_name: String,
+        /// Trigger type that caused this rule to fire (e.g. `"DeviceStateChanged"`).
+        trigger_type: String,
+        /// Number of actions that were dispatched.
+        action_count: usize,
     },
     /// A scene was activated.
     SceneActivated {
