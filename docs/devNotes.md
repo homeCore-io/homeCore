@@ -560,6 +560,87 @@ Sub-module targets can be used for finer control, e.g.:
 
 ---
 
+## Device list pagination (`GET /devices`)
+
+All list endpoints that can grow large support optional pagination via `?limit=` and `?offset=`.
+The response always includes an `X-Total-Count` header with the total item count before pagination.
+
+```sh
+# First page of 50 devices
+curl -s "http://localhost:8080/api/v1/devices?limit=50&offset=0" \
+  -H "Authorization: Bearer $TOKEN" | jq length
+# X-Total-Count: 142  ← total in DB regardless of limit/offset
+
+# Second page
+curl -s "http://localhost:8080/api/v1/devices?limit=50&offset=50" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Omit limit/offset to get all (backwards compatible)
+curl -s "http://localhost:8080/api/v1/devices" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Same parameters work on `GET /automations`. For automations, `X-Total-Count` reflects the
+post-filter total (after `?tag=`, `?trigger=`, `?stale=` etc. are applied):
+
+```sh
+# All door-alert rules, paginated
+curl -s "http://localhost:8080/api/v1/automations?tag=door-alerts&limit=10&offset=0" \
+  -H "Authorization: Bearer $TOKEN"
+# X-Total-Count: 5  ← total door-alert rules
+```
+
+---
+
+## Device bulk operations (`PATCH /devices`, `DELETE /devices`)
+
+### Bulk area assignment
+
+Assign the same area to multiple devices in one call:
+
+```sh
+curl -s -X PATCH http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["yolink_door_01", "yolink_door_02", "zwave_23"], "area": "garage"}' | jq
+# { "updated": 3, "not_found": [] }
+
+# Clear area (set to null)
+curl -s -X PATCH http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["old_device_01"], "area": null}' | jq
+```
+
+Response fields:
+- `updated` — count of devices successfully updated
+- `not_found` — IDs that didn't exist in the device registry
+
+### Bulk delete
+
+Delete multiple devices with a single call. Each deletion cascades the same way as
+`DELETE /devices/{id}` — rule file references are replaced with `DELETED:` placeholders
+and affected rules are disabled:
+
+```sh
+curl -s -X DELETE http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["old_sensor_01", "old_sensor_02"]}' | jq
+# {
+#   "deleted": 2,
+#   "not_found": [],
+#   "affected_rules": ["Morning lights", "Away mode check"]
+# }
+```
+
+Response fields:
+- `deleted` — count of devices removed from the registry
+- `not_found` — IDs that didn't exist
+- `affected_rules` — de-duplicated list of rule names that had references nullified
+
+---
+
 ## Device history API (`GET /devices/{id}/history`)
 
 Returns time-series state change records for a device, stored in `data/history.db`.
