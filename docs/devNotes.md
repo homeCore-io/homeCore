@@ -120,9 +120,18 @@ TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -d "{\"username\":\"admin\",\"password\":\"$HC_PASS\"}" | jq -r .token)
 
 websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
+
+# Watch only rule fires and scene activations
+websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&type=rule_fired,scene_activated"
+
+# Watch only events for one device
+websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN&device_id=zwave_23"
 ```
 
-Every device command, rule firing, and scene activation will print here immediately.
+Every rule firing, device state change, and scene activation will print here immediately.
+`MqttMessage` events (raw MQTT traffic) are suppressed by default — only actionable events appear.
+
+See **Event stream reference** below for the full list of event types and their enriched fields.
 
 ---
 
@@ -2757,6 +2766,89 @@ WARN hc_core::executor channel="Phone" Notification failed error=Notification ch
 4. Add `pub mod <name>;` and re-export from `lib.rs`.
 
 That's it — config, executor, and rule engine need no changes.
+
+---
+
+## Event stream reference (`GET /api/v1/events/stream`)
+
+The WebSocket event stream at `/api/v1/events/stream` emits structured JSON events in real time.
+Authenticate via `?token=<JWT>`. IP-whitelisted clients may omit the token.
+
+### Query parameters
+
+| Parameter | Example | Effect |
+|---|---|---|
+| `token` | `?token=eyJ…` | JWT auth (required unless IP-whitelisted) |
+| `type` | `?type=rule_fired,device_state_changed` | Comma-separated allow-list of event type names. Empty = all non-suppressed events. |
+| `device_id` | `?device_id=zwave_23` | Only events whose `device_id` matches. |
+
+### Suppressed events
+
+`MqttMessage` (raw MQTT traffic) is suppressed by default — it fires for every MQTT packet and
+carries no actionable information for API consumers.  Request it explicitly with
+`?type=mqtt_message` if you need raw MQTT visibility.
+
+### Event type reference
+
+| `type` field | Description | Key fields |
+|---|---|---|
+| `device_state_changed` | A device attribute changed | `device_id`, `previous`, `current`, **`changed`** (list of changed attribute keys) |
+| `device_availability_changed` | Device came online or offline | `device_id`, `available` |
+| `rule_fired` | An automation rule completed its actions | `rule_id`, `rule_name`, **`trigger_type`**, **`action_count`** |
+| `scene_activated` | A scene was activated | `scene_id`, `scene_name` |
+| `plugin_registered` | A plugin registered with the broker | `plugin_id` |
+| `plugin_offline` | A plugin stopped responding | `plugin_id` |
+| `device_name_changed` | Device display name was updated | `device_id`, `previous_name`, `current_name` |
+| `custom` | A rule fired a `FireEvent` action | `event_type`, `payload` |
+| `system_alert` | System-level warning or error | `severity` (info/warning/error/critical), `message` |
+
+### Enriched fields
+
+**`device_state_changed`** includes a `changed` array — the attribute keys whose values actually
+changed.  Use it instead of diffing `previous` vs `current` manually:
+
+```json
+{
+  "type": "device_state_changed",
+  "timestamp": "2026-03-25T15:04:05Z",
+  "device_id": "yolink_door_01",
+  "previous": { "open": false, "battery": 90 },
+  "current":  { "open": true,  "battery": 90 },
+  "changed":  ["open"]
+}
+```
+
+**`rule_fired`** includes `trigger_type` (what caused it) and `action_count` (how many actions ran):
+
+```json
+{
+  "type": "rule_fired",
+  "timestamp": "2026-03-25T15:04:05Z",
+  "rule_id": "3f2d…",
+  "rule_name": "OH-1 door left open alert",
+  "trigger_type": "DeviceStateChanged",
+  "action_count": 1
+}
+```
+
+### Common filter recipes
+
+```sh
+# Only rule firings
+websocat "…/events/stream?token=$TOKEN&type=rule_fired"
+
+# Device state changes for one device
+websocat "…/events/stream?token=$TOKEN&type=device_state_changed&device_id=zwave_23"
+
+# Availability changes (monitor offline sensors)
+websocat "…/events/stream?token=$TOKEN&type=device_availability_changed"
+
+# Custom events fired by rule chains
+websocat "…/events/stream?token=$TOKEN&type=custom"
+
+# Raw MQTT traffic (diagnostic — high volume)
+websocat "…/events/stream?token=$TOKEN&type=mqtt_message"
+```
 
 ---
 
