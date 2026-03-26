@@ -1200,6 +1200,18 @@ curl -s -X POST http://localhost:8080/api/v1/automations/import \
   -d @rules-backup.json | jq
 ```
 
+For scenes, see **Scene export and import** below.
+
+### Rule priority validation
+
+`priority` is validated on `POST /automations` and `PUT /automations/{id}`. Values outside **[-1000, 1000]** are rejected with `422 Unprocessable Entity`:
+
+```json
+{ "error": "priority must be between -1000 and 1000" }
+```
+
+The list returned by `GET /automations` is always sorted by priority descending (highest first). Pass `?sort=priority` to make this explicit — it is the default and produces the same result.
+
 ---
 
 ### Rule tags
@@ -1788,7 +1800,8 @@ All `CallService` actions in the process share a single `reqwest::Client` (initi
 | `ManualTrigger` | — | Never fires automatically — only via the `/test` endpoint. |
 | `CustomEvent` | `event_type` | Fires when a `FireEvent` action emits the matching `event_type` on the internal bus. Enables clean rule chaining: one rule fires an event, one or more rules react to it — no MQTT round-trip. See worked example above. |
 | `SystemStarted` | — | Fires **once** immediately after the rule engine finishes pre-populating its device cache on startup. Use this to catch state that changed while homeCore was not running (e.g. a door left open across a restart). Pair with `DeviceState` conditions to guard the action. See startup gap pattern below. |
-| `Cron` | `expression` | Fires on a repeating cron schedule using a **6-field expression**: `{sec} {min} {hour} {dom} {month} {dow}`. Evaluated in local wall-clock time. Invalid expressions log a warning and never fire. See cron section below. |
+| `Cron` | `expression` | Fires on a repeating cron schedule using a **6-field expression**: `{sec} {min} {hour} {dom} {month} {dow}`. Evaluated in local wall-clock time. Invalid expressions are caught at startup — the rule is disabled and its `error` field is set. See cron section below. |
+| `DeviceAvailabilityChanged` | `device_id`; optional `to` (bool) | Fires when a device comes online (`true`) or goes offline (`false`). Omit `to` to fire on both directions. See worked example below. |
 
 ### Condition type reference
 
@@ -1819,6 +1832,7 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 | `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
+| `StopRuleChain` | — | Stops further rules from being evaluated for the current event. Rules with lower priority than the firing rule are skipped. Use on a high-priority rule to make it exclusive. See below. |
 
 ### Scheduler catch-up on restart
 
@@ -2362,6 +2376,173 @@ interval_ms    = 300000   # 5 minutes
 | Need exact timing (fire at T+10:00, not T+15-30) | `RepeatUntil` + `Delay` |
 | State may persist across homeCore restarts | `SystemStarted` + `DeviceState` condition |
 | Repeating reminder every N minutes until resolved | `RepeatUntil` with notification inside loop |
+
+---
+
+### Per-rule cooldown — `cooldown_secs`
+
+Chatty sensors can generate dozens of state-change events per minute. Without a cooldown, every event evaluates and potentially fires the rule. `cooldown_secs` adds a mandatory quiet period after each fire.
+
+**TOML:**
+
+```toml
+[rule]
+id           = "..."
+name         = "Motion sensor alert"
+enabled      = true
+priority     = 10
+cooldown_secs = 300   # only fire once every 5 minutes at most
+
+[rule.trigger]
+type      = "device_state_changed"
+device_id = "yolink_motion_hall"
+attribute = "motion"
+
+[[rule.actions]]
+type    = "notify"
+channel = "telegram"
+message = "Hall motion detected"
+```
+
+**Behaviour:**
+- After the rule fires, `cooldown_secs` is enforced in-memory (resets on restart).
+- The cooldown is checked *before* conditions are evaluated — the rule is skipped entirely while cooling down.
+- Debug log: `rule.cooldown: skipping — within cooldown window  elapsed_secs=47  cooldown_secs=300`
+- Omit the field (or set to `null`) to disable cooldown.
+
+**Gotcha:** cooldown state is in-memory only. A process restart clears all cooldowns. For persistent rate-limiting, use a `TimeElapsed` condition instead.
+
+---
+
+### Device availability trigger — `Trigger::DeviceAvailabilityChanged`
+
+Fires when a device transitions between online and offline. Useful for "alert me when a sensor disappears" rules that previously required polling.
+
+**TOML — alert when a sensor goes offline:**
+
+```toml
+[rule]
+id       = "..."
+name     = "Hall motion sensor offline alert"
+enabled  = true
+priority = 5
+
+[rule.trigger]
+type      = "device_availability_changed"
+device_id = "yolink_motion_hall"
+to        = false   # only fires on offline transition; omit to fire on both
+
+[[rule.actions]]
+type    = "notify"
+channel = "telegram"
+message = "⚠ Hall motion sensor went offline"
+```
+
+**TOML — alert when a sensor comes back online:**
+
+```toml
+[rule.trigger]
+type      = "device_availability_changed"
+device_id = "yolink_motion_hall"
+to        = true
+```
+
+**Fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `device_id` | yes | Device ID to watch |
+| `to` | no | `true` = online only, `false` = offline only, omit = both directions |
+
+**Notes:**
+- Availability changes arrive from the `homecore/devices/{id}/availability` MQTT topic (`"online"` / `"offline"`).
+- This trigger fires on the **transition** — it will not fire again for the same direction unless the device first transitions the other way.
+- The WS event stream emits `device_availability_changed` events you can monitor independently.
+
+---
+
+### Exclusive rules — `Action::StopRuleChain`
+
+Normally, multiple rules can match the same event (evaluated in priority order, all firing). `StopRuleChain` makes a high-priority rule *exclusive* — once it fires, no lower-priority rules are evaluated for that event.
+
+**TOML:**
+
+```toml
+[rule]
+id       = "..."
+name     = "Night mode motion — dim only"
+enabled  = true
+priority = 100   # higher than the daytime rule below
+
+[rule.trigger]
+type      = "device_state_changed"
+device_id = "zwave_motion_hall"
+attribute = "motion"
+to        = true
+
+[[rule.conditions]]
+type      = "device_state"
+device_id = "switch_night_mode"
+attribute = "on"
+op        = "Eq"
+value     = true
+
+[[rule.actions]]
+type      = "set_device_state"
+device_id = "light.hall"
+state     = { brightness = 30, on = true }
+
+[[rule.actions]]
+type = "stop_rule_chain"   # prevents the daytime rule from also firing
+```
+
+```toml
+[rule]
+id       = "..."
+name     = "Daytime motion — full brightness"
+enabled  = true
+priority = 50   # lower priority — skipped when StopRuleChain fires above
+
+[rule.trigger]
+type      = "device_state_changed"
+device_id = "zwave_motion_hall"
+attribute = "motion"
+to        = true
+
+[[rule.actions]]
+type      = "set_device_state"
+device_id = "light.hall"
+state     = { brightness = 255, on = true }
+```
+
+**Notes:**
+- `stop_rule_chain` is the last action that matters in a sequence — place it last for clarity (other actions before it still run).
+- The stop applies to the current event only — the next event evaluates all rules from scratch.
+- Log: `rule.trigger: StopRuleChain — halting further rule evaluation for this event`
+
+---
+
+### Scene export and import
+
+Mirror of the rule export/import, useful for backing up or migrating scene definitions independently of the full backup zip.
+
+```sh
+# Export all scenes
+curl -s http://localhost:8080/api/v1/scenes/export \
+  -H "Authorization: Bearer $TOKEN" > scenes-backup.json
+
+# Import scenes (fresh UUIDs are assigned — no duplicate-ID conflicts)
+curl -s -X POST http://localhost:8080/api/v1/scenes/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @scenes-backup.json | jq
+# → { "imported": 12 }
+```
+
+**Notes:**
+- `GET /scenes/export` — returns all scenes as a JSON array. Requires `scenes:read` scope.
+- `POST /scenes/import` — accepts a JSON array of scene objects. Each scene receives a new UUID; the `id` field in the input is ignored. Requires `scenes:write` scope.
+- Importing does not delete or overwrite existing scenes — it is purely additive.
 
 ---
 
@@ -3211,10 +3392,20 @@ HomeCore handles **SIGTERM** and **SIGINT** (Ctrl-C) gracefully.  When a signal 
 4. The scheduler wakes from its sleep and exits cleanly.
 5. The process returns `0`.
 
+### Configuration
+
+```toml
+# homecore.toml
+[shutdown]
+drain_timeout_secs = 10   # default; how long to wait for in-flight rule actions
+```
+
+Increase `drain_timeout_secs` if you have rules with long-running `CallService` or `Delay` actions that should be allowed to complete before the process exits.
+
 ### What happens during the drain window
 
-- In-flight rule action tasks keep running.  If a rule action sequence is mid-execution (e.g. in the middle of a `Delay` or waiting for a `CallService` HTTP response), it is given up to **10 seconds** to complete.
-- After 10 seconds, any remaining tasks are abandoned and the engine force-stops.  A `WARN` log line is emitted with the count of abandoned tasks.
+- In-flight rule action tasks keep running.  If a rule action sequence is mid-execution (e.g. in the middle of a `Delay` or waiting for a `CallService` HTTP response), it is given up to `drain_timeout_secs` seconds to complete.
+- After the timeout, any remaining tasks are abandoned and the engine force-stops.  A `WARN` log line is emitted with the count of abandoned tasks.
 - New events arriving during the drain are ignored — no new rule evaluations are started.
 - HTTP connections that are already open are drained normally by axum; new connections are refused.
 - MQTT publishing still works during the drain (the publish handle is still alive), so rule actions that call `set_device_state` or `publish_mqtt` can complete successfully.
