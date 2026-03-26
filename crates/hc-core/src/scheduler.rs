@@ -17,13 +17,15 @@
 use crate::EventBus;
 use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
 use cron::Schedule;
+use dashmap::DashMap;
 use hc_types::event::Event;
-use hc_types::rule::{Rule, SunEventType, Trigger};
+use hc_types::rule::{PeriodicUnit, Rule, SunEventType, Trigger};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 pub struct Scheduler {
     bus:                    EventBus,
@@ -35,6 +37,8 @@ pub struct Scheduler {
     /// How many minutes back from now to search for missed triggers on startup.
     /// Set to 0 to disable catch-up entirely.
     catchup_window_minutes: u32,
+    /// Tracks when each Periodic rule last fired so we can compare elapsed time.
+    last_periodic_fire:     Arc<DashMap<Uuid, Instant>>,
 }
 
 impl Scheduler {
@@ -45,7 +49,14 @@ impl Scheduler {
         rules:                  Arc<RwLock<Vec<Rule>>>,
         catchup_window_minutes: u32,
     ) -> Self {
-        Self { bus, latitude, longitude, rules, catchup_window_minutes }
+        Self {
+            bus,
+            latitude,
+            longitude,
+            rules,
+            catchup_window_minutes,
+            last_periodic_fire: Arc::new(DashMap::new()),
+        }
     }
 
     /// Drive the scheduler loop.  Ticks once per minute and fires any rules
@@ -111,10 +122,20 @@ impl Scheduler {
                         Trigger::Cron { expression } => {
                             cron_fires_now(expression, &now, &rule.name)
                         }
+                        Trigger::Periodic { every_n, unit } => {
+                            let period_secs = periodic_to_secs(*every_n, unit);
+                            match self.last_periodic_fire.get(&rule.id) {
+                                Some(last) => last.elapsed().as_secs() >= period_secs,
+                                None => true, // never fired — fire immediately
+                            }
+                        }
                         _ => false,
                     };
 
                     if fires {
+                        if matches!(&rule.trigger, Trigger::Periodic { .. }) {
+                            self.last_periodic_fire.insert(rule.id, Instant::now());
+                        }
                         debug!(rule_id = %rule.id, "Scheduler firing time trigger");
                         // Emit a synthetic Custom event that the engine interprets as
                         // a manual fire for this specific rule.
@@ -132,9 +153,17 @@ impl Scheduler {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(secs_until_next_minute)) => {}
                 changed = shutdown.changed() => {
-                    if changed.is_ok() && *shutdown.borrow() {
-                        info!("Scheduler: shutdown signal received — stopping");
-                        return;
+                    match changed {
+                        Ok(()) if *shutdown.borrow() => {
+                            info!("Scheduler: shutdown signal received — stopping");
+                            return;
+                        }
+                        Ok(()) => {} // Value changed but still false
+                        Err(_) => {
+                            // Sender dropped — no more shutdown signals.
+                            // Sleep out the rest of the minute normally.
+                            tokio::time::sleep(Duration::from_secs(secs_until_next_minute)).await;
+                        }
                     }
                 }
             }
@@ -182,6 +211,22 @@ impl Scheduler {
                 }
                 Trigger::Cron { expression } => {
                     cron_fired_in_window(expression, &window_start_dt_full, &now_dt, &rule.name)
+                }
+                // Periodic triggers always fire on startup — they have no "missed" window
+                // to check because their period is relative to the last fire time (which
+                // is unknown after a restart).  Seeding last_periodic_fire to now prevents
+                // an immediate double-fire once the main loop starts.
+                Trigger::Periodic { every_n, unit } => {
+                    let period_secs = periodic_to_secs(*every_n, unit);
+                    if self.catchup_window_minutes as u64 * 60 >= period_secs {
+                        self.last_periodic_fire.insert(rule.id, Instant::now());
+                        true
+                    } else {
+                        // Period longer than catchup window — seed to now so the main
+                        // loop doesn't fire immediately; it will fire after one period.
+                        self.last_periodic_fire.insert(rule.id, Instant::now());
+                        false
+                    }
                 }
                 _ => false,
             };
@@ -357,6 +402,17 @@ pub(crate) fn solar_event_time(
     let h = (total_minutes / 60.0) as u32;
     let m = (total_minutes % 60.0) as u32;
     NaiveTime::from_hms_opt(h, m, 0)
+}
+
+/// Converts a `Periodic` trigger's `every_n` + `unit` into a period in whole seconds.
+fn periodic_to_secs(every_n: u32, unit: &PeriodicUnit) -> u64 {
+    let n = every_n.max(1) as u64;
+    match unit {
+        PeriodicUnit::Minutes => n * 60,
+        PeriodicUnit::Hours   => n * 3600,
+        PeriodicUnit::Days    => n * 86400,
+        PeriodicUnit::Weeks   => n * 604800,
+    }
 }
 
 /// NOAA equation of time in minutes.

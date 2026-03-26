@@ -34,6 +34,7 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Timelike};
+use hc_types::rule::TriggerContext;
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -199,6 +200,45 @@ impl ScriptRuntime {
             });
         }
 
+        self
+    }
+
+    /// Register trigger context accessor functions on this runtime.
+    ///
+    /// Available Rhai functions after this call:
+    /// - `trigger_device()` — `device_id` that fired the trigger, or `""`
+    /// - `trigger_attribute()` — attribute name that changed, or `""`
+    /// - `trigger_value()` — new attribute value (or unit if unavailable)
+    /// - `trigger_prev_value()` — previous attribute value (or unit)
+    /// - `trigger_event_type()` — event type string
+    pub fn with_trigger_context(mut self, ctx: &TriggerContext) -> Self {
+        let device_id  = ctx.device_id.clone().unwrap_or_default();
+        let attribute  = ctx.attribute.clone().unwrap_or_default();
+        let value      = ctx.value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let prev_value = ctx.prev_value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let event_type = ctx.event_type.clone().unwrap_or_default();
+
+        self.engine.register_fn("trigger_device",     move || -> String  { device_id.clone() });
+        self.engine.register_fn("trigger_attribute",  move || -> String  { attribute.clone() });
+        self.engine.register_fn("trigger_value",      move || -> Dynamic { value.clone() });
+        self.engine.register_fn("trigger_prev_value", move || -> Dynamic { prev_value.clone() });
+        self.engine.register_fn("trigger_event_type", move || -> String  { event_type.clone() });
+        self
+    }
+
+    /// Register rule-local variable read access on this runtime.
+    ///
+    /// Available Rhai functions after this call:
+    /// - `rule_var("name")` — returns the current value of a rule-local variable, or unit
+    pub fn with_rule_vars(mut self, vars: HashMap<String, JsonValue>) -> Self {
+        let rhai_vars: Arc<rhai::Map> = Arc::new(
+            vars.into_iter()
+                .map(|(k, v)| (k.into(), json_to_dynamic(v)))
+                .collect(),
+        );
+        self.engine.register_fn("rule_var", move |name: &str| -> Dynamic {
+            rhai_vars.get(name).cloned().unwrap_or(Dynamic::UNIT)
+        });
         self
     }
 
@@ -376,6 +416,34 @@ mod tests {
         assert!(matches!(effects[0], ScriptSideEffect::SetDeviceState { .. }));
         assert!(matches!(effects[1], ScriptSideEffect::Notify { .. }));
         assert!(matches!(effects[2], ScriptSideEffect::CallService { method: ref m, .. } if m == "GET"));
+    }
+
+    #[test]
+    fn trigger_context_functions() {
+        let ctx = TriggerContext {
+            device_id:  Some("light_1".into()),
+            attribute:  Some("on".into()),
+            value:      Some(json!(true)),
+            prev_value: Some(json!(false)),
+            event_type: Some("device_state_changed".into()),
+        };
+        let rt = ScriptRuntime::new().with_trigger_context(&ctx);
+        assert!(rt.eval_condition(r#"trigger_device() == "light_1""#).unwrap());
+        assert!(rt.eval_condition(r#"trigger_attribute() == "on""#).unwrap());
+        assert!(rt.eval_condition("trigger_value() == true").unwrap());
+        assert!(rt.eval_condition("trigger_prev_value() == false").unwrap());
+        assert!(rt.eval_condition(r#"trigger_event_type() == "device_state_changed""#).unwrap());
+    }
+
+    #[test]
+    fn rule_vars_accessible() {
+        let mut vars = HashMap::new();
+        vars.insert("counter".into(), json!(5_i64));
+        vars.insert("mode".into(), json!("away"));
+        let rt = ScriptRuntime::new().with_rule_vars(vars);
+        assert!(rt.eval_condition("rule_var(\"counter\") == 5").unwrap());
+        assert!(rt.eval_condition(r#"rule_var("mode") == "away""#).unwrap());
+        assert!(rt.eval_condition("rule_var(\"missing\") == ()").unwrap());
     }
 
     #[test]

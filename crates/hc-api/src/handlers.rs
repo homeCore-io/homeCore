@@ -866,6 +866,9 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::SystemStarted                    => "system_started",
         Trigger::Cron { .. }                      => "cron",
         Trigger::DeviceAvailabilityChanged { .. } => "device_availability_changed",
+        Trigger::ButtonEvent { .. }               => "button_event",
+        Trigger::NumericThreshold { .. }          => "numeric_threshold",
+        Trigger::Periodic { .. }                  => "periodic",
     }
 }
 
@@ -1284,6 +1287,52 @@ async fn eval_condition_dry_detail(
                 inner_detail.reason = Some("negated condition passed (outer Not fails)".into());
             }
             inner_detail
+        }
+        Condition::And { conditions } => {
+            let mut passed = true;
+            let mut reason = None;
+            for c in conditions {
+                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                if !detail.passed {
+                    passed = false;
+                    reason = Some(detail.reason.unwrap_or_else(|| "sub-condition failed".into()));
+                    break;
+                }
+            }
+            ConditionDetail { condition: cond_json, passed, actual: None, expected: None, elapsed_ms: None, reason }
+        }
+        Condition::Or { conditions } => {
+            let mut passed = false;
+            for c in conditions {
+                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                if detail.passed { passed = true; break; }
+            }
+            ConditionDetail {
+                condition: cond_json, passed, actual: None, expected: None, elapsed_ms: None,
+                reason: if !passed { Some("no sub-condition passed".into()) } else { None },
+            }
+        }
+        Condition::Xor { conditions } => {
+            let mut count = 0usize;
+            for c in conditions {
+                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                if detail.passed { count += 1; }
+            }
+            let passed = count == 1;
+            ConditionDetail {
+                condition: cond_json, passed, actual: Some(json!(count)), expected: Some(json!(1)),
+                elapsed_ms: None,
+                reason: if !passed { Some(format!("{count} sub-conditions passed, need exactly 1")) } else { None },
+            }
+        }
+        Condition::PrivateBooleanIs { name, value } => {
+            // Dry-run cannot access live runtime state; report as indeterminate.
+            ConditionDetail {
+                condition: cond_json, passed: false, actual: None,
+                expected: Some(json!(value)),
+                elapsed_ms: None,
+                reason: Some(format!("private boolean '{name}' not available in dry-run")),
+            }
         }
     }
 }

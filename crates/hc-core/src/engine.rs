@@ -1,43 +1,43 @@
 //! Rule engine — listens on the event bus, evaluates rules, dispatches actions.
 //!
-//! # Performance design
-//!
-//! ## In-memory device cache
+//! # In-memory device cache
 //! A `DashMap<device_id, attributes>` is populated at startup from the state
 //! store and updated synchronously on every `DeviceStateChanged` event *before*
 //! rule evaluation begins.  Condition checks never call `spawn_blocking` or
 //! touch redb — they read directly from the DashMap.
 //!
-//! ## Early RwLock release
+//! # Early RwLock release
 //! The rules `RwLock` is held only long enough to clone the current `Vec<Rule>`
-//! into a local snapshot (no I/O during the clone).  All trigger matching and
-//! condition evaluation runs against the snapshot after the lock is released,
-//! so hot-reload is never blocked while rules are being evaluated.
+//! into a local snapshot.  All trigger matching and condition evaluation run
+//! against the snapshot after the lock is released, so hot-reload is never
+//! blocked while rules are being evaluated.
 //!
-//! ## Single device snapshot per rule
-//! For rules that contain Rhai scripts (ScriptExpression, RunScript,
-//! Conditional) the `DashMap` is converted to a `HashMap` exactly once per
-//! rule firing and passed through to all script evaluations.  This replaces the
-//! previous pattern of calling `list_devices()` (a `spawn_blocking` redb scan)
-//! once per script site.
-//!
-//! ## No redundant sort
-//! `load_all()` already stores rules in priority-descending order.  The
-//! matching vec preserves that order so re-sorting on every matched event is
-//! unnecessary.
+//! # New features (Hubitat parity)
+//! - `required_expression` — Rhai gate evaluated before trigger fires
+//! - `trigger_condition` — per-rule Rhai gate evaluated after trigger fires
+//! - `from` / `not_from` / `not_to` / `device_ids` on DeviceStateChanged
+//! - `ButtonEvent` and `NumericThreshold` trigger variants
+//! - `Periodic` trigger (handled by scheduler, see scheduler.rs)
+//! - `And` / `Or` / `Xor` / `PrivateBooleanIs` conditions
+//! - `for_duration_secs` on state triggers — deferred fire via synthetic event
+//! - Per-rule logging levels (`log_events`, `log_triggers`, `log_actions`)
+//! - Pause state check before action dispatch
 
-use crate::executor::execute_actions;
+use crate::executor::{execute_actions, ExecutorContext};
 use crate::EventBus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use hc_notify::NotificationService;
+use hc_scripting::ScriptRuntime;
 use hc_state::StateStore;
 use hc_types::event::Event;
-use hc_types::rule::{CompareOp, Condition, Rule, Trigger};
+use hc_types::rule::{
+    ButtonEventType, CompareOp, Condition, Rule, ThresholdOp, Trigger, TriggerContext,
+};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -69,29 +69,24 @@ pub struct RuleEngine {
     publish: Option<hc_mqtt_client::PublishHandle>,
     notify:  Option<Arc<NotificationService>>,
     /// In-memory device attribute cache.
-    ///
-    /// Keyed by `device_id`; value is the full attributes map for that device.
-    /// Updated synchronously on every `DeviceStateChanged` event before any
-    /// rule evaluation, so condition checks are always reading current state
-    /// without any blocking I/O.
     device_cache: Arc<DashMap<String, HashMap<String, JsonValue>>>,
-    /// Per-attribute last-changed timestamps, used by `Condition::TimeElapsed`.
-    ///
-    /// `attr_changed_at[device_id][attribute]` = wall-clock time the attribute
-    /// last received a different value.  Pre-populated from `last_seen` on all
-    /// devices at startup (conservative baseline); updated on every
-    /// `DeviceStateChanged` for attributes whose value actually changed.
+    /// Per-attribute last-changed timestamps for `Condition::TimeElapsed`.
     attr_changed_at: Arc<DashMap<String, HashMap<String, DateTime<Utc>>>>,
     /// Per-rule ring buffer of the last `HISTORY_RING_SIZE` evaluation attempts.
-    /// Exposed to the API layer via `fire_history_handle()`.
     fire_history: FireHistoryHandle,
-    /// Count of rule action tasks currently executing in spawned tokio tasks.
-    /// Used during graceful shutdown to wait for in-flight work to complete.
+    /// Count of rule action tasks currently executing.
     in_flight: Arc<AtomicUsize>,
     /// Per-rule last-fire timestamps for cooldown enforcement.
-    /// `cooldown_map[rule_id]` = wall-clock time the rule last fired.
     cooldown_map: Arc<DashMap<Uuid, Instant>>,
-    /// Seconds to wait for in-flight tasks to complete during graceful shutdown.
+    /// Active cancellable delays shared with executor contexts.
+    delay_registry: Arc<DashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Pause state per rule — checked before dispatching actions.
+    pause_state: Arc<DashMap<Uuid, bool>>,
+    /// Rule-local variable store; key = (rule_id, variable_name).
+    rule_vars: Arc<DashMap<(Uuid, String), JsonValue>>,
+    /// Private boolean store; key = (rule_id, boolean_name).
+    priv_bools: Arc<DashMap<(Uuid, String), bool>>,
+    /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
 }
 
@@ -103,6 +98,14 @@ impl RuleEngine {
         publish: Option<hc_mqtt_client::PublishHandle>,
         notify:  Option<Arc<NotificationService>>,
     ) -> Self {
+        // Initialise rule-local variables from each rule's `variables` map.
+        let rule_vars: Arc<DashMap<(Uuid, String), JsonValue>> = Arc::new(DashMap::new());
+        for rule in &rules {
+            for (name, initial) in &rule.variables {
+                rule_vars.insert((rule.id, name.clone()), initial.clone());
+            }
+        }
+
         Self {
             bus,
             rules: Arc::new(RwLock::new(rules)),
@@ -114,6 +117,10 @@ impl RuleEngine {
             fire_history: Arc::new(DashMap::new()),
             in_flight: Arc::new(AtomicUsize::new(0)),
             cooldown_map: Arc::new(DashMap::new()),
+            delay_registry: Arc::new(DashMap::new()),
+            pause_state: Arc::new(DashMap::new()),
+            rule_vars,
+            priv_bools: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
         }
     }
@@ -140,20 +147,12 @@ impl RuleEngine {
     }
 
     /// Drive the rule engine until the bus is dropped or `shutdown` fires.
-    ///
-    /// When `shutdown` is `true`, the engine stops accepting new events and
-    /// waits up to 10 seconds for any in-flight rule action tasks to complete
-    /// before returning.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        // Pre-populate device cache from current state store so condition checks
-        // work correctly for devices that haven't changed since last restart.
+        // Pre-populate device cache from current state store.
         match self.state.list_devices().await {
             Ok(devices) => {
                 let count = devices.len();
                 for d in devices {
-                    // Seed attr_changed_at with last_seen as a conservative
-                    // baseline — better than treating every attribute as
-                    // "just changed" on first restart.
                     let baseline = d.last_seen;
                     let ts_map: HashMap<String, DateTime<Utc>> = d
                         .attributes
@@ -169,45 +168,71 @@ impl RuleEngine {
         }
 
         let mut rx = self.bus.subscribe();
-        // Emit system_started after subscribing so SystemStarted rules fire on
-        // the first loop iteration.  This is the only window where the device
-        // cache is fully populated but no events have been processed yet — the
-        // ideal moment to catch state that changed during a restart (e.g. a
-        // door left open).
         let _ = self.bus.publish(Event::Custom {
             timestamp: Utc::now(),
             event_type: "system_started".to_string(),
             payload: serde_json::json!({}),
         });
         info!("Rule engine started");
+
+        // When no external shutdown sender was provided, `lib.rs` creates a
+        // watch channel but immediately drops the sender.  A dropped sender
+        // causes `shutdown.changed()` to return `Err(Closed)` on every poll,
+        // which — combined with `biased` — would starve the `rx.recv()` branch.
+        // Track whether the shutdown channel is still active so we can fall back
+        // to a simple event loop once it's closed.
+        let mut shutdown_active = true;
+
         loop {
-            tokio::select! {
-                biased;
-                // Check for shutdown first so we don't keep processing events
-                // when a stop has been requested.
-                changed = shutdown.changed() => {
-                    if changed.is_ok() && *shutdown.borrow() {
-                        info!("Rule engine: shutdown signal received — stopping event loop");
-                        break;
-                    }
-                }
-                result = rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if let Err(e) = self.handle_event(&event).await {
-                                warn!(error = %e, "Rule engine error handling event");
+            if shutdown_active {
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        match changed {
+                            Ok(()) => {
+                                if *shutdown.borrow() {
+                                    info!("Rule engine: shutdown signal received — stopping event loop");
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                // Sender dropped — no more shutdown signals possible.
+                                // Switch to the event-only path below.
+                                shutdown_active = false;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("Rule engine lagged by {n} events");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
+                    result = rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                if let Err(e) = self.handle_event(&event).await {
+                                    warn!(error = %e, "Rule engine error handling event");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Rule engine lagged by {n} events");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            } else {
+                // Shutdown channel is gone — just wait for bus events.
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Err(e) = self.handle_event(&event).await {
+                            warn!(error = %e, "Rule engine error handling event");
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Rule engine lagged by {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
 
-        // Drain in-flight rule action tasks (up to drain_timeout_secs).
+        // Drain in-flight tasks (up to drain_timeout_secs).
         let deadline = Instant::now() + Duration::from_secs(self.drain_timeout_secs);
         loop {
             let n = self.in_flight.load(Ordering::SeqCst);
@@ -222,10 +247,9 @@ impl RuleEngine {
     }
 
     async fn handle_event(&self, event: &Event) -> Result<()> {
-        // ── 1. Update device cache (no lock needed — DashMap is concurrent) ──
+        // ── 1. Update device cache ─────────────────────────────────────────────
         if let Event::DeviceStateChanged { device_id, current, .. } = event {
             let now = Utc::now();
-            // Update attr_changed_at for attributes whose value actually changed.
             {
                 let prev_attrs = self.device_cache.get(device_id.as_str());
                 let mut ts_entry = self.attr_changed_at
@@ -251,30 +275,38 @@ impl RuleEngine {
                 .or_insert_with(|| current.clone());
         }
 
-        // ── 2. Snapshot rules, release the lock immediately ──────────────────
-        //
-        // The clone is O(N * sizeof(Rule)) and happens synchronously while
-        // holding the lock — no I/O.  All evaluation below runs against the
-        // snapshot after the lock is dropped.
+        // ── 2. Snapshot rules ─────────────────────────────────────────────────
         let rules_snapshot: Vec<Rule> = {
             let guard = self.rules.read().await;
             guard.clone()
         };
 
-        // ── 3. Scheduler tick — O(1) id lookup in snapshot ───────────────────
+        // ── 3. Scheduler tick (pass-through to fire_rule) ─────────────────────
         if let Event::Custom { event_type, payload, .. } = event {
             if event_type == "scheduler_tick" {
                 if let Some(rule_id_str) = payload.get("rule_id").and_then(|v| v.as_str()) {
-                    if let Ok(rule_id) = uuid::Uuid::parse_str(rule_id_str) {
+                    if let Ok(rule_id) = Uuid::parse_str(rule_id_str) {
                         if let Some(rule) = rules_snapshot.iter().find(|r| r.id == rule_id && r.enabled) {
-                            debug!(
-                                rule_name = %rule.name,
-                                rule_id   = %rule.id,
-                                "rule.trigger: scheduler_tick matched"
-                            );
-                            let _ = self.fire_rule(rule).await?;
-                        } else {
-                            debug!(rule_id = %rule_id_str, "rule.trigger: scheduler_tick — no matching enabled rule");
+                            debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger: scheduler_tick matched");
+                            let _ = self.fire_rule(rule, TriggerContext::default()).await?;
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            // Deferred for_duration_secs re-check
+            if event_type == "deferred_rule_fire" {
+                if let Some(rule_id_str) = payload.get("rule_id").and_then(|v| v.as_str()) {
+                    if let Ok(rule_id) = Uuid::parse_str(rule_id_str) {
+                        if let Some(rule) = rules_snapshot.iter().find(|r| r.id == rule_id && r.enabled) {
+                            debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger: deferred_rule_fire — re-checking");
+                            if still_matches_for_duration(&rule.trigger, &self.device_cache) {
+                                let tctx = TriggerContext::default();
+                                let _ = self.fire_rule(rule, tctx).await?;
+                            } else {
+                                debug!(rule_name = %rule.name, "deferred_rule_fire: device state changed, not firing");
+                            }
                         }
                     }
                 }
@@ -284,11 +316,8 @@ impl RuleEngine {
 
         log_incoming_event(event);
 
-        // ── 4. Trigger matching ───────────────────────────────────────────────
-        //
-        // rules_snapshot is already sorted by priority descending (load_all
-        // does this), so matching preserves that order — no re-sort needed.
-        let mut matching: Vec<&Rule> = Vec::new();
+        // ── 4. Trigger matching ────────────────────────────────────────────────
+        let mut matching: Vec<(&Rule, TriggerContext, bool /* deferred */)> = Vec::new();
         for rule in rules_snapshot.iter() {
             if !rule.enabled {
                 debug!(rule_name = %rule.name, "rule.trigger: SKIP (disabled)");
@@ -296,23 +325,49 @@ impl RuleEngine {
             }
             match trigger_check(&rule.trigger, event) {
                 TriggerResult::Matched => {
-                    debug!(
-                        rule_name = %rule.name,
-                        rule_id   = %rule.id,
-                        trigger   = trigger_type(&rule.trigger),
-                        matched   = true,
-                        "rule.trigger"
-                    );
-                    matching.push(rule);
+                    if rule.log_events {
+                        info!(
+                            rule_name = %rule.name, rule_id = %rule.id,
+                            trigger   = trigger_type(&rule.trigger),
+                            "rule.event: trigger matched"
+                        );
+                    } else {
+                        debug!(
+                            rule_name = %rule.name, rule_id = %rule.id,
+                            trigger   = trigger_type(&rule.trigger),
+                            matched   = true, "rule.trigger"
+                        );
+                    }
+                    let tctx = extract_trigger_ctx(event, rule);
+                    // Check for_duration_secs — if set, defer the fire
+                    let for_dur = trigger_for_duration(&rule.trigger);
+                    matching.push((rule, tctx, for_dur.is_some()));
+
+                    if let Some(dur_secs) = for_dur {
+                        let rule_id   = rule.id;
+                        let rule_name = rule.name.clone();
+                        let trigger   = rule.trigger.clone();
+                        let bus       = self.bus.clone();
+                        let cache     = Arc::clone(&self.device_cache);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(dur_secs)).await;
+                            if still_matches_for_duration(&trigger, &cache) {
+                                let _ = bus.publish(Event::Custom {
+                                    timestamp: Utc::now(),
+                                    event_type: "deferred_rule_fire".into(),
+                                    payload: serde_json::json!({ "rule_id": rule_id }),
+                                });
+                            } else {
+                                debug!(rule_name = %rule_name, "for_duration_secs: state changed, not firing");
+                            }
+                        });
+                    }
                 }
                 TriggerResult::NoMatch(reason) => {
                     debug!(
-                        rule_name = %rule.name,
-                        rule_id   = %rule.id,
+                        rule_name = %rule.name, rule_id = %rule.id,
                         trigger   = trigger_type(&rule.trigger),
-                        matched   = false,
-                        reason,
-                        "rule.trigger"
+                        matched   = false, reason, "rule.trigger"
                     );
                 }
             }
@@ -323,15 +378,18 @@ impl RuleEngine {
             return Ok(());
         }
 
-        debug!(count = matching.len(), "rule.trigger: {} rule(s) matched, evaluating conditions", matching.len());
+        debug!(count = matching.len(), "rule.trigger: {} rule(s) matched, evaluating", matching.len());
 
-        for rule in matching {
-            let stop = self.fire_rule(rule).await?;
+        for (rule, tctx, deferred) in matching {
+            if deferred {
+                // Deferred rules are handled by the spawned task above
+                continue;
+            }
+            let stop = self.fire_rule(rule, tctx).await?;
             if stop {
                 debug!(
-                    rule_name = %rule.name,
-                    rule_id   = %rule.id,
-                    "rule.trigger: StopRuleChain — halting further rule evaluation for this event"
+                    rule_name = %rule.name, rule_id = %rule.id,
+                    "rule.trigger: StopRuleChain — halting further evaluation"
                 );
                 break;
             }
@@ -339,18 +397,22 @@ impl RuleEngine {
         Ok(())
     }
 
-    /// Fire a rule, returning `Ok(true)` if the rule chain should stop (StopRuleChain action).
-    async fn fire_rule(&self, rule: &Rule) -> Result<bool> {
+    /// Fire a rule, returning `Ok(true)` if the rule chain should stop.
+    async fn fire_rule(&self, rule: &Rule, trigger_ctx: TriggerContext) -> Result<bool> {
+        // ── Pause check ───────────────────────────────────────────────────────
+        if self.pause_state.get(&rule.id).map(|v| *v).unwrap_or(false) {
+            debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.fire: skipping — rule is paused");
+            return Ok(false);
+        }
+
         // ── Cooldown check ────────────────────────────────────────────────────
         if let Some(cooldown_secs) = rule.cooldown_secs {
             if let Some(last_fire) = self.cooldown_map.get(&rule.id) {
                 let elapsed = last_fire.elapsed().as_secs();
                 if elapsed < cooldown_secs {
                     debug!(
-                        rule_name     = %rule.name,
-                        rule_id       = %rule.id,
-                        elapsed_secs  = elapsed,
-                        cooldown_secs,
+                        rule_name = %rule.name, rule_id = %rule.id,
+                        elapsed_secs = elapsed, cooldown_secs,
                         "rule.cooldown: skipping — within cooldown window"
                     );
                     return Ok(false);
@@ -358,57 +420,99 @@ impl RuleEngine {
             }
         }
 
-        let eval_start = Instant::now();
-
         // Build the device snapshot once for this entire rule evaluation.
-        // All ScriptExpression conditions and script actions share this snapshot
-        // so there are no redundant DashMap → HashMap conversions.
         let snapshot = self.snapshot_from_cache();
 
+        // ── Required Expression gate ──────────────────────────────────────────
+        if let Some(ref expr) = rule.required_expression {
+            let snap = snapshot.clone();
+            let tctx = trigger_ctx.clone();
+            let expr = expr.clone();
+            let passes = tokio::task::spawn_blocking(move || {
+                ScriptRuntime::new_with_devices(snap)
+                    .with_trigger_context(&tctx)
+                    .eval_condition(&expr)
+            }).await??;
+            if !passes {
+                if rule.cancel_on_false {
+                    let prefix = format!("{}/", rule.id);
+                    let keys: Vec<String> = self.delay_registry.iter()
+                        .filter(|e| e.key().starts_with(&prefix))
+                        .map(|e| e.key().clone())
+                        .collect();
+                    for k in keys {
+                        if let Some((_, n)) = self.delay_registry.remove(&k) {
+                            n.notify_one();
+                        }
+                    }
+                }
+                debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.required_expression: false — skipping");
+                return Ok(false);
+            }
+        }
+
+        // ── Trigger Condition gate ────────────────────────────────────────────
+        if let Some(ref expr) = rule.trigger_condition {
+            let snap = snapshot.clone();
+            let tctx = trigger_ctx.clone();
+            let expr = expr.clone();
+            let passes = tokio::task::spawn_blocking(move || {
+                ScriptRuntime::new_with_devices(snap)
+                    .with_trigger_context(&tctx)
+                    .eval_condition(&expr)
+            }).await??;
+            if !passes {
+                debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger_condition: false — skipping");
+                return Ok(false);
+            }
+        }
+
+        let eval_start = Instant::now();
         let maybe_failed = self.evaluate_conditions(rule, &snapshot).await?;
         let conditions_passed = maybe_failed.is_none();
         let eval_ms = eval_start.elapsed().as_millis() as u64;
         let actions_ran = if conditions_passed { rule.actions.len() } else { 0 };
 
-        // Record in the per-rule fire history ring buffer (max HISTORY_RING_SIZE).
+        // Record in the fire history ring buffer.
         {
             let mut buf = self.fire_history.entry(rule.id).or_default();
             if buf.len() >= HISTORY_RING_SIZE {
                 buf.pop_front();
             }
-            buf.push_back(RuleFiring {
-                timestamp: Utc::now(),
-                conditions_passed,
-                actions_ran,
-                eval_ms,
-            });
+            buf.push_back(RuleFiring { timestamp: Utc::now(), conditions_passed, actions_ran, eval_ms });
         }
 
         if let Some(failed_idx) = maybe_failed {
-            info!(
-                rule_name   = %rule.name,
-                rule_id     = %rule.id,
-                fired       = false,
-                reason      = "condition_failed",
-                failed_cond = failed_idx,
-                conditions  = rule.conditions.len(),
-                eval_ms,
-                "rule.eval"
-            );
+            if rule.log_triggers {
+                info!(
+                    rule_name = %rule.name, rule_id = %rule.id, fired = false,
+                    reason = "condition_failed", failed_cond = failed_idx, eval_ms,
+                    "rule.eval: conditions not met"
+                );
+            } else {
+                debug!(
+                    rule_name = %rule.name, rule_id = %rule.id, fired = false,
+                    reason = "condition_failed", failed_cond = failed_idx, eval_ms,
+                    "rule.eval"
+                );
+            }
             return Ok(false);
         }
 
-        info!(
-            rule_name  = %rule.name,
-            rule_id    = %rule.id,
-            fired      = true,
-            conditions = rule.conditions.len(),
-            actions    = rule.actions.len(),
-            eval_ms,
-            "rule.eval"
-        );
+        if rule.log_triggers {
+            info!(
+                rule_name  = %rule.name, rule_id = %rule.id, fired = true,
+                conditions = rule.conditions.len(), actions = rule.actions.len(), eval_ms,
+                "rule.eval: fired"
+            );
+        } else {
+            info!(
+                rule_name  = %rule.name, rule_id = %rule.id, fired = true,
+                conditions = rule.conditions.len(), actions = rule.actions.len(), eval_ms,
+                "rule.eval"
+            );
+        }
 
-        // Check if any action is StopRuleChain — must be determined before spawning.
         let stop_chain = rule.actions.iter().any(|a| matches!(a, hc_types::rule::Action::StopRuleChain));
 
         // Update cooldown map immediately after confirming the rule fires.
@@ -416,48 +520,48 @@ impl RuleEngine {
             self.cooldown_map.insert(rule.id, Instant::now());
         }
 
-        let actions       = rule.actions.clone();
-        let action_count  = actions.len();
+        let actions          = rule.actions.clone();
+        let action_count     = actions.len();
         let trigger_type_str = trigger_type(&rule.trigger).to_string();
-        let publish    = self.publish.clone();
-        let exec_bus   = Some(self.bus.clone());
-        let bus        = self.bus.clone();
-        let rule_id    = rule.id.to_string();
-        let rule_name  = rule.name.clone();
-        let notify     = self.notify.clone();
-        let in_flight  = Arc::clone(&self.in_flight);
+        let bus              = self.bus.clone();
+        let rule_id          = rule.id;
+        let rule_name        = rule.name.clone();
+        let in_flight        = Arc::clone(&self.in_flight);
+
+        // Build the executor context for this firing.
+        let ctx = Arc::new(ExecutorContext {
+            publish:        self.publish.clone(),
+            notify:         self.notify.clone(),
+            event_bus:      Some(self.bus.clone()),
+            device_cache:   Arc::clone(&self.device_cache),
+            delay_registry: Arc::clone(&self.delay_registry),
+            pause_state:    Arc::clone(&self.pause_state),
+            rule_vars:      Arc::clone(&self.rule_vars),
+            priv_bools:     Arc::clone(&self.priv_bools),
+            rules_handle:   Arc::clone(&self.rules),
+            trigger_ctx:    trigger_ctx,
+            rule_id:        rule.id,
+            rule_name:      rule.name.clone(),
+            log_actions:    rule.log_actions,
+            exit_flag:      Arc::new(AtomicBool::new(false)),
+        });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let action_start = Instant::now();
-            debug!(
-                rule_name = %rule_name,
-                rule_id   = %rule_id,
-                count     = action_count,
-                "rule.actions: starting"
-            );
-            match execute_actions(actions, publish, notify, snapshot, exec_bus).await {
+            debug!(rule_name = %rule_name, rule_id = %rule_id, count = action_count, "rule.actions: starting");
+            match execute_actions(actions, ctx, snapshot).await {
                 Ok(()) => {
                     let action_ms = action_start.elapsed().as_millis();
-                    info!(
-                        rule_name = %rule_name,
-                        rule_id   = %rule_id,
-                        action_ms,
-                        "rule.actions: completed"
-                    );
+                    info!(rule_name = %rule_name, rule_id = %rule_id, action_ms, "rule.actions: completed");
                 }
                 Err(e) => {
-                    warn!(
-                        rule_name = %rule_name,
-                        rule_id   = %rule_id,
-                        error     = %e,
-                        "rule.actions: failed"
-                    );
+                    warn!(rule_name = %rule_name, rule_id = %rule_id, error = %e, "rule.actions: failed");
                 }
             }
             let _ = bus.publish(Event::RuleFired {
                 timestamp: chrono::Utc::now(),
-                rule_id,
+                rule_id: rule_id.to_string(),
                 rule_name,
                 trigger_type: trigger_type_str,
                 action_count,
@@ -469,8 +573,7 @@ impl RuleEngine {
 
     /// Evaluate all conditions for a rule.
     ///
-    /// Returns `None` if all conditions pass (fire the rule).
-    /// Returns `Some(i)` if condition `i` failed (skip the rule).
+    /// Returns `None` if all conditions pass, `Some(i)` if condition `i` failed.
     async fn evaluate_conditions(
         &self,
         rule: &Rule,
@@ -481,16 +584,10 @@ impl RuleEngine {
             return Ok(None);
         }
 
-        debug!(
-            rule_name = %rule.name,
-            count     = rule.conditions.len(),
-            "rule.conditions: evaluating"
-        );
+        debug!(rule_name = %rule.name, count = rule.conditions.len(), "rule.conditions: evaluating");
 
         for (i, cond) in rule.conditions.iter().enumerate() {
-            let passed = self
-                .evaluate_one(&rule.name, i, rule.conditions.len(), cond, snapshot)
-                .await?;
+            let passed = self.evaluate_one(rule, i, rule.conditions.len(), cond, snapshot).await?;
             if !passed {
                 return Ok(Some(i));
             }
@@ -502,7 +599,7 @@ impl RuleEngine {
 
     async fn evaluate_one(
         &self,
-        rule_name: &str,
+        rule: &Rule,
         idx: usize,
         total: usize,
         condition: &Condition,
@@ -510,48 +607,32 @@ impl RuleEngine {
     ) -> Result<bool> {
         match condition {
             Condition::DeviceState { device_id, attribute, op, value } => {
-                // Read from in-memory cache — no spawn_blocking, no redb I/O.
                 let entry = self.device_cache.get(device_id.as_str());
                 let Some(attrs) = entry else {
                     info!(
-                        rule_name,
-                        cond      = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        "rule.condition: FAIL — device not found in cache"
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, "rule.condition: FAIL — device not found in cache"
                     );
                     return Ok(false);
                 };
                 let Some(actual) = attrs.get(attribute.as_str()) else {
                     info!(
-                        rule_name,
-                        cond      = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        "rule.condition: FAIL — attribute not present on device"
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute, "rule.condition: FAIL — attribute not present"
                     );
                     return Ok(false);
                 };
                 let result = compare(actual, op, value);
                 if result {
                     debug!(
-                        rule_name,
-                        cond      = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        op        = ?op,
-                        expected  = %value,
-                        actual    = %actual,
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: pass"
                     );
                 } else {
                     info!(
-                        rule_name,
-                        cond      = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        op        = ?op,
-                        expected  = %value,
-                        actual    = %actual,
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: FAIL"
                     );
                 }
@@ -566,13 +647,8 @@ impl RuleEngine {
                     now >= *start || now <= *end
                 };
                 debug!(
-                    rule_name,
-                    cond   = format!("{}/{}", idx + 1, total),
-                    %start,
-                    %end,
-                    now    = %now,
-                    result,
-                    "rule.condition: TimeWindow"
+                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    %start, %end, now = %now, result, "rule.condition: TimeWindow"
                 );
                 Ok(result)
             }
@@ -580,39 +656,84 @@ impl RuleEngine {
             Condition::ScriptExpression { script } => {
                 let snippet = if script.len() > 80 { &script[..80] } else { script };
                 debug!(
-                    rule_name,
-                    cond   = format!("{}/{}", idx + 1, total),
-                    script = %snippet,
-                    "rule.condition: ScriptExpression — evaluating"
+                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    script = %snippet, "rule.condition: ScriptExpression — evaluating"
                 );
-                // Use the pre-built snapshot — no extra DashMap iteration.
                 let snap   = snapshot.clone();
                 let script = script.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    hc_scripting::ScriptRuntime::new_with_devices(snap).eval_condition(&script)
-                })
-                .await??;
+                    ScriptRuntime::new_with_devices(snap).eval_condition(&script)
+                }).await??;
                 debug!(
-                    rule_name,
-                    cond   = format!("{}/{}", idx + 1, total),
-                    result,
-                    "rule.condition: ScriptExpression result"
+                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    result, "rule.condition: ScriptExpression"
                 );
                 Ok(result)
             }
 
             Condition::Not { condition } => {
                 let inner = Box::pin(
-                    self.evaluate_one(rule_name, idx, total, condition, snapshot)
-                )
-                .await?;
+                    self.evaluate_one(rule, idx, total, condition, snapshot)
+                ).await?;
                 let result = !inner;
                 debug!(
-                    rule_name,
-                    cond   = format!("{}/{}", idx + 1, total),
-                    inner,
-                    result,
-                    "rule.condition: Not"
+                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    inner, result, "rule.condition: Not"
+                );
+                Ok(result)
+            }
+
+            Condition::And { conditions } => {
+                for (i, c) in conditions.iter().enumerate() {
+                    let passed = Box::pin(
+                        self.evaluate_one(rule, i, conditions.len(), c, snapshot)
+                    ).await?;
+                    if !passed {
+                        debug!(rule_name = %rule.name, "rule.condition: And — short-circuit false at {}", i);
+                        return Ok(false);
+                    }
+                }
+                debug!(rule_name = %rule.name, "rule.condition: And — all passed");
+                Ok(true)
+            }
+
+            Condition::Or { conditions } => {
+                for (i, c) in conditions.iter().enumerate() {
+                    let passed = Box::pin(
+                        self.evaluate_one(rule, i, conditions.len(), c, snapshot)
+                    ).await?;
+                    if passed {
+                        debug!(rule_name = %rule.name, "rule.condition: Or — short-circuit true at {}", i);
+                        return Ok(true);
+                    }
+                }
+                debug!(rule_name = %rule.name, "rule.condition: Or — all false");
+                Ok(false)
+            }
+
+            Condition::Xor { conditions } => {
+                let mut count = 0usize;
+                for (i, c) in conditions.iter().enumerate() {
+                    let passed = Box::pin(
+                        self.evaluate_one(rule, i, conditions.len(), c, snapshot)
+                    ).await?;
+                    if passed { count += 1; }
+                }
+                let result = count == 1;
+                debug!(rule_name = %rule.name, count, result, "rule.condition: Xor");
+                Ok(result)
+            }
+
+            Condition::PrivateBooleanIs { name, value } => {
+                let actual = self.priv_bools
+                    .get(&(rule.id, name.clone()))
+                    .map(|v| *v)
+                    .unwrap_or(false);
+                let result = actual == *value;
+                debug!(
+                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    boolean = name, expected = value, actual, result,
+                    "rule.condition: PrivateBooleanIs"
                 );
                 Ok(result)
             }
@@ -625,11 +746,9 @@ impl RuleEngine {
 
                 let Some(changed_at) = changed_at else {
                     info!(
-                        rule_name,
-                        cond      = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        "rule.condition: TimeElapsed FAIL — attribute not tracked (device never seen)"
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute,
+                        "rule.condition: TimeElapsed FAIL — attribute not tracked"
                     );
                     return Ok(false);
                 };
@@ -638,22 +757,14 @@ impl RuleEngine {
                 let result = elapsed_secs >= *duration_secs;
                 if result {
                     debug!(
-                        rule_name,
-                        cond          = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        elapsed_secs,
-                        duration_secs,
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed pass"
                     );
                 } else {
                     info!(
-                        rule_name,
-                        cond          = format!("{}/{}", idx + 1, total),
-                        device_id,
-                        attribute,
-                        elapsed_secs,
-                        duration_secs,
+                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        device_id, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed FAIL"
                     );
                 }
@@ -662,8 +773,7 @@ impl RuleEngine {
         }
     }
 
-    /// Convert the DashMap cache to a `HashMap<device_id, {attrs}>` suitable
-    /// for injection into Rhai scripts via `device_state("id")`.
+    /// Convert the DashMap cache to a `HashMap<device_id, {attrs}>` for Rhai scripts.
     fn snapshot_from_cache(&self) -> HashMap<String, JsonValue> {
         self.device_cache
             .iter()
@@ -678,8 +788,121 @@ impl RuleEngine {
 }
 
 // ---------------------------------------------------------------------------
+// TriggerContext extraction
+// ---------------------------------------------------------------------------
+
+/// Build a `TriggerContext` from the matching event + rule trigger.
+fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
+    match event {
+        Event::DeviceStateChanged { device_id, current, previous, .. } => {
+            // Find the attribute specified in this rule's trigger (if any).
+            let attr = match &rule.trigger {
+                Trigger::DeviceStateChanged { attribute, .. } => attribute.clone(),
+                Trigger::ButtonEvent { event, .. } => Some(match event {
+                    ButtonEventType::Pushed      => "pushed".into(),
+                    ButtonEventType::Held        => "held".into(),
+                    ButtonEventType::DoubleTapped => "double_tapped".into(),
+                    ButtonEventType::Released    => "released".into(),
+                }),
+                Trigger::NumericThreshold { attribute, .. } => Some(attribute.clone()),
+                _ => None,
+            };
+            let (value, prev_value) = if let Some(ref a) = attr {
+                (
+                    current.get(a.as_str()).cloned(),
+                    previous.get(a.as_str()).cloned(),
+                )
+            } else {
+                // Pick first changed attribute value
+                let first_changed = current.iter()
+                    .find(|(k, v)| previous.get(*k) != Some(v));
+                if let Some((_, v)) = first_changed {
+                    (Some(v.clone()), None)
+                } else {
+                    (None, None)
+                }
+            };
+            TriggerContext {
+                device_id: Some(device_id.clone()),
+                attribute: attr,
+                value,
+                prev_value,
+                event_type: Some("device_state_changed".into()),
+            }
+        }
+        Event::MqttMessage { topic, payload, .. } => TriggerContext {
+            device_id: None,
+            attribute: None,
+            value:     Some(JsonValue::String(String::from_utf8_lossy(payload).into_owned())),
+            prev_value: None,
+            event_type: Some(format!("mqtt:{topic}")),
+        },
+        Event::Custom { event_type, payload, .. } => TriggerContext {
+            device_id: None,
+            attribute: None,
+            value:     Some(payload.clone()),
+            prev_value: None,
+            event_type: Some(event_type.clone()),
+        },
+        Event::DeviceAvailabilityChanged { device_id, available, .. } => TriggerContext {
+            device_id: Some(device_id.clone()),
+            attribute: Some("available".into()),
+            value:     Some(JsonValue::Bool(*available)),
+            prev_value: None,
+            event_type: Some("device_availability_changed".into()),
+        },
+        _ => TriggerContext::default(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns the `for_duration_secs` value if the trigger has one.
+fn trigger_for_duration(trigger: &Trigger) -> Option<u64> {
+    match trigger {
+        Trigger::DeviceStateChanged { for_duration_secs, .. }      => *for_duration_secs,
+        Trigger::DeviceAvailabilityChanged { for_duration_secs, .. } => *for_duration_secs,
+        Trigger::NumericThreshold { for_duration_secs, .. }         => *for_duration_secs,
+        _ => None,
+    }
+}
+
+/// Re-check whether the device state still satisfies the trigger after a
+/// `for_duration_secs` delay has elapsed.
+fn still_matches_for_duration(
+    trigger: &Trigger,
+    device_cache: &DashMap<String, HashMap<String, JsonValue>>,
+) -> bool {
+    match trigger {
+        Trigger::DeviceStateChanged { device_id, attribute, to, not_to, .. } => {
+            let Some(attrs) = device_cache.get(device_id.as_str()) else { return false; };
+            let Some(attr) = attribute else { return true; };
+            let Some(curr) = attrs.get(attr.as_str()) else { return false; };
+            if let Some(expected) = to {
+                if curr != expected { return false; }
+            }
+            if let Some(excluded) = not_to {
+                if curr == excluded { return false; }
+            }
+            true
+        }
+        Trigger::NumericThreshold { device_id, attribute, op, value, .. } => {
+            let Some(attrs) = device_cache.get(device_id.as_str()) else { return false; };
+            let Some(curr_f) = attrs.get(attribute.as_str()).and_then(|v| v.as_f64()) else {
+                return false;
+            };
+            let threshold = *value;
+            match op {
+                ThresholdOp::Above | ThresholdOp::CrossesAbove => curr_f > threshold,
+                ThresholdOp::Below | ThresholdOp::CrossesBelow => curr_f < threshold,
+            }
+        }
+        // For DeviceAvailabilityChanged and others, optimistically assume still matches.
+        _ => true,
+    }
+}
 
 /// Short human-readable label for the trigger variant (for log fields).
 fn trigger_type(trigger: &Trigger) -> &'static str {
@@ -694,10 +917,13 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::SystemStarted                    => "SystemStarted",
         Trigger::Cron { .. }                      => "Cron",
         Trigger::DeviceAvailabilityChanged { .. } => "DeviceAvailabilityChanged",
+        Trigger::ButtonEvent { .. }               => "ButtonEvent",
+        Trigger::NumericThreshold { .. }          => "NumericThreshold",
+        Trigger::Periodic { .. }                  => "Periodic",
     }
 }
 
-/// Log key fields from the incoming event so the rules log shows what arrived.
+/// Log key fields from the incoming event.
 fn log_incoming_event(event: &Event) {
     match event {
         Event::DeviceStateChanged { device_id, current, previous, .. } => {
@@ -710,11 +936,7 @@ fn log_incoming_event(event: &Event) {
                     format!("{k}: {prev} → {curr}")
                 })
                 .collect();
-            debug!(
-                device_id,
-                changes = %changes.join(", "),
-                "rule.event: DeviceStateChanged"
-            );
+            debug!(device_id, changes = %changes.join(", "), "rule.event: DeviceStateChanged");
         }
         Event::DeviceAvailabilityChanged { device_id, available, .. } => {
             debug!(device_id, available, "rule.event: DeviceAvailabilityChanged");
@@ -734,40 +956,147 @@ enum TriggerResult {
     NoMatch(&'static str),
 }
 
-/// Check whether an event matches a trigger, returning a reason on mismatch for logging.
+/// Check whether an event matches a trigger.
 fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
     use TriggerResult::*;
     match (trigger, event) {
+        // ── DeviceStateChanged ──────────────────────────────────────────────
         (
-            Trigger::DeviceStateChanged { device_id, attribute, to },
+            Trigger::DeviceStateChanged { device_id, device_ids, attribute, to, from, not_from, not_to, .. },
             Event::DeviceStateChanged { device_id: eid, current, previous, .. },
         ) => {
-            if device_id != eid {
+            // Match if device_id equals OR any of device_ids equals
+            let dev_matches = device_id == eid || device_ids.iter().any(|d| d == eid);
+            if !dev_matches {
                 return NoMatch("device_id mismatch");
             }
             match attribute {
-                None => Matched,
+                None => Matched, // Any attribute change fires
                 Some(attr) => {
-                    if !current.contains_key(attr.as_str()) {
-                        return NoMatch("attribute not in device state");
-                    }
-                    if previous.get(attr.as_str()) == current.get(attr.as_str()) {
+                    let Some(curr_val) = current.get(attr.as_str()) else {
+                        return NoMatch("attribute not in current state");
+                    };
+                    let prev_val = previous.get(attr.as_str());
+                    // Must have changed
+                    if prev_val == Some(curr_val) {
                         return NoMatch("attribute value unchanged");
                     }
                     if let Some(expected) = to {
-                        if current.get(attr.as_str()) != Some(expected) {
-                            return NoMatch("attribute did not change to expected value");
+                        if curr_val != expected {
+                            return NoMatch("attribute did not change to expected value (to)");
+                        }
+                    }
+                    if let Some(excluded) = not_to {
+                        if curr_val == excluded {
+                            return NoMatch("attribute changed to excluded value (not_to)");
+                        }
+                    }
+                    if let Some(expected_from) = from {
+                        if prev_val != Some(expected_from) {
+                            return NoMatch("previous value does not match 'from' filter");
+                        }
+                    }
+                    if let Some(excluded_from) = not_from {
+                        if prev_val == Some(excluded_from) {
+                            return NoMatch("previous value matches 'not_from' exclusion");
                         }
                     }
                     Matched
                 }
             }
         }
-        (_, Event::DeviceStateChanged { .. }) => NoMatch("wrong trigger type for DeviceStateChanged event"),
-        (Trigger::MqttMessage { topic_pattern }, Event::MqttMessage { topic, .. }) => {
-            if mqtt_topic_matches(topic_pattern, topic) { Matched } else { NoMatch("topic pattern mismatch") }
+        // ── ButtonEvent ───────────────────────────────────────────────────
+        (
+            Trigger::ButtonEvent { device_id, button_number, event: btn_event },
+            Event::DeviceStateChanged { device_id: eid, current, previous, .. },
+        ) => {
+            if device_id != eid {
+                return NoMatch("device_id mismatch");
+            }
+            let attr = match btn_event {
+                ButtonEventType::Pushed       => "pushed",
+                ButtonEventType::Held         => "held",
+                ButtonEventType::DoubleTapped => "double_tapped",
+                ButtonEventType::Released     => "released",
+            };
+            let Some(new_val) = current.get(attr) else {
+                return NoMatch("button attribute not in current state");
+            };
+            // Must have changed (button events are momentary)
+            if previous.get(attr) == Some(new_val) {
+                return NoMatch("button attribute value unchanged");
+            }
+            if let Some(expected_btn) = button_number {
+                let actual_btn = new_val.as_u64().unwrap_or(0) as u32;
+                if actual_btn != *expected_btn {
+                    return NoMatch("button number mismatch");
+                }
+            }
+            Matched
         }
-        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. } | Trigger::Cron { .. }, _) => NoMatch("handled by scheduler"),
+
+        // ── NumericThreshold ──────────────────────────────────────────────
+        (
+            Trigger::NumericThreshold { device_id, attribute, op, value, .. },
+            Event::DeviceStateChanged { device_id: eid, current, previous, .. },
+        ) => {
+            if device_id != eid {
+                return NoMatch("device_id mismatch");
+            }
+            let Some(curr_f) = current.get(attribute.as_str()).and_then(|v| v.as_f64()) else {
+                return NoMatch("attribute not numeric in current state");
+            };
+            let prev_f = previous.get(attribute.as_str()).and_then(|v| v.as_f64());
+            let threshold = *value;
+            let fires = match op {
+                ThresholdOp::Above  => curr_f > threshold,
+                ThresholdOp::Below  => curr_f < threshold,
+                ThresholdOp::CrossesAbove => {
+                    prev_f.map_or(false, |p| p <= threshold) && curr_f > threshold
+                }
+                ThresholdOp::CrossesBelow => {
+                    prev_f.map_or(false, |p| p >= threshold) && curr_f < threshold
+                }
+            };
+            if fires { Matched } else { NoMatch("threshold condition not met") }
+        }
+
+        (_, Event::DeviceStateChanged { .. }) => NoMatch("wrong trigger type for DeviceStateChanged"),
+
+        // ── MqttMessage ────────────────────────────────────────────────────
+        (
+            Trigger::MqttMessage { topic_pattern, payload: expected_payload, value_path, value_op, value_cmp },
+            Event::MqttMessage { topic, payload: msg_payload, .. },
+        ) => {
+            if !mqtt_topic_matches(topic_pattern, topic) {
+                return NoMatch("topic pattern mismatch");
+            }
+            let payload_str = String::from_utf8_lossy(msg_payload);
+            if let Some(expected) = expected_payload {
+                if payload_str.as_ref() != expected.as_str() {
+                    return NoMatch("payload mismatch");
+                }
+            }
+            if let (Some(path), Some(op), Some(cmp)) = (value_path, value_op, value_cmp) {
+                let Ok(json) = serde_json::from_str::<JsonValue>(&payload_str) else {
+                    return NoMatch("payload is not valid JSON for value_path match");
+                };
+                let Some(actual) = json.pointer(path.as_str()) else {
+                    return NoMatch("value_path not found in payload");
+                };
+                if !compare(actual, op, cmp) {
+                    return NoMatch("value_path comparison failed");
+                }
+            }
+            Matched
+        }
+
+        // ── Time-based (handled by scheduler) ─────────────────────────────
+        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. } | Trigger::Cron { .. } | Trigger::Periodic { .. }, _) => {
+            NoMatch("handled by scheduler")
+        }
+
+        // ── WebhookReceived ────────────────────────────────────────────────
         (Trigger::WebhookReceived { path: trigger_path }, Event::Custom { event_type, payload, .. }) => {
             if event_type != "webhook" {
                 return NoMatch("not a webhook event");
@@ -778,15 +1107,23 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                 NoMatch("webhook path mismatch")
             }
         }
+
+        // ── CustomEvent ────────────────────────────────────────────────────
         (Trigger::CustomEvent { event_type }, Event::Custom { event_type: et, .. }) => {
             if event_type == et { Matched } else { NoMatch("event_type mismatch") }
         }
+
+        // ── SystemStarted ──────────────────────────────────────────────────
         (Trigger::SystemStarted, Event::Custom { event_type, .. }) => {
-            if event_type == "system_started" { Matched } else { NoMatch("not a system_started event") }
+            if event_type == "system_started" { Matched } else { NoMatch("not system_started") }
         }
+
+        // ── ManualTrigger ──────────────────────────────────────────────────
         (Trigger::ManualTrigger, _) => NoMatch("manual trigger only fires via API"),
+
+        // ── DeviceAvailabilityChanged ──────────────────────────────────────
         (
-            Trigger::DeviceAvailabilityChanged { device_id, to },
+            Trigger::DeviceAvailabilityChanged { device_id, to, .. },
             Event::DeviceAvailabilityChanged { device_id: ev_device, available, .. },
         ) => {
             if device_id != ev_device {
@@ -799,7 +1136,8 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             }
             Matched
         }
-        (_, Event::DeviceAvailabilityChanged { .. }) => NoMatch("wrong trigger type for DeviceAvailabilityChanged event"),
+        (_, Event::DeviceAvailabilityChanged { .. }) => NoMatch("wrong trigger type for DeviceAvailabilityChanged"),
+
         _ => NoMatch("event type does not match trigger type"),
     }
 }
@@ -810,11 +1148,11 @@ fn mqtt_topic_matches(pattern: &str, topic: &str) -> bool {
     let mut tparts = topic.split('/');
     loop {
         match (pparts.next(), tparts.next()) {
-            (Some("#"), _) => return true,
-            (Some("+"), Some(_)) => continue,
+            (Some("#"), _)               => return true,
+            (Some("+"), Some(_))         => continue,
             (Some(p), Some(t)) if p == t => continue,
-            (None, None) => return true,
-            _ => return false,
+            (None, None)                 => return true,
+            _                            => return false,
         }
     }
 }
@@ -824,15 +1162,9 @@ fn compare(actual: &JsonValue, op: &CompareOp, expected: &JsonValue) -> bool {
         CompareOp::Eq  => actual == expected,
         CompareOp::Ne  => actual != expected,
         CompareOp::Gt  => num_cmp(actual, expected) == Some(std::cmp::Ordering::Greater),
-        CompareOp::Gte => matches!(
-            num_cmp(actual, expected),
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        ),
+        CompareOp::Gte => matches!(num_cmp(actual, expected), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
         CompareOp::Lt  => num_cmp(actual, expected) == Some(std::cmp::Ordering::Less),
-        CompareOp::Lte => matches!(
-            num_cmp(actual, expected),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
+        CompareOp::Lte => matches!(num_cmp(actual, expected), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
     }
 }
 
@@ -851,6 +1183,20 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    fn dsc_event(device_id: &str, attr: &str, prev: JsonValue, curr: JsonValue) -> Event {
+        let mut previous = HashMap::new();
+        previous.insert(attr.into(), prev);
+        let mut current = HashMap::new();
+        current.insert(attr.into(), curr);
+        Event::DeviceStateChanged {
+            timestamp: Utc::now(),
+            device_id: device_id.into(),
+            previous,
+            current,
+            changed: vec![attr.into()],
+        }
+    }
 
     #[test]
     fn webhook_trigger_matches_correct_path() {
@@ -886,5 +1232,91 @@ mod tests {
         assert!(mqtt_topic_matches("homecore/devices/+/state", "homecore/devices/light/state"));
         assert!(!mqtt_topic_matches("homecore/devices/+/state", "homecore/devices/light/cmd"));
         assert!(!mqtt_topic_matches("homecore/devices/+/state", "homecore/devices/a/b/state"));
+    }
+
+    #[test]
+    fn device_state_trigger_from_filter() {
+        let trigger = Trigger::DeviceStateChanged {
+            device_id: "door_1".into(),
+            device_ids: vec![],
+            attribute: Some("locked".into()),
+            to: None,
+            from: Some(json!(true)),
+            not_from: None,
+            not_to: None,
+            for_duration_secs: None,
+        };
+        // from = true (was locked), now false (unlocked) — matches
+        let ev = dsc_event("door_1", "locked", json!(true), json!(false));
+        assert!(matches!(trigger_check(&trigger, &ev), TriggerResult::Matched));
+        // from = false (was unlocked), now true (locked) — does NOT match
+        let ev2 = dsc_event("door_1", "locked", json!(false), json!(true));
+        assert!(matches!(trigger_check(&trigger, &ev2), TriggerResult::NoMatch(_)));
+    }
+
+    #[test]
+    fn device_state_trigger_multi_device_ids() {
+        let trigger = Trigger::DeviceStateChanged {
+            device_id: "motion_1".into(),
+            device_ids: vec!["motion_2".into(), "motion_3".into()],
+            attribute: Some("motion".into()),
+            to: Some(json!("active")),
+            from: None,
+            not_from: None,
+            not_to: None,
+            for_duration_secs: None,
+        };
+        // Fires for motion_2 (in device_ids)
+        let ev = dsc_event("motion_2", "motion", json!("inactive"), json!("active"));
+        assert!(matches!(trigger_check(&trigger, &ev), TriggerResult::Matched));
+        // Does not fire for unknown device
+        let ev2 = dsc_event("motion_99", "motion", json!("inactive"), json!("active"));
+        assert!(matches!(trigger_check(&trigger, &ev2), TriggerResult::NoMatch(_)));
+    }
+
+    #[test]
+    fn numeric_threshold_crosses_above() {
+        let trigger = Trigger::NumericThreshold {
+            device_id: "temp_sensor".into(),
+            attribute: "temperature".into(),
+            op: ThresholdOp::CrossesAbove,
+            value: 80.0,
+            for_duration_secs: None,
+        };
+        // Crossing upward: 75 → 82
+        let ev = dsc_event("temp_sensor", "temperature", json!(75.0), json!(82.0));
+        assert!(matches!(trigger_check(&trigger, &ev), TriggerResult::Matched));
+        // Already above, no crossing: 81 → 85
+        let ev2 = dsc_event("temp_sensor", "temperature", json!(81.0), json!(85.0));
+        assert!(matches!(trigger_check(&trigger, &ev2), TriggerResult::NoMatch(_)));
+        // Crossing downward: not a CrossesAbove
+        let ev3 = dsc_event("temp_sensor", "temperature", json!(85.0), json!(75.0));
+        assert!(matches!(trigger_check(&trigger, &ev3), TriggerResult::NoMatch(_)));
+    }
+
+    #[test]
+    fn button_event_trigger_any_button() {
+        let trigger = Trigger::ButtonEvent {
+            device_id: "pico_remote".into(),
+            button_number: None,
+            event: ButtonEventType::Pushed,
+        };
+        let ev = dsc_event("pico_remote", "pushed", json!(0), json!(1));
+        assert!(matches!(trigger_check(&trigger, &ev), TriggerResult::Matched));
+    }
+
+    #[test]
+    fn button_event_trigger_specific_button() {
+        let trigger = Trigger::ButtonEvent {
+            device_id: "pico_remote".into(),
+            button_number: Some(2),
+            event: ButtonEventType::Pushed,
+        };
+        // Button 2 pressed
+        let ev = dsc_event("pico_remote", "pushed", json!(0), json!(2));
+        assert!(matches!(trigger_check(&trigger, &ev), TriggerResult::Matched));
+        // Button 1 pressed (wrong number)
+        let ev2 = dsc_event("pico_remote", "pushed", json!(0), json!(1));
+        assert!(matches!(trigger_check(&trigger, &ev2), TriggerResult::NoMatch(_)));
     }
 }

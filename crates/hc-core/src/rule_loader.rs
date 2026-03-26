@@ -111,16 +111,23 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         .to_string();
 
     Rule {
-        id:           stub_id,
-        name:         format!("{name} [BROKEN]"),
-        enabled:      false,
-        priority:     0,
-        tags:         Vec::new(),
-        trigger:      Trigger::ManualTrigger,
-        conditions:   Vec::<Condition>::new(),
-        actions:      Vec::<Action>::new(),
-        error:        Some(format!("parse error: {err}")),
-        cooldown_secs: None,
+        id:                   stub_id,
+        name:                 format!("{name} [BROKEN]"),
+        enabled:              false,
+        priority:             0,
+        tags:                 Vec::new(),
+        trigger:              Trigger::ManualTrigger,
+        conditions:           Vec::<Condition>::new(),
+        actions:              Vec::<Action>::new(),
+        error:                Some(format!("parse error: {err}")),
+        cooldown_secs:        None,
+        log_events:           false,
+        log_triggers:         false,
+        log_actions:          false,
+        required_expression:  None,
+        cancel_on_false:      false,
+        trigger_condition:    None,
+        variables:            std::collections::HashMap::new(),
     }
 }
 

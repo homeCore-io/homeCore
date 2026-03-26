@@ -49,8 +49,13 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
         tags: vec![],
         trigger: Trigger::DeviceStateChanged {
             device_id: "test_light".into(),
+            device_ids: vec![],
             attribute: Some("on".into()),
             to: None,
+            from: None,
+            not_from: None,
+            not_to: None,
+            for_duration_secs: None,
         },
         conditions: vec![],
         actions: vec![Action::PublishMqtt {
@@ -59,6 +64,14 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
             retain: false,
         }],
         error: None,
+        cooldown_secs: None,
+        log_events: false,
+        log_triggers: false,
+        log_actions: false,
+        required_expression: None,
+        cancel_on_false: false,
+        trigger_condition: None,
+        variables: std::collections::HashMap::new(),
     };
     store.upsert_rule(&rule).await?;
 
