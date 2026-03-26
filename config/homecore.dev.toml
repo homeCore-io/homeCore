@@ -69,7 +69,7 @@ whitelist = [
 # Logging  — pretty stderr only in dev; file logging off to reduce noise
 # ---------------------------------------------------------------------------
 [logging]
-level = "debug"
+level = "info"
 time_display = "local"   # "local" (default) | "utc"
 
 [logging.targets]
