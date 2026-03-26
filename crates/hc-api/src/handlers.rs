@@ -1639,3 +1639,151 @@ pub async fn list_events(
     let entries = s.event_log.query(&query);
     (StatusCode::OK, Json(json!(entries)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite};
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+    use chrono::Utc;
+    use hc_auth::JwtService;
+    use hc_core::EventBus;
+    use hc_types::device::DeviceState;
+    use http_body_util::BodyExt;
+    use serde::de::DeserializeOwned;
+    use uuid::Uuid;
+
+    fn temp_db_paths(prefix: &str) -> (String, String) {
+        let base = std::env::temp_dir().join(format!("hc_api_handlers_{prefix}_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&base);
+        (
+            base.join("state.redb").to_string_lossy().to_string(),
+            base.join("history.sqlite").to_string_lossy().to_string(),
+        )
+    }
+
+    async fn mk_state() -> AppState {
+        let (state_db, history_db) = temp_db_paths("areas");
+        let store = hc_state::StateStore::open(&state_db, &history_db)
+            .await
+            .expect("state store opens");
+        let bus = EventBus::new(128);
+        let jwt = JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24);
+        AppState::new(store, bus, None, None, None, jwt, vec![], None)
+    }
+
+    async fn seed_device(state: &AppState, id: &str, area: Option<&str>) {
+        let mut d = DeviceState::new(id, id, "plugin.test");
+        d.available = true;
+        d.last_seen = Utc::now();
+        d.area = area.map(str::to_string);
+        state.store.upsert_device(&d).await.expect("seed device");
+    }
+
+    async fn parse_json<T: DeserializeOwned>(resp: axum::response::Response) -> T {
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect")
+            .to_bytes();
+        serde_json::from_slice::<T>(&bytes).expect("json parse")
+    }
+
+    #[tokio::test]
+    async fn list_areas_is_derived_from_device_assignments() {
+        let state = mk_state().await;
+        seed_device(&state, "d1", Some("Kitchen")).await;
+        seed_device(&state, "d2", Some("Kitchen")).await;
+        seed_device(&state, "d3", Some("Office")).await;
+
+        let resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
+            .await
+            .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut areas: Vec<Area> = parse_json(resp).await;
+        areas.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(areas.len(), 2);
+        let kitchen = areas.iter().find(|a| a.name == "Kitchen").expect("kitchen exists");
+        assert_eq!(kitchen.device_ids.len(), 2);
+        let office = areas.iter().find(|a| a.name == "Office").expect("office exists");
+        assert_eq!(office.device_ids, vec!["d3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn patch_area_renames_member_devices() {
+        let state = mk_state().await;
+        seed_device(&state, "d1", Some("Kitchen")).await;
+        seed_device(&state, "d2", Some("Kitchen")).await;
+        let kitchen_id = area_id_from_name("Kitchen");
+
+        let resp = patch_area(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(kitchen_id),
+            Json(PatchAreaBody {
+                name: "Great Room".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
+        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
+        assert_eq!(d1.area.as_deref(), Some("Great Room"));
+        assert_eq!(d2.area.as_deref(), Some("Great Room"));
+    }
+
+    #[tokio::test]
+    async fn delete_area_unassigns_member_devices() {
+        let state = mk_state().await;
+        seed_device(&state, "d1", Some("Kitchen")).await;
+        seed_device(&state, "d2", Some("Kitchen")).await;
+        let kitchen_id = area_id_from_name("Kitchen");
+
+        let resp = delete_area(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(kitchen_id),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
+        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
+        assert_eq!(d1.area, None);
+        assert_eq!(d2.area, None);
+    }
+
+    #[tokio::test]
+    async fn set_area_devices_reconciles_membership() {
+        let state = mk_state().await;
+        seed_device(&state, "d1", Some("Kitchen")).await;
+        seed_device(&state, "d2", Some("Kitchen")).await;
+        seed_device(&state, "d3", Some("Office")).await;
+        let kitchen_id = area_id_from_name("Kitchen");
+
+        let resp = set_area_devices(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(kitchen_id),
+            Json(vec!["d3".to_string()]),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
+        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
+        let d3 = state.store.get_device("d3").await.expect("load d3").expect("d3 exists");
+
+        assert_eq!(d1.area, None);
+        assert_eq!(d2.area, None);
+        assert_eq!(d3.area.as_deref(), Some("Kitchen"));
+    }
+}
