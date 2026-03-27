@@ -290,6 +290,12 @@ binary  = "plugins/hc-hue/bin/hc-hue"
 config  = "plugins/hc-hue/config/config.toml"
 enabled = false
 
+[[plugins]]
+id      = "plugin.isy"
+binary  = "plugins/hc-isy/bin/hc-isy"
+config  = "plugins/hc-isy/config/config.toml"
+enabled = false
+
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------

@@ -6049,3 +6049,112 @@ instead of `context.go('/scenes')` / `context.go('/automations')`.
 
 `ModeState.fromJson` was reading from a flat top-level object. Fixed to read
 `id`/`kind`/offsets from `config` and `on`/solar times from `state.attributes`.
+
+---
+
+## ISY/IoX (`hc-isy` plugin)
+
+HomeCore integrates Universal Devices ISY994i, eisy, and Polisy controllers via the **`hc-isy`** plugin. The ISY is a local home automation hub that manages Insteon, Z-Wave, Zigbee, and X10 devices; `hc-isy` bridges its full device inventory into HomeCore.
+
+Source: `../hc-isy/` (separate git repo)
+
+### Communication
+
+- **REST API** (`HTTP GET /rest/*`, XML responses) — used for initial node load, status poll, and all outbound commands.
+- **WebSocket** (`ws://{host}/rest/subscribe`, protocol `ISYSUB`) — used for real-time state-change events; push-based, no polling.
+- **Authentication** — HTTP Basic auth on both REST and WebSocket.
+
+### Config (`config/config.toml`)
+
+```toml
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.isy"
+password    = ""          # match [[mqtt.clients]] entry if broker auth is on
+
+[isy]
+host     = "192.168.1.50"   # ISY IP or hostname
+port     = 80               # 80 = HTTP (default); 443 = TLS
+username = "admin"
+password = "admin"          # ISY Admin Console credentials
+tls      = false            # true = HTTPS/WSS (self-signed certs accepted)
+```
+
+### Device type detection
+
+Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM:
+
+| ISY node | HomeCore `device_type` |
+|---|---|
+| Dimmable light, keypad dimmer (UOM 51, cat 1) | `light` |
+| Relay/switch, outlet module (UOM 78, cat 2) | `switch` |
+| Door/window, motion, moisture sensors | `binary_sensor` |
+| Temperature, humidity, power, voltage, … | `sensor` |
+| Deadbolt / Z-Wave lock (UOM 11) | `lock` |
+| Garage door, shade, motor (UOM 97, cat 14) | `cover` |
+| Insteon FanLinc (cat 1.46) | `fan` |
+| Insteon thermostat (cat 5) | `thermostat` |
+| ISY scenes / Insteon node groups | `scene` |
+
+### Device IDs
+
+`isy_{normalized_address}` where the ISY address has spaces and colons replaced with underscores and lowercased:
+
+- Insteon `"13 A6 99 1"` → `isy_13_a6_99_1`
+- Scene   `"00:3C:89:AB:00:00"` → `isy_00_3c_89_ab_00_00`
+
+### State attributes
+
+| Type | Attributes |
+|---|---|
+| `light` | `on: bool`, `brightness: 0–255`, `brightness_pct: 0–100` |
+| `switch` | `on: bool` |
+| `binary_sensor` | `on: bool`, `device_class: motion\|opening\|moisture` (when detectable) |
+| `sensor` | `value: f64`, `unit: str` |
+| `lock` | `locked: bool` |
+| `cover` | `position: 0–100`, `state: open\|closed` |
+| `fan` | `on: bool`, `speed: off\|low\|medium\|high` |
+| `thermostat` | `temperature`, `target_temp_heat`, `target_temp_cool`, `hvac_mode: off\|heat\|cool\|auto`, `fan_mode: auto\|on`, `state: idle\|heating\|cooling` |
+| `scene` | `on: bool` |
+
+### Commands
+
+```json
+// Light
+{"on": true}                          → DON (use device preset level)
+{"on": true, "brightness": 200}       → DON/200
+{"brightness_pct": 50}                → DON/127
+{"on": false}                         → DOF
+
+// Switch / Scene
+{"on": true}                          → DON
+{"on": false}                         → DOF
+
+// Fan
+{"speed": "low"}                      → DON/63
+{"speed": "medium"}                   → DON/127
+{"speed": "high"}                     → DON/255
+{"on": false}                         → DOF
+
+// Lock
+{"locked": true}                      → LOCK
+{"locked": false}                     → UNLOCK
+
+// Cover
+{"position": 50}                      → DON/127
+{"state": "open"}                     → DON/255
+{"state": "closed"}                   → DOF
+
+// Thermostat (all fields optional; each triggers a separate REST command)
+{"target_temp_heat": 68, "target_temp_cool": 76, "hvac_mode": "auto"}
+  → CLISPH/680, CLISPC/760, CLIMD/3
+```
+
+### ISY Programs (future)
+
+ISY programs can be executed via `send_raw_node_command` or future `run_program` action support. The current plugin handles only physical nodes and scenes.
+
+### Logs
+
+Rolling daily logs in `logs/hc-isy.log.<date>`. Debug level in file, info on stderr.

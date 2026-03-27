@@ -167,3 +167,9 @@ id      = "plugin.wled"
 binary  = "../plugins/hc-wled/target/debug/hc-wled"
 config  = "../plugins/hc-wled/config/config.toml"
 enabled = true
+
+[[plugins]]
+id      = "plugin.isy"
+binary  = "../plugins/hc-isy/target/debug/hc-isy"
+config  = "../plugins/hc-isy/config/config.toml"
+enabled = false
