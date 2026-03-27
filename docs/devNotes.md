@@ -2603,6 +2603,370 @@ state     = { brightness = 255, on = true }
 
 ---
 
+## Hubitat Rule Machine parity features
+
+The following features bring homeCore's rule engine to Hubitat RM 5.1 / Home Assistant parity. All are optional fields with safe defaults.
+
+---
+
+### New triggers
+
+#### `button_event` — physical button push/hold/double-tap/release
+
+Button events arrive as `DeviceStateChanged` with an attribute named after the event type (`pushed`, `held`, `double_tapped`, `released`) carrying the button number as the value.
+
+```toml
+[rule.trigger]
+type          = "button_event"
+device_id     = "lutron_pico_42"
+event         = "pushed"          # pushed | held | double_tapped | released
+button_number = 1                 # omit to fire for any button number
+```
+
+#### `numeric_threshold` — edge-triggered numeric crossing
+
+Fires only on the crossing edge (e.g. temperature going from ≤80 → >80), not on every change. `Above`/`Below` fire whenever the value satisfies the condition; `CrossesAbove`/`CrossesBelow` fire only on the transition.
+
+```toml
+[rule.trigger]
+type      = "numeric_threshold"
+device_id = "temp_sensor_attic"
+attribute = "temperature"
+op        = "CrossesAbove"   # Above | Below | CrossesAbove | CrossesBelow
+value     = 80.0
+# for_duration_secs = 300    # optional: must stay crossed for N seconds
+```
+
+#### `periodic` — simple repeating interval
+
+Fires repeatedly on an interval. The scheduler tracks last-fire time and fires immediately on startup if the period has elapsed since the last run.
+
+```toml
+[rule.trigger]
+type    = "periodic"
+every_n = 15
+unit    = "minutes"   # minutes | hours | days | weeks
+```
+
+---
+
+### Extended `device_state_changed` trigger
+
+```toml
+[rule.trigger]
+type              = "device_state_changed"
+device_id         = "door_sensor_front"       # primary device
+device_ids        = ["door_sensor_back"]      # additional devices (OR logic)
+attribute         = "open"
+to                = true
+from              = false          # only if previous value was false
+not_from          = true           # only if previous value was NOT true
+not_to            = false          # only if new value is NOT false
+for_duration_secs = 300            # must hold the new value for 5 min before firing
+```
+
+All filter fields are optional and can be combined. `device_ids` extends the primary `device_id` — the trigger fires if **any** device in the union changes.
+
+---
+
+### New conditions
+
+#### `and` / `or` / `xor`
+
+Logical grouping with short-circuit evaluation.
+
+```toml
+[[rule.conditions]]
+type = "and"               # or | xor
+[[rule.conditions.conditions]]
+type      = "device_state"
+device_id = "switch_night_mode"
+attribute = "on"
+op        = "Eq"
+value     = true
+[[rule.conditions.conditions]]
+type      = "time_window"
+start     = "22:00:00"
+end       = "06:00:00"
+```
+
+- `and` — all sub-conditions must pass (short-circuit: stops at first failure)
+- `or` — at least one sub-condition must pass (short-circuit: stops at first success)
+- `xor` — exactly one sub-condition must pass
+
+#### `private_boolean_is`
+
+Check a rule-local named boolean (set by `SetPrivateBoolean` actions). Useful for stateful rules that track internal state across firings.
+
+```toml
+[[rule.conditions]]
+type  = "private_boolean_is"
+name  = "already_notified"
+value = false
+```
+
+---
+
+### Rule-level gates
+
+#### `required_expression` — pre-trigger Rhai gate
+
+Evaluated before the trigger is processed. If false, the rule is skipped entirely regardless of conditions. Useful for transition-specific rules.
+
+```toml
+[rule]
+# Only fire when transitioning from Away to Home mode
+required_expression = 'device_state("switch_away_mode")["on"] == true && trigger_value() == false'
+cancel_on_false     = true   # cancel any in-flight cancellable delays when this returns false
+```
+
+#### `trigger_condition` — per-event Rhai gate
+
+Evaluated after the trigger event fires but before the main conditions list. If false, this specific event is skipped (other events still evaluate normally).
+
+```toml
+[rule]
+trigger_condition = 'trigger_value() != trigger_prev_value()'
+```
+
+**Rhai trigger functions** (available in both gates and `RunScript`):
+- `trigger_device()` → `String` — device_id that triggered the rule
+- `trigger_attribute()` → `String` — attribute that changed
+- `trigger_value()` → `Dynamic` — new attribute value
+- `trigger_prev_value()` → `Dynamic` — previous attribute value
+- `trigger_event_type()` → `String` — event type string
+
+#### `log_events` / `log_triggers` / `log_actions`
+
+Per-rule verbose logging controls (all default false):
+
+```toml
+[rule]
+log_events   = true   # log every trigger event that reaches this rule
+log_triggers = true   # log when rule fires/skips with reason
+log_actions  = true   # log each action as it executes
+```
+
+---
+
+### Rule-local variables
+
+Initial values defined on the rule, persisted in-memory across firings (reset on restart/reload):
+
+```toml
+[rule.variables]
+count     = 0
+last_mode = "away"
+threshold = 75.0
+```
+
+Access in Rhai:
+```javascript
+let n = rule_var("count");
+```
+
+Set via `set_variable` action (see below).
+
+---
+
+### New actions
+
+#### `set_variable` — read/write rule-local variables
+
+```toml
+[[rule.actions]]
+type     = "set_variable"
+name     = "count"
+op       = "Set"         # Set | Add | Subtract | Multiply | Divide | Toggle | Append | Clear
+value    = 1.0           # omit for Toggle and Clear
+```
+
+`Toggle` flips a boolean variable. `Append` appends to a string. `Clear` resets to `null`.
+
+#### `set_private_boolean` — named boolean flag
+
+```toml
+[[rule.actions]]
+type  = "set_private_boolean"
+name  = "already_notified"
+value = true
+```
+
+Private booleans are readable in conditions via `PrivateBooleanIs`. Scoped per rule.
+
+#### `exit_rule` — stop executing this rule's actions immediately
+
+```toml
+[[rule.actions]]
+type = "exit_rule"
+```
+
+Subsequent actions in the sequence are skipped. Does not affect other rules.
+
+#### `pause_rule` / `resume_rule` — runtime enable/disable
+
+```toml
+[[rule.actions]]
+type    = "pause_rule"
+rule_id = "550e8400-e29b-41d4-a716-446655440000"   # omit to pause current rule
+```
+
+```toml
+[[rule.actions]]
+type    = "resume_rule"
+rule_id = "550e8400-e29b-41d4-a716-446655440000"
+```
+
+Paused rules skip execution but remain enabled. Pause state is in-memory (clears on restart).
+
+#### `cancel_delays` — cancel a specific cancellable delay
+
+```toml
+[[rule.actions]]
+type       = "cancel_delays"
+cancel_key = "my_delay"   # matches the cancel_key on the Delay action
+```
+
+#### `cancel_rule_timers` — cancel all cancellable delays for a rule
+
+```toml
+[[rule.actions]]
+type    = "cancel_rule_timers"
+rule_id = "550e8400-e29b-41d4-a716-446655440000"   # omit for current rule
+```
+
+#### `run_rule_actions` — invoke another rule's actions inline
+
+Executes the target rule's action list directly (skips trigger/condition evaluation). Useful for sharing action sequences across multiple rules. Max recursion depth: 10.
+
+```toml
+[[rule.actions]]
+type    = "run_rule_actions"
+rule_id = "550e8400-e29b-41d4-a716-446655440000"
+```
+
+#### `repeat_while` — pre-condition loop
+
+Checks condition first; body only runs when condition is true. Useful for "while light is on, keep adjusting".
+
+```toml
+[[rule.actions]]
+type           = "repeat_while"
+condition      = 'device_state("light.office")["on"] == true'
+max_iterations = 20
+interval_ms    = 5000
+
+[[rule.actions.actions]]
+type      = "set_device_state"
+device_id = "light.office"
+state     = { brightness = 100 }
+```
+
+#### `repeat_count` — fixed-count loop
+
+```toml
+[[rule.actions]]
+type     = "repeat_count"
+count    = 3
+delay_ms = 500    # optional delay between iterations
+
+[[rule.actions.actions]]
+type    = "notify"
+channel = "pushover"
+message = "Alert! ({{iteration}})"
+```
+
+#### `wait_for_event` — suspend until a bus event matches
+
+```toml
+[[rule.actions]]
+type       = "wait_for_event"
+event_type = "device_state_changed"
+device_id  = "door_sensor_front"      # optional filter
+attribute  = "open"                   # optional filter
+value      = false                    # optional filter
+timeout_ms = 30000                    # optional; if omitted, waits indefinitely
+```
+
+Execution resumes when a matching event arrives or the timeout elapses.
+
+#### `wait_for_expression` — suspend until a Rhai expression is true
+
+```toml
+[[rule.actions]]
+type       = "wait_for_expression"
+expression = 'device_state("door_sensor_front")["open"] == false'
+poll_ms    = 1000     # how often to re-evaluate (default 1000)
+timeout_ms = 60000    # give up after 60s if still false
+```
+
+#### Cancellable `delay`
+
+Any `delay` action can be made cancellable with a named key:
+
+```toml
+[[rule.actions]]
+type         = "delay"
+duration_ms  = 300000   # 5 minutes
+cancelable   = true
+cancel_key   = "motion_off_delay"   # referenced by cancel_delays action
+
+[[rule.actions]]
+type      = "set_device_state"
+device_id = "light.hall"
+state     = { on = false }
+```
+
+If `CancelDelays { cancel_key: "motion_off_delay" }` fires before the timer expires, the delay is skipped and the `set_device_state` never runs.
+
+#### `log_message` — emit a log line from a rule
+
+```toml
+[[rule.actions]]
+type    = "log_message"
+level   = "info"     # trace | debug | info | warn | error
+message = "Office motion detected, turning on lights"
+```
+
+#### `comment` — inline documentation
+
+```toml
+[[rule.actions]]
+type = "comment"
+text = "--- Motion-triggered lighting sequence ---"
+```
+
+No effect; purely for readability in the TOML file.
+
+---
+
+### Extended `conditional` — else-if chains
+
+```toml
+[[rule.actions]]
+type      = "conditional"
+condition = 'device_state("switch_mode")["on"] == true'
+
+[[rule.actions.then_actions]]
+type    = "notify"
+channel = "pushover"
+message = "Night mode active"
+
+[[rule.actions.else_if]]
+condition = 'current_hour() < 12'
+[[rule.actions.else_if.actions]]
+type    = "notify"
+channel = "pushover"
+message = "Morning mode active"
+
+[[rule.actions.else_actions]]
+type    = "notify"
+channel = "pushover"
+message = "Default mode active"
+```
+
+---
+
 ### Scene export and import
 
 Mirror of the rule export/import, useful for backing up or migrating scene definitions independently of the full backup zip.
