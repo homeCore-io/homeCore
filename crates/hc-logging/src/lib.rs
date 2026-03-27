@@ -23,6 +23,7 @@
 pub mod broadcast_layer;
 pub mod config;
 pub mod filter;
+mod rotating_writer;
 pub mod syslog_layer;
 
 pub use broadcast_layer::{BroadcastLayer, LogRing, LogSender};
@@ -52,7 +53,7 @@ impl LoggingConfig {
 }
 
 use anyhow::Result;
-use config::{FileConfig, OutputFormat, RotationStrategy, StderrConfig, TimeDisplay};
+use config::{FileConfig, OutputFormat, StderrConfig, TimeDisplay};
 use filter::build_filter;
 use syslog_layer::SyslogLayer;
 use tracing_subscriber::{prelude::*, Registry};
@@ -136,9 +137,13 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
             eprintln!("hc-logging: cannot create log dir {}: {e}", config.file.dir);
         });
         let filter = build_filter(config, None);
-        let (layer, guard) = build_file_layer(&config.file, filter, timer.clone());
-        file_guard = Some(guard);
-        layers.push(layer);
+        match build_file_layer(&config.file, filter, timer.clone()) {
+            Ok((layer, guard)) => {
+                file_guard = Some(guard);
+                layers.push(layer);
+            }
+            Err(e) => eprintln!("hc-logging: cannot open log file: {e}"),
+        }
     }
 
     // ── rules file ────────────────────────────────────────────────────────
@@ -155,12 +160,17 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
             dir: config.rules_file.dir.clone(),
             prefix: config.rules_file.prefix.clone(),
             rotation: config.rules_file.rotation.clone(),
-            max_size_mb: 100,
+            max_size_mb: config.rules_file.max_size_mb,
+            compress: config.rules_file.compress,
             format: config.rules_file.format.clone(),
         };
-        let (layer, guard) = build_file_layer(&cfg, filter, timer.clone());
-        rules_file_guard = Some(guard);
-        layers.push(layer);
+        match build_file_layer(&cfg, filter, timer.clone()) {
+            Ok((layer, guard)) => {
+                rules_file_guard = Some(guard);
+                layers.push(layer);
+            }
+            Err(e) => eprintln!("hc-logging: cannot open rules log file: {e}"),
+        }
     }
 
     // ── syslog ────────────────────────────────────────────────────────────
@@ -229,17 +239,17 @@ fn build_file_layer(
     cfg: &FileConfig,
     filter: tracing_subscriber::EnvFilter,
     timer: HcTimer,
-) -> (DynLayer, tracing_appender::non_blocking::WorkerGuard) {
-    use tracing_appender::rolling::{RollingFileAppender, Rotation};
+) -> anyhow::Result<(DynLayer, tracing_appender::non_blocking::WorkerGuard)> {
+    use rotating_writer::RotatingWriter;
 
-    let rotation = match cfg.rotation {
-        RotationStrategy::Daily  => Rotation::DAILY,
-        RotationStrategy::Hourly => Rotation::HOURLY,
-        RotationStrategy::Never  => Rotation::NEVER,
-    };
-
-    let appender = RollingFileAppender::new(rotation, &cfg.dir, &cfg.prefix);
-    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+    let writer = RotatingWriter::new(
+        std::path::PathBuf::from(&cfg.dir),
+        cfg.prefix.clone(),
+        cfg.rotation.clone(),
+        cfg.max_size_mb.saturating_mul(1024 * 1024),
+        cfg.compress,
+    )?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
     let layer: DynLayer = match cfg.format {
         OutputFormat::Json => tracing_subscriber::fmt::layer()
@@ -265,5 +275,5 @@ fn build_file_layer(
             .boxed(),
     };
 
-    (layer, guard)
+    Ok((layer, guard))
 }

@@ -8,6 +8,7 @@ fn default_log_dir() -> String { String::new() }
 fn default_prefix() -> String { "homecore".into() }
 fn default_rules_prefix() -> String { "rules".into() }
 fn default_max_size_mb() -> u64 { 100 }
+fn default_compress() -> bool { true }
 fn default_syslog_host() -> String { "127.0.0.1".into() }
 fn default_syslog_port() -> u16 { 514 }
 fn default_facility() -> String { "user".into() }
@@ -134,13 +135,18 @@ pub struct FileConfig {
     /// Log file name prefix.  Files are named `<prefix>.YYYY-MM-DD`.
     #[serde(default = "default_prefix")]
     pub prefix: String,
-    /// Rotation strategy: "daily" | "hourly" | "never"
+    /// Rotation strategy: "daily" | "hourly" | "weekly" | "never"
     #[serde(default)]
     pub rotation: RotationStrategy,
-    /// Used only when rotation = "never" to document expected max size; not
-    /// enforced programmatically (use logrotate for size-based rotation).
+    /// Maximum size in MB before rotation is triggered.  Combined with
+    /// `rotation` as "whichever comes first": set 0 to disable size-based
+    /// rotation entirely and rely on time-based rotation only.
     #[serde(default = "default_max_size_mb")]
     pub max_size_mb: u64,
+    /// Gzip-compress rotated files.  The active log is always uncompressed;
+    /// compression runs in a background thread immediately after rotation.
+    #[serde(default = "default_compress")]
+    pub compress: bool,
     /// Output format: "json" (recommended for files) | "compact" | "pretty"
     #[serde(default)]
     pub format: OutputFormat,
@@ -154,6 +160,7 @@ impl Default for FileConfig {
             prefix: default_prefix(),
             rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
+            compress: default_compress(),
             format: OutputFormat::Json,
         }
     }
@@ -185,8 +192,15 @@ pub struct RulesFileConfig {
     pub dir: String,
     #[serde(default = "default_rules_prefix")]
     pub prefix: String,
+    /// Rotation strategy: "daily" | "hourly" | "weekly" | "never"
     #[serde(default)]
     pub rotation: RotationStrategy,
+    /// Maximum size in MB before rotation.  0 = time-only rotation.
+    #[serde(default = "default_max_size_mb")]
+    pub max_size_mb: u64,
+    /// Gzip-compress rotated files (background thread).
+    #[serde(default = "default_compress")]
+    pub compress: bool,
     /// Output format: "pretty" (default, human-readable) | "compact" | "json"
     #[serde(default = "default_rules_format")]
     pub format: OutputFormat,
@@ -201,6 +215,8 @@ impl Default for RulesFileConfig {
             dir: default_log_dir(),
             prefix: default_rules_prefix(),
             rotation: RotationStrategy::Daily,
+            max_size_mb: default_max_size_mb(),
+            compress: default_compress(),
             format: OutputFormat::Pretty,
         }
     }
@@ -266,6 +282,7 @@ pub enum RotationStrategy {
     #[default]
     Daily,
     Hourly,
+    Weekly,
     Never,
 }
 

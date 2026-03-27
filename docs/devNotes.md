@@ -405,19 +405,29 @@ enabled = false
 # Created automatically at startup if it doesn't exist.
 dir = "/var/log/homecore"
 
-# Log file name prefix. Files are named: <prefix>.<YYYY-MM-DD>
-# (or <prefix>.<YYYY-MM-DD-HH> for hourly rotation).
+# Log file name prefix.
+# Active file:          <prefix>.log                   (always uncompressed)
+# Time rotation:        <prefix>.<period>.log[.gz]
+# Size rotation (same period): <prefix>.<period>.<N>.log[.gz]
+# Period formats:  2026-03-27 (daily)  2026-03-27_14 (hourly)  2026-W13 (weekly)
+# "never" strategy uses a full timestamp: 2026-03-27T142501
 prefix = "homecore"
 
-# When to rotate to a new file.
-# "daily"  — rotate at midnight UTC (default)
+# When to rotate based on time — "whichever comes first" with max_size_mb.
+# "daily"  — rotate at midnight (default)
 # "hourly" — rotate at the top of each hour
-# "never"  — single file, no rotation (pair with logrotate for size-based)
+# "weekly" — rotate on Monday at midnight
+# "never"  — no time-based rotation; size-only (requires max_size_mb > 0)
 rotation = "daily"
 
-# Documented expected size limit; not enforced by HomeCore itself.
-# Use logrotate or a similar tool for size-based rotation.
+# Rotate when the active file exceeds this size (in MB).
+# Combined with rotation as "time OR size, whichever comes first".
+# Set to 0 to disable size-based rotation and rely on time only.
 max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread immediately after rotation.
+# The active log is always left uncompressed for easy tail/grep.
+compress = true
 
 # Output format for file logs.
 # "json"    — recommended for files; structured, parseable by log aggregators
