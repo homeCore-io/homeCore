@@ -1,7 +1,8 @@
-# Garage OH1 - Timer Close
+# Garage OH1 - Timer Close (day)
 #
-# When the auto-close timer fires: if the auto-close virtual switch is on
-# and the door is still open, activate the scene to close the door.
+# When the auto-close timer fires during the day: if the auto-close virtual
+# switch is on and the door is still open, activate the scene to close it.
+# Night variant (oh1_timer_close_night.toml) also turns off outside lights.
 
 id       = "8b49464c-2d17-4150-a10f-c6918ac669c0"
 name     = "Garage OH1 - Timer Close"
@@ -13,6 +14,13 @@ type      = "device_state_changed"
 device_id = "timer_garage_close"
 attribute = "state"
 to        = "finished"
+
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = false
 
 [[conditions]]
 type      = "device_state"

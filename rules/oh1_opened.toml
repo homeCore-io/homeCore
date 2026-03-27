@@ -1,7 +1,8 @@
-# Garage OH1 - Door Opens
+# Garage OH1 - Door Opens (day)
 #
-# When the OH1 garage door opens: turn on the overhead light and activate the
-# outside-on scene simultaneously, then start a 10-minute close timer.
+# When the OH1 garage door opens during the day: turn on the overhead light
+# and start the 10-minute auto-close timer.
+# Night variant (oh1_opened_night.toml) also activates the outside lights.
 
 id = "534b8117-c31e-4f8d-acdb-9cfc2d66aefc"
 name     = "OH1 Opened"
@@ -14,14 +15,16 @@ device_id = "yolink_d88b4c01000cf2e5"
 attribute = "open"
 to        = true
 
+[[conditions]]
+type      = "device_state"
+device_id = "mode_night"
+attribute = "on"
+op        = "eq"
+value     = false
+
 [[actions]]
 type = "parallel"
 actions = [
   { type = "set_device_state", device_id = "lutron_54", state = { on = true } },
   { type = "set_device_state", device_id = "timer_garage_close", state = { command = "start", duration_secs = 600, label = "Garage OH1 auto-close" } }
 ]
-
-#[[actions]]
-#type      = "set_device_state"
-#device_id = "timer_garage_close"
-#state     = { command = "start", duration_secs = 600, label = "Garage OH1 auto-close" }
