@@ -21,6 +21,7 @@ start = "06:00:00"
 end   = "12:00:00"
 
 [[actions]]
-type   = "call_service"
-url    = "http://10.0.10.200:5005/Bathroom/favorite/1"
-method = "GET"
+type    = "call_service"
+url     = "http://10.0.10.200:5005/Bathroom/favorite/1"
+method  = "GET"
+retries = 2

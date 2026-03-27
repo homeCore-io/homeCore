@@ -6,7 +6,7 @@
 
 id = "841818bd-f732-46df-bbb3-5c444f97846f"
 name     = "Door Alert - OH1 Open 10min"
-enabled  = true
+enabled  = false
 priority = 5
 tags     = ["garage", "door-alerts"]
 
