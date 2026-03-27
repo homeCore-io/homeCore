@@ -4,6 +4,9 @@
 # Piggybacks on timer_garage_close (same timer the close rules use) so no
 # separate timer device is needed.  Sends a Telegram alert regardless of
 # whether the auto-close switch is on — you want to know either way.
+#
+# Action sequence: wait 60 s, then re-check the door before alerting.
+# This avoids a spurious notification if the door closes in the grace period.
 
 id = "841818bd-f732-46df-bbb3-5c444f97846f"
 name     = "Door Alert - OH1 Open 10min"
@@ -25,6 +28,12 @@ op        = "eq"
 value     = true
 
 [[actions]]
-type    = "notify"
-channel = "telegram"
-message = "Garage door (OH1) has been open for 10+ minutes"
+type        = "delay"
+duration_ms = 60000
+
+[[actions]]
+type      = "conditional"
+condition = "device_state(\"yolink_d88b4c01000cf2e5\")[\"open\"] == true"
+then_actions = [
+  { type = "notify", channel = "telegram", message = "Garage door (OH1) has been open for 10+ minutes" },
+]
