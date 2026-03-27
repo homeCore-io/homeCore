@@ -1597,7 +1597,10 @@ pub async fn bulk_patch_automations(
 /// `GET /api/v1/automations/{id}/history`
 ///
 /// Returns the last 20 evaluation records for the rule (newest last).
-/// Each record contains `timestamp`, `conditions_passed`, `actions_ran`, and `eval_ms`.
+/// Each record contains `timestamp`, `trigger_type`, `trigger_context`,
+/// `outcome` (fired/condition_failed/cooldown/paused/…), `conditions[]`
+/// (per-condition pass/fail with actual vs expected values), `actions[]`
+/// (per-action type, description, outcome, duration_ms), and `eval_ms`.
 pub async fn automation_history(
     State(s): State<AppState>,
     _: AutomationsRead,

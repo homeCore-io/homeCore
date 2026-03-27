@@ -37,6 +37,32 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// Action trace types
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single action execution.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum ActionOutcome {
+    Ok,
+    Error { message: String },
+}
+
+/// Trace record for one top-level action within a rule firing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActionTrace {
+    /// Zero-based index in the top-level action list.
+    pub index: usize,
+    /// Action variant name (e.g. "SetDeviceState", "Delay").
+    pub action_type: String,
+    /// Human-readable description of what the action targeted or contained.
+    pub description: String,
+    pub outcome: ActionOutcome,
+    /// Elapsed milliseconds for this action (including any nested work).
+    pub duration_ms: u64,
+}
+
 use crate::EventBus;
 
 /// Boxed future alias used for mutually-recursive async functions.
@@ -96,6 +122,9 @@ pub struct ExecutorContext {
     pub log_actions:    bool,
     /// Set to `true` by `Action::ExitRule` to stop further action execution.
     pub exit_flag:      Arc<AtomicBool>,
+    /// When `Some`, each top-level action appends an `ActionTrace` after it
+    /// completes.  `None` disables tracing (e.g. for `RunRuleActions` calls).
+    pub trace:          Option<Arc<Mutex<Vec<ActionTrace>>>>,
 }
 
 impl ExecutorContext {
@@ -117,6 +146,7 @@ impl ExecutorContext {
             rule_name:      "test".into(),
             log_actions:    false,
             exit_flag:      Arc::new(AtomicBool::new(false)),
+            trace:          None,
         })
     }
 }
@@ -204,36 +234,59 @@ async fn execute_one(
     call_depth: u32,
 ) -> Result<()> {
     let label = format!("action[{}/{}]", idx + 1, total);
+    let action_type = action_type_name(&action).to_string();
+    let description = action_description(&action);
+    let is_comment = matches!(action, Action::Comment { .. });
+    let trace_start = Instant::now();
 
-    if ctx.log_actions {
-        if !matches!(action, Action::Comment { .. }) {
-            info!(rule = %ctx.rule_name, label, action = action_type_name(&action), "action: executing");
-        }
+    if ctx.log_actions && !is_comment {
+        info!(rule = %ctx.rule_name, label, action = %action_type, "action: executing");
     }
 
-    match action {
-        Action::Parallel { actions } => {
-            let count = actions.len();
-            debug!(label, parallel_count = count, "action: Parallel — spawning {} concurrent actions", count);
-            let handles: Vec<_> = actions
-                .into_iter()
-                .enumerate()
-                .map(|(i, a)| {
-                    let c    = Arc::clone(&ctx);
-                    let snap = snapshot.clone();
-                    debug!("action: Parallel[{}/{}] — {}", i + 1, count, action_type_name(&a));
-                    tokio::spawn(run_single_action(a, c, snap, call_depth))
-                })
-                .collect();
-            for h in handles {
-                h.await??;
+    // Run action in an inner async block so `?` propagates to `result` rather
+    // than returning early from `execute_one` before we can record the trace.
+    let result: Result<()> = async {
+        match action {
+            Action::Parallel { actions } => {
+                let count = actions.len();
+                debug!(label, parallel_count = count, "action: Parallel — spawning {} concurrent actions", count);
+                let handles: Vec<_> = actions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let c    = Arc::clone(&ctx);
+                        let snap = snapshot.clone();
+                        debug!("action: Parallel[{}/{}] — {}", i + 1, count, action_type_name(&a));
+                        tokio::spawn(run_single_action(a, c, snap, call_depth))
+                    })
+                    .collect();
+                for h in handles {
+                    h.await??;
+                }
+                debug!(label, "action: Parallel — all done");
             }
-            debug!(label, "action: Parallel — all done");
+            other => run_single_action(other, Arc::clone(&ctx), snapshot, call_depth).await?,
         }
+        Ok(())
+    }.await;
 
-        other => run_single_action(other, ctx, snapshot, call_depth).await?,
+    // Record trace for top-level actions (call_depth 0, excluding RunRuleActions
+    // sub-calls which set call_depth > 0 and pass a ctx with trace = None).
+    if let Some(ref trace_buf) = ctx.trace {
+        let outcome = match &result {
+            Ok(()) => ActionOutcome::Ok,
+            Err(e) => ActionOutcome::Error { message: e.to_string() },
+        };
+        trace_buf.lock().unwrap().push(ActionTrace {
+            index: idx,
+            action_type,
+            description,
+            outcome,
+            duration_ms: trace_start.elapsed().as_millis() as u64,
+        });
     }
-    Ok(())
+
+    result
 }
 
 fn run_single_action(
@@ -707,6 +760,7 @@ fn run_single_action(
                         rule_name:      target_name,
                         log_actions:    target_log,
                         exit_flag:      Arc::new(AtomicBool::new(false)),
+                        trace:          None, // sub-calls not traced in parent history
                     });
                     let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
                     execute_actions_inner(target_actions, sub_ctx, sub_snapshot, call_depth + 1).await?;
@@ -862,6 +916,83 @@ async fn execute_script_effect(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Human-readable summary of an action's target / content for trace output.
+fn action_description(action: &Action) -> String {
+    match action {
+        Action::SetDeviceState { device_id, state, track_event_value } => {
+            if *track_event_value {
+                format!("{} ← (trigger value)", device_id)
+            } else {
+                format!("{} ← {}", device_id, state)
+            }
+        }
+        Action::PublishMqtt { topic, .. }           => format!("topic: {}", topic),
+        Action::CallService { url, method, .. }     => format!("{} {}", method, url),
+        Action::FireEvent { event_type, .. }        => format!("event: {}", event_type),
+        Action::RunScript { script } => {
+            let s = if script.len() > 60 { &script[..60] } else { script };
+            s.to_string()
+        }
+        Action::Notify { channel, message, .. } => {
+            let m = if message.len() > 60 { &message[..60] } else { message };
+            format!("[{}] {}", channel, m)
+        }
+        Action::Delay { duration_ms, cancelable, cancel_key } => {
+            if *cancelable {
+                format!("{}ms (cancelable: {})", duration_ms,
+                    cancel_key.as_deref().unwrap_or("auto"))
+            } else {
+                format!("{}ms", duration_ms)
+            }
+        }
+        Action::Parallel { actions }   => format!("{} actions", actions.len()),
+        Action::RepeatUntil { max_iterations, .. } => match max_iterations {
+            Some(n) => format!("max {} iterations", n),
+            None    => "no limit".into(),
+        },
+        Action::RepeatWhile { max_iterations, .. } => match max_iterations {
+            Some(n) => format!("max {} iterations", n),
+            None    => "no limit".into(),
+        },
+        Action::RepeatCount { count, .. }     => format!("{} times", count),
+        Action::Conditional { condition, .. } => {
+            let c = if condition.len() > 60 { &condition[..60] } else { condition };
+            format!("if {}", c)
+        }
+        Action::Comment { text }             => text.clone(),
+        Action::LogMessage { message, level } => match level {
+            Some(l) => format!("[{:?}] {}", l, message),
+            None    => message.clone(),
+        },
+        Action::SetPrivateBoolean { name, value } => format!("{} = {}", name, value),
+        Action::SetVariable { name, value, op }   => match op {
+            Some(VariableOp::Set) | None => format!("{} = {}", name, value),
+            Some(o)                      => format!("{} {:?}= {}", name, o, value),
+        },
+        Action::PauseRule { rule_id }        => rule_id.to_string(),
+        Action::ResumeRule { rule_id }       => rule_id.to_string(),
+        Action::CancelDelays { key }         => key.as_deref().unwrap_or("all").into(),
+        Action::CancelRuleTimers { rule_id } =>
+            rule_id.map(|id| id.to_string()).unwrap_or_else(|| "self".into()),
+        Action::RunRuleActions { rule_id }   => rule_id.to_string(),
+        Action::WaitForEvent { event_type, device_id, timeout_ms, .. } => {
+            let what = event_type.as_deref().or(device_id.as_deref()).unwrap_or("any");
+            match timeout_ms {
+                Some(t) => format!("{} (timeout: {}ms)", what, t),
+                None    => what.into(),
+            }
+        }
+        Action::WaitForExpression { expression, timeout_ms, .. } => {
+            let e = if expression.len() > 60 { &expression[..60] } else { expression };
+            match timeout_ms {
+                Some(t) => format!("{} (timeout: {}ms)", e, t),
+                None    => e.into(),
+            }
+        }
+        Action::StopRuleChain | Action::ExitRule => String::new(),
+    }
+}
 
 fn action_type_name(action: &Action) -> &'static str {
     match action {

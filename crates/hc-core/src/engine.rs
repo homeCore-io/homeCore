@@ -23,7 +23,7 @@
 //! - Per-rule logging levels (`log_events`, `log_triggers`, `log_actions`)
 //! - Pause state check before action dispatch
 
-use crate::executor::{execute_actions, ExecutorContext};
+use crate::executor::{execute_actions, ActionTrace, ExecutorContext};
 use crate::EventBus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -47,14 +47,58 @@ use uuid::Uuid;
 
 const HISTORY_RING_SIZE: usize = 20;
 
+// ---------------------------------------------------------------------------
+// Trace types
+// ---------------------------------------------------------------------------
+
+/// Overall outcome of a single rule evaluation attempt.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum FireOutcome {
+    /// All conditions passed and actions were dispatched.
+    Fired,
+    /// A condition failed — evaluation stopped at `at_index`.
+    ConditionFailed { at_index: usize, reason: String },
+    /// Rule skipped because it fired within `cooldown_secs`.
+    Cooldown { remaining_secs: u64 },
+    /// Rule is currently paused via `PauseRule` action.
+    Paused,
+    /// `required_expression` evaluated to `false`.
+    RequiredExpressionFailed,
+    /// `trigger_condition` evaluated to `false`.
+    TriggerGateFailed,
+}
+
+/// Per-condition evaluation result within a rule firing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConditionTrace {
+    /// Condition variant name (e.g. "DeviceState", "TimeWindow").
+    pub condition_type: String,
+    pub passed: bool,
+    /// Actual value read at evaluation time (device attribute, elapsed seconds, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<JsonValue>,
+    /// Expected value or constraint from the rule definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<JsonValue>,
+    /// Human-readable one-line summary, e.g. `"open == false (actual: true) → FAIL"`.
+    pub reason: String,
+}
+
 /// A single recorded rule evaluation attempt (conditions + actions).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuleFiring {
     pub timestamp: chrono::DateTime<Utc>,
-    /// `true` when all conditions passed and actions were dispatched.
-    pub conditions_passed: bool,
-    /// Number of actions in the rule (0 when conditions failed).
-    pub actions_ran: usize,
+    /// Trigger variant that produced this firing attempt.
+    pub trigger_type: String,
+    /// Context captured from the triggering event.
+    pub trigger_context: hc_types::rule::TriggerContext,
+    /// Overall outcome of this attempt.
+    pub outcome: FireOutcome,
+    /// Per-condition results (in order; stops at first failure).
+    pub conditions: Vec<ConditionTrace>,
+    /// Per-action results (top-level actions only).
+    pub actions: Vec<ActionTrace>,
     /// Milliseconds spent evaluating conditions.
     pub eval_ms: u64,
 }
@@ -397,11 +441,40 @@ impl RuleEngine {
         Ok(())
     }
 
+    /// Push a `RuleFiring` entry into the ring buffer for `rule_id`.
+    fn push_history(&self, rule_id: Uuid, firing: RuleFiring) {
+        let mut buf = self.fire_history.entry(rule_id).or_default();
+        if buf.len() >= HISTORY_RING_SIZE {
+            buf.pop_front();
+        }
+        buf.push_back(firing);
+    }
+
+    /// Build a minimal `RuleFiring` for an early-exit (pre-condition) case.
+    fn early_firing(
+        &self,
+        rule: &Rule,
+        trigger_ctx: &TriggerContext,
+        outcome: FireOutcome,
+    ) -> RuleFiring {
+        RuleFiring {
+            timestamp:       Utc::now(),
+            trigger_type:    trigger_type(&rule.trigger).to_string(),
+            trigger_context: trigger_ctx.clone(),
+            outcome,
+            conditions:      vec![],
+            actions:         vec![],
+            eval_ms:         0,
+        }
+    }
+
     /// Fire a rule, returning `Ok(true)` if the rule chain should stop.
     async fn fire_rule(&self, rule: &Rule, trigger_ctx: TriggerContext) -> Result<bool> {
         // ── Pause check ───────────────────────────────────────────────────────
         if self.pause_state.get(&rule.id).map(|v| *v).unwrap_or(false) {
             debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.fire: skipping — rule is paused");
+            let firing = self.early_firing(rule, &trigger_ctx, FireOutcome::Paused);
+            self.push_history(rule.id, firing);
             return Ok(false);
         }
 
@@ -410,11 +483,14 @@ impl RuleEngine {
             if let Some(last_fire) = self.cooldown_map.get(&rule.id) {
                 let elapsed = last_fire.elapsed().as_secs();
                 if elapsed < cooldown_secs {
+                    let remaining_secs = cooldown_secs - elapsed;
                     debug!(
                         rule_name = %rule.name, rule_id = %rule.id,
                         elapsed_secs = elapsed, cooldown_secs,
                         "rule.cooldown: skipping — within cooldown window"
                     );
+                    let firing = self.early_firing(rule, &trigger_ctx, FireOutcome::Cooldown { remaining_secs });
+                    self.push_history(rule.id, firing);
                     return Ok(false);
                 }
             }
@@ -447,6 +523,8 @@ impl RuleEngine {
                     }
                 }
                 debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.required_expression: false — skipping");
+                let firing = self.early_firing(rule, &trigger_ctx, FireOutcome::RequiredExpressionFailed);
+                self.push_history(rule.id, firing);
                 return Ok(false);
             }
         }
@@ -463,26 +541,24 @@ impl RuleEngine {
             }).await??;
             if !passes {
                 debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger_condition: false — skipping");
+                let firing = self.early_firing(rule, &trigger_ctx, FireOutcome::TriggerGateFailed);
+                self.push_history(rule.id, firing);
                 return Ok(false);
             }
         }
 
         let eval_start = Instant::now();
-        let maybe_failed = self.evaluate_conditions(rule, &snapshot).await?;
-        let conditions_passed = maybe_failed.is_none();
+        let condition_traces = self.evaluate_conditions(rule, &snapshot).await?;
+        let conditions_passed = rule.conditions.is_empty()
+            || (condition_traces.len() == rule.conditions.len()
+                && condition_traces.iter().all(|t| t.passed));
         let eval_ms = eval_start.elapsed().as_millis() as u64;
-        let actions_ran = if conditions_passed { rule.actions.len() } else { 0 };
 
-        // Record in the fire history ring buffer.
-        {
-            let mut buf = self.fire_history.entry(rule.id).or_default();
-            if buf.len() >= HISTORY_RING_SIZE {
-                buf.pop_front();
-            }
-            buf.push_back(RuleFiring { timestamp: Utc::now(), conditions_passed, actions_ran, eval_ms });
-        }
-
-        if let Some(failed_idx) = maybe_failed {
+        if !conditions_passed {
+            let failed_idx = condition_traces.iter().position(|t| !t.passed).unwrap_or(0);
+            let reason = condition_traces.get(failed_idx)
+                .map(|t| t.reason.clone())
+                .unwrap_or_default();
             if rule.log_triggers {
                 info!(
                     rule_name = %rule.name, rule_id = %rule.id, fired = false,
@@ -496,6 +572,16 @@ impl RuleEngine {
                     "rule.eval"
                 );
             }
+            let firing = RuleFiring {
+                timestamp:       Utc::now(),
+                trigger_type:    trigger_type(&rule.trigger).to_string(),
+                trigger_context: trigger_ctx,
+                outcome:         FireOutcome::ConditionFailed { at_index: failed_idx, reason },
+                conditions:      condition_traces,
+                actions:         vec![],
+                eval_ms,
+            };
+            self.push_history(rule.id, firing);
             return Ok(false);
         }
 
@@ -527,6 +613,11 @@ impl RuleEngine {
         let rule_id          = rule.id;
         let rule_name        = rule.name.clone();
         let in_flight        = Arc::clone(&self.in_flight);
+        let fire_history     = Arc::clone(&self.fire_history);
+
+        // Trace accumulator shared between ExecutorContext and the history entry
+        // pushed after actions complete.
+        let action_trace_buf = Arc::new(std::sync::Mutex::new(Vec::<ActionTrace>::new()));
 
         // Build the executor context for this firing.
         let ctx = Arc::new(ExecutorContext {
@@ -539,11 +630,12 @@ impl RuleEngine {
             rule_vars:      Arc::clone(&self.rule_vars),
             priv_bools:     Arc::clone(&self.priv_bools),
             rules_handle:   Arc::clone(&self.rules),
-            trigger_ctx:    trigger_ctx,
+            trigger_ctx:    trigger_ctx.clone(),
             rule_id:        rule.id,
             rule_name:      rule.name.clone(),
             log_actions:    rule.log_actions,
             exit_flag:      Arc::new(AtomicBool::new(false)),
+            trace:          Some(Arc::clone(&action_trace_buf)),
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
@@ -559,6 +651,26 @@ impl RuleEngine {
                     warn!(rule_name = %rule_name, rule_id = %rule_id, error = %e, "rule.actions: failed");
                 }
             }
+
+            // Record completed firing with full condition + action traces.
+            let action_traces = action_trace_buf.lock().unwrap().clone();
+            let firing = RuleFiring {
+                timestamp:       Utc::now(),
+                trigger_type:    trigger_type_str.clone(),
+                trigger_context: trigger_ctx,
+                outcome:         FireOutcome::Fired,
+                conditions:      condition_traces,
+                actions:         action_traces,
+                eval_ms,
+            };
+            {
+                let mut buf = fire_history.entry(rule_id).or_default();
+                if buf.len() >= HISTORY_RING_SIZE {
+                    buf.pop_front();
+                }
+                buf.push_back(firing);
+            }
+
             let _ = bus.publish(Event::RuleFired {
                 timestamp: chrono::Utc::now(),
                 rule_id: rule_id.to_string(),
@@ -573,28 +685,34 @@ impl RuleEngine {
 
     /// Evaluate all conditions for a rule.
     ///
-    /// Returns `None` if all conditions pass, `Some(i)` if condition `i` failed.
+    /// Returns a `Vec<ConditionTrace>` in evaluation order, stopping at the
+    /// first failure (short-circuit AND).  The caller determines pass/fail by
+    /// checking whether all conditions are present and all have `passed = true`.
     async fn evaluate_conditions(
         &self,
         rule: &Rule,
         snapshot: &HashMap<String, JsonValue>,
-    ) -> Result<Option<usize>> {
+    ) -> Result<Vec<ConditionTrace>> {
         if rule.conditions.is_empty() {
             debug!(rule_name = %rule.name, "rule.conditions: none — auto-pass");
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         debug!(rule_name = %rule.name, count = rule.conditions.len(), "rule.conditions: evaluating");
 
+        let mut traces = Vec::with_capacity(rule.conditions.len());
         for (i, cond) in rule.conditions.iter().enumerate() {
-            let passed = self.evaluate_one(rule, i, rule.conditions.len(), cond, snapshot).await?;
+            let (passed, trace) = self.evaluate_one(rule, i, rule.conditions.len(), cond, snapshot).await?;
+            traces.push(trace);
             if !passed {
-                return Ok(Some(i));
+                break; // short-circuit; remaining conditions are "not evaluated"
             }
         }
 
-        debug!(rule_name = %rule.name, "rule.conditions: all passed");
-        Ok(None)
+        if traces.iter().all(|t| t.passed) {
+            debug!(rule_name = %rule.name, "rule.conditions: all passed");
+        }
+        Ok(traces)
     }
 
     async fn evaluate_one(
@@ -604,39 +722,64 @@ impl RuleEngine {
         total: usize,
         condition: &Condition,
         snapshot: &HashMap<String, JsonValue>,
-    ) -> Result<bool> {
+    ) -> Result<(bool, ConditionTrace)> {
+        let cond_label = format!("{}/{}", idx + 1, total);
+
         match condition {
             Condition::DeviceState { device_id, attribute, op, value } => {
                 let entry = self.device_cache.get(device_id.as_str());
                 let Some(attrs) = entry else {
                     info!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, "rule.condition: FAIL — device not found in cache"
                     );
-                    return Ok(false);
+                    return Ok((false, ConditionTrace {
+                        condition_type: "device_state".into(),
+                        passed: false,
+                        actual: None,
+                        expected: Some(value.clone()),
+                        reason: format!("device '{}' not found in cache", device_id),
+                    }));
                 };
                 let Some(actual) = attrs.get(attribute.as_str()) else {
                     info!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, "rule.condition: FAIL — attribute not present"
                     );
-                    return Ok(false);
+                    return Ok((false, ConditionTrace {
+                        condition_type: "device_state".into(),
+                        passed: false,
+                        actual: None,
+                        expected: Some(value.clone()),
+                        reason: format!("device '{}' has no attribute '{}'", device_id, attribute),
+                    }));
                 };
                 let result = compare(actual, op, value);
+                let op_sym = compare_op_symbol(op);
                 if result {
                     debug!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: pass"
                     );
                 } else {
                     info!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: FAIL"
                     );
                 }
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "device_state".into(),
+                    passed: result,
+                    actual: Some(actual.clone()),
+                    expected: Some(value.clone()),
+                    reason: format!(
+                        "{}.{} {} {} (actual: {}) → {}",
+                        device_id, attribute, op_sym, value, actual,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::TimeWindow { start, end } => {
@@ -647,81 +790,145 @@ impl RuleEngine {
                     now >= *start || now <= *end
                 };
                 debug!(
-                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    rule_name = %rule.name, cond = %cond_label,
                     %start, %end, now = %now, result, "rule.condition: TimeWindow"
                 );
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "time_window".into(),
+                    passed: result,
+                    actual: Some(JsonValue::String(now.format("%H:%M:%S").to_string())),
+                    expected: Some(JsonValue::String(format!("{}-{}", start, end))),
+                    reason: format!(
+                        "now {} within [{}, {}] → {}",
+                        now.format("%H:%M:%S"), start, end,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::ScriptExpression { script } => {
                 let snippet = if script.len() > 80 { &script[..80] } else { script };
                 debug!(
-                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    rule_name = %rule.name, cond = %cond_label,
                     script = %snippet, "rule.condition: ScriptExpression — evaluating"
                 );
-                let snap   = snapshot.clone();
-                let script = script.clone();
+                let snap        = snapshot.clone();
+                let script_body = script.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    ScriptRuntime::new_with_devices(snap).eval_condition(&script)
+                    ScriptRuntime::new_with_devices(snap).eval_condition(&script_body)
                 }).await??;
                 debug!(
-                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    rule_name = %rule.name, cond = %cond_label,
                     result, "rule.condition: ScriptExpression"
                 );
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "script_expression".into(),
+                    passed: result,
+                    actual: None,
+                    expected: Some(JsonValue::String(snippet.to_string())),
+                    reason: format!(
+                        "script → {} → {}",
+                        result,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::Not { condition } => {
-                let inner = Box::pin(
+                let (inner, _) = Box::pin(
                     self.evaluate_one(rule, idx, total, condition, snapshot)
                 ).await?;
                 let result = !inner;
                 debug!(
-                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    rule_name = %rule.name, cond = %cond_label,
                     inner, result, "rule.condition: Not"
                 );
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "not".into(),
+                    passed: result,
+                    actual: None,
+                    expected: None,
+                    reason: format!(
+                        "not({}) → {}",
+                        inner,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::And { conditions } => {
+                let mut all_passed = true;
                 for (i, c) in conditions.iter().enumerate() {
-                    let passed = Box::pin(
+                    let (passed, _) = Box::pin(
                         self.evaluate_one(rule, i, conditions.len(), c, snapshot)
                     ).await?;
                     if !passed {
+                        all_passed = false;
                         debug!(rule_name = %rule.name, "rule.condition: And — short-circuit false at {}", i);
-                        return Ok(false);
+                        break;
                     }
                 }
-                debug!(rule_name = %rule.name, "rule.condition: And — all passed");
-                Ok(true)
+                debug!(rule_name = %rule.name, all_passed, "rule.condition: And");
+                Ok((all_passed, ConditionTrace {
+                    condition_type: "and".into(),
+                    passed: all_passed,
+                    actual: None,
+                    expected: None,
+                    reason: format!(
+                        "and({} conditions) → {}",
+                        conditions.len(),
+                        if all_passed { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::Or { conditions } => {
+                let mut any_passed = false;
                 for (i, c) in conditions.iter().enumerate() {
-                    let passed = Box::pin(
+                    let (passed, _) = Box::pin(
                         self.evaluate_one(rule, i, conditions.len(), c, snapshot)
                     ).await?;
                     if passed {
+                        any_passed = true;
                         debug!(rule_name = %rule.name, "rule.condition: Or — short-circuit true at {}", i);
-                        return Ok(true);
+                        break;
                     }
                 }
-                debug!(rule_name = %rule.name, "rule.condition: Or — all false");
-                Ok(false)
+                debug!(rule_name = %rule.name, any_passed, "rule.condition: Or");
+                Ok((any_passed, ConditionTrace {
+                    condition_type: "or".into(),
+                    passed: any_passed,
+                    actual: None,
+                    expected: None,
+                    reason: format!(
+                        "or({} conditions) → {}",
+                        conditions.len(),
+                        if any_passed { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::Xor { conditions } => {
                 let mut count = 0usize;
                 for (i, c) in conditions.iter().enumerate() {
-                    let passed = Box::pin(
+                    let (passed, _) = Box::pin(
                         self.evaluate_one(rule, i, conditions.len(), c, snapshot)
                     ).await?;
                     if passed { count += 1; }
                 }
                 let result = count == 1;
                 debug!(rule_name = %rule.name, count, result, "rule.condition: Xor");
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "xor".into(),
+                    passed: result,
+                    actual: Some(JsonValue::Number(count.into())),
+                    expected: Some(JsonValue::Number(1u64.into())),
+                    reason: format!(
+                        "xor({} conditions): {} passed → {}",
+                        conditions.len(), count,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::PrivateBooleanIs { name, value } => {
@@ -731,11 +938,21 @@ impl RuleEngine {
                     .unwrap_or(false);
                 let result = actual == *value;
                 debug!(
-                    rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                    rule_name = %rule.name, cond = %cond_label,
                     boolean = name, expected = value, actual, result,
                     "rule.condition: PrivateBooleanIs"
                 );
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "private_boolean_is".into(),
+                    passed: result,
+                    actual: Some(JsonValue::Bool(actual)),
+                    expected: Some(JsonValue::Bool(*value)),
+                    reason: format!(
+                        "priv_bool.{} == {} (actual: {}) → {}",
+                        name, value, actual,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
 
             Condition::TimeElapsed { device_id, attribute, duration_secs } => {
@@ -746,29 +963,50 @@ impl RuleEngine {
 
                 let Some(changed_at) = changed_at else {
                     info!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute,
                         "rule.condition: TimeElapsed FAIL — attribute not tracked"
                     );
-                    return Ok(false);
+                    return Ok((false, ConditionTrace {
+                        condition_type: "time_elapsed".into(),
+                        passed: false,
+                        actual: None,
+                        expected: Some(JsonValue::Number((*duration_secs).into())),
+                        reason: format!(
+                            "{}.{} not tracked — no change recorded since startup",
+                            device_id, attribute
+                        ),
+                    }));
                 };
 
                 let elapsed_secs = (Utc::now() - changed_at).num_seconds().max(0) as u64;
                 let result = elapsed_secs >= *duration_secs;
                 if result {
                     debug!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed pass"
                     );
                 } else {
                     info!(
-                        rule_name = %rule.name, cond = format!("{}/{}", idx + 1, total),
+                        rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed FAIL"
                     );
                 }
-                Ok(result)
+                Ok((result, ConditionTrace {
+                    condition_type: "time_elapsed".into(),
+                    passed: result,
+                    actual: Some(JsonValue::Number(elapsed_secs.into())),
+                    expected: Some(JsonValue::Number((*duration_secs).into())),
+                    reason: format!(
+                        "{}.{}: elapsed {}s {} {}s → {}",
+                        device_id, attribute, elapsed_secs,
+                        if result { ">=" } else { "<" },
+                        duration_secs,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
             }
         }
     }
@@ -1154,6 +1392,17 @@ fn mqtt_topic_matches(pattern: &str, topic: &str) -> bool {
             (None, None)                 => return true,
             _                            => return false,
         }
+    }
+}
+
+fn compare_op_symbol(op: &CompareOp) -> &'static str {
+    match op {
+        CompareOp::Eq  => "==",
+        CompareOp::Ne  => "!=",
+        CompareOp::Gt  => ">",
+        CompareOp::Gte => ">=",
+        CompareOp::Lt  => "<",
+        CompareOp::Lte => "<=",
     }
 }
 

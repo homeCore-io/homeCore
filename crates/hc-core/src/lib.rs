@@ -19,7 +19,8 @@ pub mod state_bridge;
 pub mod switch_manager;
 pub mod timer_manager;
 
-pub use engine::{FireHistoryHandle, RuleFiring};
+pub use engine::{ConditionTrace, FireHistoryHandle, FireOutcome, RuleFiring};
+pub use executor::{ActionOutcome, ActionTrace};
 
 /// Shared handle to the internal event bus.
 #[derive(Clone)]
