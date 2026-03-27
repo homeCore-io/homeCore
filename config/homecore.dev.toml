@@ -173,3 +173,12 @@ id      = "plugin.isy"
 binary  = "../plugins/hc-isy/target/debug/hc-isy"
 config  = "../plugins/hc-isy/config/config.toml"
 enabled = false
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+[[notify.channels]]
+name      = "telegram"
+type      = "telegram"
+bot_token = "CHANGE_ME"   # Telegram Bot API token from @BotFather
+chat_id   = "CHANGE_ME"   # your chat/group/channel ID

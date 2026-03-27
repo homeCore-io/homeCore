@@ -297,6 +297,23 @@ config  = "plugins/hc-isy/config/config.toml"
 enabled = false
 
 # ---------------------------------------------------------------------------
+# Notifications
+#
+# Named channels used by Notify rule actions.
+# Channel name in rules must match the `name` field here exactly.
+# `channel = "all"` fans out to every registered channel.
+#
+# Telegram: create a bot via @BotFather to get bot_token, then send a
+# message to the bot and call https://api.telegram.org/bot<TOKEN>/getUpdates
+# to find your chat_id.  Group/channel IDs are negative; user IDs positive.
+# ---------------------------------------------------------------------------
+[[notify.channels]]
+name      = "telegram"
+type      = "telegram"
+bot_token = "CHANGE_ME"          # Telegram Bot API token from @BotFather
+chat_id   = "CHANGE_ME"          # your chat/group/channel ID
+
+# ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------
 # [[topic_map]]

@@ -238,6 +238,44 @@ config  = "plugins/hc-hue/config/config.toml"
 enabled = false
 
 # ---------------------------------------------------------------------------
+# Notifications
+#
+# Named channels used by `Notify` rule actions.  The `name` field is what
+# you reference in rules: `channel = "telegram"`.
+# `channel = "all"` fans out to every registered channel.
+#
+# Supported types: telegram | pushover | email
+#
+# Telegram setup:
+#   1. Message @BotFather on Telegram → /newbot → get token
+#   2. Send a message to your new bot
+#   3. GET https://api.telegram.org/bot<TOKEN>/getUpdates → find chat.id
+#   Group/channel IDs are negative integers; personal chat IDs are positive.
+# ---------------------------------------------------------------------------
+# [[notify.channels]]
+# name      = "telegram"
+# type      = "telegram"
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# chat_id   = "-100123456789"   # group/channel (negative) or user ID (positive)
+# markdown  = false             # optional: enable MarkdownV2 formatting
+
+# [[notify.channels]]
+# name      = "pushover"
+# type      = "pushover"
+# app_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
+# user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
+
+# [[notify.channels]]
+# name          = "email"
+# type          = "email"
+# smtp_host     = "smtp.example.com"
+# smtp_port     = 587
+# username      = "homecore@example.com"
+# password      = "smtp-app-password"
+# from          = "homecore@example.com"
+# to            = ["you@example.com"]
+
+# ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
 # ---------------------------------------------------------------------------
 # [[topic_map]]
