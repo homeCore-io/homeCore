@@ -20,7 +20,15 @@ attribute = "open"
 op        = "eq"
 value     = true
 
+#[[actions]]
+#type    = "notify"
+#channel = "telegram"
+#message = "Garage door (OH1) was open when homeCore started"
+
 [[actions]]
-type    = "notify"
-channel = "telegram"
-message = "Garage door (OH1) was open when homeCore started"
+type      = "set_device_state"
+device_id = "timer_garage_close"
+
+[actions.state]
+command       = "start"
+duration_secs = 600
