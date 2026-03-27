@@ -45,14 +45,14 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-const HISTORY_RING_SIZE: usize = 20;
+pub const HISTORY_RING_SIZE: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Trace types
 // ---------------------------------------------------------------------------
 
 /// Overall outcome of a single rule evaluation attempt.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum FireOutcome {
     /// All conditions passed and actions were dispatched.
@@ -70,7 +70,7 @@ pub enum FireOutcome {
 }
 
 /// Per-condition evaluation result within a rule firing.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConditionTrace {
     /// Condition variant name (e.g. "DeviceState", "TimeWindow").
     pub condition_type: String,
@@ -86,7 +86,7 @@ pub struct ConditionTrace {
 }
 
 /// A single recorded rule evaluation attempt (conditions + actions).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RuleFiring {
     pub timestamp: chrono::DateTime<Utc>,
     /// Trigger variant that produced this firing attempt.
@@ -441,13 +441,59 @@ impl RuleEngine {
         Ok(())
     }
 
-    /// Push a `RuleFiring` entry into the ring buffer for `rule_id`.
+    /// Push a `RuleFiring` into the in-memory ring buffer and persist to DB.
     fn push_history(&self, rule_id: Uuid, firing: RuleFiring) {
-        let mut buf = self.fire_history.entry(rule_id).or_default();
-        if buf.len() >= HISTORY_RING_SIZE {
-            buf.pop_front();
+        {
+            let mut buf = self.fire_history.entry(rule_id).or_default();
+            if buf.len() >= HISTORY_RING_SIZE {
+                buf.pop_front();
+            }
+            buf.push_back(firing.clone());
         }
-        buf.push_back(firing);
+        Self::persist_firing(self.state.clone(), rule_id, firing);
+    }
+
+    /// Spawn a background task to write `firing` to the SQLite history table.
+    fn persist_firing(store: StateStore, rule_id: Uuid, firing: RuleFiring) {
+        tokio::spawn(async move {
+            match serde_json::to_string(&firing) {
+                Ok(json) => {
+                    let rid   = rule_id.to_string();
+                    let ts    = firing.timestamp.to_rfc3339();
+                    if let Err(e) = store.append_rule_firing(rid, ts, json).await {
+                        warn!(rule_id = %rule_id, error = %e, "failed to persist rule firing to DB");
+                    }
+                }
+                Err(e) => warn!(rule_id = %rule_id, error = %e, "failed to serialize rule firing"),
+            }
+        });
+    }
+
+    /// Pre-populate the in-memory ring buffer from DB records loaded at startup.
+    ///
+    /// `records` maps rule_id strings to ordered (oldest-first) JSON strings.
+    pub fn populate_fire_history(&self, records: HashMap<String, Vec<String>>) {
+        let mut loaded = 0usize;
+        for (rule_id_str, jsons) in records {
+            if let Ok(rule_id) = Uuid::parse_str(&rule_id_str) {
+                let mut buf = self.fire_history.entry(rule_id).or_default();
+                for json in jsons {
+                    match serde_json::from_str::<RuleFiring>(&json) {
+                        Ok(firing) => {
+                            if buf.len() >= HISTORY_RING_SIZE {
+                                buf.pop_front();
+                            }
+                            buf.push_back(firing);
+                            loaded += 1;
+                        }
+                        Err(e) => {
+                            warn!(rule_id = %rule_id_str, error = %e, "skipping malformed fire history record");
+                        }
+                    }
+                }
+            }
+        }
+        info!(entries = loaded, "pre-populated rule fire history from DB");
     }
 
     /// Build a minimal `RuleFiring` for an early-exit (pre-condition) case.
@@ -614,6 +660,7 @@ impl RuleEngine {
         let rule_name        = rule.name.clone();
         let in_flight        = Arc::clone(&self.in_flight);
         let fire_history     = Arc::clone(&self.fire_history);
+        let state_for_persist = self.state.clone();
 
         // Trace accumulator shared between ExecutorContext and the history entry
         // pushed after actions complete.
@@ -668,8 +715,9 @@ impl RuleEngine {
                 if buf.len() >= HISTORY_RING_SIZE {
                     buf.pop_front();
                 }
-                buf.push_back(firing);
+                buf.push_back(firing.clone());
             }
+            Self::persist_firing(state_for_persist, rule_id, firing);
 
             let _ = bus.publish(Event::RuleFired {
                 timestamp: chrono::Utc::now(),

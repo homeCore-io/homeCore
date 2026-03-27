@@ -42,7 +42,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// Outcome of a single action execution.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum ActionOutcome {
     Ok,
@@ -50,7 +50,7 @@ pub enum ActionOutcome {
 }
 
 /// Trace record for one top-level action within a rule firing.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActionTrace {
     /// Zero-based index in the top-level action list.
     pub index: usize,

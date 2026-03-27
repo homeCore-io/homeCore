@@ -232,6 +232,30 @@ impl StateStore {
         .await?
     }
 
+    // --- Rule fire history ---
+
+    pub async fn append_rule_firing(
+        &self,
+        rule_id: String,
+        fired_at: String,
+        record_json: String,
+    ) -> Result<()> {
+        let store = Arc::clone(&self.history);
+        tokio::task::spawn_blocking(move || {
+            store.append_rule_firing(&rule_id, &fired_at, &record_json)
+        })
+        .await?
+    }
+
+    pub async fn load_recent_rule_firings(
+        &self,
+        limit_per_rule: usize,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let store = Arc::clone(&self.history);
+        let lim = limit_per_rule as i64;
+        tokio::task::spawn_blocking(move || store.load_recent_per_rule(lim)).await?
+    }
+
     // --- Users ---
 
     pub async fn create_user(&self, user: &User) -> Result<()> {

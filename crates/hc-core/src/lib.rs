@@ -203,6 +203,14 @@ impl Core {
             self.notify.clone(),
         )
         .with_drain_timeout(self.drain_timeout_secs);
+
+        // Pre-populate the fire history ring buffer from the database so that
+        // history survives server restarts.
+        match self.state.load_recent_rule_firings(engine::HISTORY_RING_SIZE).await {
+            Ok(records) => engine.populate_fire_history(records),
+            Err(e) => warn!(error = %e, "could not load rule fire history from DB — starting empty"),
+        }
+
         let rules_handle = engine.rules_handle();
         let fire_history = engine.fire_history_handle();
         tokio::spawn(engine.run(shutdown_rx.clone()));
