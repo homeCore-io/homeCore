@@ -1228,40 +1228,114 @@ curl -s http://localhost:8080/api/v1/automations/RULE_ID/history \
   -H "Authorization: Bearer $TOKEN" | jq
 ```
 
-Each entry contains:
+Each entry is a full step-by-step execution trace:
 
 | Field | Description |
 |---|---|
-| `timestamp` | When the trigger was matched and conditions evaluated |
-| `conditions_passed` | `true` if all conditions passed and actions were dispatched |
-| `actions_ran` | Number of actions in the rule (0 when conditions blocked execution) |
+| `timestamp` | When the evaluation attempt occurred |
+| `trigger_type` | Trigger variant that matched (e.g. `DeviceStateChanged`) |
+| `trigger_context` | `device_id`, `attribute`, `value`, `prev_value` from the triggering event |
+| `outcome` | Overall result — see outcome types below |
+| `conditions[]` | Per-condition results in evaluation order (stops at first failure) |
+| `actions[]` | Per-action results for top-level actions (only present when `outcome.type = "fired"`) |
 | `eval_ms` | Milliseconds spent evaluating conditions |
 
-**Example response:**
+**Outcome types** (`outcome.type`):
+
+| Type | Meaning |
+|---|---|
+| `fired` | All conditions passed, actions dispatched |
+| `condition_failed` | A condition blocked execution; `at_index` and `reason` identify which |
+| `cooldown` | Rule fired too recently; `remaining_secs` shows how long until it can fire again |
+| `paused` | Rule is paused via `PauseRule` action |
+| `required_expression_failed` | `required_expression` Rhai gate returned `false` |
+| `trigger_gate_failed` | `trigger_condition` Rhai gate returned `false` |
+
+**Condition trace fields** (each entry in `conditions[]`):
+
+| Field | Description |
+|---|---|
+| `condition_type` | `device_state`, `time_window`, `time_elapsed`, `script_expression`, `not`, `and`, `or`, `xor`, `private_boolean_is` |
+| `passed` | Whether this condition passed |
+| `actual` | Value read at evaluation time |
+| `expected` | Value or constraint from the rule definition |
+| `reason` | Human-readable summary, e.g. `"open == false (actual: true) → FAIL"` |
+
+**Action trace fields** (each entry in `actions[]`):
+
+| Field | Description |
+|---|---|
+| `index` | Zero-based position in the top-level action list |
+| `action_type` | `SetDeviceState`, `CallService`, `Delay`, etc. |
+| `description` | Target/content summary, e.g. `"GET http://…"` or `"lutron_21 ← {\"on\":true}"` |
+| `outcome.status` | `ok` or `error` (with `message` on error) |
+| `duration_ms` | Wall-clock time including nested work (loops, waits) |
+
+**Example response (condition failure):**
 
 ```json
 [
   {
-    "timestamp": "2026-03-24T14:30:01Z",
-    "conditions_passed": false,
-    "actions_ran": 0,
-    "eval_ms": 1
-  },
+    "timestamp": "2026-03-27T15:40:00Z",
+    "trigger_type": "DeviceStateChanged",
+    "trigger_context": { "device_id": "yolink_xxx", "attribute": "open", "value": false },
+    "outcome": { "type": "condition_failed", "at_index": 0, "reason": "now 02:15:00 within [12:00:00, 23:59:00] → FAIL" },
+    "conditions": [
+      {
+        "condition_type": "time_window",
+        "passed": false,
+        "actual": "02:15:00",
+        "expected": "12:00:00-23:59:00",
+        "reason": "now 02:15:00 within [12:00:00, 23:59:00] → FAIL"
+      }
+    ],
+    "actions": [],
+    "eval_ms": 0
+  }
+]
+```
+
+**Example response (successful fire with action trace):**
+
+```json
+[
   {
-    "timestamp": "2026-03-24T14:42:15Z",
-    "conditions_passed": true,
-    "actions_ran": 2,
-    "eval_ms": 2
+    "timestamp": "2026-03-27T14:30:00Z",
+    "trigger_type": "DeviceStateChanged",
+    "trigger_context": { "device_id": "yolink_xxx", "attribute": "open", "value": false },
+    "outcome": { "type": "fired" },
+    "conditions": [
+      {
+        "condition_type": "time_window",
+        "passed": true,
+        "actual": "14:30:00",
+        "expected": "12:00:00-23:59:00",
+        "reason": "now 14:30:00 within [12:00:00, 23:59:00] → pass"
+      }
+    ],
+    "actions": [
+      {
+        "index": 0,
+        "action_type": "CallService",
+        "description": "GET http://10.0.10.200:5005/Bathroom/favorite/0",
+        "outcome": { "status": "ok" },
+        "duration_ms": 142
+      }
+    ],
+    "eval_ms": 1
   }
 ]
 ```
 
 Entries are returned oldest-first. The buffer clears on restart — it is purely diagnostic, not persisted.
 
+> **Note:** Fired entries appear in the buffer only after all actions complete (so `actions[]` is fully populated). Entries for blocked evaluations (condition_failed, cooldown, etc.) appear immediately.
+
 **Interpreting results:**
-- Many entries with `conditions_passed: false` → the trigger fires correctly but a condition blocks it. Use `POST /test` to see which condition fails and why.
-- No entries at all → the trigger has never matched. Check that the `device_id` and `attribute` in the trigger are correct.
-- The buffer is empty but the rule exists → the rule has never had its trigger fire since the last restart.
+- `outcome.type = "condition_failed"` → trigger fires but a condition blocks it; `reason` shows the exact mismatch. Use `POST /automations/{id}/test` for a fresh dry-run.
+- No entries at all → the trigger has never matched since restart. Check `device_id` and `attribute` in the trigger.
+- `outcome.type = "cooldown"` → rule fired recently; `remaining_secs` shows when it will be eligible again.
+- `actions[].outcome.status = "error"` → an action failed; `message` has the error detail.
 
 ---
 
