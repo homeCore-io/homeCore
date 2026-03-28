@@ -16,7 +16,7 @@
 //! error is logged — the running system is never affected by a bad file.
 
 use anyhow::{Context, Result};
-use hc_types::rule::Rule;
+use hc_types::rule::{Rule, RuleAction};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -98,7 +98,7 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
 /// Uses a UUID v5 derived from the file path so the stub has a stable ID
 /// across reloads (the broken file doesn't change between reloads).
 fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
-    use hc_types::rule::{Action, Condition, Trigger};
+    use hc_types::rule::{Condition, Trigger};
 
     // Stable UUID from the absolute path so repeated reloads yield the same ID.
     let path_bytes = path.to_string_lossy();
@@ -118,7 +118,7 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         tags:                 Vec::new(),
         trigger:              Trigger::ManualTrigger,
         conditions:           Vec::<Condition>::new(),
-        actions:              Vec::<Action>::new(),
+        actions:              Vec::<RuleAction>::new(),
         error:                Some(format!("parse error: {err}")),
         cooldown_secs:        None,
         log_events:           false,

@@ -13,7 +13,7 @@ use hc_core::{Core, EventBus};
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_state::StateStore;
 use hc_types::event::Event;
-use hc_types::rule::{Action, Rule, Trigger};
+use hc_types::rule::{Action, Rule, RuleAction, Trigger};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde_json::json;
 use std::time::Duration;
@@ -58,11 +58,11 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
             for_duration_secs: None,
         },
         conditions: vec![],
-        actions: vec![Action::PublishMqtt {
+        actions: vec![RuleAction { enabled: true, action: Action::PublishMqtt {
             topic: "homecore/devices/test_light/cmd".into(),
             payload: r#"{"action":"toggle_confirmed"}"#.into(),
             retain: false,
-        }],
+        }}],
         error: None,
         cooldown_secs: None,
         log_events: false,

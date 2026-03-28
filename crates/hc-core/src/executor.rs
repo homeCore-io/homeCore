@@ -27,7 +27,7 @@ use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
 use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
 use hc_types::event::Event;
-use hc_types::rule::{Action, LogLevel, TriggerContext, VariableOp};
+use hc_types::rule::{Action, LogLevel, RuleAction, TriggerContext, VariableOp};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +47,8 @@ use uuid::Uuid;
 pub enum ActionOutcome {
     Ok,
     Error { message: String },
+    /// Action was present but disabled via `enabled = false`.
+    Skipped,
 }
 
 /// Trace record for one top-level action within a rule firing.
@@ -188,18 +190,50 @@ fn to_json_number(f: f64) -> JsonValue {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Execute a list of actions against the provided context and device snapshot.
+/// Execute a list of rule actions against the provided context and device snapshot.
 ///
 /// `snapshot` is a frozen-at-fire-time view of device state used by Rhai
 /// scripts.  It stays consistent across all script evaluations within one
 /// rule firing.  `ctx.device_cache` (the live DashMap) is used only by
 /// `WaitForExpression` and `RunRuleActions`.
+///
+/// Actions with `enabled = false` are skipped and recorded as `Skipped` in the
+/// action trace.
 pub async fn execute_actions(
-    actions: Vec<Action>,
+    actions: Vec<RuleAction>,
     ctx: Arc<ExecutorContext>,
     snapshot: HashMap<String, JsonValue>,
 ) -> Result<()> {
-    execute_actions_inner(actions, ctx, snapshot, 0).await
+    let total = actions.len();
+    for (idx, ra) in actions.into_iter().enumerate() {
+        if ctx.exit_flag.load(Ordering::SeqCst) {
+            debug!(rule = %ctx.rule_name, "execute_actions: ExitRule — stopping");
+            break;
+        }
+        if !ra.enabled {
+            if let Some(ref trace_buf) = ctx.trace {
+                let action_type  = action_type_name(&ra.action).to_string();
+                let description  = action_description(&ra.action);
+                trace_buf.lock().unwrap().push(ActionTrace {
+                    index: idx,
+                    action_type,
+                    description,
+                    outcome: ActionOutcome::Skipped,
+                    duration_ms: 0,
+                });
+            }
+            if ctx.log_actions {
+                info!(
+                    rule  = %ctx.rule_name,
+                    label = %format!("action[{}/{}]", idx + 1, total),
+                    "action: disabled — skipping"
+                );
+            }
+            continue;
+        }
+        execute_one(ra.action, idx, total, Arc::clone(&ctx), snapshot.clone(), 0).await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +797,8 @@ fn run_single_action(
                         trace:          None, // sub-calls not traced in parent history
                     });
                     let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
-                    execute_actions_inner(target_actions, sub_ctx, sub_snapshot, call_depth + 1).await?;
+                    // Use execute_actions so per-action enabled flags are respected.
+                    execute_actions(target_actions, sub_ctx, sub_snapshot).await?;
                 }
             }
         }
@@ -804,6 +839,31 @@ fn run_single_action(
             match timeout_ms {
                 Some(ms) => { let _ = tokio::time::timeout(Duration::from_millis(ms), wait_fut).await; }
                 None     => wait_fut.await,
+            }
+        }
+
+        // ── SetDeviceStatePerMode ─────────────────────────────────────────────
+        Action::SetDeviceStatePerMode { device_id, modes, default_state } => {
+            debug!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode");
+            // Check mode entries in order; apply the first one whose mode is active.
+            let state_to_apply = modes.iter().find_map(|entry| {
+                let mode_attrs = ctx.device_cache.get(&entry.mode)?;
+                let is_on = mode_attrs.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+                if is_on { Some(entry.state.clone()) } else { None }
+            }).or(default_state);
+
+            match state_to_apply {
+                None => {
+                    debug!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode — no mode matched and no default, skipping");
+                }
+                Some(state) => {
+                    let topic = format!("homecore/devices/{device_id}/cmd");
+                    info!(rule = %ctx.rule_name, device_id, state = %state, "action: SetDeviceStatePerMode — applying");
+                    match ctx.publish.clone() {
+                        Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
+                        None     => warn!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode — no publish handle"),
+                    }
+                }
             }
         }
 
@@ -991,6 +1051,13 @@ fn action_description(action: &Action) -> String {
             }
         }
         Action::StopRuleChain | Action::ExitRule => String::new(),
+        Action::SetDeviceStatePerMode { device_id, modes, default_state } => {
+            let mode_names: Vec<&str> = modes.iter().map(|e| e.mode.as_str()).collect();
+            match default_state {
+                Some(_) => format!("{} (modes: [{}] + default)", device_id, mode_names.join(", ")),
+                None    => format!("{} (modes: [{}])", device_id, mode_names.join(", ")),
+            }
+        }
     }
 }
 
@@ -1020,7 +1087,8 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::CancelRuleTimers { .. }  => "CancelRuleTimers",
         Action::RunRuleActions { .. }    => "RunRuleActions",
         Action::WaitForEvent { .. }      => "WaitForEvent",
-        Action::WaitForExpression { .. } => "WaitForExpression",
+        Action::WaitForExpression { .. }      => "WaitForExpression",
+        Action::SetDeviceStatePerMode { .. }  => "SetDeviceStatePerMode",
     }
 }
 
@@ -1036,51 +1104,55 @@ mod tests {
         HashMap::new()
     }
 
-    fn test_delay(ms: u64) -> Action {
-        Action::Delay { duration_ms: ms, cancelable: false, cancel_key: None }
+    fn ra(action: Action) -> RuleAction {
+        RuleAction { enabled: true, action }
+    }
+
+    fn test_delay(ms: u64) -> RuleAction {
+        ra(Action::Delay { duration_ms: ms, cancelable: false, cancel_key: None })
     }
 
     #[tokio::test]
     async fn repeat_until_exits_when_condition_true_immediately() {
-        let action = Action::RepeatUntil {
+        let action = ra(Action::RepeatUntil {
             condition: "true".into(),
-            actions: vec![test_delay(0)],
+            actions: vec![test_delay(0).action],
             max_iterations: Some(10),
             interval_ms: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
     async fn repeat_until_respects_max_iterations() {
-        let action = Action::RepeatUntil {
+        let action = ra(Action::RepeatUntil {
             condition: "false".into(),
-            actions: vec![test_delay(0)],
+            actions: vec![test_delay(0).action],
             max_iterations: Some(3),
             interval_ms: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
     async fn repeat_while_skips_body_when_false() {
-        let action = Action::RepeatWhile {
+        let action = ra(Action::RepeatWhile {
             condition: "false".into(),
-            actions: vec![test_delay(0)],
+            actions: vec![test_delay(0).action],
             max_iterations: Some(5),
             interval_ms: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
     #[tokio::test]
     async fn repeat_count_runs_exact_iterations() {
         // Verify it completes without error for count=3
-        let action = Action::RepeatCount {
+        let action = ra(Action::RepeatCount {
             count: 3,
-            actions: vec![test_delay(0)],
+            actions: vec![test_delay(0).action],
             interval_ms: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
@@ -1088,8 +1160,8 @@ mod tests {
     async fn exit_rule_stops_action_sequence() {
         // ExitRule should prevent the second Comment from executing (no panic / infinite loop).
         let actions = vec![
-            Action::ExitRule,
-            Action::Comment { text: "should not reach here".into() },
+            ra(Action::ExitRule),
+            ra(Action::Comment { text: "should not reach here".into() }),
         ];
         execute_actions(actions, ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
@@ -1103,8 +1175,8 @@ mod tests {
     async fn set_variable_add() {
         let ctx = ExecutorContext::for_test();
         let actions = vec![
-            Action::SetVariable { name: "x".into(), value: serde_json::json!(5_i64), op: None },
-            Action::SetVariable { name: "x".into(), value: serde_json::json!(3_i64), op: Some(VariableOp::Add) },
+            ra(Action::SetVariable { name: "x".into(), value: serde_json::json!(5_i64), op: None }),
+            ra(Action::SetVariable { name: "x".into(), value: serde_json::json!(3_i64), op: Some(VariableOp::Add) }),
         ];
         execute_actions(actions, Arc::clone(&ctx), empty_snapshot()).await.unwrap();
         let val = ctx.rule_vars.get(&(Uuid::nil(), "x".into())).map(|v| v.clone());
@@ -1115,7 +1187,7 @@ mod tests {
     async fn set_private_boolean() {
         let ctx = ExecutorContext::for_test();
         let actions = vec![
-            Action::SetPrivateBoolean { name: "armed".into(), value: true },
+            ra(Action::SetPrivateBoolean { name: "armed".into(), value: true }),
         ];
         execute_actions(actions, Arc::clone(&ctx), empty_snapshot()).await.unwrap();
         let val = ctx.priv_bools.get(&(Uuid::nil(), "armed".into())).map(|v| *v);
@@ -1125,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn conditional_else_if_branch() {
         let actions = vec![
-            Action::Conditional {
+            ra(Action::Conditional {
                 condition: "false".into(),
                 then_actions: vec![],
                 else_if: vec![
@@ -1135,34 +1207,34 @@ mod tests {
                     },
                 ],
                 else_actions: vec![],
-            },
+            }),
         ];
         execute_actions(actions, ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
-    fn call_service_action(url: &str, method: &str) -> Action {
-        Action::CallService {
+    fn call_service_action(url: &str, method: &str) -> RuleAction {
+        ra(Action::CallService {
             url: url.to_string(),
             method: method.to_string(),
             body: serde_json::Value::Null,
             timeout_ms: None,
             retries: None,
             response_event: None,
-        }
+        })
     }
 
     #[tokio::test]
     async fn call_service_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server.mock("POST", "/hook").with_status(200).create_async().await;
-        let action = Action::CallService {
+        let action = ra(Action::CallService {
             url: format!("{}/hook", server.url()),
             method: "POST".into(),
             body: serde_json::json!({"key": "val"}),
             timeout_ms: None,
             retries: None,
             response_event: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
         mock.assert_async().await;
     }
@@ -1183,14 +1255,14 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let _m1 = server.mock("POST", "/retry").with_status(500).create_async().await;
         let _m2 = server.mock("POST", "/retry").with_status(200).create_async().await;
-        let action = Action::CallService {
+        let action = ra(Action::CallService {
             url: format!("{}/retry", server.url()),
             method: "POST".into(),
             body: serde_json::Value::Null,
             timeout_ms: None,
             retries: Some(1),
             response_event: None,
-        };
+        });
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await.unwrap();
     }
 
@@ -1199,14 +1271,14 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let _m1 = server.mock("GET", "/fail").with_status(500).create_async().await;
         let _m2 = server.mock("GET", "/fail").with_status(500).create_async().await;
-        let action = Action::CallService {
+        let action = ra(Action::CallService {
             url: format!("{}/fail", server.url()),
             method: "GET".into(),
             body: serde_json::Value::Null,
             timeout_ms: None,
             retries: Some(1),
             response_event: None,
-        };
+        });
         let result = execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot()).await;
         assert!(result.is_err());
     }

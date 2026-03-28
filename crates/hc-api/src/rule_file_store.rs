@@ -193,7 +193,7 @@ pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
 fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
     trigger_references_device(&rule.trigger, device_id)
         || rule.conditions.iter().any(|c| condition_references_device(c, device_id))
-        || rule.actions.iter().any(|a| action_references_device(a, device_id))
+        || rule.actions.iter().any(|ra| action_references_device(&ra.action, device_id))
 }
 
 fn trigger_references_device(trigger: &Trigger, device_id: &str) -> bool {
@@ -227,8 +227,8 @@ fn replace_device_refs(rule: &mut Rule, device_id: &str, placeholder: &str) {
     for cond in &mut rule.conditions {
         replace_in_condition(cond, device_id, placeholder);
     }
-    for action in &mut rule.actions {
-        replace_in_action(action, device_id, placeholder);
+    for ra in &mut rule.actions {
+        replace_in_action(&mut ra.action, device_id, placeholder);
     }
 }
 

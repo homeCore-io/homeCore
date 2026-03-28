@@ -888,7 +888,7 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
         }
     }
 
-    actions_reference_device(&rule.actions, device_id)
+    rule.actions.iter().any(|ra| actions_reference_device(std::slice::from_ref(&ra.action), device_id))
 }
 
 fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
@@ -1833,18 +1833,28 @@ pub async fn set_group_enabled(
 /// `POST /api/v1/webhooks/{path}`
 ///
 /// Any POST to this endpoint fires a `Custom` event with `event_type = "webhook"` and
-/// `payload = { "path": "...", "body": <request body> }`.  Rules with
+/// `payload = { "path": "...", "body": <request body>, "query": { ... } }`.  Rules with
 /// `Trigger::WebhookReceived { path }` will match when the path matches.
+///
+/// In Rhai scripts:
+/// - `trigger_value()` returns the request body (or `()` when empty)
+/// - `trigger_extra()` returns a map of query-string parameters
 pub async fn receive_webhook(
     State(s): State<AppState>,
     Path(path): Path<String>,
+    Query(query_params): Query<std::collections::HashMap<String, String>>,
     body: Option<Json<Value>>,
 ) -> impl IntoResponse {
-    let body_value = body.map(|b| b.0).unwrap_or(Value::Null);
+    let body_value  = body.map(|b| b.0).unwrap_or(Value::Null);
+    let query_value: Value = if query_params.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(query_params.into_iter().map(|(k, v)| (k, Value::String(v))).collect())
+    };
     let event = hc_types::event::Event::Custom {
         timestamp: chrono::Utc::now(),
         event_type: "webhook".into(),
-        payload: json!({ "path": path, "body": body_value }),
+        payload: json!({ "path": path, "body": body_value, "query": query_value }),
     };
     let _ = s.event_bus.publish(event);
     (StatusCode::OK, Json(json!({ "status": "accepted", "path": path })))

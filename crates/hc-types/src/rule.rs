@@ -25,7 +25,7 @@ pub struct Rule {
     #[serde(default)]
     pub conditions: Vec<Condition>,
     #[serde(default)]
-    pub actions: Vec<Action>,
+    pub actions: Vec<RuleAction>,
     /// Set by the loader when the rule file fails to parse, or by the API when a
     /// referenced device is deleted.  Rules with an error are never executed.
     /// The value is a human-readable description of the problem.
@@ -331,6 +331,32 @@ pub enum LogLevel {
     Error,
 }
 
+fn default_true() -> bool { true }
+
+/// A wrapper that pairs an `Action` with a per-action enable flag.
+///
+/// When `enabled` is `false` the executor skips the action and records a
+/// `Skipped` trace entry.  Defaults to `true` so existing rule files that
+/// omit the field continue to work unchanged.
+///
+/// TOML representation (the `type` field and action-specific fields are
+/// flattened to the same level as `enabled`):
+///
+/// ```toml
+/// [[actions]]
+/// type      = "set_device_state"
+/// device_id = "light_1"
+/// state     = { on = true }
+/// enabled   = false           # optional — default true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleAction {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub action: Action,
+}
+
 /// A single step in a rule's action sequence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -522,6 +548,35 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         level: Option<LogLevel>,
     },
+    /// Apply a different device state depending on which mode is currently active.
+    ///
+    /// The first entry whose mode device reports `on == true` wins.  If no mode
+    /// matches, `default_state` is applied (when set).  Equivalent to Hubitat's
+    /// "Set Switches/Dimmers Per Mode".
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type      = "set_device_state_per_mode"
+    /// device_id = "light_desk"
+    ///
+    /// [[actions.modes]]
+    /// mode  = "mode_night"
+    /// state = { brightness = 30, on = true }
+    ///
+    /// [[actions.modes]]
+    /// mode  = "mode_away"
+    /// state = { on = false }
+    ///
+    /// [actions.default_state]
+    /// brightness = 200
+    /// on         = true
+    /// ```
+    SetDeviceStatePerMode {
+        device_id: String,
+        modes: Vec<ModeStateEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_state: Option<JsonValue>,
+    },
 }
 
 /// Context captured from the event that triggered a rule firing.
@@ -533,6 +588,19 @@ pub struct TriggerContext {
     pub value:      Option<JsonValue>,
     pub prev_value: Option<JsonValue>,
     pub event_type: Option<String>,
+    /// Auxiliary context data — for webhook triggers this holds the query
+    /// parameter map (`trigger_extra()` in Rhai scripts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra:      Option<JsonValue>,
+}
+
+/// A mode → state mapping entry for `Action::SetDeviceStatePerMode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStateEntry {
+    /// Device ID of the mode (e.g. `"mode_night"`).
+    pub mode: String,
+    /// State to apply when this mode is active (`on == true`).
+    pub state: JsonValue,
 }
 
 /// A named snapshot of device states that can be activated as a unit.

@@ -211,18 +211,22 @@ impl ScriptRuntime {
     /// - `trigger_value()` — new attribute value (or unit if unavailable)
     /// - `trigger_prev_value()` — previous attribute value (or unit)
     /// - `trigger_event_type()` — event type string
+    /// - `trigger_extra()` — auxiliary context; for webhook triggers this is a map of
+    ///   query-string parameters (e.g. `trigger_extra()["token"]`); unit otherwise
     pub fn with_trigger_context(mut self, ctx: &TriggerContext) -> Self {
         let device_id  = ctx.device_id.clone().unwrap_or_default();
         let attribute  = ctx.attribute.clone().unwrap_or_default();
         let value      = ctx.value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
         let prev_value = ctx.prev_value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
         let event_type = ctx.event_type.clone().unwrap_or_default();
+        let extra      = ctx.extra.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
 
         self.engine.register_fn("trigger_device",     move || -> String  { device_id.clone() });
         self.engine.register_fn("trigger_attribute",  move || -> String  { attribute.clone() });
         self.engine.register_fn("trigger_value",      move || -> Dynamic { value.clone() });
         self.engine.register_fn("trigger_prev_value", move || -> Dynamic { prev_value.clone() });
         self.engine.register_fn("trigger_event_type", move || -> String  { event_type.clone() });
+        self.engine.register_fn("trigger_extra",      move || -> Dynamic { extra.clone() });
         self
     }
 
@@ -426,6 +430,7 @@ mod tests {
             value:      Some(json!(true)),
             prev_value: Some(json!(false)),
             event_type: Some("device_state_changed".into()),
+            extra:      None,
         };
         let rt = ScriptRuntime::new().with_trigger_context(&ctx);
         assert!(rt.eval_condition(r#"trigger_device() == "light_1""#).unwrap());
