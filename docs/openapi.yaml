@@ -743,6 +743,109 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /plugins/matter/commission:
+    post:
+      operationId: matterCommission
+      summary: Start Matter commissioning flow
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MatterCommissionRequest"
+      responses:
+        "202":
+          description: Commission command accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedActionResponse"
+        "422":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/matter/nodes:
+    get:
+      operationId: listMatterNodes
+      summary: List commissioned Matter nodes from plugin inventory
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Matter node inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatterNodesResponse"
+        "404":
+          description: Matter controller device not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/matter/reinterview:
+    post:
+      operationId: matterReinterview
+      summary: Re-interview a commissioned Matter node
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MatterReinterviewRequest"
+      responses:
+        "202":
+          description: Re-interview command accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedActionResponse"
+        "422":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/matter/nodes/{id}:
+    delete:
+      operationId: removeMatterNode
+      summary: Remove a commissioned Matter node from plugin inventory
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Matter node identifier
+      responses:
+        "202":
+          description: Remove-node command accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedActionResponse"
+        "422":
+          description: Invalid node id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   # ---------------------------------------------------------------------------
   # Webhooks
   # ---------------------------------------------------------------------------
@@ -1350,6 +1453,66 @@ components:
         status:
           type: string
           enum: [active, offline]
+
+    MatterNode:
+      type: object
+      required: [node_id, commissioned_at_unix, last_interview_unix, endpoint, clusters]
+      properties:
+        node_id:
+          type: string
+        commissioned_at_unix:
+          type: integer
+          format: int64
+        last_interview_unix:
+          type: integer
+          format: int64
+        endpoint:
+          type: integer
+          format: int32
+        clusters:
+          type: array
+          items:
+            type: string
+
+    MatterNodesResponse:
+      type: object
+      required: [nodes]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatterNode"
+
+    MatterCommissionRequest:
+      type: object
+      description: Optional commissioning parameters forwarded to the Matter plugin.
+      additionalProperties: true
+
+    MatterReinterviewRequest:
+      type: object
+      required: [node_id]
+      properties:
+        node_id:
+          type: string
+        endpoint:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        clusters:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+    AcceptedActionResponse:
+      type: object
+      required: [status, action]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        action:
+          type: string
 
     # ---- System ----
 

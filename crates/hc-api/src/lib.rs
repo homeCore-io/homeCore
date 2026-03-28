@@ -271,6 +271,10 @@ pub fn router(state: AppState) -> Router {
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
         .route("/plugins/:id", delete(handlers::deregister_plugin))
+        .route("/plugins/matter/commission", post(handlers::matter_commission))
+        .route("/plugins/matter/nodes", get(handlers::list_matter_nodes))
+        .route("/plugins/matter/reinterview", post(handlers::matter_reinterview))
+        .route("/plugins/matter/nodes/:id", delete(handlers::remove_matter_node))
         // Events
         .route("/events", get(handlers::list_events))
         // System

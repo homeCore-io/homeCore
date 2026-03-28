@@ -21,6 +21,8 @@ use crate::auth_middleware::{
 use crate::group_store::RuleGroup;
 use crate::AppState;
 
+const MATTER_CONTROLLER_DEVICE_ID: &str = "matter_controller";
+
 // ---------- Health ----------
 
 pub async fn health() -> impl IntoResponse {
@@ -145,22 +147,21 @@ pub async fn command_device(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let topic = format!("homecore/devices/{id}/cmd");
-    let payload = match serde_json::to_vec(&body) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
-    };
-
-    // Publish to MQTT so plugins and external subscribers receive the command.
-    if let Some(ph) = &s.publish {
-        if let Err(e) = ph.publish(&topic, payload.clone()).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
-        }
+    if let Err(e) = publish_device_command(&s, &id, body).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
     }
 
-    // Inject directly into the event bus so the state bridge routes the cmd to
-    // the native device topic without depending on the broker echoing the publish
-    // back to the internal client.
+    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
+}
+
+async fn publish_device_command(s: &AppState, device_id: &str, body: Value) -> anyhow::Result<()> {
+    let topic = format!("homecore/devices/{device_id}/cmd");
+    let payload = serde_json::to_vec(&body)?;
+
+    if let Some(ph) = &s.publish {
+        ph.publish(&topic, payload.clone()).await?;
+    }
+
     let ev = hc_types::event::Event::MqttMessage {
         timestamp: chrono::Utc::now(),
         topic,
@@ -169,7 +170,7 @@ pub async fn command_device(
     };
     let _ = s.event_bus.publish(ev);
 
-    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
+    Ok(())
 }
 
 pub async fn update_device(
@@ -1423,6 +1424,90 @@ pub async fn deregister_plugin(
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response()
     }
+}
+
+pub async fn matter_commission(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(obj) = body.as_object() else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "request body must be a JSON object" }))).into_response();
+    };
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("action".to_string(), Value::String("commission".to_string()));
+    for (k, v) in obj {
+        payload.insert(k.clone(), v.clone());
+    }
+
+    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+
+    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "commission" }))).into_response()
+}
+
+pub async fn matter_reinterview(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(obj) = body.as_object() else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "request body must be a JSON object" }))).into_response();
+    };
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("action".to_string(), Value::String("reinterview".to_string()));
+    for (k, v) in obj {
+        payload.insert(k.clone(), v.clone());
+    }
+
+    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+
+    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "reinterview" }))).into_response()
+}
+
+pub async fn list_matter_nodes(
+    State(s): State<AppState>,
+    _: PluginsRead,
+) -> impl IntoResponse {
+    let device = match s.store.get_device(MATTER_CONTROLLER_DEVICE_ID).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "matter controller device not found" }))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    let nodes = device
+        .attributes
+        .get("commissioned_nodes")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    (StatusCode::OK, Json(json!({ "nodes": nodes }))).into_response()
+}
+
+pub async fn remove_matter_node(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if id.trim().is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "node id is required" }))).into_response();
+    }
+
+    let payload = json!({
+        "action": "remove_node",
+        "node_id": id,
+    });
+
+    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+
+    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "remove_node" }))).into_response()
 }
 
 // ---------- Area device assignment ----------
