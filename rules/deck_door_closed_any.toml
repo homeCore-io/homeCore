@@ -1,17 +1,19 @@
-# All Deck Doors Closed (Any trigger) — Optimized
+# All Deck Doors Closed (Any trigger)
 #
 # Fires when any of the 4 deck doors closes; conditions verify that ALL 4 are
-# now closed before taking action.  Consolidates 5 rules into 1:
+# now closed before acting.  When all closed at night, starts the 5-minute
+# deck lights-off timer.
 #
-#   Replaces (when enabled):
-#     door_closed_diningRoom.toml    \
-#     door_closed_familyRoom.toml     |  each sets switch_any_deck_door_open=off
-#     door_closed_garageDeck.toml     |  when all 4 doors are closed
-#     door_closed_livingRoom.toml    /
-#     all_deck_doors_closed.toml        triggers on switch→false, starts timer
+# Fully self-contained — no virtual switch involved.
 #
-# NOTE: if this rule is enabled, disable all 5 rules above.
-#       timer_deck_lights_off.toml and timer_deck_lights_off.toml are unchanged.
+# Replaces (when enabled):
+#   door_closed_diningRoom.toml
+#   door_closed_familyRoom.toml
+#   door_closed_garageDeck.toml
+#   door_closed_livingRoom.toml
+#   all_deck_doors_closed.toml
+#
+# timer_deck_lights_off.toml (timer fires → scene off) is unchanged.
 
 id = "4ad53081-5c15-465b-8d31-5ec97b289d12"
 name     = "All Deck Doors Closed — Start Lights Timer"
@@ -29,7 +31,7 @@ device_ids = [
 attribute  = "open"
 to         = false
 
-# All 4 deck doors must be closed before acting.
+# All 4 doors must be closed before starting the timer.
 [[conditions]]
 type      = "device_state"
 device_id = "yolink_d88b4c01000e813f"
@@ -58,15 +60,7 @@ attribute = "open"
 op        = "eq"
 value     = false
 
-# Update the fan-in virtual switch (keeps state consistent with other rules
-# that may read it, e.g. any_deck_door_open.toml).
-[[actions]]
-type      = "set_device_state"
-device_id = "switch_any_deck_door_open"
-state     = { on = false }
-
-# Start the lights-off countdown directly (was previously a second rule
-# triggered by the switch changing to false).  5-minute grace period.
+# Start the 5-minute lights-off countdown (night only).
 [[actions]]
 type      = "conditional"
 condition = "device_state(\"mode_night\")[\"on\"] == true"
