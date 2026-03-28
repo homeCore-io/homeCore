@@ -32,15 +32,27 @@ impl RuleFileStore {
         Self { dir: dir.into() }
     }
 
-    /// Serialize `rule` and write it to `{dir}/{slug}.toml`.
+    /// Serialize `rule` and write it to the appropriate `.toml` file.
+    ///
+    /// If a file already exists in the rules directory whose `id` matches
+    /// `rule.id`, that file is overwritten in-place (preserving the original
+    /// filename).  Otherwise a new file is created at `{dir}/{slug}.toml`
+    /// where `slug` is derived from `rule.name`.
     ///
     /// Creates the directory if it does not exist.  Returns the path written.
     pub fn write_rule(&self, rule: &Rule) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating rules directory {}", self.dir.display()))?;
 
-        let slug = slugify(&rule.name);
-        let path = self.dir.join(format!("{slug}.toml"));
+        // Prefer overwriting the existing file (if any) so a rule whose file
+        // was manually named never produces a duplicate.
+        let path = match self.find_file(rule.id)? {
+            Some(existing) => existing,
+            None => {
+                let slug = slugify(&rule.name);
+                self.dir.join(format!("{slug}.toml"))
+            }
+        };
 
         let content = toml::to_string_pretty(rule)
             .context("serializing rule to TOML")?;
@@ -94,24 +106,49 @@ impl RuleFileStore {
         Ok(None)
     }
 
-    /// Write a rule to a file named after `new_name`, and delete the old file
-    /// if the slug changed (i.e. the rule was renamed).
+    /// Write a rule to its slug-derived filename, deleting the old file when
+    /// the rule is renamed.
+    ///
+    /// Finds the current file on disk by rule ID.  If the file's path no
+    /// longer matches the slug of `rule.name` (i.e. the rule was renamed or
+    /// the original file had a custom name), the old file is deleted after the
+    /// new one is written.
     pub fn write_rule_renamed(&self, rule: &Rule, old_name: &str) -> Result<PathBuf> {
-        let old_slug = slugify(old_name);
+        // Find the existing file (by ID) before writing the new one.
+        let existing_path = self.find_file(rule.id)?;
+
         let new_slug = slugify(&rule.name);
+        let new_path = self.dir.join(format!("{new_slug}.toml"));
 
-        let path = self.write_rule(rule)?;
+        let content = toml::to_string_pretty(rule)
+            .context("serializing rule to TOML")?;
 
-        // Remove the old file if the name changed.
-        if old_slug != new_slug {
-            let old_path = self.dir.join(format!("{old_slug}.toml"));
-            if old_path.exists() {
-                std::fs::remove_file(&old_path)
-                    .with_context(|| format!("removing old rule file {}", old_path.display()))?;
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating rules directory {}", self.dir.display()))?;
+
+        std::fs::write(&new_path, &content)
+            .with_context(|| format!("writing rule file {}", new_path.display()))?;
+
+        // Delete the old file if it exists at a different path than where we
+        // just wrote (covers slug-mismatch as well as renamed files).
+        if let Some(old) = existing_path {
+            if old != new_path && old.exists() {
+                std::fs::remove_file(&old)
+                    .with_context(|| format!("removing old rule file {}", old.display()))?;
+            }
+        } else {
+            // No existing file found by ID — fall back to deleting by old slug.
+            let old_slug = slugify(old_name);
+            if old_slug != new_slug {
+                let old_path = self.dir.join(format!("{old_slug}.toml"));
+                if old_path.exists() {
+                    std::fs::remove_file(&old_path)
+                        .with_context(|| format!("removing old rule file {}", old_path.display()))?;
+                }
             }
         }
 
-        Ok(path)
+        Ok(new_path)
     }
 }
 
