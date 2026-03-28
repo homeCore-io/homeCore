@@ -296,6 +296,12 @@ binary  = "plugins/hc-isy/bin/hc-isy"
 config  = "plugins/hc-isy/config/config.toml"
 enabled = false
 
+[[plugins]]
+id      = "plugin.matter"
+binary  = "plugins/hc-matter/bin/hc-matter"
+config  = "plugins/hc-matter/config/config.toml"
+enabled = false
+
 # ---------------------------------------------------------------------------
 # Notifications
 #
