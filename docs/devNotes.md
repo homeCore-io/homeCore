@@ -6322,6 +6322,199 @@ instead of `context.go('/scenes')` / `context.go('/automations')`.
 `ModeState.fromJson` was reading from a flat top-level object. Fixed to read
 `id`/`kind`/offsets from `config` and `on`/solar times from `state.attributes`.
 
+### Devices page — table view with column sort/filter (Phase B, 2026-03-28)
+
+The Devices page is a table-only view (no list/toggle). All filtering happens
+via column header dropdowns — no chip list.
+
+**Columns:** availability (icon), type (icon), Name, Area, State, Plugin, Control
+
+**`_TableFilter` state:**
+```dart
+const _sentinel = Object();
+
+class _TableFilter {
+  final String search;
+  final String sortCol;   // 'name' | 'area' | 'state' | 'plugin'
+  final bool sortAsc;
+  final String? areaFilter;
+  final String? pluginFilter;
+  final String? statusFilter; // 'online' | 'offline' | 'on' | 'off'
+
+  _TableFilter copyWith({
+    String? search, String? sortCol, bool? sortAsc,
+    Object? areaFilter  = _sentinel,
+    Object? pluginFilter = _sentinel,
+    Object? statusFilter = _sentinel,
+  }) { ... }   // _sentinel distinguishes "not provided" from "explicitly null"
+}
+```
+
+**`_ColHeader` widget:** `PopupMenuButton<int>` (index-based to decouple labels
+from raw values). 3-state sort: tap header to cycle asc→desc→reset. Active
+filter shows value in `cs.primary` with a × clear button replacing the label.
+
+Column widths: avail 24 · icon 24 · area 110 · state 100 · plugin 72 · control 52
+
+### Device CRUD (Phase B, 2026-03-28)
+
+Device detail page gains edit and delete from the AppBar:
+
+**Edit** — pencil icon → `_EditDeviceDialog` (AlertDialog):
+- Name: `TextFormField` with validator
+- Area: `Autocomplete<String>` populated from existing device areas
+- On save: `PATCH /api/v1/devices/:id` with `{ "name": ..., "area": ... }`
+
+**Delete** — "Danger Zone" section at page bottom:
+- Confirmation AlertDialog before proceeding
+- `DELETE /api/v1/devices/:id` — nullifies device refs in rules, disables affected rules
+- On success: `devicesProvider.notifier.deleteDevice(id)` removes from in-memory state, then `context.pop()`
+
+`DevicesNotifier` additions:
+```dart
+Future<void> updateDevice(String id, Map<String, dynamic> body) async {
+  final raw = await ref.read(devicesApiProvider).updateDevice(id, body);
+  final updated = DeviceState.fromJson(raw);
+  state = AsyncData(state.valueOrNull!.map((d) => d.id == id ? updated : d).toList());
+}
+Future<void> deleteDevice(String id) async {
+  await ref.read(devicesApiProvider).deleteDevice(id);
+  state = AsyncData(state.valueOrNull!.where((d) => d.id != id).toList());
+}
+```
+
+### Custom branding (2026-03-28)
+
+Logo asset at `assets/images/logo.png` (512×512 transparent PNG). Displayed in
+`NavigationRail.leading` via `Image.asset('assets/images/logo.png', width: 56, height: 56)`.
+
+`pubspec.yaml` must declare the assets directory:
+```yaml
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+```
+
+Web icon variants also updated: `web/favicon.png` (32×32), `web/icons/Icon-192.png`,
+`web/icons/Icon-512.png`, and maskable variants (`#1a1a2e` background, 78% safe zone).
+
+---
+
+## Docker / Containerization (2026-03-28)
+
+HomeCore ships with a complete Docker setup for production deployment. All files
+live at the `homeCore/` workspace root (not inside the `core/` repo).
+
+### Monolith container
+
+**`Dockerfile`** — 4-stage build:
+1. `rust-builder` — builds homecore binary + all 7 plugin binaries
+2. `flutter-builder` — builds hc-web Flutter web app
+3. `caddy-source` — pulls Caddy binary from `caddy:2-alpine`
+4. `runtime` — `debian:bookworm-slim`; copies all binaries + web assets
+
+Exposes 80 (HTTP), 443 (HTTPS), 1883 (MQTT).
+Volumes: `/opt/homecore/config`, `/opt/homecore/data`, `/opt/homecore/rules`, `/opt/homecore/logs`
+
+**`.dockerignore`** — critical exclusions:
+- `**/target/` — Rust build artifacts
+- `plugins/hc-matter/third_party/` — Matter SDK is ~10 GB
+
+**`docker-compose.yml`** — named volumes + environment variable placeholders.
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+### Support files (`docker/`)
+
+**`Caddyfile`** — Caddy is the public-facing reverse proxy; homecore binds to
+`127.0.0.1:8080` (loopback only). Caddyfile uses `{$VAR:default}` env var syntax.
+
+Proxied paths: `/api/*`, `/auth/*`, `/health`, `/metrics`, `/webhooks/*` → `localhost:8080`
+SPA routing: `try_files {path} /index.html`
+Caddy handles WebSocket upgrades automatically (no extra directives needed).
+
+**`supervisord.conf`** — manages two programs:
+- `[program:caddy]` priority 10 — `caddy run --config /etc/caddy/Caddyfile --adapter caddyfile`
+- `[program:homecore]` priority 20 — homecore manages its own plugin subprocesses internally
+
+**`entrypoint.sh`** — first-run bootstrap:
+1. Creates `/opt/homecore/{config,data,rules,logs}` if absent
+2. Generates `HOMECORE_JWT_SECRET` if unset (prints warning to logs)
+3. Runs `envsubst` on `homecore.prod.toml` template → `config/homecore.toml`
+4. Copies `docker/plugin-configs/*.toml` → `config/plugin-configs/` on first run only
+5. `exec supervisord -n`
+
+**`homecore.prod.toml`** — production template:
+- `server.host = "127.0.0.1"` — loopback only
+- `auth.whitelist = ["127.0.0.1/32", "::1/128"]` — Caddy health checks bypass JWT
+- All 7 plugins defined, all `enabled = false` by default
+- `logging.stderr.ansi = false` — clean output for Docker log aggregators
+
+### Plugin config templates (`docker/plugin-configs/`)
+
+One TOML per plugin. All use `broker_host = "127.0.0.1"`. Copied to the config
+volume on first run by `entrypoint.sh`; edit the volume copy to enable plugins.
+
+| File | Plugin ID | Key fields |
+|------|-----------|-----------|
+| `hc-hue.toml` | `plugin.hue` | `[[bridges]]` with bridge_id, host, app_key |
+| `hc-yolink.toml` | `plugin.yolink` | mode (cloud/local), credentials |
+| `hc-lutron.toml` | `plugin.lutron` | host, port 23, username, password |
+| `hc-sonos.toml` | `plugin.sonos` | SSDP discovery or manual_hosts |
+| `hc-zwave.toml` | `plugin.zwave` | ws:// URL of zwave-js-server |
+| `hc-wled.toml` | `plugin.wled` | `[[devices]]` per WLED controller |
+| `hc-isy.toml` | `plugin.isy` | host, port, username, password, tls |
+
+### Plugin containers (independent deployment)
+
+Each plugin can run in its own container instead of (or alongside) the monolith.
+
+**`plugins/Dockerfile.plugin`** — generic template, takes one build arg:
+```bash
+# Build
+docker build -f plugins/Dockerfile.plugin \
+  --build-arg PLUGIN_NAME=hc-hue \
+  -t hc-hue:latest plugins/
+
+# Run (bind-mount your config.toml)
+docker run -d \
+  -v /path/to/hc-hue.toml:/opt/plugin/config/config.toml:ro \
+  --network host \
+  hc-hue:latest
+```
+
+The binary runs as `/opt/plugin/bin/plugin config/config.toml` with WORKDIR
+`/opt/plugin`, matching every plugin's default config path.
+
+**`plugins/docker-compose.plugins.yml`** — all 7 plugins as separate services.
+All use `network_mode: host` (required for SSDP multicast discovery in Sonos/WLED).
+Config files bind-mounted read-only from `docker/plugin-configs/`.
+
+```bash
+# Full stack — core + plugins as separate containers:
+docker compose -f docker-compose.yml \
+  -f plugins/docker-compose.plugins.yml up -d
+
+# Plugins only (against external MQTT broker):
+docker compose -f plugins/docker-compose.plugins.yml up -d hc-hue hc-yolink
+```
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HOMECORE_JWT_SECRET` | "" (auto-gen) | JWT signing key; auto-generated with log warning if empty |
+| `HOMECORE_LAT` | `0.0` | Latitude for solar mode triggers |
+| `HOMECORE_LON` | `0.0` | Longitude for solar mode triggers |
+| `HOMECORE_TZ` | `America/Chicago` | Timezone for scheduler and log timestamps |
+| `TZ` | `America/Chicago` | Container system timezone |
+| `HOMECORE_DOMAIN` | `_` | Caddy site address; `_` = any host, plain HTTP |
+| `RUST_LOG` | `info` | Rust log level for homecore + plugins |
+
 ---
 
 ## ISY/IoX (`hc-isy` plugin)
