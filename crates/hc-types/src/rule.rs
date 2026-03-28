@@ -205,6 +205,20 @@ pub enum Trigger {
         every_n: u32,
         unit: PeriodicUnit,
     },
+    /// Fires when a hub variable is set via `Action::SetHubVariable`.
+    ///
+    /// If `name` is `Some`, only fires when that specific variable changes.
+    /// If `name` is `None`, fires on any hub variable change.
+    ///
+    /// ```toml
+    /// [trigger]
+    /// type = "hub_variable_changed"
+    /// name = "alarm_state"   # optional — omit to watch all hub vars
+    /// ```
+    HubVariableChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 /// Button event types for `Trigger::ButtonEvent`.
@@ -299,6 +313,20 @@ pub enum Condition {
     PrivateBooleanIs {
         name: String,
         value: bool,
+    },
+    /// Passes when a hub variable satisfies the comparison.
+    ///
+    /// ```toml
+    /// [[conditions]]
+    /// type  = "hub_variable"
+    /// name  = "alarm_state"
+    /// op    = "eq"
+    /// value = "armed"
+    /// ```
+    HubVariable {
+        name: String,
+        op: CompareOp,
+        value: JsonValue,
     },
 }
 
@@ -664,6 +692,70 @@ pub enum Action {
     RestoreDeviceState {
         key: String,
     },
+    /// Delay for a duration that depends on the currently active mode.
+    ///
+    /// The first matching mode entry wins; if no mode matches and `default_secs`
+    /// is set, that duration is used instead.  A duration of `0` skips the
+    /// delay entirely (useful for "in Away mode, don't wait").
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type         = "delay_per_mode"
+    /// default_secs = 60
+    ///
+    /// [[actions.modes]]
+    /// mode         = "mode_night"
+    /// duration_secs = 300
+    ///
+    /// [[actions.modes]]
+    /// mode         = "mode_away"
+    /// duration_secs = 0   # skip delay when away
+    /// ```
+    DelayPerMode {
+        modes: Vec<ModeDelayEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_secs: Option<u64>,
+    },
+    /// Set or modify a cross-rule hub variable.
+    ///
+    /// Hub variables are global key-value pairs shared across all rules.
+    /// Setting a variable fires a `hub_variable_changed` event that rules
+    /// with `Trigger::HubVariableChanged` can react to.  Variables are
+    /// session-only (reset on engine restart).
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type  = "set_hub_variable"
+    /// name  = "alarm_state"
+    /// value = "armed"
+    /// ```
+    SetHubVariable {
+        name: String,
+        value: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<VariableOp>,
+    },
+    /// Activate a different scene depending on which mode is currently active.
+    ///
+    /// The first matching mode entry wins; if no mode matches and
+    /// `default_scene_id` is set, that scene is activated.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type = "activate_scene_per_mode"
+    ///
+    /// [[actions.modes]]
+    /// mode     = "mode_night"
+    /// scene_id = "11111111-0000-0000-0000-000000000001"
+    ///
+    /// [actions.default_scene_id]
+    /// scene_id = "22222222-0000-0000-0000-000000000002"
+    /// ```
+    ActivateScenePerMode {
+        modes: Vec<ModeSceneEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_scene_id: Option<Uuid>,
+    },
     /// Gradually transition numeric device attributes to target values.
     ///
     /// The executor reads the current value from the device cache and
@@ -721,6 +813,21 @@ pub struct ModeStateEntry {
     pub mode: String,
     /// State to apply when this mode is active (`on == true`).
     pub state: JsonValue,
+}
+
+/// A mode → delay mapping entry for `Action::DelayPerMode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeDelayEntry {
+    pub mode: String,
+    /// Seconds to delay when this mode is active.  `0` skips the delay entirely.
+    pub duration_secs: u64,
+}
+
+/// A mode → scene mapping entry for `Action::ActivateScenePerMode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeSceneEntry {
+    pub mode: String,
+    pub scene_id: Uuid,
 }
 
 /// A named snapshot of device states that can be activated as a unit.

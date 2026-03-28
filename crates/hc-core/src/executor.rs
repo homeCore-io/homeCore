@@ -27,6 +27,7 @@ use dashmap::DashMap;
 use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
 use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
+use hc_state::StateStore;
 use hc_types::event::Event;
 use hc_types::rule::{Action, LogLevel, RuleAction, TriggerContext, VariableOp};
 use serde_json::Value as JsonValue;
@@ -129,6 +130,10 @@ pub struct ExecutorContext {
     /// Shared across all firings of the same rule so that Capture in one
     /// firing can be Restored in a later firing.
     pub capture_store:  Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
+    /// Cross-rule hub variable store.
+    pub hub_vars:       Arc<DashMap<String, JsonValue>>,
+    /// State store — used by `ActivateScenePerMode` to look up scene contents.
+    pub state:          Option<StateStore>,
     /// When `Some`, each top-level action appends an `ActionTrace` after it
     /// completes.  `None` disables tracing (e.g. for `RunRuleActions` calls).
     pub trace:          Option<Arc<Mutex<Vec<ActionTrace>>>>,
@@ -148,6 +153,8 @@ impl ExecutorContext {
             rule_vars:      Arc::new(DashMap::new()),
             priv_bools:     Arc::new(DashMap::new()),
             capture_store:  Arc::new(DashMap::new()),
+            hub_vars:       Arc::new(DashMap::new()),
+            state:          None,
             rules_handle:   Arc::new(RwLock::new(vec![])),
             trigger_ctx:    TriggerContext::default(),
             rule_id:        Uuid::nil(),
@@ -564,11 +571,15 @@ fn run_single_action(
                 .filter(|e| e.key().0 == ctx.rule_id)
                 .map(|e| (e.key().1.clone(), e.value().clone()))
                 .collect();
+            let hub_snap: HashMap<String, JsonValue> = ctx.hub_vars.iter()
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect();
             tokio::task::spawn_blocking(move || {
                 ScriptRuntime::new_with_devices(snap)
                     .with_side_effects(buf_clone)
                     .with_trigger_context(&trigger_ctx)
                     .with_rule_vars(vars_snapshot)
+                    .with_hub_vars(hub_snap)
                     .run_action(&script_clone)
                     .map(|_| ())
             }).await??;
@@ -795,6 +806,8 @@ fn run_single_action(
                         rule_vars:      Arc::clone(&ctx.rule_vars),
                         priv_bools:     Arc::clone(&ctx.priv_bools),
                         capture_store:  Arc::clone(&ctx.capture_store),
+                        hub_vars:       Arc::clone(&ctx.hub_vars),
+                        state:          ctx.state.clone(),
                         rules_handle:   Arc::clone(&ctx.rules_handle),
                         trigger_ctx:    ctx.trigger_ctx.clone(),
                         rule_id,
@@ -936,6 +949,126 @@ fn run_single_action(
                     match ctx.publish.clone() {
                         Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
                         None     => warn!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode — no publish handle"),
+                    }
+                }
+            }
+        }
+
+        // ── DelayPerMode ──────────────────────────────────────────────────────
+        Action::DelayPerMode { modes, default_secs } => {
+            let secs = modes.iter().find_map(|entry| {
+                let attrs = ctx.device_cache.get(entry.mode.as_str())?;
+                let on = attrs.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+                if on { Some(entry.duration_secs) } else { None }
+            }).or(default_secs);
+
+            match secs {
+                None => debug!(rule = %ctx.rule_name, "action: DelayPerMode — no mode matched and no default, skipping"),
+                Some(0) => debug!(rule = %ctx.rule_name, "action: DelayPerMode — duration 0, skipping"),
+                Some(d) => {
+                    debug!(rule = %ctx.rule_name, duration_secs = d, "action: DelayPerMode — delaying");
+                    tokio::time::sleep(Duration::from_secs(d)).await;
+                }
+            }
+        }
+
+        // ── SetHubVariable ────────────────────────────────────────────────────
+        Action::SetHubVariable { name, value, op } => {
+            let prev = ctx.hub_vars.get(name.as_str()).map(|v| v.clone());
+            let new_val = match op.as_ref().unwrap_or(&VariableOp::Set) {
+                VariableOp::Set => value.clone(),
+                VariableOp::Toggle => {
+                    let current_bool = prev.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
+                    JsonValue::Bool(!current_bool)
+                }
+                VariableOp::Add => {
+                    let a = prev.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let b = value.as_f64().unwrap_or(0.0);
+                    to_json_number(a + b)
+                }
+                VariableOp::Subtract => {
+                    let a = prev.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let b = value.as_f64().unwrap_or(0.0);
+                    to_json_number(a - b)
+                }
+                VariableOp::Multiply => {
+                    let a = prev.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let b = value.as_f64().unwrap_or(1.0);
+                    to_json_number(a * b)
+                }
+                VariableOp::Divide => {
+                    let a = prev.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let b = value.as_f64().unwrap_or(1.0);
+                    if b == 0.0 {
+                        warn!(rule = %ctx.rule_name, variable = name, "action: SetHubVariable — divide by zero, setting null");
+                        JsonValue::Null
+                    } else {
+                        to_json_number(a / b)
+                    }
+                }
+            };
+            debug!(rule = %ctx.rule_name, variable = name, value = %new_val, "action: SetHubVariable");
+            ctx.hub_vars.insert(name.clone(), new_val.clone());
+            // Fire hub_variable_changed event so HubVariableChanged triggers can react.
+            let payload = serde_json::json!({
+                "name": name,
+                "value": new_val,
+                "prev_value": prev.unwrap_or(JsonValue::Null),
+            });
+            let event = hc_types::event::Event::Custom {
+                timestamp:  Utc::now(),
+                event_type: "hub_variable_changed".into(),
+                payload,
+            };
+            if let Some(ref bus) = ctx.event_bus {
+                let _ = bus.publish(event.clone());
+            }
+            if let Some(ref ph) = ctx.publish {
+                let topic = "homecore/events/hub_variable_changed";
+                let _ = ph.publish(topic, serde_json::to_vec(&event).unwrap_or_default()).await;
+            }
+        }
+
+        // ── ActivateScenePerMode ──────────────────────────────────────────────
+        Action::ActivateScenePerMode { modes, default_scene_id } => {
+            let scene_id = modes.iter().find_map(|entry| {
+                let attrs = ctx.device_cache.get(entry.mode.as_str())?;
+                let on = attrs.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+                if on { Some(entry.scene_id) } else { None }
+            }).or(default_scene_id);
+
+            let Some(sid) = scene_id else {
+                debug!(rule = %ctx.rule_name, "action: ActivateScenePerMode — no mode matched and no default, skipping");
+                return Ok(());
+            };
+
+            let Some(ref state_store) = ctx.state else {
+                warn!(rule = %ctx.rule_name, "action: ActivateScenePerMode — no state store available");
+                return Ok(());
+            };
+
+            match state_store.get_scene(sid).await {
+                Ok(None) => warn!(rule = %ctx.rule_name, scene_id = %sid, "action: ActivateScenePerMode — scene not found"),
+                Err(e)   => warn!(rule = %ctx.rule_name, scene_id = %sid, error = %e, "action: ActivateScenePerMode — error loading scene"),
+                Ok(Some(scene)) => {
+                    info!(rule = %ctx.rule_name, scene_id = %sid, scene_name = %scene.name, "action: ActivateScenePerMode — activating");
+                    for (device_id, desired) in &scene.states {
+                        let topic = format!("homecore/devices/{device_id}/cmd");
+                        match ctx.publish.clone() {
+                            Some(ph) => ph.publish(&topic, desired.to_string().into_bytes()).await?,
+                            None => {
+                                warn!(rule = %ctx.rule_name, device_id, "action: ActivateScenePerMode — no publish handle");
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(ref bus) = ctx.event_bus {
+                        let ev = hc_types::event::Event::SceneActivated {
+                            timestamp:  Utc::now(),
+                            scene_id:   sid.to_string(),
+                            scene_name: scene.name.clone(),
+                        };
+                        let _ = bus.publish(ev);
                     }
                 }
             }
@@ -1247,6 +1380,24 @@ fn action_description(action: &Action) -> String {
             let n = steps.map(|s| s.to_string()).unwrap_or_else(|| duration_secs.to_string());
             format!("{} over {}s ({} steps)", device_id, duration_secs, n)
         }
+        Action::DelayPerMode { modes, default_secs } => {
+            let mode_names: Vec<&str> = modes.iter().map(|e| e.mode.as_str()).collect();
+            match default_secs {
+                Some(d) => format!("modes: [{}] default: {}s", mode_names.join(", "), d),
+                None    => format!("modes: [{}]", mode_names.join(", ")),
+            }
+        }
+        Action::SetHubVariable { name, value, op } => match op {
+            Some(VariableOp::Set) | None => format!("hub.{} = {}", name, value),
+            Some(o)                      => format!("hub.{} {:?}= {}", name, o, value),
+        },
+        Action::ActivateScenePerMode { modes, default_scene_id } => {
+            let mode_names: Vec<&str> = modes.iter().map(|e| e.mode.as_str()).collect();
+            match default_scene_id {
+                Some(id) => format!("modes: [{}] default: {}", mode_names.join(", "), id),
+                None     => format!("modes: [{}]", mode_names.join(", ")),
+            }
+        }
     }
 }
 
@@ -1282,6 +1433,9 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::CaptureDeviceState { .. }     => "CaptureDeviceState",
         Action::RestoreDeviceState { .. }     => "RestoreDeviceState",
         Action::FadeDevice { .. }             => "FadeDevice",
+        Action::DelayPerMode { .. }           => "DelayPerMode",
+        Action::SetHubVariable { .. }         => "SetHubVariable",
+        Action::ActivateScenePerMode { .. }   => "ActivateScenePerMode",
     }
 }
 

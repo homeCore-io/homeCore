@@ -133,6 +133,8 @@ pub struct RuleEngine {
     /// Per-rule device state capture store for `CaptureDeviceState` /
     /// `RestoreDeviceState`.  Key: `(rule_id, capture_key)`.
     capture_store: Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
+    /// Cross-rule hub variable store.  Key: variable name.
+    hub_vars: Arc<DashMap<String, JsonValue>>,
     /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
 }
@@ -169,6 +171,7 @@ impl RuleEngine {
             rule_vars,
             priv_bools: Arc::new(DashMap::new()),
             capture_store: Arc::new(DashMap::new()),
+            hub_vars:      Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
         }
     }
@@ -681,6 +684,8 @@ impl RuleEngine {
             rule_vars:      Arc::clone(&self.rule_vars),
             priv_bools:     Arc::clone(&self.priv_bools),
             capture_store:  Arc::clone(&self.capture_store),
+            hub_vars:       Arc::clone(&self.hub_vars),
+            state:          Some(self.state.clone()),
             rules_handle:   Arc::clone(&self.rules),
             trigger_ctx:    trigger_ctx.clone(),
             rule_id:        rule.id,
@@ -867,8 +872,15 @@ impl RuleEngine {
                 );
                 let snap        = snapshot.clone();
                 let script_body = script.clone();
+                let hub_snap: HashMap<String, JsonValue> = self.hub_vars.iter()
+                    .map(|e| (e.key().clone(), e.value().clone()))
+                    .collect();
+                let tctx        = TriggerContext::default(); // conditions don't use trigger ctx
                 let result = tokio::task::spawn_blocking(move || {
-                    ScriptRuntime::new_with_devices(snap).eval_condition(&script_body)
+                    ScriptRuntime::new_with_devices(snap)
+                        .with_hub_vars(hub_snap)
+                        .with_trigger_context(&tctx)
+                        .eval_condition(&script_body)
                 }).await??;
                 debug!(
                     rule_name = %rule.name, cond = %cond_label,
@@ -1003,6 +1015,31 @@ impl RuleEngine {
                     reason: format!(
                         "priv_bool.{} == {} (actual: {}) → {}",
                         name, value, actual,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
+            }
+
+            Condition::HubVariable { name, op, value } => {
+                let actual = self.hub_vars.get(name.as_str()).map(|v| v.clone());
+                let (result, actual_display) = match &actual {
+                    Some(a) => (compare(a, op, value), a.clone()),
+                    None => (false, JsonValue::Null),
+                };
+                let op_sym = compare_op_symbol(op);
+                debug!(
+                    rule_name = %rule.name, cond = %cond_label,
+                    name, op = ?op, expected = %value, actual = %actual_display, result,
+                    "rule.condition: HubVariable"
+                );
+                Ok((result, ConditionTrace {
+                    condition_type: "hub_variable".into(),
+                    passed: result,
+                    actual: Some(actual_display),
+                    expected: Some(value.clone()),
+                    reason: format!(
+                        "hub.{} {} {} (actual: {}) → {}",
+                        name, op_sym, value, actual.as_ref().unwrap_or(&JsonValue::Null),
                         if result { "pass" } else { "FAIL" }
                     ),
                 }))
@@ -1230,6 +1267,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::ButtonEvent { .. }               => "ButtonEvent",
         Trigger::NumericThreshold { .. }          => "NumericThreshold",
         Trigger::Periodic { .. }                  => "Periodic",
+        Trigger::HubVariableChanged { .. }        => "HubVariableChanged",
     }
 }
 
@@ -1426,6 +1464,22 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
         // ── SystemStarted ──────────────────────────────────────────────────
         (Trigger::SystemStarted, Event::Custom { event_type, .. }) => {
             if event_type == "system_started" { Matched } else { NoMatch("not system_started") }
+        }
+
+        // ── HubVariableChanged ─────────────────────────────────────────────
+        (Trigger::HubVariableChanged { name: filter }, Event::Custom { event_type, payload, .. })
+            if event_type == "hub_variable_changed" =>
+        {
+            match filter {
+                None => Matched,
+                Some(n) => {
+                    if payload.get("name").and_then(|v| v.as_str()) == Some(n.as_str()) {
+                        Matched
+                    } else {
+                        NoMatch("hub variable name mismatch")
+                    }
+                }
+            }
         }
 
         // ── ManualTrigger ──────────────────────────────────────────────────

@@ -203,6 +203,20 @@ impl ScriptRuntime {
         self
     }
 
+    /// Register hub variable accessor function on this runtime.
+    ///
+    /// Available Rhai function after this call:
+    /// - `hub_var("name")` — current value of the named hub variable, or `()` if unset
+    pub fn with_hub_vars(mut self, hub_vars: HashMap<String, JsonValue>) -> Self {
+        let vars: Arc<HashMap<String, rhai::Dynamic>> = Arc::new(
+            hub_vars.into_iter().map(|(k, v)| (k, json_to_dynamic(v))).collect()
+        );
+        self.engine.register_fn("hub_var", move |name: &str| -> rhai::Dynamic {
+            vars.get(name).cloned().unwrap_or(rhai::Dynamic::UNIT)
+        });
+        self
+    }
+
     /// Register trigger context accessor functions on this runtime.
     ///
     /// Available Rhai functions after this call:

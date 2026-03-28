@@ -256,6 +256,7 @@ pub fn router(state: AppState) -> Router {
         .route("/automations/:id/test", post(handlers::test_automation))
         .route("/automations/:id/history", get(handlers::automation_history))
         .route("/automations/:id/clone", post(handlers::clone_automation))
+        .route("/automations/stale-refs", get(handlers::stale_refs))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
         // Rule groups

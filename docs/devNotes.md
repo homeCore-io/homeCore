@@ -2032,6 +2032,9 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `CaptureDeviceState` | `key`, `device_ids` | Snapshot current state of listed devices under a named key. Persists across firings. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
 | `RestoreDeviceState` | `key` | Re-publish device states saved by `CaptureDeviceState`. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
 | `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (brightness, color_temp, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
+| `DelayPerMode` | `modes`, `default_secs?` | Delay for a duration that depends on the active mode. First matching mode wins. `duration_secs = 0` skips the delay. See [Action: DelayPerMode](#action-delaypermode). |
+| `SetHubVariable` | `name`, `value`, `op?` | Write a cross-rule hub variable. Fires `hub_variable_changed` event. Supports all `VariableOp` operators. See [Hub Variables](#hub-variables). |
+| `ActivateScenePerMode` | `modes`, `default_scene_id?` | Activate a different scene depending on which mode is active. See [Action: ActivateScenePerMode](#action-activatescenepermode). |
 | `StopRuleChain` | — | Stops further rules from being evaluated for the current event. Rules with lower priority than the firing rule are skipped. Use on a high-priority rule to make it exclusive. See below. |
 
 #### Per-action disable toggle
@@ -6582,3 +6585,131 @@ duration_secs = 10
 [actions.actions.target]
 brightness = 80
 ```
+
+---
+
+## Action: DelayPerMode
+
+Delay the action sequence for a duration that depends on which mode is currently active. The first matching mode entry wins; `default_secs` is used when nothing matches.
+
+```toml
+[[actions]]
+type         = "delay_per_mode"
+default_secs = 60          # used if no mode matches
+
+[[actions.modes]]
+mode          = "mode_night"
+duration_secs = 300         # 5 min at night
+
+[[actions.modes]]
+mode          = "mode_away"
+duration_secs = 0           # skip delay when away
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `modes` | ✓ | Ordered list of `{mode, duration_secs}` entries. |
+| `default_secs` | | Fallback duration if no mode matches. Omit to skip when nothing matches. |
+
+`duration_secs = 0` skips the delay entirely — useful for suppressing a notification wait in Away mode.
+
+---
+
+## Hub Variables
+
+Hub variables are cross-rule global key-value pairs. Unlike `rule.variables` (per-rule), hub variables are readable and writable by any rule and persist for the engine session (reset on restart).
+
+### Writing
+
+```toml
+[[actions]]
+type  = "set_hub_variable"
+name  = "alarm_state"
+value = "armed"
+
+# Increment a counter:
+[[actions]]
+type  = "set_hub_variable"
+name  = "motion_count"
+op    = "add"
+value = 1
+```
+
+Supported `op` values: `set` (default), `add`, `subtract`, `multiply`, `divide`, `toggle`.
+
+### Reading in Rhai
+
+```rhai
+// In ScriptExpression condition or RunScript:
+let state = hub_var("alarm_state");   // returns () if unset
+if state == "armed" {
+    notify("telegram", "Armed!");
+}
+```
+
+### Condition
+
+```toml
+[[conditions]]
+type  = "hub_variable"
+name  = "alarm_state"
+op    = "eq"
+value = "armed"
+```
+
+### Trigger
+
+```toml
+[trigger]
+type = "hub_variable_changed"
+name = "alarm_state"      # optional — omit to fire on ANY hub var change
+```
+
+The trigger fires synchronously after `SetHubVariable` updates the store, so a rule that sets a hub var and another that watches it form a reliable chain.
+
+### Stale reference detection
+
+```
+GET /api/v1/automations/stale-refs
+```
+
+Returns rules that reference device IDs not currently in the device registry:
+
+```json
+[
+  {
+    "rule_id":          "abc...",
+    "rule_name":        "Motion Hall",
+    "stale_device_ids": ["yolink_old_abc", "light_deleted"]
+  }
+]
+```
+
+Useful after device renames, replacements, or plugin re-registrations.
+
+---
+
+## Action: ActivateScenePerMode
+
+Activate a different scene depending on which mode is currently active. Equivalent to `SetDeviceStatePerMode` but for named scenes.
+
+```toml
+[[actions]]
+type             = "activate_scene_per_mode"
+default_scene_id = "00000000-0000-0000-0000-000000000099"   # optional
+
+[[actions.modes]]
+mode     = "mode_night"
+scene_id = "11111111-0000-0000-0000-000000000001"
+
+[[actions.modes]]
+mode     = "mode_away"
+scene_id = "22222222-0000-0000-0000-000000000002"
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `modes` | ✓ | Ordered list of `{mode, scene_id}` entries. First active mode wins. |
+| `default_scene_id` | | Scene to activate when no mode matches. |
+
+The action reads the scene from the state store, publishes each device's target state to its `cmd` topic, and emits a `SceneActivated` event (same as `POST /scenes/{id}/activate`).

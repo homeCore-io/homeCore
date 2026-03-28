@@ -869,6 +869,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::ButtonEvent { .. }               => "button_event",
         Trigger::NumericThreshold { .. }          => "numeric_threshold",
         Trigger::Periodic { .. }                  => "periodic",
+        Trigger::HubVariableChanged { .. }        => "hub_variable_changed",
     }
 }
 
@@ -1334,6 +1335,15 @@ async fn eval_condition_dry_detail(
                 reason: Some(format!("private boolean '{name}' not available in dry-run")),
             }
         }
+        Condition::HubVariable { name, value, .. } => {
+            // Dry-run cannot access live hub variable state; report as indeterminate.
+            ConditionDetail {
+                condition: cond_json, passed: false, actual: None,
+                expected: Some(value.clone()),
+                elapsed_ms: None,
+                reason: Some(format!("hub variable '{name}' not available in dry-run")),
+            }
+        }
     }
 }
 
@@ -1664,6 +1674,113 @@ pub async fn clone_automation(
 
     rh.write().await.push(cloned.clone());
     (StatusCode::CREATED, Json(json!(cloned))).into_response()
+}
+
+// ---------- Stale device references ----------
+
+/// `GET /api/v1/automations/stale-refs`
+///
+/// Returns rules that reference device IDs not currently registered in the
+/// device store.  Useful for finding automations broken by device
+/// renames or deletions.
+///
+/// Response: `[{ rule_id, rule_name, stale_device_ids: [String] }]`
+pub async fn stale_refs(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    let Some(rh) = &s.rules_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+    };
+
+    let known_ids: HashSet<String> = match s.store.list_devices().await {
+        Ok(devices) => devices.into_iter().map(|d| d.device_id).collect(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    let rules = rh.read().await;
+    let result: Vec<serde_json::Value> = rules.iter()
+        .filter_map(|rule| {
+            let stale: Vec<String> = collect_rule_device_refs(rule)
+                .into_iter()
+                .filter(|id| !id.starts_with("DELETED:") && !known_ids.contains(id.as_str()))
+                .collect();
+            if stale.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "rule_id":         rule.id,
+                    "rule_name":       rule.name,
+                    "stale_device_ids": stale,
+                }))
+            }
+        })
+        .collect();
+
+    (StatusCode::OK, Json(json!(result))).into_response()
+}
+
+/// Collect every device ID referenced by a rule (trigger, conditions, actions).
+fn collect_rule_device_refs(rule: &Rule) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    collect_trigger_refs(&rule.trigger, &mut ids);
+    for cond in &rule.conditions {
+        collect_condition_refs(cond, &mut ids);
+    }
+    for ra in &rule.actions {
+        collect_action_refs(&ra.action, &mut ids);
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn collect_trigger_refs(trigger: &Trigger, ids: &mut Vec<String>) {
+    match trigger {
+        Trigger::DeviceStateChanged { device_id, device_ids, .. } => {
+            ids.push(device_id.clone());
+            ids.extend_from_slice(device_ids);
+        }
+        Trigger::DeviceAvailabilityChanged { device_id, .. } => ids.push(device_id.clone()),
+        Trigger::ButtonEvent { device_id, .. }               => ids.push(device_id.clone()),
+        Trigger::NumericThreshold { device_id, .. }          => ids.push(device_id.clone()),
+        _ => {}
+    }
+}
+
+fn collect_condition_refs(cond: &Condition, ids: &mut Vec<String>) {
+    match cond {
+        Condition::DeviceState { device_id, .. } => ids.push(device_id.clone()),
+        Condition::TimeElapsed { device_id, .. } => ids.push(device_id.clone()),
+        Condition::Not { condition }             => collect_condition_refs(condition, ids),
+        Condition::And { conditions } | Condition::Or { conditions } | Condition::Xor { conditions } => {
+            for c in conditions { collect_condition_refs(c, ids); }
+        }
+        _ => {}
+    }
+}
+
+fn collect_action_refs(action: &Action, ids: &mut Vec<String>) {
+    match action {
+        Action::SetDeviceState { device_id, .. }         => ids.push(device_id.clone()),
+        Action::SetDeviceStatePerMode { device_id, .. }  => ids.push(device_id.clone()),
+        Action::FadeDevice { device_id, .. }             => ids.push(device_id.clone()),
+        Action::CaptureDeviceState { device_ids, .. }    => ids.extend_from_slice(device_ids),
+        Action::Parallel { actions }                     => { for a in actions { collect_action_refs(a, ids); } }
+        Action::RepeatUntil { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
+        Action::RepeatWhile { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
+        Action::RepeatCount { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
+        Action::Conditional { then_actions, else_actions, else_if, .. } => {
+            for a in then_actions { collect_action_refs(a, ids); }
+            for a in else_actions { collect_action_refs(a, ids); }
+            for branch in else_if { for a in &branch.actions { collect_action_refs(a, ids); } }
+        }
+        Action::PingHost { then_actions, else_actions, .. } => {
+            for a in then_actions { collect_action_refs(a, ids); }
+            for a in else_actions { collect_action_refs(a, ids); }
+        }
+        _ => {}
+    }
 }
 
 // ---------- Rule groups ----------
