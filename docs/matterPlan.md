@@ -183,12 +183,176 @@ Mitigation: backup/export command + encrypted snapshots.
 4. Multi-admin interoperability edge cases.
 Mitigation: test matrix with at least two external controllers.
 
-### Suggested First Implementation Ticket List
-1. Create plugins/hc-matter skeleton with plugin-sdk-rs registration and heartbeat.
-2. Add config schema and persistent storage layout.
-3. Implement controller commissioning and node inventory API hooks.
-4. Implement OnOff + Level mapping end to end.
-5. Add OpenAPI endpoints and hc-tui admin controls for Matter plugin ops.
-6. Implement bridge endpoint exporter for light devices.
-7. Add metrics and recovery tests.
+### Implementation Backlog (Prioritized)
+Effort scale:
+1. S: 0.5-1 day
+2. M: 2-4 days
+3. L: 1-2 weeks
+
+#### Phase A: Foundation and Spike
+1. MAT-001: Create `hc-matter` plugin skeleton.
+Owner: plugin/runtime
+Estimate: M
+Depends on: none
+Acceptance:
+1. Plugin starts under `[[plugins]]` and registers plugin status over MQTT.
+2. Plugin supports graceful shutdown and restart under supervisor.
+
+2. MAT-002: Add config schema and storage layout.
+Owner: plugin/runtime
+Estimate: M
+Depends on: MAT-001
+Acceptance:
+1. Config supports `role`, `storage_dir`, commissioner IDs, and interface selection.
+2. Data directory is created with strict permissions.
+
+3. MAT-003: Matter-rs compatibility spike.
+Owner: plugin/matter stack
+Estimate: M
+Depends on: MAT-001, MAT-002
+Acceptance:
+1. Commission one test node and read OnOff + Level.
+2. Toggle OnOff command roundtrip from plugin.
+3. Advertise one bridged endpoint in spike mode.
+
+#### Phase B: Controller MVP
+4. MAT-004: Implement fabric and credential persistence.
+Owner: plugin/security
+Estimate: M
+Depends on: MAT-002, MAT-003
+Acceptance:
+1. Restart preserves commissioned nodes and session-relevant material.
+2. Corrupt store handling fails safely with clear diagnostics.
+
+5. MAT-005: Endpoint/cluster interview and internal node inventory.
+Owner: plugin/controller
+Estimate: M
+Depends on: MAT-003, MAT-004
+Acceptance:
+1. Nodes are discoverable in plugin inventory with endpoint/cluster metadata.
+2. Re-interview updates inventory without duplicate node records.
+
+6. MAT-006: HomeCore admin API for commissioning lifecycle.
+Owner: core/api
+Estimate: M
+Depends on: MAT-005
+Acceptance:
+1. Implement:
+1. `POST /api/v1/plugins/matter/commission`
+2. `GET /api/v1/plugins/matter/nodes`
+3. `POST /api/v1/plugins/matter/reinterview`
+4. `DELETE /api/v1/plugins/matter/nodes/{id}`
+2. Operations validate auth and return typed error payloads.
+
+7. MAT-007: OpenAPI contract updates.
+Owner: core/api
+Estimate: S
+Depends on: MAT-006
+Acceptance:
+1. `core/docs/openapi.yaml` includes all new endpoints and schemas.
+2. Contract checks pass in CI.
+
+8. MAT-008: Mapping layer v1 (OnOffLight, DimmableLight).
+Owner: plugin/mapper
+Estimate: L
+Depends on: MAT-005
+Acceptance:
+1. Attribute reports map to stable HomeCore keys (`on`, `brightness_pct`).
+2. HomeCore commands map back to Matter writes/commands.
+
+9. MAT-009: Mapping layer v2 (Contact, Occupancy, Temperature).
+Owner: plugin/mapper
+Estimate: L
+Depends on: MAT-008
+Acceptance:
+1. Sensor attributes publish normalized state keys.
+2. Unit handling is centralized and deterministic.
+
+10. MAT-010: Subscription engine and reconnect behavior.
+Owner: plugin/controller
+Estimate: M
+Depends on: MAT-008
+Acceptance:
+1. Attribute subscriptions auto-resume after transient disconnect.
+2. De-duplication prevents repeated state storms.
+
+#### Phase C: Bridge MVP
+11. MAT-011: Bridge include-list and endpoint ID strategy.
+Owner: plugin/bridge
+Estimate: M
+Depends on: MAT-002
+Acceptance:
+1. Include/exclude rules support explicit IDs and optional filters.
+2. Endpoint IDs are deterministic across restart.
+
+12. MAT-012: Bridge exporter for light endpoints.
+Owner: plugin/bridge
+Estimate: L
+Depends on: MAT-011, MAT-008
+Acceptance:
+1. External controller can discover and control bridged light endpoints.
+2. No duplicate endpoint creation across plugin restart.
+
+13. MAT-013: Bridge exporter for binary and temperature sensors.
+Owner: plugin/bridge
+Estimate: L
+Depends on: MAT-012, MAT-009
+Acceptance:
+1. Contact, occupancy, and temperature are visible in external controller apps.
+2. Attribute updates reflect HomeCore source-of-truth state.
+
+14. MAT-014: Loop prevention and origin tagging.
+Owner: plugin/bridge
+Estimate: M
+Depends on: MAT-012
+Acceptance:
+1. Bridge-origin writes do not re-emit as duplicate upstream commands.
+2. Correlation/origin metadata is present in debug traces.
+
+#### Phase D: Hardening and Operations
+15. MAT-015: Metrics and diagnostics.
+Owner: plugin/ops
+Estimate: M
+Depends on: MAT-010, MAT-014
+Acceptance:
+1. Emit metrics: `commissioned_nodes`, `bridged_endpoints`, `subscription_reconnects`, `command_latency_ms`, `failed_commands`.
+2. Health/status output includes actionable error states.
+
+16. MAT-016: Security hardening for credential material.
+Owner: plugin/security
+Estimate: M
+Depends on: MAT-004
+Acceptance:
+1. Secrets encrypted at rest or protected via pluggable key provider.
+2. Backup/export flow exists and is documented.
+
+17. MAT-017: Integration and restart/recovery test matrix.
+Owner: core+plugin QA
+Estimate: L
+Depends on: MAT-010, MAT-013, MAT-015
+Acceptance:
+1. Automated scenarios cover controller and bridge restarts.
+2. At least two external controller ecosystems are validated.
+
+18. MAT-018: hc-tui/admin UX for Matter operations.
+Owner: client/tui
+Estimate: M
+Depends on: MAT-006, MAT-007
+Acceptance:
+1. Basic commission/list/reinterview/remove flows available from admin UI.
+2. Operation errors are surfaced clearly to operators.
+
+### Dependency-Ordered Execution Plan
+1. MAT-001 -> MAT-002 -> MAT-003
+2. MAT-004 -> MAT-005 -> MAT-006 -> MAT-007
+3. MAT-008 -> MAT-009 -> MAT-010
+4. MAT-011 -> MAT-012 -> MAT-013 -> MAT-014
+5. MAT-015 + MAT-016 + MAT-018
+6. MAT-017 (final gate before broad rollout)
+
+### Suggested Sprint Cut
+1. Sprint 1: MAT-001 to MAT-005
+2. Sprint 2: MAT-006 to MAT-010
+3. Sprint 3: MAT-011 to MAT-014
+4. Sprint 4: MAT-015 to MAT-018
 
