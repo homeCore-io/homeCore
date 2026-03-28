@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use hc_auth::JwtService;
-use hc_core::EventBus;
+use hc_core::{CalendarHandle, EventBus};
 use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
 use hc_types::rule::Rule;
@@ -83,6 +83,13 @@ pub struct AppState {
     pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
     /// Persistent store for rule groups (groups.json in rules dir).
     pub group_store: Option<Arc<GroupStore>>,
+    /// Live calendar store — loaded `.ics` files with expanded events.
+    /// `None` when no calendar directory is configured.
+    pub calendar: Option<CalendarHandle>,
+    /// Absolute path to the calendar directory (for fetch/delete operations).
+    pub calendar_dir: Option<Arc<std::path::PathBuf>>,
+    /// RRULE expansion window in days (for re-parse after fetch).
+    pub calendar_expansion_days: u32,
 }
 
 impl AppState {
@@ -167,6 +174,9 @@ impl AppState {
             fire_history: None,
             rule_groups: None,
             group_store: None,
+            calendar: None,
+            calendar_dir: None,
+            calendar_expansion_days: 400,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -198,6 +208,19 @@ impl AppState {
     pub fn with_group_store(mut self, gs: GroupStore, groups: Vec<RuleGroup>) -> Self {
         self.group_store  = Some(Arc::new(gs));
         self.rule_groups  = Some(Arc::new(RwLock::new(groups)));
+        self
+    }
+
+    /// Attach the calendar store handle and directory path.
+    pub fn with_calendar(
+        mut self,
+        handle: CalendarHandle,
+        dir: std::path::PathBuf,
+        expansion_days: u32,
+    ) -> Self {
+        self.calendar               = Some(handle);
+        self.calendar_dir           = Some(Arc::new(dir));
+        self.calendar_expansion_days = expansion_days;
         self
     }
 }
@@ -277,6 +300,11 @@ pub fn router(state: AppState) -> Router {
         .route("/plugins/matter/nodes/:id", delete(handlers::remove_matter_node))
         // Events
         .route("/events", get(handlers::list_events))
+        // Calendars
+        .route("/calendars", get(handlers::list_calendars))
+        .route("/calendars/fetch", post(handlers::fetch_calendar))
+        .route("/calendars/:id", delete(handlers::delete_calendar))
+        .route("/calendars/:id/events", get(handlers::list_calendar_events))
         // System
         .route("/system/status", get(handlers::system_status))
         .route("/system/backup", post(backup::backup_handler))

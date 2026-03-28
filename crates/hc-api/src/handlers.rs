@@ -871,6 +871,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::NumericThreshold { .. }          => "numeric_threshold",
         Trigger::Periodic { .. }                  => "periodic",
         Trigger::HubVariableChanged { .. }        => "hub_variable_changed",
+        Trigger::CalendarEvent { .. }             => "calendar_event",
     }
 }
 
@@ -2077,6 +2078,208 @@ pub async fn list_events(
 ) -> impl IntoResponse {
     let entries = s.event_log.query(&query);
     (StatusCode::OK, Json(json!(entries)))
+}
+
+// ---------- Calendars ----------
+
+/// `GET /api/v1/calendars`
+///
+/// Lists all loaded calendars with metadata and event counts.
+pub async fn list_calendars(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    let Some(cal_handle) = &s.calendar else {
+        return (StatusCode::OK, Json(json!([]))).into_response();
+    };
+    let calendars = cal_handle.read().await;
+    let list: Vec<Value> = calendars.iter().map(|c| {
+        json!({
+            "id":            c.id,
+            "event_count":   c.events.len(),
+            "upcoming_count": c.upcoming_count(),
+            "source_url":    c.source_url,
+            "fetched_at":    c.fetched_at,
+            "loaded_at":     c.loaded_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(json!(list))).into_response()
+}
+
+/// `POST /api/v1/calendars/fetch`
+///
+/// Fetch an ICS file from a URL, save it to the calendar directory, reload.
+///
+/// Body: `{ "url": "https://...", "name": "my_cal", "refresh_hours": 24 }`
+/// (`name` and `refresh_hours` are optional.)
+#[derive(serde::Deserialize)]
+pub struct FetchCalendarBody {
+    pub url: String,
+    pub name: Option<String>,
+    pub refresh_hours: Option<u64>,
+}
+
+pub async fn fetch_calendar(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Json(body): Json<FetchCalendarBody>,
+) -> impl IntoResponse {
+    let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "calendar store not configured" })),
+        ).into_response();
+    };
+
+    let expansion_days = s.calendar_expansion_days;
+    let dir = cal_dir.as_ref().clone();
+
+    match hc_core::calendar_store::fetch_and_save(
+        &body.url,
+        body.name.as_deref(),
+        &dir,
+        expansion_days,
+        body.refresh_hours,
+    ).await {
+        Ok(entry) => {
+            let id = entry.id.clone();
+            let event_count = entry.events.len();
+            // Upsert into the live handle.
+            let mut calendars = cal_handle.write().await;
+            if let Some(slot) = calendars.iter_mut().find(|c| c.id == id) {
+                *slot = entry;
+            } else {
+                calendars.push(entry);
+            }
+            (StatusCode::OK, Json(json!({
+                "calendar_id": id,
+                "event_count": event_count,
+                "saved_path":  dir.join(format!("{id}.ics")).display().to_string(),
+            }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        ).into_response(),
+    }
+}
+
+/// `DELETE /api/v1/calendars/:id`
+///
+/// Remove a calendar's `.ics` and `.meta.json` from disk and from the live
+/// store.  Returns a warning list of rules that reference `calendar_id`.
+pub async fn delete_calendar(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "calendar store not configured" })),
+        ).into_response();
+    };
+
+    let dir = cal_dir.as_ref();
+    let ics_path  = dir.join(format!("{id}.ics"));
+    let meta_path = dir.join(format!("{id}.meta.json"));
+
+    // Check calendar exists in the live store.
+    {
+        let calendars = cal_handle.read().await;
+        if !calendars.iter().any(|c| c.id == id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("calendar '{}' not found", id) })),
+            ).into_response();
+        }
+    }
+
+    // Delete files (non-fatal if already missing).
+    if let Err(e) = std::fs::remove_file(&ics_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to delete {}: {}", ics_path.display(), e) })),
+            ).into_response();
+        }
+    }
+    let _ = std::fs::remove_file(&meta_path); // best-effort
+
+    // Remove from live store.
+    {
+        let mut calendars = cal_handle.write().await;
+        calendars.retain(|c| c.id != id);
+    }
+
+    // Check for rules that reference this calendar_id (warn only, don't delete).
+    let referencing_rules: Vec<Value> = if let Some(rh) = &s.rules_handle {
+        let rules = rh.read().await;
+        rules.iter().filter_map(|r| {
+            if let hc_types::rule::Trigger::CalendarEvent { calendar_id: Some(cid), .. } = &r.trigger {
+                if cid == &id {
+                    return Some(json!({ "rule_id": r.id, "rule_name": r.name }));
+                }
+            }
+            None
+        }).collect()
+    } else {
+        vec![]
+    };
+
+    (StatusCode::OK, Json(json!({
+        "deleted": id,
+        "referencing_rules": referencing_rules,
+    }))).into_response()
+}
+
+/// `GET /api/v1/calendars/:id/events`
+///
+/// List events from a single calendar.  Query params: `from`, `to` (ISO-8601),
+/// `limit` (default 100, max 1000).
+#[derive(serde::Deserialize, Default)]
+pub struct CalendarEventsQuery {
+    pub from:  Option<chrono::DateTime<chrono::Utc>>,
+    pub to:    Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: Option<usize>,
+}
+
+pub async fn list_calendar_events(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<String>,
+    Query(q): Query<CalendarEventsQuery>,
+) -> impl IntoResponse {
+    let Some(cal_handle) = &s.calendar else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "calendar store not configured" }))).into_response();
+    };
+
+    let calendars = cal_handle.read().await;
+    let Some(cal) = calendars.iter().find(|c| c.id == id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("calendar '{}' not found", id) }))).into_response();
+    };
+
+    let now = chrono::Utc::now();
+    let from  = q.from.unwrap_or(now);
+    let to    = q.to.unwrap_or_else(|| now + chrono::Duration::days(400));
+    let limit = q.limit.unwrap_or(100).min(1000);
+
+    let events: Vec<Value> = cal.events.iter()
+        .filter(|e| e.start >= from && e.start <= to)
+        .take(limit)
+        .map(|e| json!({
+            "uid":        e.uid,
+            "summary":    e.summary,
+            "start":      e.start,
+            "is_all_day": e.is_all_day,
+        }))
+        .collect();
+
+    (StatusCode::OK, Json(json!({
+        "calendar_id": id,
+        "events": events,
+        "total":  events.len(),
+    }))).into_response()
 }
 
 #[cfg(test)]

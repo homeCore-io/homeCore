@@ -14,6 +14,7 @@
 //! is fired immediately.  This handles the common case of a process restart
 //! shortly after a solar or time-of-day trigger was due.
 
+use crate::calendar_store::CalendarHandle;
 use crate::EventBus;
 use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
 use cron::Schedule;
@@ -39,6 +40,8 @@ pub struct Scheduler {
     catchup_window_minutes: u32,
     /// Tracks when each Periodic rule last fired so we can compare elapsed time.
     last_periodic_fire:     Arc<DashMap<Uuid, Instant>>,
+    /// Optional calendar store for `CalendarEvent` triggers.
+    calendar: Option<CalendarHandle>,
 }
 
 impl Scheduler {
@@ -56,7 +59,14 @@ impl Scheduler {
             rules,
             catchup_window_minutes,
             last_periodic_fire: Arc::new(DashMap::new()),
+            calendar: None,
         }
+    }
+
+    /// Attach a calendar handle so `CalendarEvent` triggers are evaluated.
+    pub fn with_calendar(mut self, handle: CalendarHandle) -> Self {
+        self.calendar = Some(handle);
+        self
     }
 
     /// Drive the scheduler loop.  Ticks once per minute and fires any rules
@@ -144,6 +154,82 @@ impl Scheduler {
                             event_type: "scheduler_tick".into(),
                             payload: serde_json::json!({ "rule_id": rule.id }),
                         });
+                    }
+                }
+
+                // ── CalendarEvent triggers ────────────────────────────────────
+                if let Some(cal_handle) = &self.calendar {
+                    let calendars = cal_handle.read().await;
+                    let utc_now = chrono::Utc::now();
+
+                    for rule in rules.iter() {
+                        if !rule.enabled { continue; }
+                        let Trigger::CalendarEvent { calendar_id, title_contains, offset_minutes } = &rule.trigger
+                        else { continue; };
+
+                        // The "target" event start time that would cause this rule
+                        // to fire right now after applying offset_minutes.
+                        let target = utc_now - chrono::Duration::minutes(*offset_minutes as i64);
+
+                        let fired = calendars.iter()
+                            .filter(|cal| calendar_id.as_deref().map(|id| id == cal.id).unwrap_or(true))
+                            .flat_map(|cal| cal.events.iter().map(move |ev| (cal, ev)))
+                            .any(|(cal, ev)| {
+                                // Event start must fall within the current minute window
+                                // after offset adjustment.
+                                let start = ev.start;
+                                let in_window = start.date_naive() == target.date_naive()
+                                    && start.hour() == target.hour()
+                                    && start.minute() == target.minute();
+                                if !in_window { return false; }
+                                if let Some(filter) = title_contains {
+                                    if !ev.summary.to_lowercase().contains(&filter.to_lowercase()) {
+                                        return false;
+                                    }
+                                }
+                                debug!(
+                                    rule_id   = %rule.id,
+                                    cal_id    = %cal.id,
+                                    summary   = %ev.summary,
+                                    "Scheduler: CalendarEvent matched"
+                                );
+                                true
+                            });
+
+                        if fired {
+                            let payload = {
+                                // Find the matched event for the payload (first match).
+                                let ev_info = calendars.iter()
+                                    .filter(|cal| calendar_id.as_deref().map(|id| id == cal.id).unwrap_or(true))
+                                    .flat_map(|cal| cal.events.iter().map(move |ev| (cal.id.as_str(), ev)))
+                                    .find(|(_, ev)| {
+                                        let start = ev.start;
+                                        let in_window = start.date_naive() == target.date_naive()
+                                            && start.hour() == target.hour()
+                                            && start.minute() == target.minute();
+                                        if !in_window { return false; }
+                                        if let Some(filter) = title_contains {
+                                            return ev.summary.to_lowercase().contains(&filter.to_lowercase());
+                                        }
+                                        true
+                                    });
+                                match ev_info {
+                                    Some((cal_id, ev)) => serde_json::json!({
+                                        "rule_id":       rule.id,
+                                        "calendar_id":   cal_id,
+                                        "event_summary": ev.summary,
+                                        "event_start":   ev.start,
+                                    }),
+                                    None => serde_json::json!({ "rule_id": rule.id }),
+                                }
+                            };
+                            debug!(rule_id = %rule.id, "Scheduler firing CalendarEvent trigger");
+                            let _ = self.bus.publish(Event::Custom {
+                                timestamp:  chrono::Utc::now(),
+                                event_type: "scheduler_tick".into(),
+                                payload,
+                            });
+                        }
                     }
                 }
             } // read lock released here

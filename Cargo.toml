@@ -49,6 +49,7 @@ notify            = "6"
 prometheus        = { version = "0.13", default-features = false, features = ["process"] }
 dashmap           = "6"
 cron              = "0.12"
+icalendar         = { version = "0.16", default-features = false, features = ["parser"] }
 
 [dependencies]
 hc-broker      = { path = "crates/hc-broker" }

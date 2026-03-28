@@ -6713,3 +6713,115 @@ scene_id = "22222222-0000-0000-0000-000000000002"
 | `default_scene_id` | | Scene to activate when no mode matches. |
 
 The action reads the scene from the state store, publishes each device's target state to its `cmd` topic, and emits a `SceneActivated` event (same as `POST /scenes/{id}/activate`).
+
+---
+
+## Calendar / iCal triggers (item 54)
+
+Load `.ics` calendar files (holidays, events, etc.) from a directory and fire automation rules when a calendar event starts.
+
+### Directory layout
+
+```
+config/calendars/
+  us_holidays.ics          ← loaded on startup, hot-reloaded on change
+  us_holidays.meta.json    ← sidecar: source URL, fetch timestamp, refresh interval
+  personal.ics
+```
+
+Auto-created at startup: `{base_dir}/config/calendars/`.
+
+### homecore.toml config
+
+```toml
+[calendars]
+dir            = "config/calendars"   # default; absolute or relative to base_dir
+expansion_days = 400                  # days forward to expand recurring events (default 400)
+```
+
+### Trigger: CalendarEvent
+
+```toml
+[trigger]
+type           = "calendar_event"
+calendar_id    = "us_holidays"   # optional — stem of .ics filename (omit = any calendar)
+title_contains = "Holiday"       # optional — case-insensitive substring of event summary
+offset_minutes = -30             # optional — fire 30 min before event start (default 0)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `calendar_id` | | Stem of the `.ics` file to match. Omit to match any loaded calendar. |
+| `title_contains` | | Case-insensitive substring match on event summary. |
+| `offset_minutes` | | Minutes before (negative) or after (positive) event start. Default 0. |
+
+The scheduler checks once per minute. A rule fires when `event.start + offset_minutes` falls in the current minute window.
+
+### RRULE support
+
+- `FREQ=YEARLY` — fully expanded over the configured `expansion_days` window (covers most holiday calendars)
+- Other frequencies — base occurrence included only if it falls in the window; a DEBUG log is emitted
+
+### Calendar API
+
+```
+GET    /api/v1/calendars                  list all loaded calendars
+POST   /api/v1/calendars/fetch            fetch ICS from URL and save to disk
+DELETE /api/v1/calendars/:id              remove .ics + meta sidecar, warn on referencing rules
+GET    /api/v1/calendars/:id/events       list upcoming events (from/to/limit query params)
+```
+
+**POST /api/v1/calendars/fetch body:**
+
+```json
+{
+  "url":           "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
+  "name":          "us_holidays",   // optional — derived from URL stem if absent
+  "refresh_hours": 168              // optional — auto-refresh interval (hours)
+}
+```
+
+**Response:**
+
+```json
+{ "calendar_id": "us_holidays", "event_count": 52, "saved_path": ".../.../us_holidays.ics" }
+```
+
+Fetched files are saved to the calendar directory alongside a `.meta.json` sidecar. On the next startup (or directory hot-reload) the file is read from disk — no repeated network calls needed.
+
+**Auto-refresh:** When `refresh_hours` is set in the meta sidecar, a background task checks every 15 minutes and re-fetches calendars whose last fetch is older than the interval.
+
+### Example rule
+
+```toml
+# Fire 30 minutes before any US holiday starts
+id      = "..."
+name    = "Pre-holiday Lighting"
+enabled = true
+
+[trigger]
+type           = "calendar_event"
+calendar_id    = "us_holidays"
+offset_minutes = -30
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light_living_room"
+
+[actions.state]
+on         = true
+brightness = 200
+color_temp = 2700
+```
+
+### Sidecar format (`.meta.json`)
+
+```json
+{
+  "source_url":    "https://www.calendarlabs.com/...",
+  "fetched_at":    "2026-03-28T14:00:00Z",
+  "refresh_hours": 168
+}
+```
+
+Drop a hand-crafted `.ics` in the directory with no sidecar and it loads fine — the sidecar is only written when using the fetch API.

@@ -219,6 +219,35 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    /// Fires when a calendar event from a loaded `.ics` file starts (with
+    /// optional offset).
+    ///
+    /// Calendar files are loaded from the configured `calendars.dir` directory
+    /// (default `config/calendars/`).  The scheduler checks once per minute;
+    /// a rule fires when any event's start time falls in the current minute
+    /// window after applying `offset_minutes`.
+    ///
+    /// ```toml
+    /// [trigger]
+    /// type = "calendar_event"
+    /// calendar_id    = "us_holidays"   # optional — stem of .ics filename
+    /// title_contains = "Holiday"       # optional — case-insensitive substring
+    /// offset_minutes = -30             # optional — fire 30 min before start
+    /// ```
+    CalendarEvent {
+        /// Stem of the `.ics` filename to match (e.g. `"us_holidays"` for
+        /// `us_holidays.ics`).  `None` matches events from any loaded calendar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calendar_id: Option<String>,
+        /// Case-insensitive substring match against the event summary/title.
+        /// `None` matches any event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title_contains: Option<String>,
+        /// Fire this many minutes before (negative) or after (positive) the
+        /// event start time.  Default `0` — fires at the event start minute.
+        #[serde(default)]
+        offset_minutes: i32,
+    },
 }
 
 /// Button event types for `Trigger::ButtonEvent`.

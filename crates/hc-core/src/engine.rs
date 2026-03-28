@@ -1268,6 +1268,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::NumericThreshold { .. }          => "NumericThreshold",
         Trigger::Periodic { .. }                  => "Periodic",
         Trigger::HubVariableChanged { .. }        => "HubVariableChanged",
+        Trigger::CalendarEvent { .. }             => "CalendarEvent",
     }
 }
 
@@ -1439,10 +1440,15 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             Matched
         }
 
-        // ── Time-based (handled by scheduler) ─────────────────────────────
-        (Trigger::TimeOfDay { .. } | Trigger::SunEvent { .. } | Trigger::Cron { .. } | Trigger::Periodic { .. }, _) => {
-            NoMatch("handled by scheduler")
-        }
+        // ── Time-based + calendar (handled by scheduler) ──────────────────
+        (
+            Trigger::TimeOfDay { .. }
+            | Trigger::SunEvent { .. }
+            | Trigger::Cron { .. }
+            | Trigger::Periodic { .. }
+            | Trigger::CalendarEvent { .. },
+            _,
+        ) => NoMatch("handled by scheduler"),
 
         // ── WebhookReceived ────────────────────────────────────────────────
         (Trigger::WebhookReceived { path: trigger_path }, Event::Custom { event_type, payload, .. }) => {

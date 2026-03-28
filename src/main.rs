@@ -149,6 +149,8 @@ struct AppConfig {
     logging: LoggingConfig,
     #[serde(default)]
     plugins: Vec<PluginEntry>,
+    #[serde(default)]
+    calendars: CalendarsSection,
 }
 
 impl AppConfig {
@@ -161,6 +163,7 @@ impl AppConfig {
         self.rules.resolve(base);
         self.broker.resolve(base);
         self.logging.resolve_paths(base);
+        self.calendars.resolve(base);
         for plugin in &mut self.plugins {
             plugin.resolve(base);
         }
@@ -366,6 +369,32 @@ impl Default for ShutdownConfig {
     fn default() -> Self { Self { drain_timeout_secs: default_drain_timeout() } }
 }
 
+/// `[calendars]` section of homecore.toml.
+#[derive(Deserialize)]
+struct CalendarsSection {
+    /// Directory containing `.ics` calendar files.
+    /// Default: `{base_dir}/config/calendars`
+    #[serde(default)]
+    dir: String,
+    /// How many days forward to expand recurring events.  Default: 400.
+    #[serde(default = "default_expansion_days")]
+    expansion_days: u32,
+}
+
+fn default_expansion_days() -> u32 { 400 }
+
+impl Default for CalendarsSection {
+    fn default() -> Self {
+        Self { dir: String::new(), expansion_days: default_expansion_days() }
+    }
+}
+
+impl CalendarsSection {
+    fn resolve(&mut self, base: &Path) {
+        resolve_path(&mut self.dir, base, "config/calendars");
+    }
+}
+
 /// `[scheduler]` section of homecore.toml.
 #[derive(Deserialize)]
 struct SchedulerSection {
@@ -479,7 +508,7 @@ async fn main() -> Result<()> {
     //
     // Harmless if directories already exist.  Failures are non-fatal so that
     // explicitly configured absolute paths elsewhere on the filesystem work.
-    for subdir in &["config/profiles", "data", "logs", "rules"] {
+    for subdir in &["config/profiles", "config/calendars", "data", "logs", "rules"] {
         if let Err(e) = std::fs::create_dir_all(base_dir.join(subdir)) {
             eprintln!("Warning: could not create {}/{subdir}: {e}", base_dir.display());
         }
@@ -598,6 +627,9 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
+    let calendar_dir = PathBuf::from(&config.calendars.dir);
+    let calendar_expansion_days = config.calendars.expansion_days;
+
     let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude)
         .with_modes(modes_path.clone())
@@ -605,6 +637,8 @@ async fn main() -> Result<()> {
         .with_drain_timeout(config.shutdown.drain_timeout_secs)
         .with_catchup_window(config.scheduler.catchup_window_minutes)
         .with_rules_dir(rules_dir.clone())
+        .with_calendar_dir(calendar_dir.clone())
+        .with_calendar_expansion_days(calendar_expansion_days)
         .with_shutdown(shutdown_rx.clone());
 
     // Load ecosystem profiles and build the router.  Done before spawning the
@@ -682,7 +716,7 @@ async fn main() -> Result<()> {
         core = core.with_notify(svc);
     }
 
-    let (rules_handle, fire_history) = core.start(rules).await?;
+    let (rules_handle, fire_history, calendar_handle) = core.start(rules).await?;
 
     // ── Hot-reload watcher for rule TOML files ─────────────────────────────
     // Must be kept alive for the duration of the process.
@@ -780,6 +814,12 @@ async fn main() -> Result<()> {
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups);
+
+    let app_state = if let Some(cal) = calendar_handle {
+        app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)
+    } else {
+        app_state
+    };
     hc_api::serve(&config.server.host, config.server.port, app_state, shutdown_rx).await?;
 
     Ok(())

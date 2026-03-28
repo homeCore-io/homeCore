@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
+pub mod calendar_store;
 pub mod engine;
 pub mod executor;
 pub mod mode_manager;
@@ -19,6 +20,7 @@ pub mod state_bridge;
 pub mod switch_manager;
 pub mod timer_manager;
 
+pub use calendar_store::CalendarHandle;
 pub use engine::{ConditionTrace, FireHistoryHandle, FireOutcome, RuleFiring};
 pub use executor::{ActionOutcome, ActionTrace};
 
@@ -78,6 +80,11 @@ pub struct Core {
     drain_timeout_secs: u64,
     /// Directory containing rule TOML files — used for cron validation write-back.
     rules_dir: Option<std::path::PathBuf>,
+    /// Directory containing `.ics` calendar files.  When set, calendar triggers
+    /// are enabled and the directory is hot-reloaded on file changes.
+    calendar_dir: Option<std::path::PathBuf>,
+    /// How many days forward to expand recurring calendar events.  Default: 400.
+    calendar_expansion_days: u32,
 }
 
 impl Core {
@@ -86,7 +93,22 @@ impl Core {
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
-        Self { bus, state, publish, location: LocationConfig::default(), router: None, notify: None, modes_path: None, startup_delay_secs: 10, catchup_window_minutes: 15, shutdown_rx: None, drain_timeout_secs: 10, rules_dir: None }
+        Self {
+            bus,
+            state,
+            publish,
+            location: LocationConfig::default(),
+            router: None,
+            notify: None,
+            modes_path: None,
+            startup_delay_secs: 10,
+            catchup_window_minutes: 15,
+            shutdown_rx: None,
+            drain_timeout_secs: 10,
+            rules_dir: None,
+            calendar_dir: None,
+            calendar_expansion_days: 400,
+        }
     }
 
     /// Override the plugin startup grace period (default: 10 s).
@@ -147,15 +169,29 @@ impl Core {
         self
     }
 
+    /// Set the calendar directory path.  When set, `.ics` files in the
+    /// directory are loaded at startup and hot-reloaded on change.
+    pub fn with_calendar_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.calendar_dir = Some(dir);
+        self
+    }
+
+    /// Override the RRULE expansion window (default: 400 days).
+    pub fn with_calendar_expansion_days(mut self, days: u32) -> Self {
+        self.calendar_expansion_days = days;
+        self
+    }
+
     /// Start all background tasks.
     ///
-    /// Returns `(rules_handle, fire_history_handle)`:
-    /// - `rules_handle` — live rule set, updated by the API and hot-reload watcher
-    /// - `fire_history_handle` — per-rule ring buffer of recent evaluation results
+    /// Returns `(rules_handle, fire_history_handle, calendar_handle)`:
+    /// - `rules_handle`    — live rule set, updated by the API and hot-reload watcher
+    /// - `fire_history`    — per-rule ring buffer of recent evaluation results
+    /// - `calendar_handle` — live calendar store (None if no calendar dir configured)
     pub async fn start(
         self,
         rules: Vec<Rule>,
-    ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle)> {
+    ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle, Option<CalendarHandle>)> {
         info!("HomeCore kernel starting");
 
         // State bridge: MqttMessage → DeviceStateChanged + store writes.
@@ -235,17 +271,70 @@ impl Core {
             tokio::spawn(mode_mgr.start());
         }
 
+        // ── Calendar store ────────────────────────────────────────────────
+        // Load `.ics` files from the calendar directory (if configured), start
+        // the file watcher, and schedule auto-refresh for URL-sourced calendars.
+        let calendar_handle: Option<CalendarHandle> = if let Some(ref cal_dir) = self.calendar_dir {
+            let expansion_days = self.calendar_expansion_days;
+            let dir = cal_dir.clone();
+
+            let initial = match tokio::task::spawn_blocking(move || {
+                calendar_store::load_dir(&dir, expansion_days)
+            }).await {
+                Ok(Ok(entries)) => {
+                    info!(
+                        count          = entries.len(),
+                        dir            = %cal_dir.display(),
+                        expansion_days = expansion_days,
+                        "Calendar store loaded"
+                    );
+                    entries
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Calendar load failed; starting with empty store");
+                    vec![]
+                }
+                Err(e) => {
+                    warn!(error = %e, "Calendar load task panicked; starting with empty store");
+                    vec![]
+                }
+            };
+
+            let handle: CalendarHandle = Arc::new(tokio::sync::RwLock::new(initial));
+
+            // Hot-reload watcher (keep alive in the process).
+            match calendar_store::watch(cal_dir.clone(), Arc::clone(&handle), expansion_days) {
+                Ok(_watcher) => {
+                    // Intentionally leak the watcher so it stays alive for the
+                    // lifetime of the process.  This mirrors how RuleWatcher is
+                    // handled in main.rs.
+                    std::mem::forget(_watcher);
+                }
+                Err(e) => warn!(error = %e, "Calendar file watcher failed to start"),
+            }
+
+            // Auto-refresh task for URL-sourced calendars.
+            calendar_store::spawn_auto_refresh(cal_dir.clone(), Arc::clone(&handle), expansion_days);
+
+            Some(handle)
+        } else {
+            None
+        };
+
         // Scheduler: time-based and solar triggers.
         // Uses the shared handle so hot-reloaded time rules take effect immediately.
-        let sched = scheduler::Scheduler::new(
+        let mut sched = scheduler::Scheduler::new(
             self.bus.clone(),
             self.location.latitude,
             self.location.longitude,
             Arc::clone(&rules_handle),
             self.catchup_window_minutes,
         );
+        if let Some(ref cal) = calendar_handle {
+            sched = sched.with_calendar(Arc::clone(cal));
+        }
         tokio::spawn(sched.run(shutdown_rx.clone()));
 
-        Ok((rules_handle, fire_history))
+        Ok((rules_handle, fire_history, calendar_handle))
     }
 }
