@@ -260,6 +260,7 @@ impl ModeWatcher {
 
 pub struct ModeManager {
     bus:       EventBus,
+    pub_bus:   EventBus,
     state:     StateStore,
     location:  LocationConfig,
     modes_path: PathBuf,
@@ -269,12 +270,13 @@ pub struct ModeManager {
 impl ModeManager {
     pub fn new(
         bus:       EventBus,
+        pub_bus:   EventBus,
         state:     StateStore,
         location:  LocationConfig,
         modes_path: PathBuf,
         startup_delay_secs: u64,
     ) -> Self {
-        Self { bus, state, location, modes_path, startup_delay_secs }
+        Self { bus, pub_bus, state, location, modes_path, startup_delay_secs }
     }
 
     pub async fn start(self) {
@@ -461,14 +463,14 @@ impl ModeManager {
 
         // Fire mode_changed custom event so Trigger::ModeChanged rules can react.
         if changed.contains(&"on".to_string()) {
-            let _ = self.bus.publish(Event::Custom {
+            let _ = self.pub_bus.publish(Event::Custom {
                 timestamp: chrono::Utc::now(),
                 event_type: "mode_changed".to_string(),
                 payload: json!({ "mode_id": mode.id, "on": on }),
             });
         }
 
-        let _ = self.bus.publish(Event::DeviceStateChanged {
+        let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: chrono::Utc::now(),
             device_id: mode.id.clone(),
             previous,

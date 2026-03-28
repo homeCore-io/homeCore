@@ -109,7 +109,8 @@ pub struct RuleFiring {
 pub type FireHistoryHandle = Arc<DashMap<Uuid, VecDeque<RuleFiring>>>;
 
 pub struct RuleEngine {
-    bus:    EventBus,
+    internal_bus: EventBus,
+    pub_bus:      EventBus,
     rules:  Arc<RwLock<Vec<Rule>>>,
     state:  StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
@@ -145,7 +146,8 @@ pub struct RuleEngine {
 
 impl RuleEngine {
     pub fn new(
-        bus:     EventBus,
+        internal_bus: EventBus,
+        pub_bus:      EventBus,
         rules:   Vec<Rule>,
         state:   StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
@@ -160,7 +162,8 @@ impl RuleEngine {
         }
 
         Self {
-            bus,
+            internal_bus,
+            pub_bus,
             rules: Arc::new(RwLock::new(rules)),
             state,
             publish,
@@ -223,8 +226,9 @@ impl RuleEngine {
             Err(e) => warn!(error = %e, "Rule engine: failed to pre-populate device cache"),
         }
 
-        let mut rx = self.bus.subscribe();
-        let _ = self.bus.publish(Event::Custom {
+        let mut internal_rx = self.internal_bus.subscribe();
+        let mut pub_rx      = self.pub_bus.subscribe();
+        let _ = self.pub_bus.publish(Event::Custom {
             timestamp: Utc::now(),
             event_type: "system_started".to_string(),
             payload: serde_json::json!({}),
@@ -234,9 +238,9 @@ impl RuleEngine {
         // When no external shutdown sender was provided, `lib.rs` creates a
         // watch channel but immediately drops the sender.  A dropped sender
         // causes `shutdown.changed()` to return `Err(Closed)` on every poll,
-        // which — combined with `biased` — would starve the `rx.recv()` branch.
+        // which — combined with `biased` — would starve the recv branches.
         // Track whether the shutdown channel is still active so we can fall back
-        // to a simple event loop once it's closed.
+        // to an event-only loop once it's closed.
         let mut shutdown_active = true;
 
         loop {
@@ -258,15 +262,28 @@ impl RuleEngine {
                             }
                         }
                     }
-                    result = rx.recv() => {
+                    result = internal_rx.recv() => {
                         match result {
                             Ok(event) => {
                                 if let Err(e) = self.handle_event(&event).await {
-                                    warn!(error = %e, "Rule engine error handling event");
+                                    warn!(error = %e, "Rule engine error handling event (internal bus)");
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Rule engine lagged by {n} events");
+                                warn!("Rule engine lagged by {n} events (internal bus)");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    result = pub_rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                if let Err(e) = self.handle_event(&event).await {
+                                    warn!(error = %e, "Rule engine error handling event (public bus)");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Rule engine lagged by {n} events (public bus)");
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
@@ -274,16 +291,33 @@ impl RuleEngine {
                 }
             } else {
                 // Shutdown channel is gone — just wait for bus events.
-                match rx.recv().await {
-                    Ok(event) => {
-                        if let Err(e) = self.handle_event(&event).await {
-                            warn!(error = %e, "Rule engine error handling event");
+                tokio::select! {
+                    result = internal_rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                if let Err(e) = self.handle_event(&event).await {
+                                    warn!(error = %e, "Rule engine error handling event (internal bus)");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Rule engine lagged by {n} events (internal bus)");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Rule engine lagged by {n} events");
+                    result = pub_rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                if let Err(e) = self.handle_event(&event).await {
+                                    warn!(error = %e, "Rule engine error handling event (public bus)");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Rule engine lagged by {n} events (public bus)");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
@@ -403,7 +437,7 @@ impl RuleEngine {
                         let rule_id   = rule.id;
                         let rule_name = rule.name.clone();
                         let trigger   = rule.trigger.clone();
-                        let bus       = self.bus.clone();
+                        let bus       = self.pub_bus.clone();
                         let cache     = Arc::clone(&self.device_cache);
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_secs(dur_secs)).await;
@@ -726,7 +760,7 @@ impl RuleEngine {
         let actions          = rule.actions.clone();
         let action_count     = actions.len();
         let trigger_type_str = trigger_type(&rule.trigger).to_string();
-        let bus              = self.bus.clone();
+        let bus              = self.pub_bus.clone();
         let rule_id          = rule.id;
         let rule_name        = rule.name.clone();
         let in_flight        = Arc::clone(&self.in_flight);
@@ -742,7 +776,7 @@ impl RuleEngine {
         let ctx = Arc::new(ExecutorContext {
             publish:        self.publish.clone(),
             notify:         self.notify.clone(),
-            event_bus:      Some(self.bus.clone()),
+            event_bus:      Some(self.pub_bus.clone()),
             device_cache:   Arc::clone(&self.device_cache),
             delay_registry: Arc::clone(&self.delay_registry),
             pause_state:    Arc::clone(&self.pause_state),

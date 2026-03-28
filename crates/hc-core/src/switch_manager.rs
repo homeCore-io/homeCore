@@ -67,16 +67,17 @@ enum SwitchCommand {
 // ---------------------------------------------------------------------------
 
 pub struct SwitchManager {
-    bus: EventBus,
-    state: StateStore,
+    bus:     EventBus,
+    pub_bus: EventBus,
+    state:   StateStore,
 }
 
 impl SwitchManager {
-    pub fn new(bus: EventBus, state: StateStore) -> Self {
-        Self { bus, state }
+    pub fn new(bus: EventBus, pub_bus: EventBus, state: StateStore) -> Self {
+        Self { bus, pub_bus, state }
     }
 
-    /// Listen for commands on the event bus and apply them to switch devices.
+    /// Listen for commands on the internal bus and apply them to switch devices.
     /// Call `tokio::spawn(manager.start())`.
     pub async fn start(self) {
         let mut rx = self.bus.subscribe();
@@ -163,7 +164,7 @@ impl SwitchManager {
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
-        let _ = self.bus.publish(Event::DeviceStateChanged {
+        let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             previous,

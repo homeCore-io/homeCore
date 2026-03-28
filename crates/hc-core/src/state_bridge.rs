@@ -28,15 +28,17 @@ use tracing::{debug, info, warn};
 
 pub struct StateBridge {
     bus:     EventBus,
+    pub_bus: EventBus,
     store:   StateStore,
     router:  Option<EcosystemRouter>,
     publish: Option<PublishHandle>,
 }
 
 impl StateBridge {
-    pub fn new(bus: EventBus, store: StateStore) -> Self {
+    pub fn new(bus: EventBus, pub_bus: EventBus, store: StateStore) -> Self {
         Self {
             bus,
+            pub_bus,
             store,
             router:  None,
             publish: None,
@@ -149,7 +151,7 @@ impl StateBridge {
             && parts[3] == "register"
         {
             let plugin_id = parts[2];
-            let _ = self.bus.publish(Event::PluginRegistered {
+            let _ = self.pub_bus.publish(Event::PluginRegistered {
                 timestamp: Utc::now(),
                 plugin_id: plugin_id.to_string(),
             });
@@ -230,7 +232,7 @@ impl StateBridge {
                 current_name  = %device.name,
                 "Device name changed via state attribute"
             );
-            let _ = self.bus.publish(Event::DeviceNameChanged {
+            let _ = self.pub_bus.publish(Event::DeviceNameChanged {
                 timestamp:    Utc::now(),
                 device_id:    device_id.to_string(),
                 previous_name,
@@ -253,7 +255,7 @@ impl StateBridge {
             }
         }
 
-        let _ = self.bus.publish(Event::DeviceStateChanged {
+        let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             previous,
@@ -317,7 +319,7 @@ impl StateBridge {
                         current_name  = %new_name,
                         "Device name changed"
                     );
-                    let _ = self.bus.publish(Event::DeviceNameChanged {
+                    let _ = self.pub_bus.publish(Event::DeviceNameChanged {
                         timestamp:     Utc::now(),
                         device_id:     device_id.to_string(),
                         previous_name,
@@ -359,7 +361,7 @@ impl StateBridge {
         device.last_seen = Utc::now();
         self.store.upsert_device(&device).await?;
 
-        let _ = self.bus.publish(Event::DeviceAvailabilityChanged {
+        let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             available,

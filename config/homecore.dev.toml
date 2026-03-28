@@ -178,7 +178,7 @@ enabled = false
 id      = "plugin.matter"
 binary  = "../plugins/hc-matter/target/debug/hc-matter"
 config  = "../plugins/hc-matter/config/config.toml"
-enabled = true
+enabled = false
 
 # ---------------------------------------------------------------------------
 # Notifications

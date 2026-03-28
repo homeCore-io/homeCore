@@ -1,69 +1,64 @@
-# All Deck Doors Closed (Any trigger)
-#
-# Fires when any of the 4 deck doors closes; conditions verify that ALL 4 are
-# now closed before acting.  When all closed at night, starts the 5-minute
-# deck lights-off timer.
-#
-# Fully self-contained — no virtual switch involved.
-#
-# Replaces (when enabled):
-#   door_closed_diningRoom.toml
-#   door_closed_familyRoom.toml
-#   door_closed_garageDeck.toml
-#   door_closed_livingRoom.toml
-#   all_deck_doors_closed.toml
-#
-# timer_deck_lights_off.toml (timer fires → scene off) is unchanged.
-
 id = "4ad53081-5c15-465b-8d31-5ec97b289d12"
-name     = "All Deck Doors Closed — Start Lights Timer"
-enabled  = false
+name = "All Deck Doors Closed — Start Lights Timer"
+enabled = true
 priority = 20
+tags = []
+log_events = false
+log_triggers = false
+log_actions = false
+cancel_on_false = false
 
 [trigger]
-type       = "device_state_changed"
-device_id  = "yolink_d88b4c01000e813f"   # Dining Room (primary)
+type = "device_state_changed"
+device_id = "yolink_d88b4c01000e813f"
 device_ids = [
-  "yolink_d88b4c01000e8304",             # Living Room
-  "yolink_d88b4c01000e82eb",             # Garage Deck
-  "yolink_d88b4c0200142eb8",             # Family Room
+    "yolink_d88b4c01000e8304",
+    "yolink_d88b4c01000e82eb",
+    "yolink_d88b4c0200142eb8",
 ]
-attribute  = "open"
-to         = false
+attribute = "open"
+to = false
 
-# All 4 doors must be closed before starting the timer.
 [[conditions]]
-type      = "device_state"
+type = "device_state"
 device_id = "yolink_d88b4c01000e813f"
 attribute = "open"
-op        = "eq"
-value     = false
+op = "eq"
+value = false
 
 [[conditions]]
-type      = "device_state"
+type = "device_state"
 device_id = "yolink_d88b4c01000e8304"
 attribute = "open"
-op        = "eq"
-value     = false
+op = "eq"
+value = false
 
 [[conditions]]
-type      = "device_state"
+type = "device_state"
 device_id = "yolink_d88b4c01000e82eb"
 attribute = "open"
-op        = "eq"
-value     = false
+op = "eq"
+value = false
 
 [[conditions]]
-type      = "device_state"
+type = "device_state"
 device_id = "yolink_d88b4c0200142eb8"
 attribute = "open"
-op        = "eq"
-value     = false
+op = "eq"
+value = false
 
-# Start the 5-minute lights-off countdown (night only).
 [[actions]]
-type      = "conditional"
-condition = "device_state(\"mode_night\")[\"on\"] == true"
-then_actions = [
-  { type = "set_device_state", device_id = "timer_deck_lights_off", state = { command = "start", duration_secs = 300, label = "Deck lights off" } },
-]
+enabled = true
+type = "conditional"
+condition = 'device_state("mode_night")["on"] == true'
+else_actions = []
+
+[[actions.then_actions]]
+type = "set_device_state"
+device_id = "timer_deck_lights_off"
+track_event_value = false
+
+[actions.then_actions.state]
+command = "start"
+duration_secs = 300
+label = "Deck lights off"

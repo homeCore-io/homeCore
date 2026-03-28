@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub struct Scheduler {
-    bus:                    EventBus,
+    pub_bus:                EventBus,
     latitude:               f64,
     longitude:              f64,
     /// Shared rule set — reads the live handle each tick so hot-reloaded
@@ -46,14 +46,14 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(
-        bus:                    EventBus,
+        pub_bus:                EventBus,
         latitude:               f64,
         longitude:              f64,
         rules:                  Arc<RwLock<Vec<Rule>>>,
         catchup_window_minutes: u32,
     ) -> Self {
         Self {
-            bus,
+            pub_bus,
             latitude,
             longitude,
             rules,
@@ -149,7 +149,7 @@ impl Scheduler {
                         debug!(rule_id = %rule.id, "Scheduler firing time trigger");
                         // Emit a synthetic Custom event that the engine interprets as
                         // a manual fire for this specific rule.
-                        let _ = self.bus.publish(Event::Custom {
+                        let _ = self.pub_bus.publish(Event::Custom {
                             timestamp: chrono::Utc::now(),
                             event_type: "scheduler_tick".into(),
                             payload: serde_json::json!({ "rule_id": rule.id }),
@@ -224,7 +224,7 @@ impl Scheduler {
                                 }
                             };
                             debug!(rule_id = %rule.id, "Scheduler firing CalendarEvent trigger");
-                            let _ = self.bus.publish(Event::Custom {
+                            let _ = self.pub_bus.publish(Event::Custom {
                                 timestamp:  chrono::Utc::now(),
                                 event_type: "scheduler_tick".into(),
                                 payload,
@@ -325,7 +325,7 @@ impl Scheduler {
                     catchup_window_minutes = self.catchup_window_minutes,
                     "Scheduler catch-up: firing missed time trigger"
                 );
-                if let Err(e) = self.bus.publish(Event::Custom {
+                if let Err(e) = self.pub_bus.publish(Event::Custom {
                     timestamp:  chrono::Utc::now(),
                     event_type: "scheduler_tick".into(),
                     payload:    serde_json::json!({ "rule_id": rule.id }),

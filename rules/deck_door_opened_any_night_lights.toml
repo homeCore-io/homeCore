@@ -1,0 +1,52 @@
+id = "842b2dc5-140b-471f-b459-ca8a773542bc"
+name = "Deck Door Opened (Any) — Night Lights"
+enabled = true
+priority = 20
+tags = []
+conditions = []
+log_events = false
+log_triggers = false
+log_actions = false
+cancel_on_false = false
+
+[trigger]
+type = "device_state_changed"
+device_id = "yolink_d88b4c01000e813f"
+device_ids = [
+    "yolink_d88b4c01000e8304",
+    "yolink_d88b4c01000e82eb",
+    "yolink_d88b4c0200142eb8",
+]
+attribute = "open"
+to = true
+
+[[actions]]
+enabled = true
+type = "set_device_state"
+device_id = "switch_any_deck_door_open"
+track_event_value = false
+
+[actions.state]
+on = true
+
+[[actions]]
+enabled = true
+type = "conditional"
+condition = 'device_state("mode_night")["on"] == true'
+else_actions = []
+
+[[actions.then_actions]]
+type = "set_device_state"
+device_id = "timer_deck_lights_off"
+track_event_value = false
+
+[actions.then_actions.state]
+command = "cancel"
+
+[[actions.then_actions]]
+type = "set_device_state"
+device_id = "lutron_scene_deck_on_phantom"
+track_event_value = false
+
+[actions.then_actions.state]
+activate = true

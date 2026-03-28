@@ -62,7 +62,8 @@ impl Default for LocationConfig {
 
 /// Top-level core runtime.
 pub struct Core {
-    bus: EventBus,
+    internal_bus: EventBus,
+    pub_bus:      EventBus,
     state: hc_state::StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
@@ -89,12 +90,14 @@ pub struct Core {
 
 impl Core {
     pub fn new(
-        bus: EventBus,
+        internal_bus: EventBus,
+        pub_bus:      EventBus,
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
         Self {
-            bus,
+            internal_bus,
+            pub_bus,
             state,
             publish,
             location: LocationConfig::default(),
@@ -194,8 +197,8 @@ impl Core {
     ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle, Option<CalendarHandle>)> {
         info!("HomeCore kernel starting");
 
-        // State bridge: MqttMessage → DeviceStateChanged + store writes.
-        let mut bridge = state_bridge::StateBridge::new(self.bus.clone(), self.state.clone());
+        // State bridge: internal bus MqttMessage → DeviceStateChanged on public bus.
+        let mut bridge = state_bridge::StateBridge::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
         if let Some(router) = self.router {
             bridge = bridge.with_router(router);
         }
@@ -230,9 +233,10 @@ impl Core {
             }
         }
 
-        // Rule engine.
+        // Rule engine: subscribes to both buses; publishes to public bus.
         let engine = engine::RuleEngine::new(
-            self.bus.clone(),
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
             validated_rules,
             self.state.clone(),
             self.publish.clone(),
@@ -252,17 +256,18 @@ impl Core {
         tokio::spawn(engine.run(shutdown_rx.clone()));
 
         // Timer manager: virtual countdown timer devices.
-        let timer_mgr = timer_manager::TimerManager::new(self.bus.clone(), self.state.clone());
+        let timer_mgr = timer_manager::TimerManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
         tokio::spawn(timer_mgr.start());
 
         // Switch manager: virtual on/off helper switches.
-        let switch_mgr = switch_manager::SwitchManager::new(self.bus.clone(), self.state.clone());
+        let switch_mgr = switch_manager::SwitchManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
         tokio::spawn(switch_mgr.start());
 
         // Mode manager: solar + manual named boolean modes.
         if let Some(modes_path) = self.modes_path.clone() {
             let mode_mgr = mode_manager::ModeManager::new(
-                self.bus.clone(),
+                self.internal_bus.clone(),
+                self.pub_bus.clone(),
                 self.state.clone(),
                 self.location,
                 modes_path,
@@ -321,10 +326,9 @@ impl Core {
             None
         };
 
-        // Scheduler: time-based and solar triggers.
-        // Uses the shared handle so hot-reloaded time rules take effect immediately.
+        // Scheduler: time-based and solar triggers; publishes to public bus only.
         let mut sched = scheduler::Scheduler::new(
-            self.bus.clone(),
+            self.pub_bus.clone(),
             self.location.latitude,
             self.location.longitude,
             Arc::clone(&rules_handle),

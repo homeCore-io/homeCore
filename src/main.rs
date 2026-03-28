@@ -565,8 +565,13 @@ async fn main() -> Result<()> {
     // ── 10. State store ─────────────────────────────────────────────────────
     let store = StateStore::open(&config.storage.state_db_path, &config.storage.history_db_path).await?;
 
-    // ── 11. Event bus ───────────────────────────────────────────────────────
-    let bus = EventBus::new(1024);
+    // ── 11. Event buses ─────────────────────────────────────────────────────
+    // internal_bus: carries only Event::MqttMessage (raw MQTT traffic).
+    //   Subscribers: state_bridge, timer_manager, switch_manager, mode_manager, engine.
+    // pub_bus: carries all typed events (DeviceStateChanged, RuleFired, etc.).
+    //   Subscribers: engine, hc-api (event log, WS stream, plugin registry).
+    let internal_bus = EventBus::new(1024);
+    let pub_bus      = EventBus::new(1024);
 
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
@@ -630,7 +635,7 @@ async fn main() -> Result<()> {
     let calendar_dir = PathBuf::from(&config.calendars.dir);
     let calendar_expansion_days = config.calendars.expansion_days;
 
-    let mut core = Core::new(bus.clone(), store.clone(), Some(publish_handle.clone()))
+    let mut core = Core::new(internal_bus.clone(), pub_bus.clone(), store.clone(), Some(publish_handle.clone()))
         .with_location(config.location.latitude, config.location.longitude)
         .with_modes(modes_path.clone())
         .with_startup_delay(config.startup.plugin_ready_delay_secs)
@@ -658,9 +663,10 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "Could not load profiles directory; running without router"),
     }
 
-    // ── 13. MQTT forwarder → EventBus ──────────────────────────────────────
+    // ── 13. MQTT forwarder → internal bus ──────────────────────────────────
+    // Only MqttMessage events flow through here; typed events go to pub_bus.
     {
-        let bus_clone = bus.clone();
+        let bus_clone = internal_bus.clone();
         tokio::spawn(async move {
             loop {
                 match mqtt_rx.recv().await {
@@ -802,7 +808,7 @@ async fn main() -> Result<()> {
     };
     let app_state = AppState::new(
         store,
-        bus,
+        pub_bus,
         Some(publish_handle),
         Some(rules_handle),
         Some(rule_file_store),

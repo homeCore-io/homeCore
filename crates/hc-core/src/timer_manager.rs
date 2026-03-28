@@ -104,15 +104,17 @@ struct TimerHandle {
 // ---------------------------------------------------------------------------
 
 pub struct TimerManager {
-    bus: EventBus,
-    state: StateStore,
+    bus:     EventBus,
+    pub_bus: EventBus,
+    state:   StateStore,
     handles: Arc<RwLock<HashMap<String, TimerHandle>>>,
 }
 
 impl TimerManager {
-    pub fn new(bus: EventBus, state: StateStore) -> Self {
+    pub fn new(bus: EventBus, pub_bus: EventBus, state: StateStore) -> Self {
         Self {
             bus,
+            pub_bus,
             state,
             handles: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -364,7 +366,7 @@ impl TimerManager {
     ) {
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<TimerCtrl>(4);
         let id = device_id.to_string();
-        let bus = self.bus.clone();
+        let bus = self.pub_bus.clone();
         let state = self.state.clone();
         let handles_ref = Arc::clone(&self.handles);
 
@@ -468,7 +470,7 @@ impl TimerManager {
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
-        let _ = self.bus.publish(Event::DeviceStateChanged {
+        let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
             previous,
