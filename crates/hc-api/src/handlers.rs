@@ -981,8 +981,18 @@ pub async fn update_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
-    Json(mut rule): Json<Rule>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Path id is authoritative — inject it so clients don't need to send it.
+    body["id"] = serde_json::Value::String(id.to_string());
+
+    let mut rule: Rule = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": format!("invalid rule body: {e}")
+        }))).into_response(),
+    };
+
     // Validate priority is within practical range.
     if rule.priority < -1000 || rule.priority > 1000 {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
