@@ -1,0 +1,75 @@
+# All Deck Doors Closed (Any trigger) — Optimized
+#
+# Fires when any of the 4 deck doors closes; conditions verify that ALL 4 are
+# now closed before taking action.  Consolidates 5 rules into 1:
+#
+#   Replaces (when enabled):
+#     door_closed_diningRoom.toml    \
+#     door_closed_familyRoom.toml     |  each sets switch_any_deck_door_open=off
+#     door_closed_garageDeck.toml     |  when all 4 doors are closed
+#     door_closed_livingRoom.toml    /
+#     all_deck_doors_closed.toml        triggers on switch→false, starts timer
+#
+# NOTE: if this rule is enabled, disable all 5 rules above.
+#       timer_deck_lights_off.toml and timer_deck_lights_off.toml are unchanged.
+
+id = "4ad53081-5c15-465b-8d31-5ec97b289d12"
+name     = "All Deck Doors Closed — Start Lights Timer"
+enabled  = false
+priority = 20
+
+[trigger]
+type       = "device_state_changed"
+device_id  = "yolink_d88b4c01000e813f"   # Dining Room (primary)
+device_ids = [
+  "yolink_d88b4c01000e8304",             # Living Room
+  "yolink_d88b4c01000e82eb",             # Garage Deck
+  "yolink_d88b4c0200142eb8",             # Family Room
+]
+attribute  = "open"
+to         = false
+
+# All 4 deck doors must be closed before acting.
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e813f"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e8304"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c01000e82eb"
+attribute = "open"
+op        = "eq"
+value     = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "yolink_d88b4c0200142eb8"
+attribute = "open"
+op        = "eq"
+value     = false
+
+# Update the fan-in virtual switch (keeps state consistent with other rules
+# that may read it, e.g. any_deck_door_open.toml).
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_any_deck_door_open"
+state     = { on = false }
+
+# Start the lights-off countdown directly (was previously a second rule
+# triggered by the switch changing to false).  5-minute grace period.
+[[actions]]
+type      = "conditional"
+condition = "device_state(\"mode_night\")[\"on\"] == true"
+then_actions = [
+  { type = "set_device_state", device_id = "timer_deck_lights_off", state = { command = "start", duration_secs = 300, label = "Deck lights off" } },
+]
