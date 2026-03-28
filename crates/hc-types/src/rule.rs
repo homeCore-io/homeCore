@@ -9,6 +9,36 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Controls how a rule behaves when it is triggered while previous actions
+/// from the same rule are still executing.
+///
+/// Mirrors Home Assistant's `mode` automation field.
+///
+/// ```toml
+/// run_mode = "single"   # skip if already running
+/// run_mode = "restart"  # cancel in-flight and restart
+/// run_mode = { type = "queued", max_queue = 3 }
+/// run_mode = "parallel" # default — concurrent firings
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunMode {
+    /// No limit — concurrent firings run in parallel (default).
+    #[default]
+    Parallel,
+    /// If the rule is already executing, skip this firing.
+    Single,
+    /// Cancel the in-flight execution (cancels pending delays) and restart.
+    Restart,
+    /// Queue up to `max_queue` concurrent firings; drop if the queue is full.
+    Queued {
+        #[serde(default = "default_max_queue")]
+        max_queue: usize,
+    },
+}
+
+fn default_max_queue() -> usize { 10 }
+
 /// A complete automation rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
@@ -87,7 +117,15 @@ pub struct Rule {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_label: Option<String>,
+
+    // ── Run mode (HA-style concurrency control) ──────────────────────────────
+    /// Controls what happens when the rule fires while its previous actions are
+    /// still executing.  Defaults to `Parallel` (current behavior).
+    #[serde(default, skip_serializing_if = "is_parallel")]
+    pub run_mode: RunMode,
 }
+
+fn is_parallel(m: &RunMode) -> bool { *m == RunMode::Parallel }
 
 /// What causes a rule to be evaluated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +256,25 @@ pub enum Trigger {
     HubVariableChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+    },
+    /// Fires when a hub mode turns on or off.
+    ///
+    /// Matches the `mode_changed` internal event emitted by `ModeManager`
+    /// whenever any mode device's `on` attribute changes.
+    ///
+    /// ```toml
+    /// [trigger]
+    /// type    = "mode_changed"
+    /// mode_id = "mode_night"  # optional — omit to fire on any mode change
+    /// to      = true          # optional — only fire when turning on
+    /// ```
+    ModeChanged {
+        /// Mode device ID (e.g. `"mode_night"`).  `None` matches any mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode_id: Option<String>,
+        /// Only fire when the mode transitions to this on/off state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<bool>,
     },
     /// Fires when a calendar event from a loaded `.ics` file starts (with
     /// optional offset).
@@ -357,6 +414,22 @@ pub enum Condition {
         op: CompareOp,
         value: JsonValue,
     },
+    /// Passes when the named hub mode is in the specified on/off state.
+    ///
+    /// Reads the mode device's `on` attribute from the device cache.
+    ///
+    /// ```toml
+    /// [[conditions]]
+    /// type    = "mode_is"
+    /// mode_id = "mode_night"
+    /// on      = true
+    /// ```
+    ModeIs {
+        /// Mode device ID (e.g. `"mode_night"`).
+        mode_id: String,
+        /// Expected on/off state.
+        on: bool,
+    },
 }
 
 /// Comparison operators for `Condition::DeviceState`.
@@ -390,6 +463,15 @@ pub enum VariableOp {
     Multiply,
     Divide,
     /// Toggle a boolean variable (ignores value field).
+    Toggle,
+}
+
+/// Command for `Action::SetMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeCommand {
+    On,
+    Off,
     Toggle,
 }
 
@@ -814,6 +896,24 @@ pub enum Action {
         /// clamped to 2–100).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steps: Option<u32>,
+    },
+    /// Turn a hub mode on, off, or toggle it.
+    ///
+    /// Publishes `{ "command": "on|off|toggle" }` to the mode device's cmd
+    /// topic.  The `ModeManager` handles the command and fires a
+    /// `mode_changed` event that other rules can react to.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type    = "set_mode"
+    /// mode_id = "mode_away"
+    /// command = "on"
+    /// ```
+    SetMode {
+        /// Mode device ID (e.g. `"mode_away"`).
+        mode_id: String,
+        /// Whether to turn the mode on, off, or toggle its current state.
+        command: ModeCommand,
     },
 }
 

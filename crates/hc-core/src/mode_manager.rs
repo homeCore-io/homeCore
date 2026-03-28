@@ -458,6 +458,16 @@ impl ModeManager {
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
+
+        // Fire mode_changed custom event so Trigger::ModeChanged rules can react.
+        if changed.contains(&"on".to_string()) {
+            let _ = self.bus.publish(Event::Custom {
+                timestamp: chrono::Utc::now(),
+                event_type: "mode_changed".to_string(),
+                payload: json!({ "mode_id": mode.id, "on": on }),
+            });
+        }
+
         let _ = self.bus.publish(Event::DeviceStateChanged {
             timestamp: chrono::Utc::now(),
             device_id: mode.id.clone(),
@@ -467,19 +477,52 @@ impl ModeManager {
         });
     }
 
-    /// Handle offset-change commands arriving on the event bus.
+    /// Handle commands arriving on the event bus.
     ///
-    /// Writes the new value back to `modes.toml` (the watcher will reload and
-    /// reschedule on the next loop iteration).
+    /// For **solar** modes: handles `on_offset_minutes` / `off_offset_minutes`
+    /// and writes back to `modes.toml`.
+    ///
+    /// For **manual** modes: handles `{ "command": "on|off|toggle" }` and
+    /// `{ "on": bool }` payloads to change mode state directly.
     async fn handle_mode_cmd(
         &self,
         mode_id: &str,
         cmd: &serde_json::Value,
         modes: &mut Vec<ModeConfig>,
     ) {
-        let Some(mode) = modes.iter_mut().find(|m| m.id == mode_id) else { return };
-        if mode.kind != ModeKind::Solar { return; }
+        let Some(mode_idx) = modes.iter().position(|m| m.id == mode_id) else { return };
+        let mode = &modes[mode_idx];
 
+        // ── Manual mode: on / off / toggle ────────────────────────────────
+        if mode.kind == ModeKind::Manual {
+            // Determine desired new state.
+            let current_on = self.state.get_device(mode_id).await.ok().flatten()
+                .and_then(|d| d.attributes.get("on").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            let new_on = if let Some(command) = cmd.get("command").and_then(|v| v.as_str()) {
+                match command {
+                    "on"     => Some(true),
+                    "off"    => Some(false),
+                    "toggle" => Some(!current_on),
+                    _        => None,
+                }
+            } else if let Some(b) = cmd.get("on").and_then(|v| v.as_bool()) {
+                Some(b)
+            } else {
+                None
+            };
+
+            if let Some(on) = new_on {
+                info!(mode_id, on, "ModeManager: manual mode command");
+                let mode_cfg = modes[mode_idx].clone();
+                self.write_mode_state(&mode_cfg, on).await;
+            }
+            return;
+        }
+
+        // ── Solar mode: offset changes ────────────────────────────────────
+        let mode = &mut modes[mode_idx];
         let mut changed = false;
         if let Some(v) = cmd.get("on_offset_minutes").and_then(|v| v.as_i64()) {
             mode.on_offset_minutes = v as i32;

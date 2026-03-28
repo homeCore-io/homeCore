@@ -1029,6 +1029,22 @@ fn run_single_action(
             }
         }
 
+        // ── SetMode ───────────────────────────────────────────────────────────
+        Action::SetMode { mode_id, command } => {
+            use hc_types::rule::ModeCommand;
+            let payload_str = match command {
+                ModeCommand::On     => r#"{"command":"on"}"#,
+                ModeCommand::Off    => r#"{"command":"off"}"#,
+                ModeCommand::Toggle => r#"{"command":"toggle"}"#,
+            };
+            let topic = format!("homecore/devices/{mode_id}/cmd");
+            info!(rule = %ctx.rule_name, mode_id, command = ?command, "action: SetMode");
+            match ctx.publish.clone() {
+                Some(ph) => ph.publish(&topic, payload_str.as_bytes().to_vec()).await?,
+                None => warn!(rule = %ctx.rule_name, mode_id, "action: SetMode — no publish handle"),
+            }
+        }
+
         // ── ActivateScenePerMode ──────────────────────────────────────────────
         Action::ActivateScenePerMode { modes, default_scene_id } => {
             let scene_id = modes.iter().find_map(|entry| {
@@ -1398,6 +1414,7 @@ fn action_description(action: &Action) -> String {
                 None     => format!("modes: [{}]", mode_names.join(", ")),
             }
         }
+        Action::SetMode { mode_id, command } => format!("{} {:?}", mode_id, command),
     }
 }
 
@@ -1436,6 +1453,7 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::DelayPerMode { .. }           => "DelayPerMode",
         Action::SetHubVariable { .. }         => "SetHubVariable",
         Action::ActivateScenePerMode { .. }   => "ActivateScenePerMode",
+        Action::SetMode { .. }               => "SetMode",
     }
 }
 

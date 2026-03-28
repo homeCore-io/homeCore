@@ -872,6 +872,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::Periodic { .. }                  => "periodic",
         Trigger::HubVariableChanged { .. }        => "hub_variable_changed",
         Trigger::CalendarEvent { .. }             => "calendar_event",
+        Trigger::ModeChanged { .. }               => "mode_changed",
     }
 }
 
@@ -1344,6 +1345,23 @@ async fn eval_condition_dry_detail(
                 expected: Some(value.clone()),
                 elapsed_ms: None,
                 reason: Some(format!("hub variable '{name}' not available in dry-run")),
+            }
+        }
+        Condition::ModeIs { mode_id, on } => {
+            // Dry-run checks the persisted device state.
+            let actual_on = match store.get_device(mode_id).await {
+                Ok(Some(d)) => d.attributes.get("on").and_then(|v| v.as_bool()).unwrap_or(false),
+                _ => false,
+            };
+            let passed = actual_on == *on;
+            ConditionDetail {
+                condition: cond_json, passed,
+                actual: Some(json!(actual_on)),
+                expected: Some(json!(on)),
+                elapsed_ms: None,
+                reason: if !passed {
+                    Some(format!("mode '{mode_id}' is {} (expected {})", actual_on, on))
+                } else { None },
             }
         }
     }

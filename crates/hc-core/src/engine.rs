@@ -33,7 +33,7 @@ use hc_scripting::ScriptRuntime;
 use hc_state::StateStore;
 use hc_types::event::Event;
 use hc_types::rule::{
-    ButtonEventType, CompareOp, Condition, Rule, ThresholdOp, Trigger, TriggerContext,
+    ButtonEventType, CompareOp, Condition, Rule, RunMode, ThresholdOp, Trigger, TriggerContext,
 };
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, VecDeque};
@@ -67,6 +67,8 @@ pub enum FireOutcome {
     RequiredExpressionFailed,
     /// `trigger_condition` evaluated to `false`.
     TriggerGateFailed,
+    /// Rule was skipped due to `run_mode` concurrency policy (Single or Queued).
+    Skipped { reason: String },
 }
 
 /// Per-condition evaluation result within a rule firing.
@@ -135,6 +137,8 @@ pub struct RuleEngine {
     capture_store: Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
     /// Cross-rule hub variable store.  Key: variable name.
     hub_vars: Arc<DashMap<String, JsonValue>>,
+    /// Per-rule in-flight action task counter, used by run_mode: single/queued.
+    rule_in_flight: Arc<DashMap<Uuid, Arc<AtomicUsize>>>,
     /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
 }
@@ -171,7 +175,8 @@ impl RuleEngine {
             rule_vars,
             priv_bools: Arc::new(DashMap::new()),
             capture_store: Arc::new(DashMap::new()),
-            hub_vars:      Arc::new(DashMap::new()),
+            hub_vars:       Arc::new(DashMap::new()),
+            rule_in_flight: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
         }
     }
@@ -600,6 +605,65 @@ impl RuleEngine {
             }
         }
 
+        // ── Run mode concurrency check ────────────────────────────────────────
+        let rule_counter = self.rule_in_flight
+            .entry(rule.id)
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+
+        match &rule.run_mode {
+            RunMode::Parallel => {} // always proceed
+            RunMode::Single => {
+                if rule_counter.load(Ordering::SeqCst) > 0 {
+                    debug!(
+                        rule_name = %rule.name, rule_id = %rule.id,
+                        "run_mode=single: already in-flight, skipping"
+                    );
+                    let firing = self.early_firing(
+                        rule, &trigger_ctx,
+                        FireOutcome::Skipped { reason: "single: already in-flight".into() },
+                    );
+                    self.push_history(rule.id, firing);
+                    return Ok(false);
+                }
+            }
+            RunMode::Queued { max_queue } => {
+                if rule_counter.load(Ordering::SeqCst) >= *max_queue {
+                    debug!(
+                        rule_name = %rule.name, rule_id = %rule.id,
+                        max_queue, "run_mode=queued: queue full, skipping"
+                    );
+                    let firing = self.early_firing(
+                        rule, &trigger_ctx,
+                        FireOutcome::Skipped { reason: format!("queued: queue full (max {})", max_queue) },
+                    );
+                    self.push_history(rule.id, firing);
+                    return Ok(false);
+                }
+            }
+            RunMode::Restart => {
+                // Cancel all pending cancellable delays for this rule so the
+                // in-flight execution winds down quickly, then proceed.
+                let prefix = format!("{}/", rule.id);
+                let keys: Vec<String> = self.delay_registry.iter()
+                    .filter(|e| e.key().starts_with(&prefix))
+                    .map(|e| e.key().clone())
+                    .collect();
+                if !keys.is_empty() {
+                    debug!(
+                        rule_name = %rule.name, rule_id = %rule.id,
+                        cancelled = keys.len(),
+                        "run_mode=restart: cancelling in-flight delays"
+                    );
+                    for k in keys {
+                        if let Some((_, n)) = self.delay_registry.remove(&k) {
+                            n.notify_one();
+                        }
+                    }
+                }
+            }
+        }
+
         let eval_start = Instant::now();
         let condition_traces = self.evaluate_conditions(rule, &snapshot).await?;
         let conditions_passed = rule.conditions.is_empty()
@@ -666,6 +730,7 @@ impl RuleEngine {
         let rule_id          = rule.id;
         let rule_name        = rule.name.clone();
         let in_flight        = Arc::clone(&self.in_flight);
+        let rule_counter_spawn = Arc::clone(&rule_counter);
         let fire_history     = Arc::clone(&self.fire_history);
         let state_for_persist = self.state.clone();
 
@@ -696,6 +761,7 @@ impl RuleEngine {
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
+        rule_counter_spawn.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let action_start = Instant::now();
             debug!(rule_name = %rule_name, rule_id = %rule_id, count = action_count, "rule.actions: starting");
@@ -736,6 +802,7 @@ impl RuleEngine {
                 trigger_type: trigger_type_str,
                 action_count,
             });
+            rule_counter_spawn.fetch_sub(1, Ordering::SeqCst);
             in_flight.fetch_sub(1, Ordering::SeqCst);
         });
         Ok(stop_chain)
@@ -1045,6 +1112,30 @@ impl RuleEngine {
                 }))
             }
 
+            Condition::ModeIs { mode_id, on: expected_on } => {
+                let actual_on = self.device_cache
+                    .get(mode_id.as_str())
+                    .and_then(|attrs| attrs.get("on").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                let result = actual_on == *expected_on;
+                debug!(
+                    rule_name = %rule.name, cond = %cond_label,
+                    mode_id, expected = expected_on, actual = actual_on, result,
+                    "rule.condition: ModeIs"
+                );
+                Ok((result, ConditionTrace {
+                    condition_type: "mode_is".into(),
+                    passed: result,
+                    actual: Some(JsonValue::Bool(actual_on)),
+                    expected: Some(JsonValue::Bool(*expected_on)),
+                    reason: format!(
+                        "mode.{}.on == {} (actual: {}) → {}",
+                        mode_id, expected_on, actual_on,
+                        if result { "pass" } else { "FAIL" }
+                    ),
+                }))
+            }
+
             Condition::TimeElapsed { device_id, attribute, duration_secs } => {
                 let changed_at = self
                     .attr_changed_at
@@ -1269,6 +1360,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::Periodic { .. }                  => "Periodic",
         Trigger::HubVariableChanged { .. }        => "HubVariableChanged",
         Trigger::CalendarEvent { .. }             => "CalendarEvent",
+        Trigger::ModeChanged { .. }               => "ModeChanged",
     }
 }
 
@@ -1486,6 +1578,24 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                     }
                 }
             }
+        }
+
+        // ── ModeChanged ────────────────────────────────────────────────────
+        (Trigger::ModeChanged { mode_id: filter, to }, Event::Custom { event_type, payload, .. })
+            if event_type == "mode_changed" =>
+        {
+            if let Some(expected_id) = filter {
+                if payload.get("mode_id").and_then(|v| v.as_str()) != Some(expected_id.as_str()) {
+                    return NoMatch("mode_id mismatch");
+                }
+            }
+            if let Some(expected_on) = to {
+                let actual = payload.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+                if actual != *expected_on {
+                    return NoMatch("mode 'to' state mismatch");
+                }
+            }
+            Matched
         }
 
         // ── ManualTrigger ──────────────────────────────────────────────────

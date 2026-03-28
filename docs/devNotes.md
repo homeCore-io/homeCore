@@ -6825,3 +6825,72 @@ color_temp = 2700
 ```
 
 Drop a hand-crafted `.ics` in the directory with no sidecar and it loads fine — the sidecar is only written when using the fetch API.
+
+---
+
+## Hub Mode System (item 56)
+
+Modes are named boolean devices (`plugin_id = "core.mode"`) managed by `ModeManager`.  Solar modes (`mode_night`) flip automatically at sunrise/sunset; manual modes respond to commands.
+
+### `Trigger::ModeChanged`
+
+Fires when any mode's `on` attribute changes.  Matched against the `mode_changed` Custom event emitted by `ModeManager`.
+
+```toml
+[trigger]
+type    = "mode_changed"
+mode_id = "mode_night"   # optional — omit to fire on any mode change
+to      = true           # optional — only fire when the mode turns on
+```
+
+### `Condition::ModeIs`
+
+Passes when the named mode device reports the expected `on` state.
+
+```toml
+[[conditions]]
+type    = "mode_is"
+mode_id = "mode_night"
+on      = true
+```
+
+### `Action::SetMode`
+
+Turns a manual mode on, off, or toggles it.  Publishes `{"command":"on|off|toggle"}` to the mode device's cmd topic.
+
+```toml
+[[actions]]
+type    = "set_mode"
+mode_id = "mode_away"
+command = "on"          # "on" | "off" | "toggle"
+```
+
+**Note:** Solar modes ignore `SetMode` commands — they are driven by solar events only.  Use `PATCH /api/v1/modes/{id}/offset` to adjust timing.
+
+---
+
+## HA-style Run Mode (item 59)
+
+Controls what happens when a rule is triggered while its previous actions are still executing.  Mirrors Home Assistant's `mode:` automation field.
+
+```toml
+# In rule TOML — default is "parallel" (omit field to keep current behavior)
+run_mode = "parallel"          # concurrent — no limit (default)
+run_mode = "single"            # skip if already running
+run_mode = "restart"           # cancel in-flight delays and restart
+run_mode = { type = "queued", max_queue = 5 }  # queue up to N, drop if full
+```
+
+| Mode | Behaviour |
+|---|---|
+| `parallel` | Multiple concurrent executions — current default |
+| `single` | New trigger skipped if any actions are still running; records `Skipped` outcome in history |
+| `restart` | All pending cancellable delays for this rule are cancelled; then the new execution starts fresh |
+| `queued` | Executions are allowed up to `max_queue` concurrent; additional triggers are skipped |
+
+The `Skipped` outcome appears in the rule fire history:
+
+```json
+{ "type": "skipped", "reason": "single: already in-flight" }
+```
+

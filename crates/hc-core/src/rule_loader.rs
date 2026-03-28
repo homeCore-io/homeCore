@@ -129,6 +129,7 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         trigger_condition:    None,
         variables:            std::collections::HashMap::new(),
         trigger_label:        None,
+        run_mode:             hc_types::rule::RunMode::Parallel,
     }
 }
 
