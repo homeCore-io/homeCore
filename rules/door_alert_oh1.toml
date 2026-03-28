@@ -28,8 +28,8 @@ op        = "eq"
 value     = true
 
 [[actions]]
-type        = "delay"
-duration_ms = 60000
+type           = "delay"
+duration_secs  = 60
 
 [[actions]]
 type      = "conditional"

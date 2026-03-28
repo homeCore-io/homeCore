@@ -344,8 +344,8 @@ fn run_single_action(
         }
 
         // ── Delay ─────────────────────────────────────────────────────────────
-        Action::Delay { duration_ms, cancelable, cancel_key } => {
-            debug!(duration_ms, cancelable, "action: Delay");
+        Action::Delay { duration_secs, cancelable, cancel_key } => {
+            debug!(duration_secs, cancelable, "action: Delay");
             if cancelable {
                 let key = cancel_key
                     .map(|k| format!("{}/{k}", ctx.rule_id))
@@ -353,16 +353,16 @@ fn run_single_action(
                 let notify_handle = Arc::new(tokio::sync::Notify::new());
                 ctx.delay_registry.insert(key.clone(), Arc::clone(&notify_handle));
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(duration_ms)) => {}
+                    _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
                     _ = notify_handle.notified() => {
                         debug!(key, "action: Delay — cancelled early");
                     }
                 }
                 ctx.delay_registry.remove(&key);
             } else {
-                tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+                tokio::time::sleep(Duration::from_secs(duration_secs)).await;
             }
-            debug!(duration_ms, "action: Delay — done");
+            debug!(duration_secs, "action: Delay — done");
         }
 
         // ── RepeatUntil (post-condition loop) ─────────────────────────────────
@@ -1066,12 +1066,12 @@ fn action_description(action: &Action) -> String {
             let m = if message.len() > 60 { &message[..60] } else { message };
             format!("[{}] {}", channel, m)
         }
-        Action::Delay { duration_ms, cancelable, cancel_key } => {
+        Action::Delay { duration_secs, cancelable, cancel_key } => {
             if *cancelable {
-                format!("{}ms (cancelable: {})", duration_ms,
+                format!("{}s (cancelable: {})", duration_secs,
                     cancel_key.as_deref().unwrap_or("auto"))
             } else {
-                format!("{}ms", duration_ms)
+                format!("{}s", duration_secs)
             }
         }
         Action::Parallel { actions }   => format!("{} actions", actions.len()),
@@ -1182,8 +1182,8 @@ mod tests {
         RuleAction { enabled: true, action }
     }
 
-    fn test_delay(ms: u64) -> RuleAction {
-        ra(Action::Delay { duration_ms: ms, cancelable: false, cancel_key: None })
+    fn test_delay(secs: u64) -> RuleAction {
+        ra(Action::Delay { duration_secs: secs, cancelable: false, cancel_key: None })
     }
 
     #[tokio::test]

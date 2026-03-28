@@ -46,8 +46,8 @@ title   = "Arrival"
 message = "Front door opened"
 
 [[actions]]
-type        = "delay"
-duration_ms = 300000   # 5 minutes
+type          = "delay"
+duration_secs = 300   # 5 minutes
 
 [[actions]]
 type      = "set_device_state"

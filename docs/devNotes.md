@@ -1705,9 +1705,9 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
     "conditions": [],
     "actions": [
       { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness": 255 } },
-      { "type": "Delay", "duration_ms": 300 },
+      { "type": "Delay", "duration_secs": 1 },
       { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": false } },
-      { "type": "Delay", "duration_ms": 300 },
+      { "type": "Delay", "duration_secs": 1 },
       { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness": 180 } }
     ]
   }' | jq -r .id)
@@ -2025,7 +2025,7 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `FireEvent` | `event_type`, `payload` | Publishes to `homecore/events/{event_type}` on MQTT **and** emits directly to the internal EventBus. Any rule with `Trigger::CustomEvent { event_type }` reacts instantly (same process, no broker round-trip). Visible in the WS event stream and event log. |
 | `RunScript` | `script` | Sandboxed Rhai script. |
 | `Notify` | `channel`, `message`, `title?` | Delivers via the named channel in `[notify]` config. `title` defaults to `"HomeCore Alert"`. Returns a warning (not an error) if the channel is missing or delivery fails, so the rule sequence continues. |
-| `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
+| `Delay` | `duration_secs` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
 | `PingHost` | `host`, `count?`, `timeout_ms?`, `then_actions?`, `else_actions?`, `response_event?` | ICMP ping via system `ping` binary. Runs `then_actions` on success, `else_actions` on failure. Optionally fires a `Custom` event with `{host, reachable, rtt_ms}`. See [Action: PingHost](#action-pinghost). |
@@ -2049,8 +2049,8 @@ channel   = "telegram"
 message   = "Desk light turned on"
 
 [[actions]]
-type      = "delay"
-duration_ms = 5000
+type          = "delay"
+duration_secs = 5
 ```
 
 The `Skipped` trace entry appears alongside `Ok` / `Error` in `GET /api/v1/automations/{id}/history`, so you can confirm the skip happened without running the action.
@@ -3047,10 +3047,10 @@ Any `delay` action can be made cancellable with a named key:
 
 ```toml
 [[rule.actions]]
-type         = "delay"
-duration_ms  = 300000   # 5 minutes
-cancelable   = true
-cancel_key   = "motion_off_delay"   # referenced by cancel_delays action
+type          = "delay"
+duration_secs = 300     # 5 minutes
+cancelable    = true
+cancel_key    = "motion_off_delay"   # referenced by cancel_delays action
 
 [[rule.actions]]
 type      = "set_device_state"
@@ -3418,7 +3418,7 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
       }
     ],
     "actions": [
-      { "Delay": { "duration_ms": 600000 } },
+      { "Delay": { "duration_secs": 600 } },
       {
         "Notify": {
           "channel": "urgent",
@@ -5340,8 +5340,8 @@ interval_ms    = 2000
   on = true
 
   [[actions.actions]]
-  type         = "delay"
-  duration_ms  = 500
+  type          = "delay"
+  duration_secs = 1
 
   [[actions.actions]]
   type      = "set_device_state"

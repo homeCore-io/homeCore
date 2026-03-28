@@ -406,7 +406,7 @@ pub enum Action {
     /// When `cancelable` is `true`, this delay can be interrupted by a
     /// `CancelDelays` or `CancelRuleTimers` action using the matching key.
     Delay {
-        duration_ms: u64,
+        duration_secs: u64,
         /// Whether this delay can be cancelled externally.
         #[serde(default)]
         cancelable: bool,
