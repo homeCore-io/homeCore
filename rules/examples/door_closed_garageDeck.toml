@@ -5,7 +5,7 @@
 
 id = "70669e2d-3780-4ec8-80b0-593729699f9a"
 name     = "All Deck Doors Closed - Garage Deck"
-enabled  = true
+enabled  = false
 priority = 10
 
 [trigger]

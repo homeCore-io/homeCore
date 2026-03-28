@@ -1,12 +1,12 @@
 
-id = "597f80ec-4159-4ff1-a6f1-5b0c5dcd5f6f"
-name     = "Door Opened - Garage Deck"
-enabled  = true
+id = "804a7e76-ea96-47d5-9e7c-6a039b7d7eee"
+name     = "Door Opened - Dining Room"
+enabled  = false
 priority = 10
 
 [trigger]
 type      = "device_state_changed"
-device_id = "yolink_d88b4c01000e82eb"
+device_id = "yolink_d88b4c01000e813f"
 attribute = "open"
 to        = true
 

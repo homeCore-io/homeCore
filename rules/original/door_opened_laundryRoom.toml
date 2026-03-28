@@ -1,7 +1,7 @@
 
 id = "d30ccaa1-c764-454b-9389-7507bfe0fcbe"
 name     = "Door Opened - Laundry Room"
-enabled  = true
+enabled  = false
 priority = 10
 
 [trigger]

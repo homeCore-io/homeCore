@@ -1,24 +1,20 @@
 
-id = "d9b61693-abed-4475-a2ee-50c1c6eb934a"
-name     = "Door Opened - Living Room"
-enabled  = true
-priority = 20
+id = "eb5cc369-1658-4834-88b0-03e45efc2173"
+name     = "Door Opened - Family Room"
+enabled  = false
+priority = 10
 
 [trigger]
 type      = "device_state_changed"
-device_id = "yolink_d88b4c01000e8304"
+device_id = "yolink_d88b4c0200142eb8"
 attribute = "open"
 to        = true
 
-# Fan-in: keep virtual switch current for the "all closed" rule.
 [[actions]]
 type      = "set_device_state"
 device_id = "switch_any_deck_door_open"
 state     = { on = true }
 
-# Activate deck lights directly so they turn on even when another deck door
-# is already open (in that case the virtual switch stays on and no
-# state-change event fires, so any_deck_door_open.toml never triggers).
 [[actions]]
 type = "conditional"
 condition = "device_state(\"mode_night\")[\"on\"] == true"

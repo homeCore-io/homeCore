@@ -1,6 +1,6 @@
 id = "760950e1-a317-4c95-bc8e-6bc5ab35746b"
 name = "Door Closed - Living Room"
-enabled = true
+enabled = false
 priority = 10
 
 [trigger]
