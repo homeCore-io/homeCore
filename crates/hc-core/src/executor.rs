@@ -22,6 +22,7 @@
 //! This propagates through all nested loops and recursive calls.
 
 use anyhow::{anyhow, Result};
+use chrono::Utc;
 use dashmap::DashMap;
 use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
@@ -842,6 +843,73 @@ fn run_single_action(
             }
         }
 
+        // ── PingHost ──────────────────────────────────────────────────────────
+        Action::PingHost { host, count, timeout_ms: ping_timeout_ms, then_actions, else_actions, response_event } => {
+            let n       = count.unwrap_or(1);
+            let wait_ms = ping_timeout_ms.unwrap_or(3000);
+            // Convert ms → whole seconds, minimum 1 s, for the -W flag.
+            let timeout_secs = ((wait_ms + 999) / 1000).max(1);
+
+            debug!(rule = %ctx.rule_name, host, n, timeout_secs, "action: PingHost — running");
+
+            let output = tokio::process::Command::new("ping")
+                .args(["-c", &n.to_string(), "-W", &timeout_secs.to_string(), &host])
+                .output()
+                .await;
+
+            let (reachable, rtt_ms) = match output {
+                Err(e) => {
+                    warn!(rule = %ctx.rule_name, host, error = %e, "action: PingHost — failed to spawn ping");
+                    (false, None)
+                }
+                Ok(out) => {
+                    let success = out.status.success();
+                    // Try to parse avg RTT from the summary line:
+                    // "rtt min/avg/max/mdev = 0.234/0.567/0.890/0.123 ms"
+                    let stdout  = String::from_utf8_lossy(&out.stdout);
+                    let avg_rtt = stdout.lines()
+                        .find(|l| l.contains("rtt min/avg/max"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .and_then(|vals| vals.trim().split('/').nth(1))
+                        .and_then(|avg| avg.trim().parse::<f64>().ok());
+                    debug!(
+                        rule     = %ctx.rule_name,
+                        host,
+                        reachable = success,
+                        rtt_ms   = ?avg_rtt,
+                        "action: PingHost — result"
+                    );
+                    (success, avg_rtt)
+                }
+            };
+
+            // Fire optional response_event so other rules can react.
+            if let Some(ref ev_type) = response_event {
+                let mut payload = serde_json::json!({ "host": host, "reachable": reachable });
+                if let Some(rtt) = rtt_ms {
+                    payload["rtt_ms"] = serde_json::json!(rtt);
+                }
+                let event = hc_types::event::Event::Custom {
+                    timestamp:  Utc::now(),
+                    event_type: ev_type.clone(),
+                    payload,
+                };
+                if let Some(ref bus) = ctx.event_bus {
+                    let _ = bus.publish(event.clone());
+                }
+                if let Some(ref ph) = ctx.publish {
+                    let topic = format!("homecore/events/{ev_type}");
+                    let _ = ph.publish(&topic, serde_json::to_vec(&event).unwrap_or_default()).await;
+                }
+            }
+
+            // Run then/else branch.
+            let branch = if reachable { then_actions } else { else_actions };
+            if !branch.is_empty() {
+                execute_actions_inner(branch, Arc::clone(&ctx), snapshot, call_depth).await?;
+            }
+        }
+
         // ── SetDeviceStatePerMode ─────────────────────────────────────────────
         Action::SetDeviceStatePerMode { device_id, modes, default_state } => {
             debug!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode");
@@ -1051,6 +1119,11 @@ fn action_description(action: &Action) -> String {
             }
         }
         Action::StopRuleChain | Action::ExitRule => String::new(),
+        Action::PingHost { host, count, timeout_ms, .. } => {
+            let n   = count.unwrap_or(1);
+            let tms = timeout_ms.unwrap_or(3000);
+            format!("{host} ({n}× / {tms}ms)")
+        }
         Action::SetDeviceStatePerMode { device_id, modes, default_state } => {
             let mode_names: Vec<&str> = modes.iter().map(|e| e.mode.as_str()).collect();
             match default_state {
@@ -1089,6 +1162,7 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::WaitForEvent { .. }      => "WaitForEvent",
         Action::WaitForExpression { .. }      => "WaitForExpression",
         Action::SetDeviceStatePerMode { .. }  => "SetDeviceStatePerMode",
+        Action::PingHost { .. }               => "PingHost",
     }
 }
 

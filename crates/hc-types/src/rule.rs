@@ -577,6 +577,49 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_state: Option<JsonValue>,
     },
+    /// Send ICMP echo requests to a host and branch on reachability.
+    ///
+    /// Uses the system `ping` binary (`ping -c {count} -W {timeout_secs} {host}`).
+    /// `then_actions` run when the host responds; `else_actions` when it does not.
+    /// If `response_event` is set, a `Custom` event is fired with
+    /// `{ "host": "…", "reachable": true/false, "rtt_ms": … }` so other rules
+    /// can react.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type           = "ping_host"
+    /// host           = "192.168.1.1"
+    /// count          = 3          # optional — default 1
+    /// timeout_ms     = 3000       # optional — default 3000
+    /// response_event = "router_ping"  # optional
+    ///
+    /// [[actions.then_actions]]
+    /// type    = "log_message"
+    /// message = "Router is up"
+    ///
+    /// [[actions.else_actions]]
+    /// type    = "notify"
+    /// channel = "telegram"
+    /// message = "Router unreachable!"
+    /// ```
+    PingHost {
+        host: String,
+        /// Number of ICMP echo requests to send (default 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u32>,
+        /// Total time to wait for all replies, in milliseconds (default 3000).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        /// Actions to run when the host responds.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then_actions: Vec<Action>,
+        /// Actions to run when the host does not respond.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        else_actions: Vec<Action>,
+        /// If set, fires a `Custom` event with this type carrying the ping result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_event: Option<String>,
+    },
 }
 
 /// Context captured from the event that triggered a rule firing.

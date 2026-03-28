@@ -2028,6 +2028,7 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `Delay` | `duration_ms` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
+| `PingHost` | `host`, `count?`, `timeout_ms?`, `then_actions?`, `else_actions?`, `response_event?` | ICMP ping via system `ping` binary. Runs `then_actions` on success, `else_actions` on failure. Optionally fires a `Custom` event with `{host, reachable, rtt_ms}`. See [Action: PingHost](#action-pinghost). |
 | `StopRuleChain` | — | Stops further rules from being evaluated for the current event. Rules with lower priority than the firing rule are skipped. Use on a high-priority rule to make it exclusive. See below. |
 
 #### Per-action disable toggle
@@ -5503,6 +5504,109 @@ mode  = "mode_night"
 state = { on = true, brightness = 5 }
 # No default_state — light is only set at night; other times this action is a no-op
 ```
+
+---
+
+## Action: PingHost
+
+Send ICMP echo requests to a host and branch on whether it responds. Runs the system `ping` binary — no extra dependencies or raw-socket privileges required.
+
+### TOML syntax
+
+```toml
+[[actions]]
+type       = "ping_host"
+host       = "192.168.1.1"
+count      = 3          # optional — packets to send, default 1
+timeout_ms = 3000       # optional — total wait time, default 3000 ms
+
+# Optional: fire a Custom event with the result so other rules can react
+response_event = "router_ping_result"
+
+# Optional: actions to run when host responds
+[[actions.then_actions]]
+type    = "log_message"
+message = "Host is up"
+
+# Optional: actions to run when host does not respond
+[[actions.else_actions]]
+type    = "notify"
+channel = "telegram"
+message = "Host unreachable!"
+```
+
+`then_actions` and `else_actions` support the full action vocabulary (nested `Conditional`, `Delay`, `SetDeviceState`, etc.).
+
+### `response_event` payload
+
+When `response_event` is set, a `Custom` event is fired on the internal bus **and** published to `homecore/events/{response_event}` with:
+
+```json
+{ "host": "192.168.1.1", "reachable": true, "rtt_ms": 0.567 }
+```
+
+`rtt_ms` is the average round-trip time parsed from `ping` output. It is omitted when the host is unreachable.
+
+### Example: periodic router health check
+
+```toml
+id      = ""
+name    = "Router — periodic ping check"
+enabled = true
+priority = 5
+
+[trigger]
+type    = "periodic"
+every_n = 5
+unit    = "minutes"
+
+[[actions]]
+type           = "ping_host"
+host           = "192.168.1.1"
+count          = 3
+timeout_ms     = 5000
+response_event = "router_ping"
+
+[[actions.else_actions]]
+type    = "notify"
+channel = "telegram"
+message = "Router 192.168.1.1 is not responding"
+```
+
+### Example: presence-like detection via ping
+
+```toml
+id      = ""
+name    = "Phone presence check"
+enabled = true
+priority = 5
+
+[trigger]
+type    = "periodic"
+every_n = 1
+unit    = "minutes"
+
+[[actions]]
+type  = "ping_host"
+host  = "192.168.1.42"    # phone's static DHCP lease
+
+[[actions.then_actions]]
+type      = "set_device_state"
+device_id = "switch_phone_home"
+state     = { command = "on" }
+
+[[actions.else_actions]]
+type      = "set_device_state"
+device_id = "switch_phone_home"
+state     = { command = "off" }
+```
+
+### Notes
+
+- `timeout_ms` is converted to whole seconds for the `-W` flag (`ping -W N`); minimum 1 s.
+- If the `ping` binary is not found (non-Linux system, restricted PATH), the action logs a warning and treats the host as unreachable.
+- Ping is not a reliable presence detector — phones go to sleep and stop responding to ICMP. Use a short `count` (1–3) and a `Periodic` trigger with a window that fits your use case.
+- For hosts behind a firewall that blocks ICMP, use `CallService` (HTTP check) instead.
 
 ---
 
