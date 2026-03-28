@@ -14,3 +14,11 @@ to        = true
 type      = "set_device_state"
 device_id = "switch_any_deck_door_open"
 state     = { on = true }
+
+[[actions]]
+type = "conditional"
+condition = "device_state(\"mode_night\")[\"on\"] == true"
+then_actions = [
+  { type = "set_device_state", device_id = "timer_deck_lights_off", state = { command = "cancel" } },
+  { type = "set_device_state", device_id = "lutron_scene_deck_on_phantom", state = { activate = true } },
+]
