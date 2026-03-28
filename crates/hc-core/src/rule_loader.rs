@@ -31,7 +31,6 @@ fn has_empty_id(content: &str) -> bool {
     for line in content.lines() {
         let t = line.trim();
         if t.starts_with("id") {
-            // strip "id", optional spaces, "=", optional spaces, then check for `""`
             let after_key = t["id".len()..].trim_start();
             if let Some(after_eq) = after_key.strip_prefix('=') {
                 return after_eq.trim() == r#""""#;
@@ -39,6 +38,16 @@ fn has_empty_id(content: &str) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` if the file has no `id = ...` key at all (top-level only).
+fn is_missing_id(content: &str) -> bool {
+    !content.lines().any(|line| {
+        let t = line.trim();
+        if !t.starts_with("id") { return false; }
+        let after_key = t["id".len()..].trim_start();
+        after_key.starts_with('=')
+    })
 }
 
 // ── Public load function ─────────────────────────────────────────────────────
@@ -135,8 +144,8 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
 
 /// Parse a single rule TOML file.
 ///
-/// If the file contains `id = ""`, a fresh UUID v4 is generated, written back
-/// into the file in place of the empty string, and used for this rule.  This
+/// If the file contains `id = ""` or has no `id` key at all, a fresh UUID v4
+/// is generated, written back into the file, and used for this rule.  This
 /// lets authors create rule files without having to generate a UUID manually.
 pub fn load_file(path: &Path) -> Result<Rule> {
     let mut content = std::fs::read_to_string(path)
@@ -144,11 +153,18 @@ pub fn load_file(path: &Path) -> Result<Rule> {
 
     if has_empty_id(&content) {
         let new_id = uuid::Uuid::new_v4();
-        // Replace the first occurrence of id = "" (handles id="" and id = "" etc.)
         let updated = replace_empty_id(&content, &new_id.to_string());
         std::fs::write(path, &updated)
             .with_context(|| format!("writing generated id back to {}", path.display()))?;
         info!(file = %path.display(), id = %new_id, "Generated missing rule ID and wrote to file");
+        content = updated;
+    } else if is_missing_id(&content) {
+        let new_id = uuid::Uuid::new_v4();
+        // Prepend the id line so the rest of the file is untouched.
+        let updated = format!("id = \"{new_id}\"\n{content}");
+        std::fs::write(path, &updated)
+            .with_context(|| format!("writing generated id back to {}", path.display()))?;
+        info!(file = %path.display(), id = %new_id, "Added missing rule ID and wrote to file");
         content = updated;
     }
 
