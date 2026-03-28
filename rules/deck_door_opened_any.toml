@@ -1,0 +1,47 @@
+# Deck Door Opened (Any) — Night Lights
+#
+# Consolidates the 4 individual deck door-opened rules into a single rule
+# using the multi-device OR trigger (device_ids field).  Fires when any of
+# the 4 deck doors opens; activates deck lights if night mode is active.
+#
+# Replaces (when enabled):
+#   door_opened_diningRoom.toml  — still sets switch_any_deck_door_open
+#   door_opened_familyRoom.toml  — still sets switch_any_deck_door_open
+#   door_opened_garageDeck.toml  — still sets switch_any_deck_door_open
+#   door_opened_livingRoom.toml  — still sets switch_any_deck_door_open
+#
+# NOTE: if this rule is enabled, disable the 4 individual door_opened_*.toml
+# rules to avoid double-execution.
+
+id = "842b2dc5-140b-471f-b459-ca8a773542bc"
+name     = "Deck Door Opened (Any) — Night Lights"
+enabled  = false
+priority = 20
+
+[trigger]
+type       = "device_state_changed"
+device_id  = "yolink_d88b4c01000e813f"   # Dining Room (primary)
+device_ids = [
+  "yolink_d88b4c01000e8304",             # Living Room
+  "yolink_d88b4c01000e82eb",             # Garage Deck
+  "yolink_d88b4c0200142eb8",             # Family Room
+]
+attribute  = "open"
+to         = true
+
+# Update the fan-in virtual switch (used by the "all closed" close rules).
+[[actions]]
+type      = "set_device_state"
+device_id = "switch_any_deck_door_open"
+state     = { on = true }
+
+# Activate deck lights directly — this fires on every door open regardless
+# of the virtual switch state, fixing the suppression bug where a second
+# door opening when the switch is already on produced no state-change event.
+[[actions]]
+type      = "conditional"
+condition = "device_state(\"mode_night\")[\"on\"] == true"
+then_actions = [
+  { type = "set_device_state", device_id = "timer_deck_lights_off", state = { command = "cancel" } },
+  { type = "set_device_state", device_id = "lutron_scene_deck_on_phantom", state = { activate = true } },
+]
