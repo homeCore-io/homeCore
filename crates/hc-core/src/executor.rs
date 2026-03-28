@@ -125,6 +125,10 @@ pub struct ExecutorContext {
     pub log_actions:    bool,
     /// Set to `true` by `Action::ExitRule` to stop further action execution.
     pub exit_flag:      Arc<AtomicBool>,
+    /// Per-rule device state capture store.  Key: `(rule_id, capture_key)`.
+    /// Shared across all firings of the same rule so that Capture in one
+    /// firing can be Restored in a later firing.
+    pub capture_store:  Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
     /// When `Some`, each top-level action appends an `ActionTrace` after it
     /// completes.  `None` disables tracing (e.g. for `RunRuleActions` calls).
     pub trace:          Option<Arc<Mutex<Vec<ActionTrace>>>>,
@@ -143,6 +147,7 @@ impl ExecutorContext {
             pause_state:    Arc::new(DashMap::new()),
             rule_vars:      Arc::new(DashMap::new()),
             priv_bools:     Arc::new(DashMap::new()),
+            capture_store:  Arc::new(DashMap::new()),
             rules_handle:   Arc::new(RwLock::new(vec![])),
             trigger_ctx:    TriggerContext::default(),
             rule_id:        Uuid::nil(),
@@ -789,6 +794,7 @@ fn run_single_action(
                         pause_state:    Arc::clone(&ctx.pause_state),
                         rule_vars:      Arc::clone(&ctx.rule_vars),
                         priv_bools:     Arc::clone(&ctx.priv_bools),
+                        capture_store:  Arc::clone(&ctx.capture_store),
                         rules_handle:   Arc::clone(&ctx.rules_handle),
                         trigger_ctx:    ctx.trigger_ctx.clone(),
                         rule_id,
@@ -933,6 +939,109 @@ fn run_single_action(
                     }
                 }
             }
+        }
+
+        // ── CaptureDeviceState ────────────────────────────────────────────────
+        Action::CaptureDeviceState { key, device_ids } => {
+            let mut snapshot: HashMap<String, HashMap<String, JsonValue>> = HashMap::new();
+            for device_id in &device_ids {
+                if let Some(attrs) = ctx.device_cache.get(device_id.as_str()) {
+                    snapshot.insert(device_id.clone(), attrs.clone());
+                } else {
+                    debug!(rule = %ctx.rule_name, key, device_id, "action: CaptureDeviceState — device not in cache, skipping");
+                }
+            }
+            let captured_count = snapshot.len();
+            debug!(rule = %ctx.rule_name, key, captured_count, "action: CaptureDeviceState — saved");
+            ctx.capture_store.insert((ctx.rule_id, key), snapshot);
+        }
+
+        // ── RestoreDeviceState ────────────────────────────────────────────────
+        Action::RestoreDeviceState { key } => {
+            let snapshot = ctx.capture_store.get(&(ctx.rule_id, key.clone())).map(|e| e.clone());
+            match snapshot {
+                None => {
+                    warn!(rule = %ctx.rule_name, key, "action: RestoreDeviceState — no capture found for key");
+                }
+                Some(snapshot) => {
+                    let device_count = snapshot.len();
+                    debug!(rule = %ctx.rule_name, key, device_count, "action: RestoreDeviceState — restoring");
+                    for (device_id, attrs) in snapshot {
+                        let state = JsonValue::Object(attrs.into_iter().collect());
+                        let topic = format!("homecore/devices/{device_id}/cmd");
+                        match ctx.publish.clone() {
+                            Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
+                            None => {
+                                warn!(rule = %ctx.rule_name, device_id, "action: RestoreDeviceState — no publish handle");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── FadeDevice ────────────────────────────────────────────────────────
+        Action::FadeDevice { device_id, target, duration_secs, steps } => {
+            let n_steps = steps
+                .map(|s| (s as u64).max(2).min(100))
+                .unwrap_or_else(|| duration_secs.max(2).min(100));
+            let interval_ms = (duration_secs * 1000).saturating_div(n_steps);
+
+            // Read current numeric values from the live device cache.
+            let current_nums: HashMap<String, f64> = ctx.device_cache
+                .get(device_id.as_str())
+                .map(|attrs| {
+                    attrs.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Separate numeric target fields (interpolated) from non-numeric (pass-through).
+            let target_nums: HashMap<String, f64> = target.as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            debug!(rule = %ctx.rule_name, device_id, n_steps, interval_ms, "action: FadeDevice — starting");
+
+            for step in 1..=n_steps {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+
+                let t = step as f64 / n_steps as f64;
+                let mut state_obj = serde_json::Map::new();
+
+                // Non-numeric pass-through fields on every step.
+                if let Some(obj) = target.as_object() {
+                    for (k, v) in obj {
+                        if !target_nums.contains_key(k) {
+                            state_obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+
+                // Interpolated numeric fields.
+                for (attr, &target_val) in &target_nums {
+                    let start_val = current_nums.get(attr).copied().unwrap_or(target_val);
+                    let interp = start_val + (target_val - start_val) * t;
+                    state_obj.insert(attr.clone(), to_json_number(interp));
+                }
+
+                let state = JsonValue::Object(state_obj);
+                let topic = format!("homecore/devices/{device_id}/cmd");
+                match ctx.publish.clone() {
+                    Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
+                    None => {
+                        warn!(rule = %ctx.rule_name, device_id, "action: FadeDevice — no publish handle");
+                        break;
+                    }
+                }
+            }
+            debug!(rule = %ctx.rule_name, device_id, "action: FadeDevice — complete");
         }
 
         // ── WaitForExpression ─────────────────────────────────────────────────
@@ -1131,6 +1240,13 @@ fn action_description(action: &Action) -> String {
                 None    => format!("{} (modes: [{}])", device_id, mode_names.join(", ")),
             }
         }
+        Action::CaptureDeviceState { key, device_ids } =>
+            format!("key={} devices=[{}]", key, device_ids.join(", ")),
+        Action::RestoreDeviceState { key } => format!("key={}", key),
+        Action::FadeDevice { device_id, duration_secs, steps, .. } => {
+            let n = steps.map(|s| s.to_string()).unwrap_or_else(|| duration_secs.to_string());
+            format!("{} over {}s ({} steps)", device_id, duration_secs, n)
+        }
     }
 }
 
@@ -1163,6 +1279,9 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::WaitForExpression { .. }      => "WaitForExpression",
         Action::SetDeviceStatePerMode { .. }  => "SetDeviceStatePerMode",
         Action::PingHost { .. }               => "PingHost",
+        Action::CaptureDeviceState { .. }     => "CaptureDeviceState",
+        Action::RestoreDeviceState { .. }     => "RestoreDeviceState",
+        Action::FadeDevice { .. }             => "FadeDevice",
     }
 }
 

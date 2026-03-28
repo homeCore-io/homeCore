@@ -71,6 +71,22 @@ pub struct Rule {
     /// engine start and reset only when the rule is reloaded/restarted.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, JsonValue>,
+
+    // ── Trigger label ────────────────────────────────────────────────────────
+    /// Optional human-readable label for this rule's trigger.
+    ///
+    /// Accessible in Rhai scripts as `trigger_label()`.  Useful for giving
+    /// meaningful names to multi-device triggers or to make conditions more
+    /// readable:
+    ///
+    /// ```toml
+    /// trigger_label = "motion_hallway"
+    /// ```
+    /// ```rhai
+    /// if trigger_label() == "motion_hallway" { ... }
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_label: Option<String>,
 }
 
 /// What causes a rule to be evaluated.
@@ -620,6 +636,64 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response_event: Option<String>,
     },
+    /// Snapshot the current state of one or more devices under a named key.
+    ///
+    /// The snapshot is stored per-rule and persists across firings (until
+    /// replaced or the engine restarts).  Use `RestoreDeviceState` to replay
+    /// the saved state back to the devices.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type       = "capture_device_state"
+    /// key        = "pre_movie"
+    /// device_ids = ["light_living", "light_hall"]
+    /// ```
+    CaptureDeviceState {
+        /// Rule-local name for this snapshot.
+        key: String,
+        /// Device IDs to capture.
+        device_ids: Vec<String>,
+    },
+    /// Publish the device states previously saved by `CaptureDeviceState`.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type = "restore_device_state"
+    /// key  = "pre_movie"
+    /// ```
+    RestoreDeviceState {
+        key: String,
+    },
+    /// Gradually transition numeric device attributes to target values.
+    ///
+    /// The executor reads the current value from the device cache and
+    /// publishes `steps` intermediate states at equal intervals over
+    /// `duration_secs` seconds.  Non-numeric target fields (e.g. `on = true`)
+    /// are included unchanged on every step.
+    ///
+    /// ```toml
+    /// [[actions]]
+    /// type          = "fade_device"
+    /// device_id     = "light_living"
+    /// duration_secs = 30
+    /// steps         = 30          # optional — default = duration_secs (1/sec)
+    ///
+    /// [actions.target]
+    /// on         = true
+    /// brightness = 255
+    /// ```
+    FadeDevice {
+        device_id: String,
+        /// Target state.  Numeric fields are interpolated; non-numeric fields
+        /// are applied as-is on every step.
+        target: JsonValue,
+        /// Total fade time in seconds.
+        duration_secs: u64,
+        /// Number of intermediate state publishes (default: 1 per second;
+        /// clamped to 2–100).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+    },
 }
 
 /// Context captured from the event that triggered a rule firing.
@@ -635,6 +709,9 @@ pub struct TriggerContext {
     /// parameter map (`trigger_extra()` in Rhai scripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra:      Option<JsonValue>,
+    /// User-defined label from `rule.trigger_label` (accessible as `trigger_label()` in Rhai).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_label: Option<String>,
 }
 
 /// A mode → state mapping entry for `Action::SetDeviceStatePerMode`.

@@ -128,6 +128,7 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         cancel_on_false:      false,
         trigger_condition:    None,
         variables:            std::collections::HashMap::new(),
+        trigger_label:        None,
     }
 }
 

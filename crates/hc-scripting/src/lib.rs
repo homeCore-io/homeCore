@@ -213,13 +213,15 @@ impl ScriptRuntime {
     /// - `trigger_event_type()` — event type string
     /// - `trigger_extra()` — auxiliary context; for webhook triggers this is a map of
     ///   query-string parameters (e.g. `trigger_extra()["token"]`); unit otherwise
+    /// - `trigger_label()` — user-defined label from `rule.trigger_label`, or `""`
     pub fn with_trigger_context(mut self, ctx: &TriggerContext) -> Self {
-        let device_id  = ctx.device_id.clone().unwrap_or_default();
-        let attribute  = ctx.attribute.clone().unwrap_or_default();
-        let value      = ctx.value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
-        let prev_value = ctx.prev_value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
-        let event_type = ctx.event_type.clone().unwrap_or_default();
-        let extra      = ctx.extra.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let device_id     = ctx.device_id.clone().unwrap_or_default();
+        let attribute     = ctx.attribute.clone().unwrap_or_default();
+        let value         = ctx.value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let prev_value    = ctx.prev_value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let event_type    = ctx.event_type.clone().unwrap_or_default();
+        let extra         = ctx.extra.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let trigger_label = ctx.trigger_label.clone().unwrap_or_default();
 
         self.engine.register_fn("trigger_device",     move || -> String  { device_id.clone() });
         self.engine.register_fn("trigger_attribute",  move || -> String  { attribute.clone() });
@@ -227,6 +229,7 @@ impl ScriptRuntime {
         self.engine.register_fn("trigger_prev_value", move || -> Dynamic { prev_value.clone() });
         self.engine.register_fn("trigger_event_type", move || -> String  { event_type.clone() });
         self.engine.register_fn("trigger_extra",      move || -> Dynamic { extra.clone() });
+        self.engine.register_fn("trigger_label",      move || -> String  { trigger_label.clone() });
         self
     }
 

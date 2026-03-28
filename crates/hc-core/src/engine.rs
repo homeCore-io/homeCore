@@ -130,6 +130,9 @@ pub struct RuleEngine {
     rule_vars: Arc<DashMap<(Uuid, String), JsonValue>>,
     /// Private boolean store; key = (rule_id, boolean_name).
     priv_bools: Arc<DashMap<(Uuid, String), bool>>,
+    /// Per-rule device state capture store for `CaptureDeviceState` /
+    /// `RestoreDeviceState`.  Key: `(rule_id, capture_key)`.
+    capture_store: Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
     /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
 }
@@ -165,6 +168,7 @@ impl RuleEngine {
             pause_state: Arc::new(DashMap::new()),
             rule_vars,
             priv_bools: Arc::new(DashMap::new()),
+            capture_store: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
         }
     }
@@ -676,6 +680,7 @@ impl RuleEngine {
             pause_state:    Arc::clone(&self.pause_state),
             rule_vars:      Arc::clone(&self.rule_vars),
             priv_bools:     Arc::clone(&self.priv_bools),
+            capture_store:  Arc::clone(&self.capture_store),
             rules_handle:   Arc::clone(&self.rules),
             trigger_ctx:    trigger_ctx.clone(),
             rule_id:        rule.id,
@@ -1079,6 +1084,7 @@ impl RuleEngine {
 
 /// Build a `TriggerContext` from the matching event + rule trigger.
 fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
+    let label = rule.trigger_label.clone();
     match event {
         Event::DeviceStateChanged { device_id, current, previous, .. } => {
             // Find the attribute specified in this rule's trigger (if any).
@@ -1115,40 +1121,45 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
                 prev_value,
                 event_type: Some("device_state_changed".into()),
                 extra: None,
+                trigger_label: label,
             }
         }
         Event::MqttMessage { topic, payload, .. } => TriggerContext {
-            device_id:  None,
-            attribute:  None,
-            value:      Some(JsonValue::String(String::from_utf8_lossy(payload).into_owned())),
-            prev_value: None,
-            event_type: Some(format!("mqtt:{topic}")),
-            extra:      None,
+            device_id:     None,
+            attribute:     None,
+            value:         Some(JsonValue::String(String::from_utf8_lossy(payload).into_owned())),
+            prev_value:    None,
+            event_type:    Some(format!("mqtt:{topic}")),
+            extra:         None,
+            trigger_label: label,
         },
         // Webhook events: expose body as trigger_value(), query params as trigger_extra().
         Event::Custom { event_type, payload, .. } if event_type == "webhook" => TriggerContext {
-            device_id:  None,
-            attribute:  None,
-            value:      payload.get("body").cloned(),
-            prev_value: None,
-            event_type: Some(event_type.clone()),
-            extra:      payload.get("query").cloned(),
+            device_id:     None,
+            attribute:     None,
+            value:         payload.get("body").cloned(),
+            prev_value:    None,
+            event_type:    Some(event_type.clone()),
+            extra:         payload.get("query").cloned(),
+            trigger_label: label,
         },
         Event::Custom { event_type, payload, .. } => TriggerContext {
-            device_id:  None,
-            attribute:  None,
-            value:      Some(payload.clone()),
-            prev_value: None,
-            event_type: Some(event_type.clone()),
-            extra:      None,
+            device_id:     None,
+            attribute:     None,
+            value:         Some(payload.clone()),
+            prev_value:    None,
+            event_type:    Some(event_type.clone()),
+            extra:         None,
+            trigger_label: label,
         },
         Event::DeviceAvailabilityChanged { device_id, available, .. } => TriggerContext {
-            device_id:  Some(device_id.clone()),
-            attribute:  Some("available".into()),
-            value:      Some(JsonValue::Bool(*available)),
-            prev_value: None,
-            event_type: Some("device_availability_changed".into()),
-            extra:      None,
+            device_id:     Some(device_id.clone()),
+            attribute:     Some("available".into()),
+            value:         Some(JsonValue::Bool(*available)),
+            prev_value:    None,
+            event_type:    Some("device_availability_changed".into()),
+            extra:         None,
+            trigger_label: label,
         },
         _ => TriggerContext::default(),
     }

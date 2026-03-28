@@ -2029,6 +2029,9 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
 | `PingHost` | `host`, `count?`, `timeout_ms?`, `then_actions?`, `else_actions?`, `response_event?` | ICMP ping via system `ping` binary. Runs `then_actions` on success, `else_actions` on failure. Optionally fires a `Custom` event with `{host, reachable, rtt_ms}`. See [Action: PingHost](#action-pinghost). |
+| `CaptureDeviceState` | `key`, `device_ids` | Snapshot current state of listed devices under a named key. Persists across firings. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
+| `RestoreDeviceState` | `key` | Re-publish device states saved by `CaptureDeviceState`. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
+| `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (brightness, color_temp, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
 | `StopRuleChain` | — | Stops further rules from being evaluated for the current event. Rules with lower priority than the firing rule are skipped. Use on a high-priority rule to make it exclusive. See below. |
 
 #### Per-action disable toggle
@@ -2876,6 +2879,7 @@ trigger_condition = 'trigger_value() != trigger_prev_value()'
 - `trigger_prev_value()` → `Dynamic` — previous attribute value
 - `trigger_event_type()` → `String` — event type string
 - `trigger_extra()` → `Dynamic` — auxiliary context; for **webhook triggers** this is a map of query-string parameters (e.g. `trigger_extra()["token"]`); `()` (unit) for all other trigger types
+- `trigger_label()` → `String` — user-defined label from `rule.trigger_label`, or `""`. Useful for naming multi-device triggers or making conditions more readable: `trigger_label() == "motion_hallway"`
 
 #### `log_events` / `log_triggers` / `log_actions`
 
@@ -6423,3 +6427,158 @@ ISY programs can be executed via `send_raw_node_command` or future `run_program`
 ### Logs
 
 Rolling daily logs in `logs/hc-isy.log.<date>`. Debug level in file, info on stderr.
+
+---
+
+## Trigger Label (`trigger_label`)
+
+An optional `trigger_label` field on a rule lets you give the trigger a human-readable name accessible in Rhai conditions and action scripts via `trigger_label()`.
+
+```toml
+id            = "..."
+name          = "Multi-Motion Hallway Light"
+trigger_label = "motion_hallway"
+
+[trigger]
+type       = "device_state_changed"
+device_ids = ["motion_hall_1", "motion_hall_2", "motion_hall_3"]
+attribute  = "motion"
+to         = "active"
+```
+
+```rhai
+// In a Conditional action or required_expression:
+if trigger_label() == "motion_hallway" {
+    set_device_state("light_hall", #{ on: true, brightness: 200 });
+}
+```
+
+The label is also recorded in the fire history `trigger_context` for diagnostics. If `trigger_label` is not set, `trigger_label()` returns `""`.
+
+---
+
+## Action: CaptureDeviceState / RestoreDeviceState
+
+Save and restore the current state of one or more devices. The snapshot persists across rule firings (until replaced or the engine restarts), so you can capture in one firing and restore in a later one.
+
+### Typical pattern
+
+```toml
+# Rule: "Movie Mode On" — capture lights then dim them
+[[actions]]
+type       = "capture_device_state"
+key        = "pre_movie"
+device_ids = ["light_living", "light_hall", "light_kitchen"]
+
+[[actions]]
+type      = "set_device_state"
+device_id = "light_living"
+[actions.state]
+on         = true
+brightness = 20
+
+# Rule: "Movie Mode Off" — restore saved state
+[[actions]]
+type = "restore_device_state"
+key  = "pre_movie"
+```
+
+### Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `key` | ✓ | Rule-local name for this snapshot. |
+| `device_ids` | ✓ (capture only) | List of device IDs to capture. |
+
+**Notes:**
+- Capture keys are scoped to the rule — two rules can use the same key name without conflict.
+- If a device in `device_ids` is not in the cache at capture time, it is silently skipped.
+- `RestoreDeviceState` warns at log level if the key has never been captured; it does not error.
+- Captured state is the full attribute map — restoring sends the entire map as a command.
+
+---
+
+## Action: FadeDevice
+
+Gradually transition one or more numeric device attributes to target values over `duration_secs` seconds. Non-numeric target fields are applied unchanged on every intermediate step.
+
+### TOML syntax
+
+```toml
+[[actions]]
+type          = "fade_device"
+device_id     = "light_living"
+duration_secs = 30          # total fade time
+steps         = 30          # optional — default = duration_secs (1 per second), clamped 2–100
+
+[actions.target]
+on         = true           # non-numeric: sent on every step
+brightness = 255            # interpolated: 0 → 255 over 30 steps
+```
+
+### Fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `device_id` | ✓ | — | Device to fade. |
+| `target` | ✓ | — | Target state object. Numeric fields are interpolated; others pass through. |
+| `duration_secs` | ✓ | — | Total fade duration in seconds. |
+| `steps` | | `duration_secs` | Number of intermediate publishes (clamped to 2–100). |
+
+### How interpolation works
+
+1. Read current attribute values from the live device cache at action start.
+2. If the attribute is missing from cache, start interpolation from the target value (instant jump).
+3. Publish `steps` states at equal intervals, linearly interpolating each numeric attribute.
+4. Non-numeric fields (e.g. `on = true`) are included unchanged on every step.
+5. The final step always equals the exact target values.
+
+### Examples
+
+**Sunrise simulation — 10-minute fade from dim warm to bright cool:**
+```toml
+[[actions]]
+type          = "fade_device"
+device_id     = "light_bedroom"
+duration_secs = 600
+steps         = 60
+
+[actions.target]
+on         = true
+brightness = 255
+color_temp = 6500
+```
+
+**Fade out over 5 seconds:**
+```toml
+[[actions]]
+type          = "fade_device"
+device_id     = "light_hall"
+duration_secs = 5
+steps         = 10
+
+[actions.target]
+on         = true
+brightness = 0
+```
+
+**Note:** `FadeDevice` is sequential — the next action only starts after the fade finishes. Use `Parallel` if you need to fade multiple devices simultaneously:
+
+```toml
+[[actions]]
+type = "parallel"
+
+[[actions.actions]]
+type          = "fade_device"
+device_id     = "light_living"
+duration_secs = 10
+[actions.actions.target]
+brightness = 128
+
+[[actions.actions]]
+type          = "fade_device"
+device_id     = "light_dining"
+duration_secs = 10
+[actions.actions.target]
+brightness = 80
+```
