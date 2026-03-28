@@ -1740,22 +1740,50 @@ websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
 You should see:
 1. `rule_fired` — "Doorbell flash" matched and executed
 
-**Step 5 — read the body in an action:**
+**Step 5 — read the body and query params in rules:**
 
-The webhook body is forwarded into the event payload as `body`. A `ScriptExpression` condition can inspect it:
+The request body is available as `trigger_value()` in Rhai scripts and conditions.
+Query-string parameters (e.g. `?token=abc&action=arm`) are available as `trigger_extra()`.
 
-```json
-{
-  "type": "ScriptExpression",
-  "script": "event.body.source == \"ring-doorbell-cloud\""
-}
+```toml
+# ScriptExpression condition — only proceed if body identifies the caller
+[[conditions]]
+type   = "script_expression"
+script = 'trigger_value()["source"] == "ring-doorbell-cloud"'
+
+# ScriptExpression condition — validate a shared secret passed as a query param
+[[conditions]]
+type   = "script_expression"
+script = 'trigger_extra()["token"] == "my-secret-key"'
 ```
 
-> **Note:** `ScriptExpression` conditions have access to the event payload via the `event` variable in the Rhai sandbox. This lets you route different callers to different rules even on the same path.
+In a `RunScript` action you have the same access:
+
+```toml
+[[actions]]
+type   = "run_script"
+script = '''
+  let body   = trigger_value();
+  let params = trigger_extra();
+  let action = params["action"];
+  if action == "arm" {
+      set_device_state("switch_alarm", #{ "on": true });
+  }
+'''
+```
+
+**Sending a webhook with a body and query params:**
+
+```sh
+curl -s -X POST \
+  "http://localhost:8080/api/v1/webhooks/front-door-bell-a3f9c2?token=my-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"ring-doorbell-cloud","event":"motion"}'
+```
 
 **Security note:**
 
-The path is the only authentication mechanism for webhooks. Keep it long and random. If a path is compromised, delete the rule and create a new one with a different path. No token rotation infrastructure needed.
+The path is the only required authentication mechanism. For extra security, also check a query-param token in a `ScriptExpression` condition — callers that don't supply the correct token will fail the condition and the rule will not fire. Keep paths long and random; rotate by creating a new rule and deleting the old one.
 
 ---
 
@@ -1986,9 +2014,12 @@ All conditions AND together — every one must pass.
 
 Actions run in sequence. Use `Parallel` to run a group concurrently.
 
+Every action supports an optional `enabled` field (default `true`). Set `enabled = false` to disable a specific action without removing it — the executor skips it and records a `Skipped` entry in the action trace. See [Per-action disable toggle](#per-action-disable-toggle) below.
+
 | `type` value | Key fields | What it does |
 |---|---|---|
 | `SetDeviceState` | `device_id`, `state` | Publishes to `homecore/devices/{id}/cmd` — device plugin applies it. |
+| `SetDeviceStatePerMode` | `device_id`, `modes`, `default_state?` | Applies a different state depending on which mode is active. First matching mode wins; falls back to `default_state` if none match. See [Action: SetDeviceStatePerMode](#action-setdevicestatepermode). |
 | `PublishMqtt` | `topic`, `payload`, `retain` | Raw MQTT publish. |
 | `CallService` | `url`, `method`, `body`, `timeout_ms?`, `retries?`, `response_event?` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. `timeout_ms` defaults to 10 000. `retries` retries on network errors and 5xx only (4xx fails immediately); backoff: 500 ms → 1 000 ms → 2 000 ms → 4 000 ms. If `response_event` is set, the response body (JSON) is published to `homecore/events/{response_event}` so downstream rules can react to it. |
 | `FireEvent` | `event_type`, `payload` | Publishes to `homecore/events/{event_type}` on MQTT **and** emits directly to the internal EventBus. Any rule with `Trigger::CustomEvent { event_type }` reacts instantly (same process, no broker round-trip). Visible in the WS event stream and event log. |
@@ -1998,6 +2029,30 @@ Actions run in sequence. Use `Parallel` to run a group concurrently.
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
 | `StopRuleChain` | — | Stops further rules from being evaluated for the current event. Rules with lower priority than the firing rule are skipped. Use on a high-priority rule to make it exclusive. See below. |
+
+#### Per-action disable toggle
+
+Every `[[actions]]` entry accepts an `enabled` field (default `true`). Setting it to `false` causes the executor to skip that action and record a `Skipped` outcome in the fire history trace. The action is visible in the rule definition and trace — useful for temporarily turning off a single step without restructuring the rule.
+
+```toml
+[[actions]]
+type      = "set_device_state"
+device_id = "light_desk"
+state     = { on = true, brightness = 200 }
+# enabled = true  ← default; omitting is the same as true
+
+[[actions]]
+enabled   = false                   # ← this action is skipped
+type      = "notify"
+channel   = "telegram"
+message   = "Desk light turned on"
+
+[[actions]]
+type      = "delay"
+duration_ms = 5000
+```
+
+The `Skipped` trace entry appears alongside `Ok` / `Error` in `GET /api/v1/automations/{id}/history`, so you can confirm the skip happened without running the action.
 
 ### Scheduler catch-up on restart
 
@@ -2816,9 +2871,10 @@ trigger_condition = 'trigger_value() != trigger_prev_value()'
 **Rhai trigger functions** (available in both gates and `RunScript`):
 - `trigger_device()` → `String` — device_id that triggered the rule
 - `trigger_attribute()` → `String` — attribute that changed
-- `trigger_value()` → `Dynamic` — new attribute value
+- `trigger_value()` → `Dynamic` — new attribute value; for webhook triggers this is the **request body**
 - `trigger_prev_value()` → `Dynamic` — previous attribute value
 - `trigger_event_type()` → `String` — event type string
+- `trigger_extra()` → `Dynamic` — auxiliary context; for **webhook triggers** this is a map of query-string parameters (e.g. `trigger_extra()["token"]`); `()` (unit) for all other trigger types
 
 #### `log_events` / `log_triggers` / `log_actions`
 
@@ -5341,6 +5397,111 @@ type = "parallel"
   device_id = "light_backyard"
   [actions.actions.state]
   on = true
+```
+
+---
+
+## Action: SetDeviceStatePerMode
+
+Apply a different device state depending on which **mode** is currently active, without writing a `Conditional` chain for every case. Equivalent to Hubitat Rule Machine's "Set Switches/Dimmers Per Mode".
+
+The executor checks the `modes` list in order. The first entry whose mode device reports `on == true` wins and its `state` is applied. If no mode matches, `default_state` is applied (when present). If neither matches, the action is a no-op.
+
+Modes are standard HomeCore mode devices — solar modes (`mode_night`, `mode_day`) and any custom boolean modes you define in `config/modes.toml`.
+
+### TOML syntax
+
+```toml
+[[actions]]
+type      = "set_device_state_per_mode"
+device_id = "light_office"
+
+[[actions.modes]]
+mode  = "mode_night"
+state = { on = true, brightness = 30, color_temp = 2700 }
+
+[[actions.modes]]
+mode  = "mode_away"
+state = { on = false }
+
+# Optional: used when no mode above is active
+[actions.default_state]
+on         = true
+brightness = 180
+color_temp = 4000
+```
+
+### Evaluation order
+
+Modes are evaluated top-to-bottom. If two modes are simultaneously active (e.g. a custom `mode_movie` and `mode_night`), put the higher-priority one first.
+
+### Example: desk light brightness by time of day
+
+```toml
+[[actions]]
+type      = "set_device_state_per_mode"
+device_id = "light_desk"
+
+[[actions.modes]]
+mode  = "mode_night"
+state = { on = true, brightness = 20 }    # dim at night
+
+[actions.default_state]
+on         = true
+brightness = 255                           # full brightness otherwise
+```
+
+### Example: outdoor lights off when away, dim when night, bright otherwise
+
+```toml
+[[actions]]
+type      = "set_device_state_per_mode"
+device_id = "lutron_scene_outdoor_front"
+
+[[actions.modes]]
+mode  = "mode_away"
+state = { on = false }
+
+[[actions.modes]]
+mode  = "mode_night"
+state = { activate = true }               # activate a dim Lutron scene
+
+[actions.default_state]
+activate = true                           # bright daytime scene
+```
+
+### Example: notification volume per mode
+
+```toml
+[[actions]]
+type      = "set_device_state_per_mode"
+device_id = "sonos_kitchen"
+
+[[actions.modes]]
+mode  = "mode_night"
+state = { volume = 15 }
+
+[[actions.modes]]
+mode  = "mode_away"
+state = { volume = 0 }
+
+[actions.default_state]
+volume = 40
+```
+
+### No default (no-op when no mode matches)
+
+If `default_state` is omitted and no mode is active, the action does nothing and logs a debug message. This is useful when you only want to act in specific modes:
+
+```toml
+[[actions]]
+type      = "set_device_state_per_mode"
+device_id = "light_night_light"
+
+[[actions.modes]]
+mode  = "mode_night"
+state = { on = true, brightness = 5 }
+# No default_state — light is only set at night; other times this action is a no-op
 ```
 
 ---
