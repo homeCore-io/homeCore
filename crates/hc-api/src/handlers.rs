@@ -923,8 +923,20 @@ fn actions_reference_device(actions: &[Action], device_id: &str) -> bool {
 pub async fn create_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Json(mut rule): Json<Rule>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Server is always authoritative on ID for new rules.  Inject a fresh
+    // UUID unconditionally — clients may omit `id` or send any value.
+    let new_id = Uuid::new_v4();
+    body["id"] = serde_json::Value::String(new_id.to_string());
+
+    let mut rule: Rule = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": format!("invalid rule body: {e}")
+        }))).into_response(),
+    };
+
     // Validate priority is within practical range.
     if rule.priority < -1000 || rule.priority > 1000 {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
@@ -932,7 +944,8 @@ pub async fn create_automation(
         }))).into_response();
     }
 
-    rule.id = Uuid::new_v4();
+    // id already set above; assert it round-tripped correctly.
+    debug_assert_eq!(rule.id, new_id);
 
     // Write file first — if this fails the in-memory state is unchanged.
     if let Some(fs) = &s.rule_file_store {

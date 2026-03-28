@@ -42,9 +42,6 @@ fn default_max_queue() -> usize { 10 }
 /// A complete automation rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
-    /// When deserializing from the REST API body, `id` may be absent or nil;
-    /// the handler assigns a fresh UUID before persisting.
-    #[serde(default)]
     pub id: Uuid,
     pub name: String,
     pub enabled: bool,
