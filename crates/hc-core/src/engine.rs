@@ -638,7 +638,7 @@ impl RuleEngine {
                 "rule.eval: fired"
             );
         } else {
-            info!(
+            debug!(
                 rule_name  = %rule.name, rule_id = %rule.id, fired = true,
                 conditions = rule.conditions.len(), actions = rule.actions.len(), eval_ms,
                 "rule.eval"
@@ -692,7 +692,7 @@ impl RuleEngine {
             match execute_actions(actions, ctx, snapshot).await {
                 Ok(()) => {
                     let action_ms = action_start.elapsed().as_millis();
-                    info!(rule_name = %rule_name, rule_id = %rule_id, action_ms, "rule.actions: completed");
+                    debug!(rule_name = %rule_name, rule_id = %rule_id, action_ms, "rule.actions: completed");
                 }
                 Err(e) => {
                     warn!(rule_name = %rule_name, rule_id = %rule_id, error = %e, "rule.actions: failed");
@@ -777,7 +777,7 @@ impl RuleEngine {
             Condition::DeviceState { device_id, attribute, op, value } => {
                 let entry = self.device_cache.get(device_id.as_str());
                 let Some(attrs) = entry else {
-                    info!(
+                    debug!(
                         rule_name = %rule.name, cond = %cond_label,
                         device_id, "rule.condition: FAIL — device not found in cache"
                     );
@@ -790,7 +790,7 @@ impl RuleEngine {
                     }));
                 };
                 let Some(actual) = attrs.get(attribute.as_str()) else {
-                    info!(
+                    debug!(
                         rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, "rule.condition: FAIL — attribute not present"
                     );
@@ -811,7 +811,7 @@ impl RuleEngine {
                         "rule.condition: pass"
                     );
                 } else {
-                    info!(
+                    debug!(
                         rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: FAIL"
@@ -1010,7 +1010,7 @@ impl RuleEngine {
                     .and_then(|ts| ts.get(attribute.as_str()).copied());
 
                 let Some(changed_at) = changed_at else {
-                    info!(
+                    debug!(
                         rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute,
                         "rule.condition: TimeElapsed FAIL — attribute not tracked"
@@ -1036,7 +1036,7 @@ impl RuleEngine {
                         "rule.condition: TimeElapsed pass"
                     );
                 } else {
-                    info!(
+                    debug!(
                         rule_name = %rule.name, cond = %cond_label,
                         device_id, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed FAIL"
