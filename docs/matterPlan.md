@@ -12,7 +12,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
   - Verified command result contracts for success/error flows including structured codes and correlation IDs.
 - Phase 1: in progress
   - Completed passes: runtime-backed commissioning flow (with deterministic simulation fallback), controller metrics/status publishing, runtime commissioning snapshot surfaced in command results, reconnect subscription reattach telemetry, controller brightness/lock/cover command handling, runtime-originated brightness callback publishing, and validated mapper normalization tests for initial device set.
-  - Completed bridge baseline: endpoint inventory from controller registry, include/exclude/device-type filtering, reconnect-safe state topic subscriptions, inbound HomeCore state tracking per bridged endpoint, bridge observability metrics in plugin metrics publishing, and bridge command-topic forwarding into HomeCore device command topics.
+  - Completed bridge baseline: endpoint inventory from controller registry, deterministic exposed endpoint IDs, include/exclude/device-type filtering, reconnect-safe state topic subscriptions, inbound HomeCore state tracking per bridged endpoint, bridge observability metrics in plugin metrics publishing, and bridge command-topic forwarding into HomeCore device command topics (including endpoint-ID addressed routing).
   - Next remaining work is full matter.js-backed commissioning/subscription/device-type expansion beyond spike placeholders and concrete bridge endpoint exposure to external Matter controllers.
 
 ### Why Start Fresh with matter.js
