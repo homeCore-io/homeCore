@@ -255,13 +255,16 @@ impl StateBridge {
             }
         }
 
-        let _ = self.pub_bus.publish(Event::DeviceStateChanged {
-            timestamp: Utc::now(),
-            device_id: device_id.to_string(),
-            previous,
-            current,
-            changed,
-        });
+        // Only publish if at least one attribute value actually changed.
+        if !changed.is_empty() {
+            let _ = self.pub_bus.publish(Event::DeviceStateChanged {
+                timestamp: Utc::now(),
+                device_id: device_id.to_string(),
+                previous,
+                current,
+                changed,
+            });
+        }
 
         Ok(())
     }

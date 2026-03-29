@@ -930,7 +930,7 @@ pub async fn create_automation(
     let new_id = Uuid::new_v4();
     body["id"] = serde_json::Value::String(new_id.to_string());
 
-    let mut rule: Rule = match serde_json::from_value(body) {
+    let rule: Rule = match serde_json::from_value(body) {
         Ok(r) => r,
         Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": format!("invalid rule body: {e}")
