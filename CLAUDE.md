@@ -288,7 +288,7 @@ homeCore/                          # container dir (no git)
 │   ├── deploy.sh                  # build + install to /var/tmp/homeCore
 │   └── workspace-clone.sh
 │
-├── core/                          # main HomeCore server (git repo: jeubanks/homeCore)
+├── core/                          # main HomeCore server (git repo: homeCore-io/homeCore)
 │   ├── Cargo.toml / Cargo.lock    # workspace with all crates
 │   ├── build.sh                   # local build helper
 │   ├── config/
