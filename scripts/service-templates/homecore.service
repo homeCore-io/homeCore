@@ -1,6 +1,6 @@
 [Unit]
 Description=HomeCore Home Automation Server
-Documentation=https://github.com/jeubanks/homeCore
+Documentation=https://github.com/homeCore-io/homeCore
 After=network-online.target
 Wants=network-online.target
 
