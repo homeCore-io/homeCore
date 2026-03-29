@@ -55,15 +55,35 @@ cargo run --release
 
 ### First steps
 
+On first run, homeCore creates an `admin` account and prints the generated password to the console:
+
+```
+[INFO] First run detected — admin account created
+[INFO] Username: admin
+[INFO] Password: <generated-password>
+[INFO] Change this password after first login
+```
+
+Use those credentials to get a token, then make authenticated requests:
+
 ```sh
-# Check system health
+# Check system health (no auth required)
 curl http://localhost:8080/api/v1/health
+
+# Get a JWT token
+curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<generated-password>"}' \
+  | jq -r '.token'
+
+# Export the token for subsequent requests
+export TOKEN=<token-from-above>
 
 # List devices (empty on first run)
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/devices
 
 # Watch the live event stream
-wscat -c ws://localhost:8080/api/v1/events/stream
+wscat -c "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
 ```
 
 Connect your first device by installing one of the [device plugins](#plugins) and pointing it at your homeCore instance.
