@@ -193,6 +193,16 @@ plugins/examples/http-poller     ← depends on plugin-sdk-rs
 
 **Rule of thumb:** if you only change `hc-api`, only `hc-api` and `homecore` recompile. If you change `hc-types`, everything recompiles.
 
+## Current integration notes
+
+- `homecore/devices/{id}/state/partial` is treated as a JSON merge-patch for top-level attributes.
+  A partial payload value of `null` removes that attribute from stored device state instead of
+  storing a literal JSON null.
+- `hc-hue` compacts Hue sensor facets onto the primary motion device when possible. That now
+  includes `grouped_motion` and `grouped_light_level`, so Hue eventstream updates for grouped
+  motion sensors should patch the existing compacted sensor state instead of forcing a full
+  bridge refresh.
+
 ---
 
 ## Essential cargo commands
@@ -7086,4 +7096,3 @@ The `Skipped` outcome appears in the rule fire history:
 ```json
 { "type": "skipped", "reason": "single: already in-flight" }
 ```
-

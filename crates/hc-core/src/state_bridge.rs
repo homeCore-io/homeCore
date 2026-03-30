@@ -24,6 +24,8 @@ use hc_state::StateStore;
 use hc_topic_map::{DeviceTypeRegistry, EcosystemRouter, InboundResult};
 use hc_types::device::DeviceState;
 use hc_types::event::Event;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -219,9 +221,7 @@ impl StateBridge {
             .map(str::to_string);
 
         if partial {
-            for (k, v) in &attrs {
-                device.attributes.insert(k.clone(), v.clone());
-            }
+            apply_partial_merge_patch(&mut device.attributes, &attrs);
         } else {
             device.attributes = attrs.into_iter().collect();
         }
@@ -415,5 +415,45 @@ impl StateBridge {
         });
 
         Ok(())
+    }
+}
+
+fn apply_partial_merge_patch(
+    target: &mut HashMap<String, Value>,
+    patch: &serde_json::Map<String, Value>,
+) {
+    for (key, value) in patch {
+        if value.is_null() {
+            target.remove(key);
+        } else {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_partial_merge_patch;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn partial_merge_patch_removes_null_fields() {
+        let mut target = HashMap::new();
+        target.insert("motion".to_string(), json!(true));
+        target.insert("temperature".to_string(), json!(72.5));
+        target.insert("legacy".to_string(), json!("stale"));
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("temperature".to_string(), json!(70.0));
+        patch.insert("legacy".to_string(), serde_json::Value::Null);
+        patch.insert("illuminance".to_string(), json!(145.0));
+
+        apply_partial_merge_patch(&mut target, &patch);
+
+        assert_eq!(target.get("motion"), Some(&json!(true)));
+        assert_eq!(target.get("temperature"), Some(&json!(70.0)));
+        assert_eq!(target.get("illuminance"), Some(&json!(145.0)));
+        assert!(!target.contains_key("legacy"));
     }
 }
