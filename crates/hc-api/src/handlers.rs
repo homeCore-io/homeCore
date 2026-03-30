@@ -1640,6 +1640,339 @@ fn dashboard_response_for(
     }
 }
 
+fn dashboard_copy_name(base: &str, existing_names: &HashSet<String>) -> String {
+    if !existing_names.contains(&format!("{base} Copy")) {
+        return format!("{base} Copy");
+    }
+    for index in 2..1000 {
+        let candidate = format!("{base} Copy {index}");
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base} Copy {}", Uuid::new_v4().simple())
+}
+
+fn default_dashboard_layout(
+    placements: &[(&str, i32, i32, i32, i32)],
+) -> Vec<hc_types::dashboard::DashboardLayout> {
+    use hc_types::dashboard::{DashboardBreakpoint, DashboardLayout, DashboardWidgetPlacement};
+
+    let build = |breakpoint, columns, row_height, gap| DashboardLayout {
+        breakpoint,
+        columns,
+        row_height,
+        gap,
+        placements: placements
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (widget_id, x, y, w, h))| DashboardWidgetPlacement {
+                    widget_id: (*widget_id).to_string(),
+                    x: if matches!(breakpoint, DashboardBreakpoint::Mobile) {
+                        0
+                    } else {
+                        *x
+                    },
+                    y: if matches!(breakpoint, DashboardBreakpoint::Mobile) {
+                        index as i32
+                    } else {
+                        *y
+                    },
+                    w: if matches!(breakpoint, DashboardBreakpoint::Mobile) {
+                        1
+                    } else {
+                        *w
+                    },
+                    h: *h,
+                },
+            )
+            .collect(),
+    };
+
+    vec![
+        build(DashboardBreakpoint::Mobile, 1, 150.0, 12.0),
+        build(DashboardBreakpoint::Tablet, 12, 150.0, 12.0),
+        build(DashboardBreakpoint::Desktop, 12, 150.0, 12.0),
+        build(DashboardBreakpoint::Tv, 12, 180.0, 16.0),
+    ]
+}
+
+fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
+    use hc_types::dashboard::{
+        DashboardDefinition, DashboardRefreshPolicy, DashboardVisibility, DashboardWidget,
+        DashboardWidgetType,
+    };
+
+    let now = chrono::Utc::now();
+    let widget = |id: &str,
+                  r#type: DashboardWidgetType,
+                  title: &str,
+                  subtitle: Option<&str>,
+                  refresh_policy: DashboardRefreshPolicy,
+                  config: Value| DashboardWidget {
+        id: id.to_string(),
+        r#type,
+        title: title.to_string(),
+        subtitle: subtitle.map(str::to_string),
+        refresh_policy,
+        config,
+    };
+
+    vec![
+        DashboardDefinition {
+            id: "starter_getting_started".to_string(),
+            name: "Getting Started".to_string(),
+            description: Some(
+                "Starter dashboard with home status, examples, and setup guidance.".to_string(),
+            ),
+            owner_user_id: owner_user_id.to_string(),
+            visibility: DashboardVisibility::Private,
+            tags: vec!["starter".into(), "home".into(), "overview".into()],
+            icon: "home".into(),
+            created_at: now,
+            updated_at: now,
+            widgets: vec![
+                widget(
+                    "welcome",
+                    DashboardWidgetType::Markdown,
+                    "Welcome",
+                    None,
+                    DashboardRefreshPolicy::Passive,
+                    json!({
+                        "markdown": "## Welcome to HomeCore\nUse this starter dashboard as your baseline.\n\n- Review **Devices** and assign areas.\n- Confirm **Scenes** and **Modes** are useful.\n- Open **Automations** to inspect active rules.\n- Duplicate this dashboard before tailoring it for rooms or wall tablets."
+                    }),
+                ),
+                widget(
+                    "summary",
+                    DashboardWidgetType::StatSummary,
+                    "Home Summary",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"metrics": ["devices", "on", "offline", "media_playing"]}),
+                ),
+                widget(
+                    "modes",
+                    DashboardWidgetType::ModeChips,
+                    "Modes",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({}),
+                ),
+                widget(
+                    "scenes",
+                    DashboardWidgetType::SceneRow,
+                    "Scenes",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({}),
+                ),
+                widget(
+                    "devices",
+                    DashboardWidgetType::DeviceGrid,
+                    "Quick Device View",
+                    Some("Example device widget bound to your active devices."),
+                    DashboardRefreshPolicy::Live,
+                    json!({"selection_mode": "query", "query": "", "show_offline": false, "limit": 6}),
+                ),
+                widget(
+                    "events",
+                    DashboardWidgetType::EventFeed,
+                    "Recent Events",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"limit": 8, "group_by": "type"}),
+                ),
+                widget(
+                    "links",
+                    DashboardWidgetType::DashboardLink,
+                    "Next Steps",
+                    Some("Manage dashboards, clone this one, or create room-specific views."),
+                    DashboardRefreshPolicy::Passive,
+                    json!({}),
+                ),
+            ],
+            layouts: default_dashboard_layout(&[
+                ("welcome", 0, 0, 12, 2),
+                ("summary", 0, 2, 12, 2),
+                ("modes", 0, 4, 12, 1),
+                ("scenes", 0, 5, 12, 1),
+                ("devices", 0, 6, 7, 2),
+                ("events", 7, 6, 5, 2),
+                ("links", 0, 8, 12, 1),
+            ]),
+        },
+        DashboardDefinition {
+            id: "template_home_overview".to_string(),
+            name: "Home Overview".to_string(),
+            description: Some("General whole-home dashboard.".to_string()),
+            owner_user_id: owner_user_id.to_string(),
+            visibility: DashboardVisibility::Private,
+            tags: vec!["home".into(), "overview".into()],
+            icon: "dashboard".into(),
+            created_at: now,
+            updated_at: now,
+            widgets: vec![
+                widget(
+                    "summary",
+                    DashboardWidgetType::StatSummary,
+                    "Summary",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"metrics": ["devices", "on", "offline", "media_playing"]}),
+                ),
+                widget(
+                    "modes",
+                    DashboardWidgetType::ModeChips,
+                    "Modes",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({}),
+                ),
+                widget(
+                    "scenes",
+                    DashboardWidgetType::SceneRow,
+                    "Scenes",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({}),
+                ),
+                widget(
+                    "grid",
+                    DashboardWidgetType::DeviceGrid,
+                    "Devices",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 12}),
+                ),
+                widget(
+                    "events",
+                    DashboardWidgetType::EventFeed,
+                    "Recent Events",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"limit": 10}),
+                ),
+            ],
+            layouts: default_dashboard_layout(&[
+                ("summary", 0, 0, 12, 2),
+                ("modes", 0, 2, 12, 1),
+                ("scenes", 0, 3, 12, 1),
+                ("grid", 0, 4, 8, 3),
+                ("events", 8, 4, 4, 3),
+            ]),
+        },
+        DashboardDefinition {
+            id: "template_security".to_string(),
+            name: "Security".to_string(),
+            description: Some("Entry points, alerts, and camera placeholders.".to_string()),
+            owner_user_id: owner_user_id.to_string(),
+            visibility: DashboardVisibility::Private,
+            tags: vec!["security".into()],
+            icon: "shield".into(),
+            created_at: now,
+            updated_at: now,
+            widgets: vec![
+                widget(
+                    "summary",
+                    DashboardWidgetType::StatSummary,
+                    "Security Summary",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"metrics": ["doors_open", "motion_active", "offline"]}),
+                ),
+                widget(
+                    "devices",
+                    DashboardWidgetType::DeviceList,
+                    "Security Devices",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"selection_mode": "query", "query": "door,motion,lock,camera", "show_offline": true, "limit": 16}),
+                ),
+                widget(
+                    "events",
+                    DashboardWidgetType::EventFeed,
+                    "Alerts",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"limit": 12, "types": ["device_state_changed", "system_alert"], "group_by": "device"}),
+                ),
+                widget(
+                    "notes",
+                    DashboardWidgetType::Markdown,
+                    "Camera Setup",
+                    None,
+                    DashboardRefreshPolicy::Passive,
+                    json!({"markdown": "Add camera widgets after configuring approved sources and embed policy."}),
+                ),
+            ],
+            layouts: default_dashboard_layout(&[
+                ("summary", 0, 0, 12, 2),
+                ("devices", 0, 2, 7, 3),
+                ("events", 7, 2, 5, 3),
+                ("notes", 0, 5, 12, 1),
+            ]),
+        },
+        DashboardDefinition {
+            id: "template_living_room".to_string(),
+            name: "Living Room".to_string(),
+            description: Some("A room-focused dashboard with devices and media.".to_string()),
+            owner_user_id: owner_user_id.to_string(),
+            visibility: DashboardVisibility::Private,
+            tags: vec!["room".into(), "living_room".into()],
+            icon: "chair".into(),
+            created_at: now,
+            updated_at: now,
+            widgets: vec![
+                widget(
+                    "devices",
+                    DashboardWidgetType::DeviceGrid,
+                    "Living Room Devices",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"selection_mode": "area", "area_name": "Living Room", "show_offline": false, "limit": 8}),
+                ),
+                widget(
+                    "media",
+                    DashboardWidgetType::MediaPlayer,
+                    "Media",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"selection_mode": "query", "query": "living", "show_offline": false, "limit": 2}),
+                ),
+                widget(
+                    "scenes",
+                    DashboardWidgetType::SceneRow,
+                    "Scenes",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({}),
+                ),
+                widget(
+                    "events",
+                    DashboardWidgetType::EventFeed,
+                    "Room Activity",
+                    None,
+                    DashboardRefreshPolicy::Live,
+                    json!({"limit": 8, "area_name": "Living Room"}),
+                ),
+            ],
+            layouts: default_dashboard_layout(&[
+                ("devices", 0, 0, 7, 3),
+                ("media", 7, 0, 5, 3),
+                ("scenes", 0, 3, 12, 1),
+                ("events", 0, 4, 12, 2),
+            ]),
+        },
+    ]
+}
+
+fn find_dashboard_template(template_id: &str, owner_user_id: &str) -> Option<DashboardDefinition> {
+    dashboard_templates_for(owner_user_id)
+        .into_iter()
+        .find(|template| template.id == template_id)
+}
+
 fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     if dashboard.id.trim().is_empty() {
         return Err("dashboard id cannot be empty".into());
@@ -1876,6 +2209,32 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             let map = config_object(widget)?;
             optional_i64_min(map, "limit", 1, &widget.id)?;
             optional_string_list(map, "types", &widget.id)?;
+            optional_string_list(map, "device_ids", &widget.id)?;
+            if let Some(value) = map.get("area_name") {
+                if value.as_str().is_none() {
+                    return Err(format!(
+                        "widget '{}' field 'area_name' must be a string",
+                        widget.id
+                    ));
+                }
+            }
+            if let Some(value) = map.get("group_by") {
+                let Some(group_by) = value.as_str() else {
+                    return Err(format!(
+                        "widget '{}' field 'group_by' must be a string",
+                        widget.id
+                    ));
+                };
+                match group_by {
+                    "none" | "type" | "device" | "area" => {}
+                    _ => {
+                        return Err(format!(
+                            "widget '{}' field 'group_by' is unsupported",
+                            widget.id
+                        ));
+                    }
+                }
+            }
             Ok(())
         }
         hc_types::dashboard::DashboardWidgetType::CameraVideo => {
@@ -1938,6 +2297,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             require_string(map, "device_id", &widget.id)?;
             require_string(map, "attribute", &widget.id)?;
             optional_i64_min(map, "limit", 1, &widget.id)?;
+            optional_i64_min(map, "timeframe_hours", 1, &widget.id)?;
             Ok(())
         }
         hc_types::dashboard::DashboardWidgetType::DashboardLink => {
@@ -1972,6 +2332,15 @@ pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) ->
         .collect();
     dashboards.sort_by(|a, b| a.dashboard.name.cmp(&b.dashboard.name));
     Json(dashboards).into_response()
+}
+
+pub async fn list_dashboard_templates(
+    _: State<AppState>,
+    user: DashboardsRead,
+) -> impl IntoResponse {
+    let mut templates = dashboard_templates_for(&user.0.uid);
+    templates.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(templates).into_response()
 }
 
 pub async fn get_dashboard(
@@ -2067,6 +2436,72 @@ pub async fn create_dashboard(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
+pub async fn create_dashboard_from_template(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(template) = find_dashboard_template(&id, &user.0.uid) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "dashboard template not found" })),
+        )
+            .into_response();
+    };
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let existing_names: HashSet<String> = data
+            .dashboards
+            .iter()
+            .map(|item| item.name.clone())
+            .collect();
+        let now = chrono::Utc::now();
+        let mut dashboard = template.clone();
+        dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
+        dashboard.owner_user_id = user.0.uid.clone();
+        dashboard.created_at = now;
+        dashboard.updated_at = now;
+        dashboard.name = if template.id == "starter_getting_started"
+            && !existing_names.contains(&template.name)
+        {
+            template.name
+        } else {
+            dashboard_copy_name(&template.name, &existing_names)
+        };
+
+        data.dashboards.push(dashboard.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+
+        dashboard_response_for(
+            &dashboard,
+            data.user_defaults.get(&user.0.uid).map(String::as_str),
+        )
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
 pub async fn update_dashboard(
     State(s): State<AppState>,
     user: DashboardsWrite,
@@ -2133,6 +2568,167 @@ pub async fn update_dashboard(
     };
 
     Json(response).into_response()
+}
+
+pub async fn duplicate_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        if !dashboard_visible_to(&user.0, &existing) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "dashboard access denied" })),
+            )
+                .into_response();
+        }
+
+        let existing_names: HashSet<String> = data
+            .dashboards
+            .iter()
+            .map(|item| item.name.clone())
+            .collect();
+        let now = chrono::Utc::now();
+        let mut duplicate = existing.clone();
+        duplicate.id = format!("dashboard_{}", Uuid::new_v4().simple());
+        duplicate.owner_user_id = user.0.uid.clone();
+        duplicate.visibility = DashboardVisibility::Private;
+        duplicate.name = dashboard_copy_name(&existing.name, &existing_names);
+        duplicate.created_at = now;
+        duplicate.updated_at = now;
+
+        data.dashboards.push(duplicate.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+
+        dashboard_response_for(
+            &duplicate,
+            data.user_defaults.get(&user.0.uid).map(String::as_str),
+        )
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+pub async fn export_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let data = handle.read().await;
+    match data.dashboards.iter().find(|dashboard| dashboard.id == id) {
+        Some(dashboard) if dashboard_visible_to(&user.0, dashboard) => {
+            Json(dashboard).into_response()
+        }
+        Some(_) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "dashboard access denied" })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "dashboard not found" })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn import_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Json(mut dashboard): Json<DashboardDefinition>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    if let Err(error) = validate_dashboard(&dashboard) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+    }
+
+    let response = {
+        let mut data = handle.write().await;
+        let existing_names: HashSet<String> = data
+            .dashboards
+            .iter()
+            .map(|item| item.name.clone())
+            .collect();
+        let now = chrono::Utc::now();
+        dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
+        dashboard.owner_user_id = user.0.uid.clone();
+        dashboard.visibility = DashboardVisibility::Private;
+        dashboard.name = if existing_names.contains(&dashboard.name) {
+            dashboard_copy_name(&dashboard.name, &existing_names)
+        } else {
+            dashboard.name.clone()
+        };
+        dashboard.created_at = now;
+        dashboard.updated_at = now;
+
+        data.dashboards.push(dashboard.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+
+        dashboard_response_for(
+            &dashboard,
+            data.user_defaults.get(&user.0.uid).map(String::as_str),
+        )
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 pub async fn delete_dashboard(
@@ -4575,5 +5171,70 @@ mod tests {
             .as_str()
             .expect("error string")
             .contains("source_type"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_templates_duplicate_export_and_import_work() {
+        let state = mk_state().await;
+        let claims = claims_for("owner", Role::User);
+
+        let resp = list_dashboard_templates(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let templates: Vec<DashboardDefinition> = parse_json(resp).await;
+        assert!(templates
+            .iter()
+            .any(|template| template.id == "starter_getting_started"));
+
+        let resp = create_dashboard_from_template(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Path("starter_getting_started".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created: DashboardResponse = parse_json(resp).await;
+        assert_eq!(created.dashboard.owner_user_id, "owner");
+        assert_ne!(created.dashboard.id, "starter_getting_started");
+
+        let resp = export_dashboard(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims.clone()),
+            Path(created.dashboard.id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let exported: DashboardDefinition = parse_json(resp).await;
+        assert_eq!(exported.name, created.dashboard.name);
+
+        let resp = duplicate_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Path(created.dashboard.id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let duplicated: DashboardResponse = parse_json(resp).await;
+        assert_ne!(duplicated.dashboard.id, created.dashboard.id);
+        assert!(duplicated.dashboard.name.contains("Copy"));
+
+        let resp = import_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims),
+            Json(exported),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let imported: DashboardResponse = parse_json(resp).await;
+        assert_ne!(imported.dashboard.id, created.dashboard.id);
+        assert_eq!(imported.dashboard.owner_user_id, "owner");
     }
 }

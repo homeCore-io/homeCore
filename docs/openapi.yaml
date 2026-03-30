@@ -665,6 +665,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/DashboardResponse"
 
+  /dashboards/templates:
+    get:
+      operationId: listDashboardTemplates
+      summary: List built-in dashboard templates available to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of reusable dashboard template definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DashboardDefinition"
+
+  /dashboards/templates/{id}:
+    post:
+      operationId: createDashboardFromTemplate
+      summary: Create a private dashboard from a built-in template
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Created dashboard cloned from the template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/import:
+    post:
+      operationId: importDashboard
+      summary: Import a dashboard definition as a new private dashboard owned by the caller
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "201":
+          description: Imported dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+
   /dashboards/{id}:
     get:
       operationId: getDashboard
@@ -729,6 +790,52 @@ paths:
       responses:
         "204":
           description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/export:
+    get:
+      operationId: exportDashboard
+      summary: Export a visible dashboard definition for backup or transfer
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/duplicate:
+    post:
+      operationId: duplicateDashboard
+      summary: Duplicate a visible dashboard into a new private dashboard owned by the caller
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Duplicated dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1334,11 +1441,13 @@ components:
               `selection_mode` (`manual|area|query`), optional `device_ids`, `area_name`,
               `query`, `limit`, `show_offline`
             - `stat_summary`: `metrics` string array
-            - `event_feed`: optional `limit`, `types`
+            - `event_feed`: optional `limit`, `types`, `device_ids`, `area_name`,
+              `group_by` (`none|type|device|area`)
             - `camera_video`: `source_type`, `url`, optional `refresh_secs`
             - `web_embed`: `url`, optional `sandbox_profile`
             - `markdown`: `markdown`
-            - `history_chart`: `device_id`, `attribute`, optional `limit`
+            - `history_chart`: `device_id`, `attribute`, optional `limit`,
+              optional `timeframe_hours`
             - `dashboard_link`: optional `dashboard_ids`
             - `mode_chips`, `scene_row`: object, currently no required fields
 

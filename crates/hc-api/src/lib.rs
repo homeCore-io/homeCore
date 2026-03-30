@@ -371,10 +371,24 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_dashboards).post(handlers::create_dashboard),
         )
         .route(
+            "/dashboards/templates",
+            get(handlers::list_dashboard_templates),
+        )
+        .route(
+            "/dashboards/templates/:id",
+            post(handlers::create_dashboard_from_template),
+        )
+        .route("/dashboards/import", post(handlers::import_dashboard))
+        .route(
             "/dashboards/:id",
             get(handlers::get_dashboard)
                 .put(handlers::update_dashboard)
                 .delete(handlers::delete_dashboard),
+        )
+        .route("/dashboards/:id/export", get(handlers::export_dashboard))
+        .route(
+            "/dashboards/:id/duplicate",
+            post(handlers::duplicate_dashboard),
         )
         .route(
             "/dashboards/:id/default",
