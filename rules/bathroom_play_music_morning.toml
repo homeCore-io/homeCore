@@ -23,7 +23,7 @@ end   = "12:00:00"
 [[actions]]
 type      = "set_device_state"
 device_id = "sonos_bathroom"
-state     = { action = "set_volume", volume = 20 }
+state     = { action = "set_volume", volume = 10 }
 
 [[actions]]
 type      = "set_device_state"
