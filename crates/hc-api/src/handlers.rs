@@ -4109,6 +4109,68 @@ mod tests {
         handle.write().await.dashboards.push(dashboard);
     }
 
+    fn sample_web_dashboard_payload(id: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "name": "Getting Started",
+            "description": "Starter dashboard with onboarding and status widgets.",
+            "owner_user_id": "ignored-by-server",
+            "visibility": "private",
+            "tags": ["starter", "home", "overview"],
+            "icon": "home",
+            "is_default": true,
+            "created_at": "2026-03-30T16:00:00Z",
+            "updated_at": "2026-03-30T16:00:00Z",
+            "layouts": [
+                {
+                    "breakpoint": "mobile",
+                    "columns": 1,
+                    "row_height": 140.0,
+                    "gap": 12.0,
+                    "placements": [
+                        {"widget_id": "welcome", "x": 0, "y": 0, "w": 1, "h": 2},
+                        {"widget_id": "summary", "x": 0, "y": 2, "w": 1, "h": 1},
+                        {"widget_id": "links", "x": 0, "y": 3, "w": 1, "h": 1}
+                    ]
+                },
+                {
+                    "breakpoint": "desktop",
+                    "columns": 12,
+                    "row_height": 160.0,
+                    "gap": 12.0,
+                    "placements": [
+                        {"widget_id": "welcome", "x": 0, "y": 0, "w": 12, "h": 2},
+                        {"widget_id": "summary", "x": 0, "y": 2, "w": 7, "h": 1},
+                        {"widget_id": "links", "x": 7, "y": 2, "w": 5, "h": 1}
+                    ]
+                }
+            ],
+            "widgets": [
+                {
+                    "id": "welcome",
+                    "type": "markdown",
+                    "title": "Welcome",
+                    "refresh_policy": "passive",
+                    "config": {"markdown": "## Welcome to HomeCore"}
+                },
+                {
+                    "id": "summary",
+                    "type": "stat_summary",
+                    "title": "Home Summary",
+                    "refresh_policy": "live",
+                    "config": {"metrics": ["devices", "on", "offline"]}
+                },
+                {
+                    "id": "links",
+                    "type": "dashboard_link",
+                    "title": "Next Steps",
+                    "refresh_policy": "passive",
+                    "config": {"dashboard_ids": []}
+                }
+            ]
+        })
+    }
+
     #[tokio::test]
     async fn list_areas_is_derived_from_device_assignments() {
         let state = mk_state().await;
@@ -4276,6 +4338,113 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let updated: DashboardResponse = parse_json(resp).await;
         assert!(updated.is_default);
+    }
+
+    #[tokio::test]
+    async fn web_dashboard_payload_round_trips_through_lifecycle() {
+        let state = mk_state().await;
+        let claims = claims_for("web_user", Role::User);
+        let dashboard: DashboardDefinition =
+            serde_json::from_value(sample_web_dashboard_payload("starter_web"))
+                .expect("web payload deserializes");
+
+        let resp = create_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Json(dashboard),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created: DashboardResponse = parse_json(resp).await;
+        assert_eq!(created.dashboard.id, "starter_web");
+        assert_eq!(created.dashboard.owner_user_id, "web_user");
+        assert_eq!(created.dashboard.visibility, DashboardVisibility::Private);
+        assert_eq!(created.dashboard.layouts.len(), 2);
+        assert_eq!(created.dashboard.widgets.len(), 3);
+        assert!(!created.is_default);
+
+        let resp = list_dashboards(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed: Vec<DashboardResponse> = parse_json(resp).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].dashboard.id, "starter_web");
+
+        let mut updated_dashboard = created.dashboard.clone();
+        updated_dashboard.name = "Getting Started Updated".to_string();
+        updated_dashboard.description = Some("Updated description".to_string());
+        let resp = update_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Path("starter_web".to_string()),
+            Json(updated_dashboard),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated: DashboardResponse = parse_json(resp).await;
+        assert_eq!(updated.dashboard.name, "Getting Started Updated");
+        assert_eq!(
+            updated.dashboard.description.as_deref(),
+            Some("Updated description")
+        );
+
+        let resp = get_dashboard(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims.clone()),
+            Path("starter_web".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let fetched: DashboardResponse = parse_json(resp).await;
+        assert_eq!(fetched.dashboard.name, "Getting Started Updated");
+        assert!(!fetched.is_default);
+
+        let resp = set_default_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Path("starter_web".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let defaulted: DashboardResponse = parse_json(resp).await;
+        assert!(defaulted.is_default);
+
+        let resp = list_dashboards(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims.clone()),
+        )
+        .await
+        .into_response();
+        let listed: Vec<DashboardResponse> = parse_json(resp).await;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_default);
+
+        let resp = delete_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims),
+            Path("starter_web".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = list_dashboards(
+            State(state),
+            crate::auth_middleware::DashboardsRead(claims_for("web_user", Role::User)),
+        )
+        .await
+        .into_response();
+        let listed: Vec<DashboardResponse> = parse_json(resp).await;
+        assert!(listed.is_empty());
     }
 
     #[tokio::test]
