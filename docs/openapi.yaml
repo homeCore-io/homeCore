@@ -1326,6 +1326,21 @@ components:
         config:
           type: object
           additionalProperties: true
+          description: |
+            Type-specific widget configuration validated by the server.
+
+            Initial server-enforced shapes:
+            - `device_grid`, `device_list`, `device_tile`, `media_player`:
+              `selection_mode` (`manual|area|query`), optional `device_ids`, `area_name`,
+              `query`, `limit`, `show_offline`
+            - `stat_summary`: `metrics` string array
+            - `event_feed`: optional `limit`, `types`
+            - `camera_video`: `source_type`, `url`, optional `refresh_secs`
+            - `web_embed`: `url`, optional `sandbox_profile`
+            - `markdown`: `markdown`
+            - `history_chart`: `device_id`, `attribute`, optional `limit`
+            - `dashboard_link`: optional `dashboard_ids`
+            - `mode_chips`, `scene_row`: object, currently no required fields
 
     DashboardDefinition:
       type: object

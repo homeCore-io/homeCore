@@ -1640,6 +1640,319 @@ fn dashboard_response_for(
     }
 }
 
+fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
+    if dashboard.id.trim().is_empty() {
+        return Err("dashboard id cannot be empty".into());
+    }
+    if dashboard.name.trim().is_empty() {
+        return Err("dashboard name cannot be empty".into());
+    }
+    if dashboard.icon.trim().is_empty() {
+        return Err("dashboard icon cannot be empty".into());
+    }
+    if dashboard.layouts.is_empty() {
+        return Err("dashboard must define at least one layout".into());
+    }
+
+    let mut widget_ids = HashSet::new();
+    for widget in &dashboard.widgets {
+        if widget.id.trim().is_empty() {
+            return Err("widget id cannot be empty".into());
+        }
+        if widget.title.trim().is_empty() {
+            return Err(format!("widget '{}' title cannot be empty", widget.id));
+        }
+        if !widget_ids.insert(widget.id.as_str()) {
+            return Err(format!("duplicate widget id '{}'", widget.id));
+        }
+        validate_widget_config(widget)?;
+    }
+
+    let widget_id_set: HashSet<&str> = dashboard.widgets.iter().map(|w| w.id.as_str()).collect();
+    let mut breakpoints = HashSet::new();
+    for layout in &dashboard.layouts {
+        if layout.columns <= 0 {
+            return Err(format!(
+                "layout {:?} must have columns > 0",
+                layout.breakpoint
+            ));
+        }
+        if layout.row_height <= 0.0 {
+            return Err(format!(
+                "layout {:?} must have row_height > 0",
+                layout.breakpoint
+            ));
+        }
+        if layout.gap < 0.0 {
+            return Err(format!("layout {:?} must have gap >= 0", layout.breakpoint));
+        }
+        if !breakpoints.insert(layout.breakpoint) {
+            return Err(format!(
+                "duplicate layout breakpoint '{:?}'",
+                layout.breakpoint
+            ));
+        }
+        let mut layout_widget_ids = HashSet::new();
+        for placement in &layout.placements {
+            if !widget_id_set.contains(placement.widget_id.as_str()) {
+                return Err(format!(
+                    "layout {:?} references unknown widget '{}'",
+                    layout.breakpoint, placement.widget_id
+                ));
+            }
+            if !layout_widget_ids.insert(placement.widget_id.as_str()) {
+                return Err(format!(
+                    "layout {:?} has duplicate placement for widget '{}'",
+                    layout.breakpoint, placement.widget_id
+                ));
+            }
+            if placement.x < 0 || placement.y < 0 {
+                return Err(format!(
+                    "layout {:?} placement '{}' must have non-negative x/y",
+                    layout.breakpoint, placement.widget_id
+                ));
+            }
+            if placement.w <= 0 || placement.h <= 0 {
+                return Err(format!(
+                    "layout {:?} placement '{}' must have w/h > 0",
+                    layout.breakpoint, placement.widget_id
+                ));
+            }
+            if placement.x + placement.w > layout.columns {
+                return Err(format!(
+                    "layout {:?} placement '{}' exceeds column count {}",
+                    layout.breakpoint, placement.widget_id, layout.columns
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn config_object<'a>(
+    widget: &'a hc_types::dashboard::DashboardWidget,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    widget
+        .config
+        .as_object()
+        .ok_or_else(|| format!("widget '{}' config must be an object", widget.id))
+}
+
+fn require_string(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    widget_id: &str,
+) -> Result<String, String> {
+    match map.get(key).and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => Ok(value.to_string()),
+        _ => Err(format!(
+            "widget '{}' requires non-empty string '{}'",
+            widget_id, key
+        )),
+    }
+}
+
+fn optional_string_list(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    widget_id: &str,
+) -> Result<(), String> {
+    if let Some(value) = map.get(key) {
+        let Some(items) = value.as_array() else {
+            return Err(format!(
+                "widget '{}' field '{}' must be a string array",
+                widget_id, key
+            ));
+        };
+        if items.iter().any(|item| item.as_str().is_none()) {
+            return Err(format!(
+                "widget '{}' field '{}' must be a string array",
+                widget_id, key
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_bool(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    widget_id: &str,
+) -> Result<(), String> {
+    if let Some(value) = map.get(key) {
+        if !value.is_boolean() {
+            return Err(format!(
+                "widget '{}' field '{}' must be a boolean",
+                widget_id, key
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_i64_min(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    min: i64,
+    widget_id: &str,
+) -> Result<(), String> {
+    if let Some(value) = map.get(key) {
+        match value.as_i64() {
+            Some(v) if v >= min => {}
+            _ => {
+                return Err(format!(
+                    "widget '{}' field '{}' must be an integer >= {}",
+                    widget_id, key, min
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_selection_widget_config(
+    widget: &hc_types::dashboard::DashboardWidget,
+    require_limit: bool,
+) -> Result<(), String> {
+    let map = config_object(widget)?;
+    let selection_mode = require_string(map, "selection_mode", &widget.id)?;
+    match selection_mode.as_str() {
+        "manual" => optional_string_list(map, "device_ids", &widget.id)?,
+        "area" => {
+            require_string(map, "area_name", &widget.id)?;
+        }
+        "query" => {
+            if let Some(value) = map.get("query") {
+                if value.as_str().is_none() {
+                    return Err(format!(
+                        "widget '{}' field 'query' must be a string",
+                        widget.id
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(format!(
+                "widget '{}' has unsupported selection_mode '{}'",
+                widget.id, selection_mode
+            ));
+        }
+    }
+    optional_i64_min(map, "limit", 1, &widget.id)?;
+    if require_limit && !map.contains_key("limit") {
+        return Err(format!(
+            "widget '{}' requires integer field 'limit'",
+            widget.id
+        ));
+    }
+    optional_bool(map, "show_offline", &widget.id)?;
+    Ok(())
+}
+
+fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Result<(), String> {
+    match widget.r#type {
+        hc_types::dashboard::DashboardWidgetType::DeviceGrid
+        | hc_types::dashboard::DashboardWidgetType::DeviceList
+        | hc_types::dashboard::DashboardWidgetType::DeviceTile
+        | hc_types::dashboard::DashboardWidgetType::MediaPlayer => {
+            validate_selection_widget_config(widget, false)
+        }
+        hc_types::dashboard::DashboardWidgetType::StatSummary => {
+            let map = config_object(widget)?;
+            let metrics = map
+                .get("metrics")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("widget '{}' requires string array 'metrics'", widget.id))?;
+            if metrics.is_empty() || metrics.iter().any(|item| item.as_str().is_none()) {
+                return Err(format!(
+                    "widget '{}' requires string array 'metrics'",
+                    widget.id
+                ));
+            }
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::EventFeed => {
+            let map = config_object(widget)?;
+            optional_i64_min(map, "limit", 1, &widget.id)?;
+            optional_string_list(map, "types", &widget.id)?;
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::CameraVideo => {
+            let map = config_object(widget)?;
+            let source_type = require_string(map, "source_type", &widget.id)?;
+            match source_type.as_str() {
+                "image_refresh" | "mjpeg" | "hls" | "webrtc" => {}
+                _ => {
+                    return Err(format!(
+                        "widget '{}' field 'source_type' is unsupported",
+                        widget.id
+                    ));
+                }
+            }
+            require_string(map, "url", &widget.id)?;
+            optional_i64_min(map, "refresh_secs", 1, &widget.id)?;
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::WebEmbed => {
+            let map = config_object(widget)?;
+            require_string(map, "url", &widget.id)?;
+            if let Some(value) = map.get("sandbox_profile") {
+                let Some(profile) = value.as_str() else {
+                    return Err(format!(
+                        "widget '{}' field 'sandbox_profile' must be a string",
+                        widget.id
+                    ));
+                };
+                match profile {
+                    "readonly_embed" | "trusted_internal" | "strict_isolated" => {}
+                    _ => {
+                        return Err(format!(
+                            "widget '{}' field 'sandbox_profile' is unsupported",
+                            widget.id
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::Markdown => {
+            let map = config_object(widget)?;
+            if let Some(value) = map.get("markdown") {
+                if value.as_str().is_none() {
+                    return Err(format!(
+                        "widget '{}' field 'markdown' must be a string",
+                        widget.id
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "widget '{}' requires string field 'markdown'",
+                    widget.id
+                ));
+            }
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::HistoryChart => {
+            let map = config_object(widget)?;
+            require_string(map, "device_id", &widget.id)?;
+            require_string(map, "attribute", &widget.id)?;
+            optional_i64_min(map, "limit", 1, &widget.id)?;
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::DashboardLink => {
+            let map = config_object(widget)?;
+            optional_string_list(map, "dashboard_ids", &widget.id)?;
+            Ok(())
+        }
+        hc_types::dashboard::DashboardWidgetType::ModeChips
+        | hc_types::dashboard::DashboardWidgetType::SceneRow => {
+            let _ = config_object(widget)?;
+            Ok(())
+        }
+    }
+}
+
 pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) -> impl IntoResponse {
     let Some(handle) = &s.dashboards else {
         return (
@@ -1724,6 +2037,10 @@ pub async fn create_dashboard(
     dashboard.created_at = now;
     dashboard.updated_at = now;
 
+    if let Err(error) = validate_dashboard(&dashboard) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+    }
+
     let response = {
         let mut data = handle.write().await;
         if data.dashboards.iter().any(|item| item.id == dashboard.id) {
@@ -1792,6 +2109,10 @@ pub async fn update_dashboard(
         dashboard.owner_user_id = existing.owner_user_id.clone();
         dashboard.created_at = existing.created_at;
         dashboard.updated_at = chrono::Utc::now();
+
+        if let Err(error) = validate_dashboard(&dashboard) {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+        }
 
         if let Some(pos) = data.dashboards.iter().position(|item| item.id == id) {
             data.dashboards[pos] = dashboard.clone();
@@ -3683,11 +4004,12 @@ mod tests {
     use axum::extract::{Path, State};
     use axum::response::IntoResponse;
     use chrono::Utc;
-    use hc_auth::JwtService;
+    use hc_auth::{Claims, JwtService, Role};
     use hc_core::EventBus;
     use hc_types::dashboard::{
         DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardRefreshPolicy,
-        DashboardVisibility, DashboardWidget, DashboardWidgetPlacement, DashboardWidgetType,
+        DashboardResponse, DashboardVisibility, DashboardWidget, DashboardWidgetPlacement,
+        DashboardWidgetType,
     };
     use hc_types::device::DeviceState;
     use http_body_util::BodyExt;
@@ -3737,6 +4059,16 @@ mod tests {
         serde_json::from_slice::<T>(&bytes).expect("json parse")
     }
 
+    fn claims_for(uid: &str, role: Role) -> Claims {
+        Claims {
+            sub: uid.to_string(),
+            uid: uid.to_string(),
+            exp: u64::MAX,
+            role,
+            scopes: role.scopes(),
+        }
+    }
+
     fn sample_dashboard(id: &str, owner_user_id: &str) -> DashboardDefinition {
         DashboardDefinition {
             id: id.to_string(),
@@ -3770,6 +4102,11 @@ mod tests {
                 config: json!({"metrics":["devices"]}),
             }],
         }
+    }
+
+    async fn seed_dashboard(state: &AppState, dashboard: DashboardDefinition) {
+        let handle = state.dashboards.as_ref().expect("dashboard handle");
+        handle.write().await.dashboards.push(dashboard);
     }
 
     #[tokio::test]
@@ -3939,5 +4276,135 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let updated: DashboardResponse = parse_json(resp).await;
         assert!(updated.is_default);
+    }
+
+    #[tokio::test]
+    async fn list_dashboards_filters_by_visibility() {
+        let state = mk_state().await;
+        seed_dashboard(&state, sample_dashboard("private_mine", "user_a")).await;
+        seed_dashboard(&state, sample_dashboard("private_other", "user_b")).await;
+        let mut shared = sample_dashboard("shared_other", "user_b");
+        shared.visibility = DashboardVisibility::Shared;
+        seed_dashboard(&state, shared).await;
+        let mut public = sample_dashboard("public_other", "user_b");
+        public.visibility = DashboardVisibility::Public;
+        seed_dashboard(&state, public).await;
+
+        let resp = list_dashboards(
+            State(state),
+            crate::auth_middleware::DashboardsRead(claims_for("user_a", Role::User)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
+        let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
+        assert!(ids.contains("private_mine"));
+        assert!(ids.contains("shared_other"));
+        assert!(ids.contains("public_other"));
+        assert!(!ids.contains("private_other"));
+    }
+
+    #[tokio::test]
+    async fn non_owner_cannot_update_shared_dashboard() {
+        let state = mk_state().await;
+        let mut dashboard = sample_dashboard("shared_1", "owner");
+        dashboard.visibility = DashboardVisibility::Shared;
+        seed_dashboard(&state, dashboard.clone()).await;
+
+        dashboard.name = "Renamed".to_string();
+        let resp = update_dashboard(
+            State(state),
+            DashboardsWrite(claims_for("other_user", Role::User)),
+            Path("shared_1".to_string()),
+            Json(dashboard),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_dashboard_clears_default_mapping() {
+        let state = mk_state().await;
+        let claims = claims_for("owner", Role::User);
+        seed_dashboard(&state, sample_dashboard("dash_1", "owner")).await;
+        {
+            let handle = state.dashboards.as_ref().expect("dashboard handle");
+            handle
+                .write()
+                .await
+                .user_defaults
+                .insert("owner".to_string(), "dash_1".to_string());
+        }
+
+        let resp = delete_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims),
+            Path("dash_1".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let handle = state.dashboards.as_ref().expect("dashboard handle");
+        let data = handle.read().await;
+        assert!(!data.user_defaults.contains_key("owner"));
+        assert!(data.dashboards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_dashboard_payload_is_rejected() {
+        let state = mk_state().await;
+        let claims = claims_for("owner", Role::User);
+        let mut dashboard = sample_dashboard("bad_1", "owner");
+        dashboard.widgets.push(DashboardWidget {
+            id: "summary".to_string(),
+            r#type: DashboardWidgetType::Markdown,
+            title: "Duplicate".to_string(),
+            subtitle: None,
+            refresh_policy: DashboardRefreshPolicy::Passive,
+            config: json!({"markdown":"hello"}),
+        });
+
+        let resp = create_dashboard(State(state), DashboardsWrite(claims), Json(dashboard))
+            .await
+            .into_response();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert!(body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("duplicate widget id"));
+    }
+
+    #[tokio::test]
+    async fn invalid_widget_config_is_rejected() {
+        let state = mk_state().await;
+        let claims = claims_for("owner", Role::User);
+        let mut dashboard = sample_dashboard("bad_cfg", "owner");
+        dashboard.widgets[0] = DashboardWidget {
+            id: "camera".to_string(),
+            r#type: DashboardWidgetType::CameraVideo,
+            title: "Camera".to_string(),
+            subtitle: None,
+            refresh_policy: DashboardRefreshPolicy::Passive,
+            config: json!({"source_type":"bogus","url":"https://example.com/cam"}),
+        };
+        dashboard.layouts[0].placements[0].widget_id = "camera".to_string();
+
+        let resp = create_dashboard(State(state), DashboardsWrite(claims), Json(dashboard))
+            .await
+            .into_response();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert!(body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("source_type"));
     }
 }
