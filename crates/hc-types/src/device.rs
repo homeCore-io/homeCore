@@ -13,6 +13,13 @@ use uuid::Uuid;
 pub struct DeviceState {
     /// Stable, unique identifier assigned at plugin registration time.
     pub device_id: String,
+    /// Stable, rule-facing canonical name assigned by HomeCore.
+    ///
+    /// Unlike `name`, this is intended to stay stable even if the display
+    /// label changes. Rules may use this value instead of the plugin-owned
+    /// `device_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_name: Option<String>,
     /// Human-readable label (from plugin registration or user override).
     pub name: String,
     /// The plugin that owns this device.
@@ -40,6 +47,7 @@ impl DeviceState {
     ) -> Self {
         Self {
             device_id: device_id.into(),
+            canonical_name: None,
             name: name.into(),
             plugin_id: plugin_id.into(),
             area: None,

@@ -17,6 +17,7 @@
 //! `spawn_blocking`.  Rule files are small; the I/O is negligible.
 
 use anyhow::{Context, Result};
+use hc_types::device::DeviceState;
 use hc_types::rule::{Action, Condition, Rule, Trigger};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -189,7 +190,11 @@ pub fn rule_path(dir: &Path, name: &str) -> PathBuf {
 /// annotated with `error`.
 ///
 /// Returns the names of rules that were modified and written back to disk.
-pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
+pub fn nullify_device_refs(
+    dir: &Path,
+    device_id: &str,
+    devices: &[DeviceState],
+) -> Result<Vec<String>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -211,8 +216,8 @@ pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
             continue;
         };
 
-        if rule_references_device(&rule, device_id) {
-            replace_device_refs(&mut rule, device_id, &placeholder);
+        if rule_references_device(&rule, device_id, devices) {
+            replace_device_refs(&mut rule, device_id, &placeholder, devices);
             rule.enabled = false;
             rule.error = Some(format!("references deleted device: {device_id}"));
 
@@ -236,75 +241,157 @@ pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
 
 /// Returns `true` if any trigger, condition, or action in `rule` directly
 /// references `device_id` (does not search inside Rhai script strings).
-fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
-    trigger_references_device(&rule.trigger, device_id)
+fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
+    trigger_references_device(&rule.trigger, device_id, devices)
         || rule
             .conditions
             .iter()
-            .any(|c| condition_references_device(c, device_id))
+            .any(|c| condition_references_device(c, device_id, devices))
         || rule
             .actions
             .iter()
-            .any(|ra| action_references_device(&ra.action, device_id))
+            .any(|ra| action_references_device(&ra.action, device_id, devices))
 }
 
-fn trigger_references_device(trigger: &Trigger, device_id: &str) -> bool {
+fn trigger_references_device(trigger: &Trigger, device_id: &str, devices: &[DeviceState]) -> bool {
     match trigger {
-        Trigger::DeviceStateChanged { device_id: id, .. } => id == device_id,
-        Trigger::DeviceAvailabilityChanged { device_id: id, .. } => id == device_id,
+        Trigger::DeviceStateChanged {
+            device_id: id,
+            device_ids,
+            ..
+        } => {
+            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
+                || device_ids.iter().any(|id| {
+                    hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
+                })
+        }
+        Trigger::DeviceAvailabilityChanged { device_id: id, .. }
+        | Trigger::ButtonEvent { device_id: id, .. }
+        | Trigger::NumericThreshold { device_id: id, .. } => {
+            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
+        }
         _ => false,
     }
 }
 
-fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
-    matches!(cond, Condition::DeviceState { device_id: id, .. } if id == device_id)
+fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
+    match cond {
+        Condition::DeviceState { device_id: id, .. }
+        | Condition::TimeElapsed { device_id: id, .. } => {
+            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
+        }
+        Condition::Not { condition } => condition_references_device(condition, device_id, devices),
+        Condition::And { conditions }
+        | Condition::Or { conditions }
+        | Condition::Xor { conditions } => conditions
+            .iter()
+            .any(|cond| condition_references_device(cond, device_id, devices)),
+        _ => false,
+    }
 }
 
-fn action_references_device(action: &Action, device_id: &str) -> bool {
+fn action_references_device(action: &Action, device_id: &str, devices: &[DeviceState]) -> bool {
     match action {
-        Action::SetDeviceState { device_id: id, .. } => id == device_id,
+        Action::SetDeviceState { device_id: id, .. }
+        | Action::SetDeviceStatePerMode { device_id: id, .. }
+        | Action::FadeDevice { device_id: id, .. } => {
+            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
+        }
+        Action::WaitForEvent {
+            device_id: Some(id),
+            ..
+        } => hc_core::rule_resolver::reference_points_to_device(id, device_id, devices),
+        Action::CaptureDeviceState { device_ids, .. } => device_ids
+            .iter()
+            .any(|id| hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)),
         Action::Parallel { actions } => actions
             .iter()
-            .any(|a| action_references_device(a, device_id)),
+            .any(|a| action_references_device(a, device_id, devices)),
         Action::RepeatUntil { actions, .. } => actions
             .iter()
-            .any(|a| action_references_device(a, device_id)),
+            .any(|a| action_references_device(a, device_id, devices)),
+        Action::RepeatWhile { actions, .. } => actions
+            .iter()
+            .any(|a| action_references_device(a, device_id, devices)),
+        Action::RepeatCount { actions, .. } => actions
+            .iter()
+            .any(|a| action_references_device(a, device_id, devices)),
         Action::Conditional {
+            then_actions,
+            else_if,
+            else_actions,
+            ..
+        } => {
+            then_actions
+                .iter()
+                .any(|a| action_references_device(a, device_id, devices))
+                || else_if.iter().any(|branch| {
+                    branch
+                        .actions
+                        .iter()
+                        .any(|a| action_references_device(a, device_id, devices))
+                })
+                || else_actions
+                    .iter()
+                    .any(|a| action_references_device(a, device_id, devices))
+        }
+        Action::PingHost {
             then_actions,
             else_actions,
             ..
         } => {
             then_actions
                 .iter()
-                .any(|a| action_references_device(a, device_id))
+                .any(|a| action_references_device(a, device_id, devices))
                 || else_actions
                     .iter()
-                    .any(|a| action_references_device(a, device_id))
+                    .any(|a| action_references_device(a, device_id, devices))
         }
         _ => false,
     }
 }
 
 /// Mutably replace all occurrences of `device_id` with `placeholder` in a rule.
-fn replace_device_refs(rule: &mut Rule, device_id: &str, placeholder: &str) {
-    replace_in_trigger(&mut rule.trigger, device_id, placeholder);
+fn replace_device_refs(
+    rule: &mut Rule,
+    device_id: &str,
+    placeholder: &str,
+    devices: &[DeviceState],
+) {
+    replace_in_trigger(&mut rule.trigger, device_id, placeholder, devices);
     for cond in &mut rule.conditions {
-        replace_in_condition(cond, device_id, placeholder);
+        replace_in_condition(cond, device_id, placeholder, devices);
     }
     for ra in &mut rule.actions {
-        replace_in_action(&mut ra.action, device_id, placeholder);
+        replace_in_action(&mut ra.action, device_id, placeholder, devices);
     }
 }
 
-fn replace_in_trigger(trigger: &mut Trigger, device_id: &str, placeholder: &str) {
+fn replace_in_trigger(
+    trigger: &mut Trigger,
+    device_id: &str,
+    placeholder: &str,
+    devices: &[DeviceState],
+) {
     match trigger {
-        Trigger::DeviceStateChanged { device_id: id, .. } => {
-            if id == device_id {
+        Trigger::DeviceStateChanged {
+            device_id: id,
+            device_ids,
+            ..
+        } => {
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
                 *id = placeholder.to_string();
             }
+            for ref_id in device_ids {
+                if hc_core::rule_resolver::reference_points_to_device(ref_id, device_id, devices) {
+                    *ref_id = placeholder.to_string();
+                }
+            }
         }
-        Trigger::DeviceAvailabilityChanged { device_id: id, .. } => {
-            if id == device_id {
+        Trigger::DeviceAvailabilityChanged { device_id: id, .. }
+        | Trigger::ButtonEvent { device_id: id, .. }
+        | Trigger::NumericThreshold { device_id: id, .. } => {
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
                 *id = placeholder.to_string();
             }
         }
@@ -312,41 +399,102 @@ fn replace_in_trigger(trigger: &mut Trigger, device_id: &str, placeholder: &str)
     }
 }
 
-fn replace_in_condition(cond: &mut Condition, device_id: &str, placeholder: &str) {
-    if let Condition::DeviceState { device_id: id, .. } = cond {
-        if id == device_id {
-            *id = placeholder.to_string();
+fn replace_in_condition(
+    cond: &mut Condition,
+    device_id: &str,
+    placeholder: &str,
+    devices: &[DeviceState],
+) {
+    match cond {
+        Condition::DeviceState { device_id: id, .. }
+        | Condition::TimeElapsed { device_id: id, .. } => {
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
+                *id = placeholder.to_string();
+            }
         }
+        Condition::Not { condition } => {
+            replace_in_condition(condition, device_id, placeholder, devices)
+        }
+        Condition::And { conditions }
+        | Condition::Or { conditions }
+        | Condition::Xor { conditions } => {
+            for cond in conditions {
+                replace_in_condition(cond, device_id, placeholder, devices);
+            }
+        }
+        _ => {}
     }
 }
 
-fn replace_in_action(action: &mut Action, device_id: &str, placeholder: &str) {
+fn replace_in_action(
+    action: &mut Action,
+    device_id: &str,
+    placeholder: &str,
+    devices: &[DeviceState],
+) {
     match action {
-        Action::SetDeviceState { device_id: id, .. } => {
-            if id == device_id {
+        Action::SetDeviceState { device_id: id, .. }
+        | Action::SetDeviceStatePerMode { device_id: id, .. }
+        | Action::FadeDevice { device_id: id, .. } => {
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
                 *id = placeholder.to_string();
+            }
+        }
+        Action::WaitForEvent {
+            device_id: Some(id),
+            ..
+        } => {
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
+                *id = placeholder.to_string();
+            }
+        }
+        Action::CaptureDeviceState { device_ids, .. } => {
+            for ref_id in device_ids {
+                if hc_core::rule_resolver::reference_points_to_device(ref_id, device_id, devices) {
+                    *ref_id = placeholder.to_string();
+                }
             }
         }
         Action::Parallel { actions } => {
             for a in actions {
-                replace_in_action(a, device_id, placeholder);
+                replace_in_action(a, device_id, placeholder, devices);
             }
         }
-        Action::RepeatUntil { actions, .. } => {
+        Action::RepeatUntil { actions, .. }
+        | Action::RepeatWhile { actions, .. }
+        | Action::RepeatCount { actions, .. } => {
             for a in actions {
-                replace_in_action(a, device_id, placeholder);
+                replace_in_action(a, device_id, placeholder, devices);
             }
         }
         Action::Conditional {
+            then_actions,
+            else_if,
+            else_actions,
+            ..
+        } => {
+            for a in then_actions {
+                replace_in_action(a, device_id, placeholder, devices);
+            }
+            for branch in else_if {
+                for a in &mut branch.actions {
+                    replace_in_action(a, device_id, placeholder, devices);
+                }
+            }
+            for a in else_actions {
+                replace_in_action(a, device_id, placeholder, devices);
+            }
+        }
+        Action::PingHost {
             then_actions,
             else_actions,
             ..
         } => {
             for a in then_actions {
-                replace_in_action(a, device_id, placeholder);
+                replace_in_action(a, device_id, placeholder, devices);
             }
             for a in else_actions {
-                replace_in_action(a, device_id, placeholder);
+                replace_in_action(a, device_id, placeholder, devices);
             }
         }
         _ => {}

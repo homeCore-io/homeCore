@@ -16,7 +16,7 @@
 //! - `homecore/devices/{id}/cmd` on a mapped device is relayed to the native
 //!   device command topic via the router's outbound path.
 
-use crate::EventBus;
+use crate::{device_naming::ensure_unique_canonical_name, EventBus};
 use anyhow::Result;
 use chrono::Utc;
 use hc_mqtt_client::PublishHandle;
@@ -235,6 +235,11 @@ impl StateBridge {
             device.name = new_name;
         }
 
+        if device.canonical_name.is_none() {
+            let devices = self.store.list_devices().await?;
+            device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
+        }
+
         self.store.upsert_device(&device).await?;
 
         for (attr, val) in &device.attributes {
@@ -324,6 +329,11 @@ impl StateBridge {
                     existing.device_type = Some(dt.clone());
                 }
                 existing.name = new_name.to_string();
+                if existing.canonical_name.is_none() {
+                    let devices = self.store.list_devices().await?;
+                    existing.canonical_name =
+                        Some(ensure_unique_canonical_name(&existing, &devices));
+                }
 
                 // Always persist — ensures name/plugin_id/area are correct even
                 // when the device was auto-created from a retained state message
@@ -350,6 +360,8 @@ impl StateBridge {
                 let mut device = DeviceState::new(device_id, new_name, plugin_id);
                 device.area = area;
                 device.device_type = device_type.clone();
+                let devices = self.store.list_devices().await?;
+                device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
                 self.store.upsert_device(&device).await?;
                 info!(device_id, name = new_name, plugin_id, "Device registered");
             }
@@ -390,6 +402,10 @@ impl StateBridge {
 
         device.available = available;
         device.last_seen = Utc::now();
+        if device.canonical_name.is_none() {
+            let devices = self.store.list_devices().await?;
+            device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
+        }
         self.store.upsert_device(&device).await?;
 
         let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {

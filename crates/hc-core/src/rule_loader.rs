@@ -16,6 +16,7 @@
 //! error is logged — the running system is never affected by a bad file.
 
 use anyhow::{Context, Result};
+use hc_state::StateStore;
 use hc_types::rule::{Rule, RuleAction};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
@@ -270,7 +271,12 @@ impl RuleWatcher {
     /// 3. Validates the full set (parse + duplicate ID check).
     /// 4. On success: atomically swaps `handle` and logs at INFO.
     /// 5. On failure: logs a warning and leaves `handle` unchanged.
-    pub fn start(dir: PathBuf, handle: Arc<RwLock<Vec<Rule>>>) -> Result<Self> {
+    pub fn start(
+        dir: PathBuf,
+        store: StateStore,
+        source_handle: Arc<RwLock<Vec<Rule>>>,
+        handle: Arc<RwLock<Vec<Rule>>>,
+    ) -> Result<Self> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
 
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
@@ -309,8 +315,20 @@ impl RuleWatcher {
                 let dir2 = dir_clone.clone();
                 match tokio::task::spawn_blocking(move || load_all(&dir2)).await {
                     Ok(Ok(new_rules)) => {
-                        let count = new_rules.len();
-                        *handle.write().await = new_rules;
+                        *source_handle.write().await = new_rules.clone();
+                        let compiled = match crate::rule_resolver::compile_rules_for_store(
+                            &store, new_rules,
+                        )
+                        .await
+                        {
+                            Ok(rules) => rules,
+                            Err(e) => {
+                                warn!(error = %e, "Rule reload compilation failed — existing rules unchanged");
+                                continue;
+                            }
+                        };
+                        let count = compiled.len();
+                        *handle.write().await = compiled;
                         info!(count, "Rules hot-reloaded successfully");
                     }
                     Ok(Err(e)) => {

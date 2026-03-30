@@ -6,6 +6,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
 use hc_types::device::{Area, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
@@ -229,6 +230,17 @@ pub async fn update_device(
 ) -> impl IntoResponse {
     match s.store.get_device(&id).await {
         Ok(Some(mut device)) => {
+            let all_devices = match s.store.list_devices().await {
+                Ok(devices) => devices,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response()
+                }
+            };
+
             if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
                 device.name = name.to_string();
             }
@@ -238,6 +250,49 @@ pub async fn update_device(
                 } else {
                     area.as_str().map(|s| s.to_string())
                 };
+            }
+            if let Some(canonical_name) = body.get("canonical_name") {
+                if canonical_name.is_null() {
+                    device.canonical_name = None;
+                } else if let Some(value) = canonical_name.as_str() {
+                    match device_naming::validate_or_generate_canonical_name(
+                        &device,
+                        &all_devices,
+                        Some(value),
+                    ) {
+                        Ok(name) => device.canonical_name = Some(name),
+                        Err(e) => {
+                            return (
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({ "error": e.to_string() })),
+                            )
+                                .into_response()
+                        }
+                    }
+                } else {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "canonical_name must be a string or null" })),
+                    )
+                        .into_response();
+                }
+            }
+
+            if device.canonical_name.is_none() {
+                match device_naming::validate_or_generate_canonical_name(
+                    &device,
+                    &all_devices,
+                    None,
+                ) {
+                    Ok(name) => device.canonical_name = Some(name),
+                    Err(e) => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(json!({ "error": e.to_string() })),
+                        )
+                            .into_response()
+                    }
+                }
             }
             match s.store.upsert_device(&device).await {
                 Ok(_) => (StatusCode::OK, Json(json!(device))),
@@ -256,6 +311,7 @@ pub async fn update_device(
             Json(json!({ "error": e.to_string() })),
         ),
     }
+    .into_response()
 }
 
 pub async fn delete_device(
@@ -263,6 +319,17 @@ pub async fn delete_device(
     _: DevicesWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let devices_before_delete = match s.store.list_devices().await {
+        Ok(devices) => devices,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
     match s.store.delete_device(&id).await {
         Ok(false) => {
             return (
@@ -283,7 +350,7 @@ pub async fn delete_device(
 
     // Nullify references to this device in all rule files, then return a summary.
     let affected_rules = if let Some(rfs) = &s.rule_file_store {
-        match crate::rule_file_store::nullify_device_refs(&rfs.dir, &id) {
+        match crate::rule_file_store::nullify_device_refs(&rfs.dir, &id, &devices_before_delete) {
             Ok(names) => names,
             Err(e) => {
                 tracing::warn!(device_id = %id, error = %e, "delete_device: failed to nullify rule refs");
@@ -415,6 +482,16 @@ pub async fn bulk_delete_devices(
     let mut deleted = 0usize;
     let mut not_found: Vec<String> = Vec::new();
     let mut affected_rules: Vec<String> = Vec::new();
+    let devices_before_delete = match s.store.list_devices().await {
+        Ok(devices) => devices,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
 
     for id in &ids {
         match s.store.delete_device(id).await {
@@ -429,7 +506,11 @@ pub async fn bulk_delete_devices(
             Ok(true) => {
                 deleted += 1;
                 if let Some(rfs) = &s.rule_file_store {
-                    match crate::rule_file_store::nullify_device_refs(&rfs.dir, id) {
+                    match crate::rule_file_store::nullify_device_refs(
+                        &rfs.dir,
+                        id,
+                        &devices_before_delete,
+                    ) {
                         Ok(names) => {
                             for name in names {
                                 if !affected_rules.contains(&name) {
@@ -1067,10 +1148,11 @@ pub async fn delete_area(
 
 // ---------- Automations (Rules) ----------
 //
-// The rules_handle (Arc<RwLock<Vec<Rule>>>) is the single in-memory source of
-// truth.  All reads come from it; all writes go to the rule_file_store (which
-// writes a TOML file on disk) *and* directly update the handle so the change
-// is immediately visible — no need to wait for the hot-reload watcher.
+// HomeCore keeps two in-memory rule views:
+// - `source_rules_handle`: the authored rule form from disk/API payloads
+// - `rules_handle`: compiled rules with device references resolved to device IDs
+// API reads should prefer the source handle so canonical names round-trip
+// cleanly; the engine executes the compiled handle.
 
 #[derive(Deserialize, Default)]
 pub struct AutomationListQuery {
@@ -1097,7 +1179,19 @@ pub async fn list_automations(
     _: AutomationsRead,
     Query(params): Query<AutomationListQuery>,
 ) -> impl IntoResponse {
-    match &s.rules_handle {
+    let devices = match s.store.list_devices().await {
+        Ok(devices) => devices,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    match &s.source_rules_handle {
         Some(rh) => {
             let rules = rh.read().await;
             let filtered: Vec<_> = rules
@@ -1114,7 +1208,7 @@ pub async fn list_automations(
                         }
                     }
                     if let Some(ref did) = params.device_id {
-                        if !rule_references_device(r, did) {
+                        if !rule_references_device(r, did, &devices) {
                             return false;
                         }
                     }
@@ -1173,10 +1267,23 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
 
 /// Returns `true` if `device_id` appears anywhere in the rule's trigger,
 /// conditions, or actions (including nested action groups).
-fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
+fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
     let in_trigger = match &rule.trigger {
-        Trigger::DeviceStateChanged { device_id: d, .. } => d == device_id,
-        Trigger::DeviceAvailabilityChanged { device_id: d, .. } => d == device_id,
+        Trigger::DeviceStateChanged {
+            device_id: d,
+            device_ids,
+            ..
+        } => {
+            rule_resolver::reference_points_to_device(d, device_id, devices)
+                || device_ids
+                    .iter()
+                    .any(|d| rule_resolver::reference_points_to_device(d, device_id, devices))
+        }
+        Trigger::DeviceAvailabilityChanged { device_id: d, .. }
+        | Trigger::ButtonEvent { device_id: d, .. }
+        | Trigger::NumericThreshold { device_id: d, .. } => {
+            rule_resolver::reference_points_to_device(d, device_id, devices)
+        }
         _ => false,
     };
     if in_trigger {
@@ -1184,40 +1291,72 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
     }
 
     for cond in &rule.conditions {
-        if condition_references_device(cond, device_id) {
+        if condition_references_device(cond, device_id, devices) {
             return true;
         }
     }
 
     rule.actions
         .iter()
-        .any(|ra| actions_reference_device(std::slice::from_ref(&ra.action), device_id))
+        .any(|ra| actions_reference_device(std::slice::from_ref(&ra.action), device_id, devices))
 }
 
-fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
+fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
     match cond {
-        Condition::DeviceState { device_id: d, .. } => d == device_id,
-        Condition::TimeElapsed { device_id: d, .. } => d == device_id,
-        Condition::Not { condition } => condition_references_device(condition, device_id),
+        Condition::DeviceState { device_id: d, .. }
+        | Condition::TimeElapsed { device_id: d, .. } => {
+            rule_resolver::reference_points_to_device(d, device_id, devices)
+        }
+        Condition::Not { condition } => condition_references_device(condition, device_id, devices),
         _ => false,
     }
 }
 
-fn actions_reference_device(actions: &[Action], device_id: &str) -> bool {
+fn actions_reference_device(actions: &[Action], device_id: &str, devices: &[DeviceState]) -> bool {
     for action in actions {
         let found = match action {
-            Action::SetDeviceState { device_id: d, .. } => d == device_id,
-            Action::Parallel { actions: inner } => actions_reference_device(inner, device_id),
+            Action::SetDeviceState { device_id: d, .. }
+            | Action::SetDeviceStatePerMode { device_id: d, .. }
+            | Action::FadeDevice { device_id: d, .. } => {
+                rule_resolver::reference_points_to_device(d, device_id, devices)
+            }
+            Action::CaptureDeviceState { device_ids, .. } => device_ids
+                .iter()
+                .any(|d| rule_resolver::reference_points_to_device(d, device_id, devices)),
+            Action::WaitForEvent {
+                device_id: Some(d), ..
+            } => rule_resolver::reference_points_to_device(d, device_id, devices),
+            Action::Parallel { actions: inner } => {
+                actions_reference_device(inner, device_id, devices)
+            }
             Action::RepeatUntil { actions: inner, .. } => {
-                actions_reference_device(inner, device_id)
+                actions_reference_device(inner, device_id, devices)
+            }
+            Action::RepeatWhile { actions: inner, .. } => {
+                actions_reference_device(inner, device_id, devices)
+            }
+            Action::RepeatCount { actions: inner, .. } => {
+                actions_reference_device(inner, device_id, devices)
             }
             Action::Conditional {
+                then_actions,
+                else_if,
+                else_actions,
+                ..
+            } => {
+                actions_reference_device(then_actions, device_id, devices)
+                    || else_if
+                        .iter()
+                        .any(|branch| actions_reference_device(&branch.actions, device_id, devices))
+                    || actions_reference_device(else_actions, device_id, devices)
+            }
+            Action::PingHost {
                 then_actions,
                 else_actions,
                 ..
             } => {
-                actions_reference_device(then_actions, device_id)
-                    || actions_reference_device(else_actions, device_id)
+                actions_reference_device(then_actions, device_id, devices)
+                    || actions_reference_device(else_actions, device_id, devices)
             }
             _ => false,
         };
@@ -1265,6 +1404,17 @@ pub async fn create_automation(
     // id already set above; assert it round-tripped correctly.
     debug_assert_eq!(rule.id, new_id);
 
+    let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+        Ok(rule) => rule,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
     // Write file first — if this fails the in-memory state is unchanged.
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule(&rule) {
@@ -1277,8 +1427,11 @@ pub async fn create_automation(
     }
 
     // Update live engine handle immediately (don't wait for watcher).
-    if let Some(rh) = &s.rules_handle {
+    if let Some(rh) = &s.source_rules_handle {
         rh.write().await.push(rule.clone());
+    }
+    if let Some(rh) = &s.rules_handle {
+        rh.write().await.push(compiled_rule);
     }
 
     (StatusCode::CREATED, Json(json!(rule))).into_response()
@@ -1289,7 +1442,7 @@ pub async fn get_automation(
     _: AutomationsRead,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -1342,7 +1495,18 @@ pub async fn update_automation(
 
     rule.id = id;
 
-    let Some(rh) = &s.rules_handle else {
+    let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+        Ok(rule) => rule,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -1352,7 +1516,7 @@ pub async fn update_automation(
 
     // Check existence and get old name for potential rename.
     let old_name = {
-        let rules = rh.read().await;
+        let rules = source_rh.read().await;
         match rules.iter().find(|r| r.id == id) {
             Some(r) => r.name.clone(),
             None => {
@@ -1378,11 +1542,19 @@ pub async fn update_automation(
 
     // Update live handle.
     {
-        let mut rules = rh.write().await;
+        let mut rules = source_rh.write().await;
         if let Some(pos) = rules.iter().position(|r| r.id == id) {
             rules[pos] = rule.clone();
         } else {
             rules.push(rule.clone());
+        }
+    }
+    if let Some(rh) = &s.rules_handle {
+        let mut rules = rh.write().await;
+        if let Some(pos) = rules.iter().position(|r| r.id == id) {
+            rules[pos] = compiled_rule;
+        } else {
+            rules.push(compiled_rule);
         }
     }
 
@@ -1394,7 +1566,7 @@ pub async fn delete_automation(
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -1435,6 +1607,9 @@ pub async fn delete_automation(
 
     // Remove from live handle.
     rh.write().await.retain(|r| r.id != id);
+    if let Some(compiled_rh) = &s.rules_handle {
+        compiled_rh.write().await.retain(|r| r.id != id);
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1927,7 +2102,7 @@ pub async fn export_automations(
     State(s): State<AppState>,
     _: AutomationsRead,
 ) -> impl IntoResponse {
-    match &s.rules_handle {
+    match &s.source_rules_handle {
         Some(rh) => (StatusCode::OK, Json(json!(rh.read().await.clone()))),
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1943,7 +2118,7 @@ pub async fn import_automations(
     _: AutomationsWrite,
     Json(rules): Json<Vec<Rule>>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -1953,6 +2128,15 @@ pub async fn import_automations(
     let mut saved = Vec::with_capacity(rules.len());
     for mut rule in rules {
         rule.id = Uuid::new_v4();
+        let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+            Ok(rule) => rule,
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": e.to_string() })),
+                );
+            }
+        };
 
         if let Some(fs) = &s.rule_file_store {
             if let Err(e) = fs.write_rule(&rule) {
@@ -1963,7 +2147,10 @@ pub async fn import_automations(
             }
         }
 
-        rh.write().await.push(rule.clone());
+        source_rh.write().await.push(rule.clone());
+        if let Some(rh) = &s.rules_handle {
+            rh.write().await.push(compiled_rule);
+        }
         saved.push(rule);
     }
     (
@@ -2240,7 +2427,7 @@ pub async fn patch_automation(
     Path(id): Path<Uuid>,
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -2249,7 +2436,7 @@ pub async fn patch_automation(
     };
 
     // Read current rule from handle.
-    let mut rule = match rh.read().await.iter().find(|r| r.id == id).cloned() {
+    let mut rule = match source_rh.read().await.iter().find(|r| r.id == id).cloned() {
         Some(r) => r,
         None => {
             return (
@@ -2280,9 +2467,26 @@ pub async fn patch_automation(
 
     // Update live handle.
     {
-        let mut rules = rh.write().await;
+        let mut rules = source_rh.write().await;
         if let Some(pos) = rules.iter().position(|r| r.id == id) {
             rules[pos] = rule.clone();
+        }
+    }
+
+    if let Some(rh) = &s.rules_handle {
+        let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+            Ok(rule) => rule,
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        };
+        let mut rules = rh.write().await;
+        if let Some(pos) = rules.iter().position(|r| r.id == id) {
+            rules[pos] = compiled_rule;
         }
     }
 
@@ -2319,7 +2523,7 @@ pub async fn bulk_patch_automations(
     Query(params): Query<BulkPatchQuery>,
     Json(patch): Json<BulkPatchBody>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -2329,7 +2533,7 @@ pub async fn bulk_patch_automations(
 
     let mut updated = Vec::new();
     {
-        let mut rules = rh.write().await;
+        let mut rules = source_rh.write().await;
         for rule in rules.iter_mut() {
             let selected = if let Some(ref ids) = patch.ids {
                 ids.contains(&rule.id)
@@ -2352,6 +2556,29 @@ pub async fn bulk_patch_automations(
         for rule in &updated {
             if let Err(e) = fs.write_rule(rule) {
                 tracing::warn!(rule_id = %rule.id, error = %e, "bulk_patch: failed to write rule file");
+            }
+        }
+    }
+
+    if let Some(rh) = &s.rules_handle {
+        let mut compiled_updates = Vec::with_capacity(updated.len());
+        for rule in &updated {
+            match rule_resolver::compile_rule_for_store(&s.store, rule).await {
+                Ok(rule) => compiled_updates.push(rule),
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+
+        let mut compiled_rules = rh.write().await;
+        for compiled_rule in compiled_updates {
+            if let Some(pos) = compiled_rules.iter().position(|r| r.id == compiled_rule.id) {
+                compiled_rules[pos] = compiled_rule;
             }
         }
     }
@@ -2386,7 +2613,7 @@ pub async fn automation_history(
     };
 
     // Verify rule exists.
-    if let Some(rh) = &s.rules_handle {
+    if let Some(rh) = &s.source_rules_handle {
         let rules = rh.read().await;
         if !rules.iter().any(|r| r.id == id) {
             return (
@@ -2417,7 +2644,7 @@ pub async fn clone_automation(
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some(rh) = &s.rules_handle else {
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -2426,7 +2653,7 @@ pub async fn clone_automation(
     };
 
     let original = {
-        let rules = rh.read().await;
+        let rules = source_rh.read().await;
         match rules.iter().find(|r| r.id == id).cloned() {
             Some(r) => r,
             None => {
@@ -2455,7 +2682,19 @@ pub async fn clone_automation(
         }
     }
 
-    rh.write().await.push(cloned.clone());
+    source_rh.write().await.push(cloned.clone());
+    if let Some(rh) = &s.rules_handle {
+        match rule_resolver::compile_rule_for_store(&s.store, &cloned).await {
+            Ok(compiled) => rh.write().await.push(compiled),
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        }
+    }
     (StatusCode::CREATED, Json(json!(cloned))).into_response()
 }
 

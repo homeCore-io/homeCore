@@ -47,6 +47,22 @@ use uuid::Uuid;
 
 pub const HISTORY_RING_SIZE: usize = 20;
 
+async fn device_log_name(state: &StateStore, device_id: &str) -> String {
+    match state.get_device(device_id).await {
+        Ok(Some(device)) => device
+            .canonical_name
+            .or_else(|| {
+                if device.name.is_empty() {
+                    None
+                } else {
+                    Some(device.name)
+                }
+            })
+            .unwrap_or_else(|| device_id.to_string()),
+        _ => device_id.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trace types
 // ---------------------------------------------------------------------------
@@ -417,7 +433,7 @@ impl RuleEngine {
             }
         }
 
-        log_incoming_event(event);
+        log_incoming_event(&self.state, event).await;
 
         // ── 4. Trigger matching ────────────────────────────────────────────────
         let mut matching: Vec<(&Rule, TriggerContext, bool /* deferred */)> = Vec::new();
@@ -935,11 +951,12 @@ impl RuleEngine {
                 op,
                 value,
             } => {
+                let device = device_log_name(&self.state, device_id).await;
                 let entry = self.device_cache.get(device_id.as_str());
                 let Some(attrs) = entry else {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, "rule.condition: FAIL — device not found in cache"
+                        device = %device, "rule.condition: FAIL — device not found in cache"
                     );
                     return Ok((
                         false,
@@ -948,14 +965,14 @@ impl RuleEngine {
                             passed: false,
                             actual: None,
                             expected: Some(value.clone()),
-                            reason: format!("device '{}' not found in cache", device_id),
+                            reason: format!("device '{}' not found in cache", device),
                         },
                     ));
                 };
                 let Some(actual) = attrs.get(attribute.as_str()) else {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute, "rule.condition: FAIL — attribute not present"
+                        device = %device, attribute, "rule.condition: FAIL — attribute not present"
                     );
                     return Ok((
                         false,
@@ -964,10 +981,7 @@ impl RuleEngine {
                             passed: false,
                             actual: None,
                             expected: Some(value.clone()),
-                            reason: format!(
-                                "device '{}' has no attribute '{}'",
-                                device_id, attribute
-                            ),
+                            reason: format!("device '{}' has no attribute '{}'", device, attribute),
                         },
                     ));
                 };
@@ -976,13 +990,13 @@ impl RuleEngine {
                 if result {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute, op = ?op, expected = %value, actual = %actual,
+                        device = %device, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: pass"
                     );
                 } else {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute, op = ?op, expected = %value, actual = %actual,
+                        device = %device, attribute, op = ?op, expected = %value, actual = %actual,
                         "rule.condition: FAIL"
                     );
                 }
@@ -995,7 +1009,7 @@ impl RuleEngine {
                         expected: Some(value.clone()),
                         reason: format!(
                             "{}.{} {} {} (actual: {}) → {}",
-                            device_id,
+                            device,
                             attribute,
                             op_sym,
                             value,
@@ -1287,6 +1301,7 @@ impl RuleEngine {
                 attribute,
                 duration_secs,
             } => {
+                let device = device_log_name(&self.state, device_id).await;
                 let changed_at = self
                     .attr_changed_at
                     .get(device_id.as_str())
@@ -1295,7 +1310,7 @@ impl RuleEngine {
                 let Some(changed_at) = changed_at else {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute,
+                        device = %device, attribute,
                         "rule.condition: TimeElapsed FAIL — attribute not tracked"
                     );
                     return Ok((
@@ -1307,7 +1322,7 @@ impl RuleEngine {
                             expected: Some(JsonValue::Number((*duration_secs).into())),
                             reason: format!(
                                 "{}.{} not tracked — no change recorded since startup",
-                                device_id, attribute
+                                device, attribute
                             ),
                         },
                     ));
@@ -1318,13 +1333,13 @@ impl RuleEngine {
                 if result {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute, elapsed_secs, duration_secs,
+                        device = %device, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed pass"
                     );
                 } else {
                     debug!(
                         rule_name = %rule.name, cond = %cond_label,
-                        device_id, attribute, elapsed_secs, duration_secs,
+                        device = %device, attribute, elapsed_secs, duration_secs,
                         "rule.condition: TimeElapsed FAIL"
                     );
                 }
@@ -1337,7 +1352,7 @@ impl RuleEngine {
                         expected: Some(JsonValue::Number((*duration_secs).into())),
                         reason: format!(
                             "{}.{}: elapsed {}s {} {}s → {}",
-                            device_id,
+                            device,
                             attribute,
                             elapsed_secs,
                             if result { ">=" } else { "<" },
@@ -1575,7 +1590,7 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
 }
 
 /// Log key fields from the incoming event.
-fn log_incoming_event(event: &Event) {
+async fn log_incoming_event(state: &StateStore, event: &Event) {
     match event {
         Event::DeviceStateChanged {
             device_id,
@@ -1598,15 +1613,17 @@ fn log_incoming_event(event: &Event) {
                     format!("{k}: {prev} → {curr}")
                 })
                 .collect();
-            debug!(device_id, changes = %changes.join(", "), "rule.event: DeviceStateChanged");
+            let device = device_log_name(state, device_id).await;
+            debug!(device = %device, changes = %changes.join(", "), "rule.event: DeviceStateChanged");
         }
         Event::DeviceAvailabilityChanged {
             device_id,
             available,
             ..
         } => {
+            let device = device_log_name(state, device_id).await;
             debug!(
-                device_id,
+                device = %device,
                 available, "rule.event: DeviceAvailabilityChanged"
             );
         }

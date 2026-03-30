@@ -51,9 +51,12 @@ pub struct AppState {
     pub store: StateStore,
     pub event_bus: EventBus,
     pub publish: Option<PublishHandle>,
+    /// Live source rule set exactly as authored on disk/API input.
+    pub source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
     /// Live rule set — source of truth for the rule engine and all API reads.
-    /// Updated atomically by the API (write-through to files) and by the
-    /// hot-reload watcher when files change on disk.
+    /// Updated atomically by the API and by the hot-reload watcher.
+    /// This handle contains compiled rules with device references resolved to
+    /// concrete device IDs for execution.
     pub rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
     /// Write-through file store for automation rules.
     pub rule_file_store: Option<RuleFileStore>,
@@ -97,6 +100,7 @@ impl AppState {
         store: StateStore,
         event_bus: EventBus,
         publish: Option<PublishHandle>,
+        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
         rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
         rule_file_store: Option<RuleFileStore>,
         jwt: JwtService,
@@ -166,6 +170,7 @@ impl AppState {
             store,
             event_bus,
             publish,
+            source_rules_handle,
             rules_handle,
             rule_file_store,
             plugins,

@@ -9,7 +9,7 @@ use hc_api::{
 };
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
-use hc_core::{rule_loader, Core, EventBus};
+use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
 use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
 use hc_notify::{ChannelConfig, NotificationService};
@@ -653,6 +653,12 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    match device_naming::backfill_missing_canonical_names(&store).await {
+        Ok(0) => {}
+        Ok(count) => info!(count, "Backfilled missing device canonical names"),
+        Err(e) => tracing::warn!(error = %e, "Failed to backfill device canonical names"),
+    }
+
     // ── 11. Event buses ─────────────────────────────────────────────────────
     // internal_bus: carries only Event::MqttMessage (raw MQTT traffic).
     //   Subscribers: state_bridge, timer_manager, switch_manager, mode_manager, engine.
@@ -708,6 +714,9 @@ async fn main() -> Result<()> {
         rules
     };
 
+    let source_rules_handle = Arc::new(tokio::sync::RwLock::new(rules.clone()));
+    let rules = rule_resolver::compile_rules_for_store(&store, rules).await?;
+
     let modes_path = base_dir.join("config").join("modes.toml");
 
     // ── Graceful shutdown channel ──────────────────────────────────────────
@@ -749,7 +758,7 @@ async fn main() -> Result<()> {
             info!(path = %device_types_path.display(), count, "Device type registry loaded");
             core = core.with_device_types(Arc::new(registry));
         }
-        Err(e) if !device_types_path.exists() => {
+        Err(_e) if !device_types_path.exists() => {
             info!(path = %device_types_path.display(), "No device type registry found; typed devices will not have auto schemas");
         }
         Err(e) => {
@@ -849,6 +858,8 @@ async fn main() -> Result<()> {
     // Must be kept alive for the duration of the process.
     let _rule_watcher = hc_core::rule_loader::RuleWatcher::start(
         rules_dir.clone(),
+        store.clone(),
+        std::sync::Arc::clone(&source_rules_handle),
         std::sync::Arc::clone(&rules_handle),
     )?;
 
@@ -927,6 +938,7 @@ async fn main() -> Result<()> {
         store,
         pub_bus,
         Some(publish_handle),
+        Some(source_rules_handle),
         Some(rules_handle),
         Some(rule_file_store),
         jwt,

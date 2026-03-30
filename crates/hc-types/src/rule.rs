@@ -137,10 +137,11 @@ fn is_parallel(m: &RunMode) -> bool {
 pub enum Trigger {
     DeviceStateChanged {
         /// Primary device ID (used when `device_ids` is empty).
+        #[serde(alias = "device")]
         device_id: String,
         /// Additional device IDs — trigger fires if *any* of these devices
         /// changes.  When non-empty, `device_id` is also included in the set.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "devices")]
         device_ids: Vec<String>,
         /// When `None`, any attribute change fires the trigger.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +206,7 @@ pub enum Trigger {
     },
     /// Fires when a device's availability (online/offline) changes.
     DeviceAvailabilityChanged {
+        #[serde(alias = "device")]
         device_id: String,
         #[serde(default)]
         to: Option<bool>,
@@ -219,6 +221,7 @@ pub enum Trigger {
     /// after the event type (`"pushed"`, `"held"`, `"double_tapped"`, or
     /// `"released"`) carrying the button number as its value.
     ButtonEvent {
+        #[serde(alias = "device")]
         device_id: String,
         /// If `None`, fires for any button number.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +234,7 @@ pub enum Trigger {
     /// crossing edge (e.g. when temperature goes from ≤80 to >80), not on
     /// every change.
     NumericThreshold {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         op: ThresholdOp,
@@ -361,6 +365,7 @@ pub enum SunEventType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Condition {
     DeviceState {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         op: CompareOp,
@@ -376,6 +381,7 @@ pub enum Condition {
     },
     /// True when a device attribute has not changed for at least `duration_secs` seconds.
     TimeElapsed {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         duration_secs: u64,
@@ -523,6 +529,7 @@ pub struct RuleAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     SetDeviceState {
+        #[serde(alias = "device")]
         device_id: String,
         state: JsonValue,
         /// When `true`, use the trigger event's value instead of `state`.
@@ -629,7 +636,7 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_type: Option<String>,
         /// Device ID whose state-changed event to wait for.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", alias = "device")]
         device_id: Option<String>,
         /// Optional attribute filter for device-state events.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,6 +725,7 @@ pub enum Action {
     /// on         = true
     /// ```
     SetDeviceStatePerMode {
+        #[serde(alias = "device")]
         device_id: String,
         modes: Vec<ModeStateEntry>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -782,6 +790,7 @@ pub enum Action {
         /// Rule-local name for this snapshot.
         key: String,
         /// Device IDs to capture.
+        #[serde(alias = "devices")]
         device_ids: Vec<String>,
     },
     /// Publish the device states previously saved by `CaptureDeviceState`.
@@ -875,6 +884,7 @@ pub enum Action {
     /// brightness = 255
     /// ```
     FadeDevice {
+        #[serde(alias = "device")]
         device_id: String,
         /// Target state.  Numeric fields are interpolated; non-numeric fields
         /// are applied as-is on every step.
@@ -955,4 +965,81 @@ pub struct Scene {
     pub name: String,
     /// Map of device_id → desired attribute values.
     pub states: std::collections::HashMap<String, JsonValue>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, Condition, Trigger};
+    use serde_json::json;
+
+    #[test]
+    fn parses_device_aliases_in_trigger() {
+        let trigger: Trigger = serde_json::from_value(json!({
+            "type": "device_state_changed",
+            "device": "living_room.floor_lamp",
+            "devices": ["bedroom.floor_lamp"],
+            "attribute": "on",
+            "to": true
+        }))
+        .unwrap();
+
+        match trigger {
+            Trigger::DeviceStateChanged {
+                device_id,
+                device_ids,
+                ..
+            } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+                assert_eq!(device_ids, vec!["bedroom.floor_lamp"]);
+            }
+            _ => panic!("unexpected trigger variant"),
+        }
+    }
+
+    #[test]
+    fn parses_device_aliases_in_condition_and_actions() {
+        let condition: Condition = serde_json::from_value(json!({
+            "type": "device_state",
+            "device": "living_room.floor_lamp",
+            "attribute": "on",
+            "op": "eq",
+            "value": true
+        }))
+        .unwrap();
+        match condition {
+            Condition::DeviceState { device_id, .. } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+            }
+            _ => panic!("unexpected condition variant"),
+        }
+
+        let action: Action = serde_json::from_value(json!({
+            "type": "set_device_state",
+            "device": "living_room.floor_lamp",
+            "state": { "on": true }
+        }))
+        .unwrap();
+        match action {
+            Action::SetDeviceState { device_id, .. } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+            }
+            _ => panic!("unexpected action variant"),
+        }
+
+        let capture: Action = serde_json::from_value(json!({
+            "type": "capture_device_state",
+            "key": "before_scene",
+            "devices": ["living_room.floor_lamp", "hall.floor_lamp"]
+        }))
+        .unwrap();
+        match capture {
+            Action::CaptureDeviceState { device_ids, .. } => {
+                assert_eq!(
+                    device_ids,
+                    vec!["living_room.floor_lamp", "hall.floor_lamp"]
+                );
+            }
+            _ => panic!("unexpected action variant"),
+        }
+    }
 }

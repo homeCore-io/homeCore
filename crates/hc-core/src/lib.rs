@@ -11,10 +11,12 @@ use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
 pub mod calendar_store;
+pub mod device_naming;
 pub mod engine;
 pub mod executor;
 pub mod mode_manager;
 pub mod rule_loader;
+pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
 pub mod switch_manager;

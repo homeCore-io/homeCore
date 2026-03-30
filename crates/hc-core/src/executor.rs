@@ -77,6 +77,26 @@ use crate::EventBus;
 /// allow the compiler to verify `Send` bounds without infinite type expansion.
 type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>>;
 
+async fn device_log_name(state: Option<&StateStore>, device_id: &str) -> String {
+    let Some(store) = state else {
+        return device_id.to_string();
+    };
+
+    match store.get_device(device_id).await {
+        Ok(Some(device)) => device
+            .canonical_name
+            .or_else(|| {
+                if device.name.is_empty() {
+                    None
+                } else {
+                    Some(device.name)
+                }
+            })
+            .unwrap_or_else(|| device_id.to_string()),
+        _ => device_id.to_string(),
+    }
+}
+
 /// Shared HTTP client — initialised once, reused for every `CallService` action.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -232,7 +252,7 @@ pub async fn execute_actions(
         if !ra.enabled {
             if let Some(ref trace_buf) = ctx.trace {
                 let action_type = action_type_name(&ra.action).to_string();
-                let description = action_description(&ra.action);
+                let description = action_description(Arc::clone(&ctx), &ra.action).await;
                 trace_buf.lock().unwrap().push(ActionTrace {
                     index: idx,
                     action_type,
@@ -296,7 +316,7 @@ async fn execute_one(
 ) -> Result<()> {
     let label = format!("action[{}/{}]", idx + 1, total);
     let action_type = action_type_name(&action).to_string();
-    let description = action_description(&action);
+    let description = action_description(Arc::clone(&ctx), &action).await;
     let is_comment = matches!(action, Action::Comment { .. });
     let trace_start = Instant::now();
 
@@ -550,23 +570,23 @@ fn run_single_action(
                 state,
                 track_event_value,
             } => {
+                let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                 let actual_state = if track_event_value {
                     ctx.trigger_ctx.value.clone().unwrap_or(state)
                 } else {
                     state
                 };
                 let topic = format!("homecore/devices/{device_id}/cmd");
-                debug!(device_id, payload = %actual_state, track_event_value, "action: SetDeviceState");
+                debug!(device = %device, payload = %actual_state, track_event_value, "action: SetDeviceState");
                 match &ctx.publish {
                     Some(ph) => {
                         ph.publish(&topic, actual_state.to_string().into_bytes())
                             .await?;
-                        debug!(device_id, "action: SetDeviceState — published");
+                        debug!(device = %device, "action: SetDeviceState — published");
                     }
-                    None => warn!(
-                        device_id,
-                        "action: SetDeviceState — no publish handle, dropped"
-                    ),
+                    None => {
+                        warn!(device = %device, "action: SetDeviceState — no publish handle, dropped")
+                    }
                 }
             }
 
@@ -723,7 +743,13 @@ fn run_single_action(
                     debug!(script = %snippet, count = effects.len(), "action: RunScript — executing side effects");
                 }
                 for effect in effects {
-                    execute_script_effect(effect, ctx.publish.clone(), ctx.notify.clone()).await?;
+                    execute_script_effect(
+                        effect,
+                        ctx.publish.clone(),
+                        ctx.notify.clone(),
+                        ctx.state.clone(),
+                    )
+                    .await?;
                 }
                 debug!(script = %snippet, "action: RunScript — completed");
             }
@@ -1016,12 +1042,16 @@ fn run_single_action(
                 attribute,
                 timeout_ms,
             } => {
+                let device = match device_id.as_deref() {
+                    Some(id) => Some(device_log_name(ctx.state.as_ref(), id).await),
+                    None => None,
+                };
                 let Some(bus) = ctx.event_bus.clone() else {
                     warn!(rule = %ctx.rule_name, "action: WaitForEvent — no event bus, skipping");
                     return Ok(());
                 };
                 debug!(
-                    rule = %ctx.rule_name, event_type = ?et, device_id = ?device_id,
+                    rule = %ctx.rule_name, event_type = ?et, device = ?device,
                     timeout_ms = ?timeout_ms, "action: WaitForEvent — waiting"
                 );
                 let mut rx = bus.subscribe();
@@ -1149,7 +1179,8 @@ fn run_single_action(
                 modes,
                 default_state,
             } => {
-                debug!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode");
+                let device = device_log_name(ctx.state.as_ref(), &device_id).await;
+                debug!(rule = %ctx.rule_name, device = %device, "action: SetDeviceStatePerMode");
                 // Check mode entries in order; apply the first one whose mode is active.
                 let state_to_apply = modes
                     .iter()
@@ -1169,15 +1200,15 @@ fn run_single_action(
 
                 match state_to_apply {
                     None => {
-                        debug!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode — no mode matched and no default, skipping");
+                        debug!(rule = %ctx.rule_name, device = %device, "action: SetDeviceStatePerMode — no mode matched and no default, skipping");
                     }
                     Some(state) => {
                         let topic = format!("homecore/devices/{device_id}/cmd");
-                        info!(rule = %ctx.rule_name, device_id, state = %state, "action: SetDeviceStatePerMode — applying");
+                        info!(rule = %ctx.rule_name, device = %device, state = %state, "action: SetDeviceStatePerMode — applying");
                         match ctx.publish.clone() {
                             Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
                             None => {
-                                warn!(rule = %ctx.rule_name, device_id, "action: SetDeviceStatePerMode — no publish handle")
+                                warn!(rule = %ctx.rule_name, device = %device, "action: SetDeviceStatePerMode — no publish handle")
                             }
                         }
                     }
@@ -1361,7 +1392,8 @@ fn run_single_action(
                     if let Some(attrs) = ctx.device_cache.get(device_id.as_str()) {
                         snapshot.insert(device_id.clone(), attrs.clone());
                     } else {
-                        debug!(rule = %ctx.rule_name, key, device_id, "action: CaptureDeviceState — device not in cache, skipping");
+                        let device = device_log_name(ctx.state.as_ref(), device_id).await;
+                        debug!(rule = %ctx.rule_name, key, device = %device, "action: CaptureDeviceState — device not in cache, skipping");
                     }
                 }
                 let captured_count = snapshot.len();
@@ -1383,6 +1415,7 @@ fn run_single_action(
                         let device_count = snapshot.len();
                         debug!(rule = %ctx.rule_name, key, device_count, "action: RestoreDeviceState — restoring");
                         for (device_id, attrs) in snapshot {
+                            let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                             let state = JsonValue::Object(attrs.into_iter().collect());
                             let topic = format!("homecore/devices/{device_id}/cmd");
                             match ctx.publish.clone() {
@@ -1390,7 +1423,7 @@ fn run_single_action(
                                     ph.publish(&topic, state.to_string().into_bytes()).await?
                                 }
                                 None => {
-                                    warn!(rule = %ctx.rule_name, device_id, "action: RestoreDeviceState — no publish handle");
+                                    warn!(rule = %ctx.rule_name, device = %device, "action: RestoreDeviceState — no publish handle");
                                     break;
                                 }
                             }
@@ -1406,6 +1439,7 @@ fn run_single_action(
                 duration_secs,
                 steps,
             } => {
+                let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                 let n_steps = steps
                     .map(|s| (s as u64).max(2).min(100))
                     .unwrap_or_else(|| duration_secs.max(2).min(100));
@@ -1433,7 +1467,7 @@ fn run_single_action(
                     })
                     .unwrap_or_default();
 
-                debug!(rule = %ctx.rule_name, device_id, n_steps, interval_ms, "action: FadeDevice — starting");
+                debug!(rule = %ctx.rule_name, device = %device, n_steps, interval_ms, "action: FadeDevice — starting");
 
                 for step in 1..=n_steps {
                     tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -1462,12 +1496,12 @@ fn run_single_action(
                     match ctx.publish.clone() {
                         Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
                         None => {
-                            warn!(rule = %ctx.rule_name, device_id, "action: FadeDevice — no publish handle");
+                            warn!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — no publish handle");
                             break;
                         }
                     }
                 }
-                debug!(rule = %ctx.rule_name, device_id, "action: FadeDevice — complete");
+                debug!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — complete");
             }
 
             // ── WaitForExpression ─────────────────────────────────────────────────
@@ -1533,17 +1567,18 @@ async fn execute_script_effect(
     effect: ScriptSideEffect,
     publish: Option<PublishHandle>,
     notify: Option<Arc<NotificationService>>,
+    state_store: Option<StateStore>,
 ) -> Result<()> {
     match effect {
         ScriptSideEffect::SetDeviceState { device_id, state } => {
+            let device = device_log_name(state_store.as_ref(), &device_id).await;
             let topic = format!("homecore/devices/{device_id}/cmd");
-            debug!(device_id, payload = %state, "RunScript: set_device_state");
+            debug!(device = %device, payload = %state, "RunScript: set_device_state");
             match publish {
                 Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
-                None => warn!(
-                    device_id,
-                    "RunScript: set_device_state — no publish handle, dropped"
-                ),
+                None => {
+                    warn!(device = %device, "RunScript: set_device_state — no publish handle, dropped")
+                }
             }
         }
 
@@ -1610,17 +1645,18 @@ async fn execute_script_effect(
 // ---------------------------------------------------------------------------
 
 /// Human-readable summary of an action's target / content for trace output.
-fn action_description(action: &Action) -> String {
+async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> String {
     match action {
         Action::SetDeviceState {
             device_id,
             state,
             track_event_value,
         } => {
+            let device = device_log_name(ctx.state.as_ref(), device_id).await;
             if *track_event_value {
-                format!("{} ← (trigger value)", device_id)
+                format!("{} ← (trigger value)", device)
             } else {
-                format!("{} ← {}", device_id, state)
+                format!("{} ← {}", device, state)
             }
         }
         Action::PublishMqtt { topic, .. } => format!("topic: {}", topic),
@@ -1700,13 +1736,16 @@ fn action_description(action: &Action) -> String {
             timeout_ms,
             ..
         } => {
-            let what = event_type
-                .as_deref()
-                .or(device_id.as_deref())
-                .unwrap_or("any");
+            let what = if let Some(event_type) = event_type.as_deref() {
+                event_type.to_string()
+            } else if let Some(device_id) = device_id.as_deref() {
+                device_log_name(ctx.state.as_ref(), device_id).await
+            } else {
+                "any".to_string()
+            };
             match timeout_ms {
                 Some(t) => format!("{} (timeout: {}ms)", what, t),
-                None => what.into(),
+                None => what,
             }
         }
         Action::WaitForExpression {
@@ -1740,18 +1779,19 @@ fn action_description(action: &Action) -> String {
             modes,
             default_state,
         } => {
+            let device = device_log_name(ctx.state.as_ref(), device_id).await;
             let mode_names: Vec<&str> = modes.iter().map(|e| e.mode.as_str()).collect();
             match default_state {
-                Some(_) => format!(
-                    "{} (modes: [{}] + default)",
-                    device_id,
-                    mode_names.join(", ")
-                ),
-                None => format!("{} (modes: [{}])", device_id, mode_names.join(", ")),
+                Some(_) => format!("{} (modes: [{}] + default)", device, mode_names.join(", ")),
+                None => format!("{} (modes: [{}])", device, mode_names.join(", ")),
             }
         }
         Action::CaptureDeviceState { key, device_ids } => {
-            format!("key={} devices=[{}]", key, device_ids.join(", "))
+            let mut devices = Vec::with_capacity(device_ids.len());
+            for device_id in device_ids {
+                devices.push(device_log_name(ctx.state.as_ref(), device_id).await);
+            }
+            format!("key={} devices=[{}]", key, devices.join(", "))
         }
         Action::RestoreDeviceState { key } => format!("key={}", key),
         Action::FadeDevice {
@@ -1760,10 +1800,11 @@ fn action_description(action: &Action) -> String {
             steps,
             ..
         } => {
+            let device = device_log_name(ctx.state.as_ref(), device_id).await;
             let n = steps
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| duration_secs.to_string());
-            format!("{} over {}s ({} steps)", device_id, duration_secs, n)
+            format!("{} over {}s ({} steps)", device, duration_secs, n)
         }
         Action::DelayPerMode {
             modes,

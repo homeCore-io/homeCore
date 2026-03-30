@@ -266,6 +266,48 @@ paths:
                 $ref: "#/components/schemas/DeviceState"
         "404":
           $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateDevice
+      summary: Update device metadata
+      description: |
+        Updates metadata fields such as `name`, `area`, and `canonical_name`.
+
+        `canonical_name` is the stable, rule-facing identifier used by HomeCore
+        for readable automations. It must be unique across the hub after
+        normalization.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                area:
+                  type: string
+                  nullable: true
+                canonical_name:
+                  type: string
+                  nullable: true
+            example:
+              name: Floor Lamp
+              area: living_room
+              canonical_name: living_room.floor_lamp
+      responses:
+        "200":
+          description: Updated device state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /devices/{id}/state:
     patch:
@@ -1082,6 +1124,11 @@ components:
       properties:
         device_id:
           type: string
+          description: Plugin-owned internal identifier used for MQTT topics and execution
+        canonical_name:
+          type: string
+          nullable: true
+          description: Stable, HomeCore-managed identifier intended for rule authoring and logs
         name:
           type: string
         plugin_id:
@@ -1200,19 +1247,38 @@ components:
 
         | `type` | Additional fields |
         |---|---|
-        | `DeviceStateChanged` | `device_id` (string), `attribute` (string, optional) |
+        | `DeviceStateChanged` | `device` or `device_id` (string), `devices` or `device_ids` (array, optional), `attribute` (string, optional) |
         | `MqttMessage` | `topic_pattern` (string, supports `+` and `#`) |
         | `TimeOfDay` | `time` (HH:MM string), `days` (array of weekday names) |
         | `SunEvent` | `event` (`"Sunrise"` or `"Sunset"`), `offset_minutes` (integer) |
         | `WebhookReceived` | `path` (string) |
         | `ManualTrigger` | no additional fields |
+
+        For device-based triggers, prefer `device` / `devices` in authored
+        rules. These can be:
+
+        - a `canonical_name` such as `living_room.floor_lamp`
+        - a unique display name such as `Kitchen Speaker`
+        - a raw `device_id` for advanced/manual cases
       required: [type]
       properties:
         type:
           type: string
           enum: [DeviceStateChanged, MqttMessage, TimeOfDay, SunEvent, WebhookReceived, ManualTrigger]
+        device:
+          type: string
+        devices:
+          type: array
+          items:
+            type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
+        device_ids:
+          type: array
+          items:
+            type: string
+          description: Backward-compatible alias for `devices`
         attribute:
           type: string
         topic_pattern:
@@ -1236,7 +1302,8 @@ components:
         DeviceStateChanged:
           value:
             type: DeviceStateChanged
-            device_id: light.virtual_01
+            device: living_room.floor_lamp
+            devices: [hall.floor_lamp]
             attribute: on
         WebhookReceived:
           value:
@@ -1255,7 +1322,7 @@ components:
 
         | `type` | Additional fields |
         |---|---|
-        | `DeviceState` | `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
+        | `DeviceState` | `device` or `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
         | `TimeWindow` | `start` (HH:MM), `end` (HH:MM) |
         | `ScriptExpression` | `script` (Rhai expression returning bool) |
       required: [type]
@@ -1263,8 +1330,11 @@ components:
         type:
           type: string
           enum: [DeviceState, TimeWindow, ScriptExpression]
+        device:
+          type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
         attribute:
           type: string
         op:
@@ -1285,7 +1355,7 @@ components:
 
         | `type` | Key fields |
         |---|---|
-        | `SetDeviceState` | `device_id`, `state` (object) |
+        | `SetDeviceState` | `device` or `device_id`, `state` (object) |
         | `PublishMqtt` | `topic`, `payload` (string), `retain` (bool) |
         | `CallService` | `url`, `method`, `body` |
         | `FireEvent` | `event_type`, `payload` (object) |
@@ -1294,13 +1364,20 @@ components:
         | `Delay` | `duration_ms` (integer) |
         | `Parallel` | `actions` (array — run concurrently) |
         | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
+
+        For device-targeting actions, prefer `device` in authored rules so the
+        automation remains readable and stable across plugin-specific ID
+        changes.
       required: [type]
       properties:
         type:
           type: string
           enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil]
+        device:
+          type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
         state:
           type: object
           additionalProperties: true
