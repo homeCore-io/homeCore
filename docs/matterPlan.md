@@ -6,59 +6,60 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
 2. **Expose HomeCore devices** as Matter-compliant endpoints to external Matter controllers
 3. Provide **persistent fabric management**, subscriptions, and state synchronization
 
-### Current Phase Status (2026-03-29)
+### Current Phase Status (2026-03-30)
 - Phase 0: complete
   - TypeScript plugin scaffold, WebSocket handshake/publish/subscribe, controller command plane, deterministic runtime simulation mode, and integration tests are passing.
   - Verified command result contracts for success/error flows including structured codes and correlation IDs.
 - Phase 1: complete
   - Completed passes: runtime-backed commissioning flow (with deterministic simulation fallback), controller metrics/status publishing, runtime commissioning snapshot surfaced in command results, reconnect subscription reattach telemetry, controller brightness/lock/cover command handling, runtime-originated brightness callback publishing, controller correlation-id deduplication/idempotency for device commands, device command execution result/metrics reporting, and validated mapper normalization tests for initial device set.
   - Completed bridge baseline: endpoint inventory from controller registry, deterministic exposed endpoint IDs, include/exclude/device-type filtering, reconnect-safe state topic subscriptions, inbound HomeCore state tracking per bridged endpoint, bridge endpoint snapshot inventory publication, bridge observability metrics in plugin metrics publishing, and bridge command-topic forwarding into HomeCore device command topics (including endpoint-ID addressed routing and bridge command_result success/error reporting).
-- Phase 2: next
-  - In progress: runtime and bridge command/control hardening is active and test-backed.
-  - Completed in this session:
-    - Runtime/controller lifecycle:
-      - Runtime node snapshot API and controller reinterview sync of endpoint metadata + device registry.
-      - Runtime reinterview/remove hooks hardened with best-effort runtime API probing and deterministic fallback behavior.
-    - Bridge admin/control plane:
-      - Admin actions completed and exercised: `list_endpoints`, `get_endpoint`, `get_bridge_metrics`, `refresh_endpoints`.
-      - Shared topic routing supports device targets by `homecore_id`, `device_id`, and `exposed_endpoint_id`.
-      - `exposed_endpoint_id` parsing now supports numeric and numeric-string forms.
-      - Structured validation errors added:
-        - `INVALID_ENDPOINT_ID` for malformed/out-of-range endpoint IDs.
-        - `ENDPOINT_NOT_FOUND` for valid-but-missing endpoint IDs.
-      - Pagination compatibility for `list_endpoints` (`limit`/`offset` accept numeric strings, malformed values fall back safely).
-    - Device-type command parity:
-      - Switch command semantics added end-to-end (bridge translation + controller handling).
-      - Shade parity added (treated like cover in controller and bridge command translation).
-      - Cover/shade alias support: `position_pct` accepted in controller command normalization.
-      - Controller safety tightened: non-actuator types no longer implicitly treated as light devices.
-    - Correlation/idempotency contract:
-      - Explicit bridge `command` payloads now inherit top-level `correlation_id` when missing inside command body.
+- Phase 2: active (runtime API concretization sprint)
+  - Completed in prior session:
+    - Runtime/controller lifecycle: Node snapshot API and controller reinterview sync of endpoint metadata + device registry.
+    - Bridge admin/control plane: Admin actions (list_endpoints, get_endpoint, get_bridge_metrics, refresh_endpoints), shared topic routing, endpoint-ID parsing, validation errors, pagination.
+    - Device-type command parity: Switch, shade, cover/shade alias, actuator safety, correlation propagation.
+  - Completed in this session (2026-03-30):
+    - **Runtime robustness enhancement** (commit c23d7a9):
+      - Enhanced `tryInterviewNodeEndpoints()` with detailed diagnostic logging for each attempt method.
+      - Added support for additional matter.js API patterns: `discoverNode`, `forgetNode`, `decommissionNode`.
+      - Improved error handling with method tracking and context in logs.
+      - Graceful fallback for simulation and real modes maintained.
+    - **Runtime node discovery** (commit e8804b5):
+      - Added `getKnownNodeIds()` to discover all managed runtime nodes.
+      - Added `getNodeInfo()` to query node capabilities with full endpoint metadata (clustering, homecore mappings).
+      - Attempt to fetch runtime-level node info when matter.js API available.
+    - **Discovery integration tests** (commit cfec5ac):
+      - 6 new tests covering getKnownNodeIds() discovery, getNodeInfo() endpoint details, null/empty scenarios.
+      - Tests verify node info accuracy and removal tracking.
+      - Total test count increased from 71 to 77; all passing.
   - Verified baseline:
-    - Plugin tests: `tests/phase0.test.ts` + `tests/mapper.test.ts` passing (71 total tests).
-    - Build: `npm run build` passing.
-    - Latest checkpoint commit in `plugins/hc-matter`: `3720675`.
-  - Remaining for Phase 2 completion:
-    - Replace runtime placeholders with concrete matter.js controller operations for:
-      - node interview/reinterview endpoint discovery,
-      - node/fabric removal lifecycle,
-      - subscription attachment to real device attribute streams.
+    - Plugin tests: `tests/phase0.test.ts` + `tests/mapper.test.ts` passing (77 total tests, +6 in this session).
+    - Build: `npm run build` passing clean (tsc).
+    - Latest checkpoint commit in `plugins/hc-matter`: `cfec5ac` (discovery integration).
+    - All 3 session commits integrated: c23d7a9 → e8804b5 → cfec5ac.
+  - Remaining for Phase 2 completion (after runtime API work):
     - Implement concrete bridge endpoint exposure to external Matter controllers (not only HomeCore topic forwarding).
     - Expand supported device-type mappings beyond current actuator baseline with real matter.js cluster bindings.
+    - Optional: integrate with real matter.js Controller discovery if/when full controller support is added.
 
-### Session Resume Checklist (2026-03-29)
+### Session Resume Checklist (2026-03-30)
 1. Workspace entry point:
    - `cd plugins/hc-matter`
-2. Quick verification before coding:
-   - `npm test -- --run`
-   - `npm run build`
-3. Highest-value next implementation target:
-   - `src/matter-runtime.ts`: replace best-effort interview/remove hooks with concrete matter.js node APIs.
-4. Then wire controller/bridge to concrete runtime outputs:
-   - `src/controller/index.ts`
-   - `src/bridge/index.ts`
-5. Keep regression coverage in lockstep:
-   - extend `tests/phase0.test.ts` for each new runtime or bridge contract.
+2. Latest session commits:
+   - `c23d7a9`: Runtime diagnostic robustness (interview/removal logging)
+   - `e8804b5`: Node discovery and queryability (getKnownNodeIds, getNodeInfo)
+   - `cfec5ac`: Discovery integration tests (6 new tests, 77 total)
+3. Verification status:
+   - Tests: 77/77 passing (baseline 71, +6 new discovery tests)
+   - Build: tsc clean, no errors
+   - All commits integrated and clean tree
+4. Next highest-priority work:
+   - Implement concrete bridge endpoint exposure (Phase 2 remaining)
+   - Expand device-type mappings with matter.js cluster bindings
+5. Maintenance checklist:
+   - Keep tests in lockstep with each implementation pass
+   - Maintain simulation mode compatibility
+   - Commit after each logical implementation unit
 
 ### Why Start Fresh with matter.js
 - **Prior approach** (Rust matter-rs): Complex protocol stack, steep async/embassy learning curve, limited ecosystem maturity
