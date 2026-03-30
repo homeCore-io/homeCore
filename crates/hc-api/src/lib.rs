@@ -21,6 +21,7 @@ use tracing::info;
 pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
+pub mod dashboard_store;
 pub mod event_log;
 pub mod group_store;
 pub mod handlers;
@@ -31,6 +32,7 @@ pub mod ws;
 
 use auth_middleware::require_auth;
 use backup::BackupPaths;
+use dashboard_store::{DashboardStore, DashboardStoreData};
 use event_log::EventLog;
 use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
@@ -86,6 +88,10 @@ pub struct AppState {
     pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
     /// Persistent store for rule groups (groups.json in rules dir).
     pub group_store: Option<Arc<GroupStore>>,
+    /// Dashboard definitions and per-user defaults.
+    pub dashboards: Option<Arc<RwLock<DashboardStoreData>>>,
+    /// Persistent store for dashboards (`data/dashboards.json`).
+    pub dashboard_store: Option<Arc<DashboardStore>>,
     /// Live calendar store — loaded `.ics` files with expanded events.
     /// `None` when no calendar directory is configured.
     pub calendar: Option<CalendarHandle>,
@@ -185,6 +191,8 @@ impl AppState {
             fire_history: None,
             rule_groups: None,
             group_store: None,
+            dashboards: None,
+            dashboard_store: None,
             calendar: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
@@ -219,6 +227,13 @@ impl AppState {
     pub fn with_group_store(mut self, gs: GroupStore, groups: Vec<RuleGroup>) -> Self {
         self.group_store = Some(Arc::new(gs));
         self.rule_groups = Some(Arc::new(RwLock::new(groups)));
+        self
+    }
+
+    /// Attach the dashboard store and pre-loaded dashboards.
+    pub fn with_dashboard_store(mut self, store: DashboardStore, data: DashboardStoreData) -> Self {
+        self.dashboard_store = Some(Arc::new(store));
+        self.dashboards = Some(Arc::new(RwLock::new(data)));
         self
     }
 
@@ -351,6 +366,20 @@ pub fn router(state: AppState) -> Router {
             post(handlers::set_group_enabled),
         )
         // Scenes
+        .route(
+            "/dashboards",
+            get(handlers::list_dashboards).post(handlers::create_dashboard),
+        )
+        .route(
+            "/dashboards/:id",
+            get(handlers::get_dashboard)
+                .put(handlers::update_dashboard)
+                .delete(handlers::delete_dashboard),
+        )
+        .route(
+            "/dashboards/:id/default",
+            post(handlers::set_default_dashboard),
+        )
         .route(
             "/scenes",
             get(handlers::list_scenes).post(handlers::create_scene),

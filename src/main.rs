@@ -2,6 +2,7 @@ mod plugin_launcher;
 
 use anyhow::Result;
 use hc_api::{
+    dashboard_store::DashboardStore,
     group_store::{groups_path, GroupStore},
     logs::LogStreamState,
     rule_file_store::RuleFileStore,
@@ -927,6 +928,11 @@ async fn main() -> Result<()> {
         tracing::warn!(error = %e, "Failed to load rule groups — starting with empty group list");
         Vec::new()
     });
+    let dashboard_store = DashboardStore::new(base_dir.join("data").join("dashboards.json"));
+    let dashboard_data = dashboard_store.load().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "Failed to load dashboards — starting with empty dashboard list");
+        Default::default()
+    });
 
     let backup_paths = hc_api::backup::BackupPaths {
         state_db_path: std::path::PathBuf::from(&config.storage.state_db_path),
@@ -951,7 +957,8 @@ async fn main() -> Result<()> {
     })
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
-    .with_group_store(group_store, groups);
+    .with_group_store(group_store, groups)
+    .with_dashboard_store(dashboard_store, dashboard_data);
 
     let app_state = if let Some(cal) = calendar_handle {
         app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)

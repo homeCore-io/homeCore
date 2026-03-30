@@ -627,6 +627,135 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   # ---------------------------------------------------------------------------
+  # Dashboards
+  # ---------------------------------------------------------------------------
+  /dashboards:
+    get:
+      operationId: listDashboards
+      summary: List dashboards visible to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of dashboards with caller-specific default flag
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DashboardResponse"
+    post:
+      operationId: createDashboard
+      summary: Create a dashboard owned by the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "201":
+          description: Created dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+
+  /dashboards/{id}:
+    get:
+      operationId: getDashboard
+      summary: Get one dashboard if it is visible to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateDashboard
+      summary: Replace a dashboard definition
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "200":
+          description: Updated dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteDashboard
+      summary: Delete a dashboard owned by the authenticated user (or by any user if Admin)
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/default:
+    post:
+      operationId: setDefaultDashboard
+      summary: Set the caller's default dashboard preference
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard with caller-specific `is_default=true`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
   # Scenes
   # ---------------------------------------------------------------------------
   /scenes:
@@ -1115,6 +1244,135 @@ components:
       properties:
         role:
           $ref: "#/components/schemas/Role"
+
+    # ---- Dashboards ----
+
+    DashboardVisibility:
+      type: string
+      enum: [private, shared, public]
+
+    DashboardBreakpoint:
+      type: string
+      enum: [mobile, tablet, desktop, tv]
+
+    DashboardRefreshPolicy:
+      type: string
+      enum: [live, poll, manual, passive]
+
+    DashboardWidgetType:
+      type: string
+      enum:
+        - device_grid
+        - device_list
+        - device_tile
+        - stat_summary
+        - mode_chips
+        - scene_row
+        - event_feed
+        - history_chart
+        - media_player
+        - camera_video
+        - web_embed
+        - markdown
+        - dashboard_link
+
+    DashboardWidgetPlacement:
+      type: object
+      required: [widget_id, x, y, w, h]
+      properties:
+        widget_id:
+          type: string
+        x:
+          type: integer
+        y:
+          type: integer
+        w:
+          type: integer
+        h:
+          type: integer
+
+    DashboardLayout:
+      type: object
+      required: [breakpoint, columns, row_height, gap, placements]
+      properties:
+        breakpoint:
+          $ref: "#/components/schemas/DashboardBreakpoint"
+        columns:
+          type: integer
+        row_height:
+          type: number
+        gap:
+          type: number
+        placements:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardWidgetPlacement"
+
+    DashboardWidget:
+      type: object
+      required: [id, type, title, refresh_policy, config]
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/DashboardWidgetType"
+        title:
+          type: string
+        subtitle:
+          type: string
+          nullable: true
+        refresh_policy:
+          $ref: "#/components/schemas/DashboardRefreshPolicy"
+        config:
+          type: object
+          additionalProperties: true
+
+    DashboardDefinition:
+      type: object
+      required:
+        [id, name, owner_user_id, visibility, tags, icon, created_at, updated_at, layouts, widgets]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        owner_user_id:
+          type: string
+          description: Server-owned user identifier; non-admin create/update requests cannot take ownership of another user's dashboard
+        visibility:
+          $ref: "#/components/schemas/DashboardVisibility"
+        tags:
+          type: array
+          items:
+            type: string
+        icon:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        layouts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardLayout"
+        widgets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardWidget"
+
+    DashboardResponse:
+      allOf:
+        - $ref: "#/components/schemas/DashboardDefinition"
+        - type: object
+          properties:
+            is_default:
+              type: boolean
+              description: Derived per authenticated user; not a shared dashboard property
 
     # ---- Devices ----
 

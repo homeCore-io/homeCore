@@ -17,8 +17,9 @@
 //! ```
 //!
 //! Available guards: [`DevicesRead`], [`DevicesWrite`], [`AutomationsRead`],
-//! [`AutomationsWrite`], [`ScenesRead`], [`ScenesWrite`], [`AreasRead`],
-//! [`AreasWrite`], [`PluginsRead`], [`PluginsWrite`].
+//! [`AutomationsWrite`], [`DashboardsRead`], [`DashboardsWrite`],
+//! [`ScenesRead`], [`ScenesWrite`], [`AreasRead`], [`AreasWrite`],
+//! [`PluginsRead`], [`PluginsWrite`].
 
 use async_trait::async_trait;
 use axum::{
@@ -202,6 +203,8 @@ scope_extractor!(DevicesRead, "devices:read");
 scope_extractor!(DevicesWrite, "devices:write");
 scope_extractor!(AutomationsRead, "automations:read");
 scope_extractor!(AutomationsWrite, "automations:write");
+scope_extractor!(DashboardsRead, "dashboards:read");
+scope_extractor!(DashboardsWrite, "dashboards:write");
 scope_extractor!(ScenesRead, "scenes:read");
 scope_extractor!(ScenesWrite, "scenes:write");
 scope_extractor!(AreasRead, "areas:read");

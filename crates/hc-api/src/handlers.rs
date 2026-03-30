@@ -8,6 +8,7 @@ use axum::{
 };
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
+use hc_types::dashboard::{DashboardDefinition, DashboardResponse, DashboardVisibility};
 use hc_types::device::{Area, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
@@ -16,8 +17,8 @@ use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 use crate::auth_middleware::{
-    AreasRead, AreasWrite, AutomationsRead, AutomationsWrite, DevicesRead, DevicesWrite,
-    PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
+    AreasRead, AreasWrite, AutomationsRead, AutomationsWrite, DashboardsRead, DashboardsWrite,
+    DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
 };
 use crate::group_store::RuleGroup;
 use crate::AppState;
@@ -1612,6 +1613,310 @@ pub async fn delete_automation(
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------- Dashboards ----------
+
+fn dashboard_visible_to(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
+    claims.is_admin()
+        || dashboard.owner_user_id == claims.uid
+        || matches!(
+            dashboard.visibility,
+            DashboardVisibility::Shared | DashboardVisibility::Public
+        )
+}
+
+fn dashboard_mutable_by(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
+    claims.is_admin() || dashboard.owner_user_id == claims.uid
+}
+
+fn dashboard_response_for(
+    dashboard: &DashboardDefinition,
+    default_id: Option<&str>,
+) -> DashboardResponse {
+    DashboardResponse {
+        dashboard: dashboard.clone(),
+        is_default: default_id == Some(dashboard.id.as_str()),
+    }
+}
+
+pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let data = handle.read().await;
+    let default_id = data.user_defaults.get(&user.0.uid).map(String::as_str);
+    let mut dashboards: Vec<_> = data
+        .dashboards
+        .iter()
+        .filter(|dashboard| dashboard_visible_to(&user.0, dashboard))
+        .map(|dashboard| dashboard_response_for(dashboard, default_id))
+        .collect();
+    dashboards.sort_by(|a, b| a.dashboard.name.cmp(&b.dashboard.name));
+    Json(dashboards).into_response()
+}
+
+pub async fn get_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let data = handle.read().await;
+    match data.dashboards.iter().find(|dashboard| dashboard.id == id) {
+        Some(dashboard) if dashboard_visible_to(&user.0, dashboard) => {
+            Json(dashboard_response_for(
+                dashboard,
+                data.user_defaults.get(&user.0.uid).map(String::as_str),
+            ))
+            .into_response()
+        }
+        Some(_) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "dashboard access denied" })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "dashboard not found" })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn create_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Json(mut dashboard): Json<DashboardDefinition>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let now = chrono::Utc::now();
+    if dashboard.id.trim().is_empty() {
+        dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
+    }
+    dashboard.owner_user_id = user.0.uid.clone();
+    dashboard.created_at = now;
+    dashboard.updated_at = now;
+
+    let response = {
+        let mut data = handle.write().await;
+        if data.dashboards.iter().any(|item| item.id == dashboard.id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "dashboard id already exists" })),
+            )
+                .into_response();
+        }
+        data.dashboards.push(dashboard.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        dashboard_response_for(
+            &dashboard,
+            data.user_defaults.get(&user.0.uid).map(String::as_str),
+        )
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+pub async fn update_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+    Json(mut dashboard): Json<DashboardDefinition>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        if !dashboard_mutable_by(&user.0, &existing) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "dashboard access denied" })),
+            )
+                .into_response();
+        }
+
+        dashboard.id = existing.id.clone();
+        dashboard.owner_user_id = existing.owner_user_id.clone();
+        dashboard.created_at = existing.created_at;
+        dashboard.updated_at = chrono::Utc::now();
+
+        if let Some(pos) = data.dashboards.iter().position(|item| item.id == id) {
+            data.dashboards[pos] = dashboard.clone();
+        }
+
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+
+        dashboard_response_for(
+            &dashboard,
+            data.user_defaults.get(&user.0.uid).map(String::as_str),
+        )
+    };
+
+    Json(response).into_response()
+}
+
+pub async fn delete_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        if !dashboard_mutable_by(&user.0, &existing) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "dashboard access denied" })),
+            )
+                .into_response();
+        }
+
+        data.dashboards.retain(|item| item.id != id);
+        data.user_defaults
+            .retain(|_, dashboard_id| dashboard_id != &id);
+
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn set_default_dashboard(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        if !dashboard_visible_to(&user.0, &existing) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "dashboard access denied" })),
+            )
+                .into_response();
+        }
+
+        data.user_defaults.insert(user.0.uid.clone(), id.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+
+        dashboard_response_for(&existing, Some(id.as_str()))
+    };
+
+    Json(response).into_response()
 }
 
 // ---------- Scenes ----------
@@ -3373,15 +3678,21 @@ pub async fn list_calendar_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite};
+    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite, DashboardsWrite};
+    use crate::dashboard_store::{DashboardStore, DashboardStoreData};
     use axum::extract::{Path, State};
     use axum::response::IntoResponse;
     use chrono::Utc;
     use hc_auth::JwtService;
     use hc_core::EventBus;
+    use hc_types::dashboard::{
+        DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardRefreshPolicy,
+        DashboardVisibility, DashboardWidget, DashboardWidgetPlacement, DashboardWidgetType,
+    };
     use hc_types::device::DeviceState;
     use http_body_util::BodyExt;
     use serde::de::DeserializeOwned;
+    use serde_json::json;
     use uuid::Uuid;
 
     fn temp_db_paths(prefix: &str) -> (String, String) {
@@ -3401,7 +3712,11 @@ mod tests {
             .expect("state store opens");
         let bus = EventBus::new(128);
         let jwt = JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24);
-        AppState::new(store, bus, None, None, None, jwt, vec![], None)
+        let dashboard_store = DashboardStore::new(
+            std::env::temp_dir().join(format!("hc_api_dashboards_{}.json", Uuid::new_v4())),
+        );
+        AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
+            .with_dashboard_store(dashboard_store, DashboardStoreData::default())
     }
 
     async fn seed_device(state: &AppState, id: &str, area: Option<&str>) {
@@ -3420,6 +3735,41 @@ mod tests {
             .expect("body collect")
             .to_bytes();
         serde_json::from_slice::<T>(&bytes).expect("json parse")
+    }
+
+    fn sample_dashboard(id: &str, owner_user_id: &str) -> DashboardDefinition {
+        DashboardDefinition {
+            id: id.to_string(),
+            name: "Home".to_string(),
+            description: Some("Test dashboard".to_string()),
+            owner_user_id: owner_user_id.to_string(),
+            visibility: DashboardVisibility::Private,
+            tags: vec!["home".to_string()],
+            icon: "dashboard".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            layouts: vec![DashboardLayout {
+                breakpoint: DashboardBreakpoint::Desktop,
+                columns: 12,
+                row_height: 160.0,
+                gap: 12.0,
+                placements: vec![DashboardWidgetPlacement {
+                    widget_id: "summary".to_string(),
+                    x: 0,
+                    y: 0,
+                    w: 12,
+                    h: 1,
+                }],
+            }],
+            widgets: vec![DashboardWidget {
+                id: "summary".to_string(),
+                r#type: DashboardWidgetType::StatSummary,
+                title: "Summary".to_string(),
+                subtitle: None,
+                refresh_policy: DashboardRefreshPolicy::Live,
+                config: json!({"metrics":["devices"]}),
+            }],
+        }
     }
 
     #[tokio::test]
@@ -3557,5 +3907,37 @@ mod tests {
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);
         assert_eq!(d3.area.as_deref(), Some("Kitchen"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_create_sets_owner_and_default_can_be_selected() {
+        let state = mk_state().await;
+        let claims = whitelist_claims();
+        let owner_id = claims.uid.clone();
+
+        let resp = create_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims.clone()),
+            Json(sample_dashboard("dash_1", "ignored-owner")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created: DashboardResponse = parse_json(resp).await;
+        assert_eq!(created.dashboard.owner_user_id, owner_id);
+        assert!(!created.is_default);
+
+        let resp = set_default_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims),
+            Path("dash_1".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated: DashboardResponse = parse_json(resp).await;
+        assert!(updated.is_default);
     }
 }
