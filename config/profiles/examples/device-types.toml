@@ -310,13 +310,25 @@ description = "Audio/video player (Sonos, Chromecast, etc.)"
   type   = "string"
   access = "rw"
 
-  [types.media_player.attributes.track_title]
+  [types.media_player.attributes.media_title]
   type   = "string"
   access = "r"
 
-  [types.media_player.attributes.track_artist]
+  [types.media_player.attributes.media_artist]
   type   = "string"
   access = "r"
+
+  [types.media_player.attributes.media_album]
+  type   = "string"
+  access = "r"
+
+  [types.media_player.attributes.media_duration]
+  type   = "integer"
+  access = "r"
+
+  [types.media_player.attributes.media_position]
+  type   = "integer"
+  access = "rw"
 
   [types.media_player.attributes.shuffle]
   type   = "boolean"
@@ -324,8 +336,24 @@ description = "Audio/video player (Sonos, Chromecast, etc.)"
 
   [types.media_player.attributes.repeat]
   type   = "string"
-  enum   = ["off", "one", "all"]
+  enum   = ["none", "one", "all"]
   access = "rw"
+
+  [types.media_player.attributes.group_coordinator]
+  type   = "string"
+  access = "r"
+
+  [types.media_player.attributes.group_members]
+  type   = "object"
+  access = "r"
+
+  [types.media_player.attributes.available_favorites]
+  type   = "object"
+  access = "r"
+
+  [types.media_player.attributes.available_playlists]
+  type   = "object"
+  access = "r"
 
 
 # ---------------------------------------------------------------------------

@@ -51,8 +51,12 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
     };
 
     let (state_db_bytes, history_db_bytes) = if let Some(bp) = &s.backup_paths {
-        let state_sz = std::fs::metadata(&bp.state_db_path).map(|m| m.len()).unwrap_or(0);
-        let hist_sz  = std::fs::metadata(&bp.history_db_path).map(|m| m.len()).unwrap_or(0);
+        let state_sz = std::fs::metadata(&bp.state_db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let hist_sz = std::fs::metadata(&bp.history_db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         (state_sz, hist_sz)
     } else {
         (0, 0)
@@ -77,6 +81,8 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
 pub struct DeviceListQuery {
     #[serde(default)]
     pub include_schema: bool,
+    /// Optional device type filter (e.g. `media_player`).
+    pub device_type: Option<String>,
     /// Maximum number of devices to return (default: all).
     pub limit: Option<usize>,
     /// Number of devices to skip before returning results (default: 0).
@@ -90,12 +96,34 @@ pub async fn list_devices(
 ) -> impl IntoResponse {
     let all_devices = match s.store.list_devices().await {
         Ok(d) => d,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
-    let total = all_devices.len();
+    let filtered: Vec<_> = all_devices
+        .into_iter()
+        .filter(|device| {
+            params
+                .device_type
+                .as_deref()
+                .map(|wanted| device.device_type.as_deref() == Some(wanted))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let total = filtered.len();
     let offset = params.offset.unwrap_or(0);
-    let page: Vec<_> = all_devices.into_iter().skip(offset).take(params.limit.unwrap_or(usize::MAX)).collect();
+    let page: Vec<_> = filtered
+        .into_iter()
+        .skip(offset)
+        .take(params.limit.unwrap_or(usize::MAX))
+        .collect();
 
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
@@ -110,7 +138,12 @@ pub async fn list_devices(
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(page.len());
     for device in page {
         let mut entry = serde_json::to_value(&device).unwrap_or(json!({}));
-        let schema = s.store.get_device_schema(&device.device_id).await.ok().flatten();
+        let schema = s
+            .store
+            .get_device_schema(&device.device_id)
+            .await
+            .ok()
+            .flatten();
         entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
         out.push(entry);
     }
@@ -124,8 +157,14 @@ pub async fn get_device(
 ) -> impl IntoResponse {
     match s.store.get_device(&id).await {
         Ok(Some(device)) => (StatusCode::OK, Json(json!(device))),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "device not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -136,8 +175,14 @@ pub async fn get_device_schema(
 ) -> impl IntoResponse {
     match s.store.get_device_schema(&id).await {
         Ok(Some(schema)) => (StatusCode::OK, Json(json!(schema))),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "schema not found" }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "schema not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -148,7 +193,10 @@ pub async fn command_device(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     if let Err(e) = publish_device_command(&s, &id, body).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        );
     }
 
     (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
@@ -193,11 +241,20 @@ pub async fn update_device(
             }
             match s.store.upsert_device(&device).await {
                 Ok(_) => (StatusCode::OK, Json(json!(device))),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                ),
             }
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "device not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -208,10 +265,18 @@ pub async fn delete_device(
 ) -> impl IntoResponse {
     match s.store.delete_device(&id).await {
         Ok(false) => {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+                .into_response();
         }
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
         Ok(true) => {}
     }
@@ -229,10 +294,14 @@ pub async fn delete_device(
         vec![]
     };
 
-    (StatusCode::OK, Json(json!({
-        "deleted": true,
-        "affected_rules": affected_rules,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "deleted": true,
+            "affected_rules": affected_rules,
+        })),
+    )
+        .into_response()
 }
 
 /// `PATCH /api/v1/devices`
@@ -251,15 +320,30 @@ pub async fn bulk_patch_devices(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
-        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-        None => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "ids array required" }))).into_response(),
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "ids array required" })),
+            )
+                .into_response()
+        }
     };
 
     let new_area: Option<Option<String>> = if body.get("area").is_some() {
         Some(match body["area"].as_str() {
             Some(a) => Some(a.to_string()),
             None if body["area"].is_null() => None,
-            _ => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "area must be a string or null" }))).into_response(),
+            _ => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "area must be a string or null" })),
+                )
+                    .into_response()
+            }
         })
     } else {
         None // no area key — nothing to do yet (future: other bulk fields)
@@ -275,16 +359,30 @@ pub async fn bulk_patch_devices(
                     device.area = area.clone();
                 }
                 if let Err(e) = s.store.upsert_device(&device).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
                 }
                 updated += 1;
             }
             Ok(None) => not_found.push(id.clone()),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
         }
     }
 
-    (StatusCode::OK, Json(json!({ "updated": updated, "not_found": not_found }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "updated": updated, "not_found": not_found })),
+    )
+        .into_response()
 }
 
 /// `DELETE /api/v1/devices`
@@ -301,8 +399,17 @@ pub async fn bulk_delete_devices(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
-        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-        None => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "ids array required" }))).into_response(),
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "ids array required" })),
+            )
+                .into_response()
+        }
     };
 
     let mut deleted = 0usize;
@@ -312,7 +419,13 @@ pub async fn bulk_delete_devices(
     for id in &ids {
         match s.store.delete_device(id).await {
             Ok(false) => not_found.push(id.clone()),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
             Ok(true) => {
                 deleted += 1;
                 if let Some(rfs) = &s.rule_file_store {
@@ -324,18 +437,24 @@ pub async fn bulk_delete_devices(
                                 }
                             }
                         }
-                        Err(e) => tracing::warn!(device_id = %id, error = %e, "bulk_delete_devices: failed to nullify rule refs"),
+                        Err(e) => {
+                            tracing::warn!(device_id = %id, error = %e, "bulk_delete_devices: failed to nullify rule refs")
+                        }
                     }
                 }
             }
         }
     }
 
-    (StatusCode::OK, Json(json!({
-        "deleted": deleted,
-        "not_found": not_found,
-        "affected_rules": affected_rules,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "deleted": deleted,
+            "not_found": not_found,
+            "affected_rules": affected_rules,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -357,17 +476,32 @@ pub async fn device_history(
     Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
     let now = chrono::Utc::now();
-    let from = params.from.unwrap_or_else(|| now - chrono::Duration::hours(24));
+    let from = params
+        .from
+        .unwrap_or_else(|| now - chrono::Duration::hours(24));
     let to = params.to.unwrap_or(now);
     let limit = params.limit.unwrap_or(500).min(5_000);
 
-    match s.store.query_history(&id, from, to, params.attribute.as_deref(), limit).await {
-        Ok(entries) => (StatusCode::OK, Json(json!(entries.iter().map(|e| json!({
-            "attribute":   e.attribute,
-            "value":       e.value,
-            "recorded_at": e.recorded_at,
-        })).collect::<Vec<_>>()))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    match s
+        .store
+        .query_history(&id, from, to, params.attribute.as_deref(), limit)
+        .await
+    {
+        Ok(entries) => (
+            StatusCode::OK,
+            Json(json!(entries
+                .iter()
+                .map(|e| json!({
+                    "attribute":   e.attribute,
+                    "value":       e.value,
+                    "recorded_at": e.recorded_at,
+                }))
+                .collect::<Vec<_>>())),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -393,7 +527,11 @@ pub async fn create_timer(
     };
 
     if let Ok(Some(_)) = s.store.get_device(&device_id).await {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "timer already exists" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "timer already exists" })),
+        )
+            .into_response();
     }
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
@@ -406,7 +544,11 @@ pub async fn create_timer(
 
     match s.store.upsert_device(&dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -438,20 +580,36 @@ pub async fn get_timer(
         format!("timer_{id}")
     };
     match s.store.get_device(&device_id).await {
-        Ok(Some(dev)) => (StatusCode::OK, Json(json!(compute_timer_remaining(dev)))).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "timer not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Some(dev)) => {
+            (StatusCode::OK, Json(json!(compute_timer_remaining(dev)))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "timer not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// For a running timer, recompute `remaining_secs` from `started_at` + `duration_secs`
 /// so callers always see an accurate countdown without requiring periodic store writes.
-fn compute_timer_remaining(mut dev: hc_types::device::DeviceState) -> hc_types::device::DeviceState {
+fn compute_timer_remaining(
+    mut dev: hc_types::device::DeviceState,
+) -> hc_types::device::DeviceState {
     let is_running = dev.attributes.get("state").and_then(Value::as_str) == Some("running");
     if !is_running {
         return dev;
     }
-    let duration_secs = dev.attributes.get("duration_secs").and_then(Value::as_u64).unwrap_or(0);
+    let duration_secs = dev
+        .attributes
+        .get("duration_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let started_at = dev
         .attributes
         .get("started_at")
@@ -461,7 +619,8 @@ fn compute_timer_remaining(mut dev: hc_types::device::DeviceState) -> hc_types::
     if let Some(started) = started_at {
         let elapsed = (chrono::Utc::now() - started).num_seconds().max(0) as u64;
         let remaining = duration_secs.saturating_sub(elapsed);
-        dev.attributes.insert("remaining_secs".into(), json!(remaining));
+        dev.attributes
+            .insert("remaining_secs".into(), json!(remaining));
     }
     dev
 }
@@ -488,7 +647,11 @@ pub async fn create_switch(
     };
 
     if let Ok(Some(_)) = s.store.get_device(&device_id).await {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "switch already exists" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "switch already exists" })),
+        )
+            .into_response();
     }
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
@@ -498,7 +661,11 @@ pub async fn create_switch(
 
     match s.store.upsert_device(&dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -524,17 +691,30 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
 pub async fn list_modes(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
     let path = match s.modes_path.as_ref() {
         Some(p) => p.as_ref().clone(),
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "modes not configured" })),
+            )
+        }
     };
     let configs = match hc_core::mode_manager::load_modes(&path) {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        }
     };
     let devices = s.store.list_devices().await.unwrap_or_default();
-    let result: Vec<Value> = configs.into_iter().map(|cfg| {
-        let state = devices.iter().find(|d| d.device_id == cfg.id);
-        json!({ "config": cfg, "state": state })
-    }).collect();
+    let result: Vec<Value> = configs
+        .into_iter()
+        .map(|cfg| {
+            let state = devices.iter().find(|d| d.device_id == cfg.id);
+            json!({ "config": cfg, "state": state })
+        })
+        .collect();
     (StatusCode::OK, Json(json!(result)))
 }
 
@@ -546,24 +726,44 @@ pub async fn get_mode(
 ) -> impl IntoResponse {
     let path = match s.modes_path.as_ref() {
         Some(p) => p.as_ref().clone(),
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "modes not configured" })),
+            )
+                .into_response()
+        }
     };
     let configs = match hc_core::mode_manager::load_modes(&path) {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
     match configs.into_iter().find(|c| c.id == id) {
         Some(cfg) => {
             let state = s.store.get_device(&id).await.ok().flatten();
-            (StatusCode::OK, Json(json!({ "config": cfg, "state": state }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({ "config": cfg, "state": state })),
+            )
+                .into_response()
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "mode not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "mode not found" })),
+        )
+            .into_response(),
     }
 }
 
 #[derive(Deserialize)]
 pub struct CreateModeBody {
-    pub id:   String,
+    pub id: String,
     pub name: String,
     pub kind: hc_core::mode_manager::ModeKind,
 }
@@ -576,23 +776,34 @@ pub async fn create_mode(
 ) -> impl IntoResponse {
     let path = match s.modes_path.as_ref() {
         Some(p) => p.as_ref().clone(),
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "modes not configured" })),
+            )
+        }
     };
     if !body.id.starts_with("mode_") {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id must start with 'mode_'" })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "id must start with 'mode_'" })),
+        );
     }
     let cfg = hc_core::mode_manager::ModeConfig {
-        id:   body.id,
+        id: body.id,
         name: body.name,
         kind: body.kind,
-        on_event:           None,
-        off_event:          None,
-        on_offset_minutes:  0,
+        on_event: None,
+        off_event: None,
+        on_offset_minutes: 0,
         off_offset_minutes: 0,
     };
     match hc_core::mode_manager::append_mode(&path, cfg.clone()) {
         Ok(_) => (StatusCode::CREATED, Json(json!(cfg))),
-        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -604,16 +815,30 @@ pub async fn delete_mode(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if id == hc_core::mode_manager::MODE_NIGHT_ID {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "mode_night is a built-in mode and cannot be deleted"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "mode_night is a built-in mode and cannot be deleted"
+            })),
+        )
+            .into_response();
     }
     let path = match s.modes_path.as_ref() {
         Some(p) => p.as_ref().clone(),
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "modes not configured" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "modes not configured" })),
+            )
+                .into_response()
+        }
     };
     if let Err(e) = hc_core::mode_manager::remove_mode(&path, &id) {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     if let Err(e) = s.store.delete_device(&id).await {
         tracing::warn!(mode_id = %id, error = %e, "delete_mode: failed to remove device from store");
@@ -628,7 +853,10 @@ fn normalize_area_name(name: &str) -> String {
 }
 
 fn area_id_from_name(name: &str) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("homecore:area:{}", name).as_bytes())
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("homecore:area:{}", name).as_bytes(),
+    )
 }
 
 fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
@@ -667,8 +895,14 @@ async fn find_area_by_id(store: &StateStore, id: Uuid) -> Result<Option<Area>, S
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {
     match s.store.list_devices().await {
-        Ok(devices) => (StatusCode::OK, Json(json!(derive_areas_from_devices(&devices)))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(devices) => (
+            StatusCode::OK,
+            Json(json!(derive_areas_from_devices(&devices))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -684,7 +918,10 @@ pub async fn create_area(
 ) -> impl IntoResponse {
     let name = normalize_area_name(&body.name);
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "area name cannot be empty" })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "area name cannot be empty" })),
+        );
     }
 
     // Canonical model: areas are derived from device.area.
@@ -698,7 +935,10 @@ pub async fn create_area(
             };
             (StatusCode::CREATED, Json(json!(area)))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -715,31 +955,51 @@ pub async fn patch_area(
 ) -> impl IntoResponse {
     let new_name = normalize_area_name(&body.name);
     if new_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "area name cannot be empty" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "area name cannot be empty" })),
+        )
+            .into_response();
     }
 
     let area = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "area not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let mut devices = match s.store.list_devices().await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     for device in &mut devices {
-        if device
-            .area
-            .as_deref()
-            .map(normalize_area_name)
-            .as_deref()
-            == Some(area.name.as_str())
-        {
+        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
             device.area = Some(new_name.clone());
             if let Err(e) = s.store.upsert_device(device).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
             }
         }
     }
@@ -762,26 +1022,42 @@ pub async fn delete_area(
 ) -> impl IntoResponse {
     let area = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "area not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let mut devices = match s.store.list_devices().await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     for device in &mut devices {
-        if device
-            .area
-            .as_deref()
-            .map(normalize_area_name)
-            .as_deref()
-            == Some(area.name.as_str())
-        {
+        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
             device.area = None;
             if let Err(e) = s.store.upsert_device(device).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
             }
         }
     }
@@ -824,25 +1100,39 @@ pub async fn list_automations(
     match &s.rules_handle {
         Some(rh) => {
             let rules = rh.read().await;
-            let filtered: Vec<_> = rules.iter().filter(|r| {
-                if let Some(ref tag) = params.tag {
-                    if !r.tags.contains(tag) { return false; }
-                }
-                if let Some(ref trig) = params.trigger {
-                    if trigger_type_name(&r.trigger) != trig.as_str() { return false; }
-                }
-                if let Some(ref did) = params.device_id {
-                    if !rule_references_device(r, did) { return false; }
-                }
-                if params.stale == Some(true) && r.error.is_none() {
-                    return false;
-                }
-                true
-            }).cloned().collect();
+            let filtered: Vec<_> = rules
+                .iter()
+                .filter(|r| {
+                    if let Some(ref tag) = params.tag {
+                        if !r.tags.contains(tag) {
+                            return false;
+                        }
+                    }
+                    if let Some(ref trig) = params.trigger {
+                        if trigger_type_name(&r.trigger) != trig.as_str() {
+                            return false;
+                        }
+                    }
+                    if let Some(ref did) = params.device_id {
+                        if !rule_references_device(r, did) {
+                            return false;
+                        }
+                    }
+                    if params.stale == Some(true) && r.error.is_none() {
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
 
             let total = filtered.len();
             let offset = params.offset.unwrap_or(0);
-            let page: Vec<_> = filtered.into_iter().skip(offset).take(params.limit.unwrap_or(usize::MAX)).collect();
+            let page: Vec<_> = filtered
+                .into_iter()
+                .skip(offset)
+                .take(params.limit.unwrap_or(usize::MAX))
+                .collect();
 
             let mut headers = HeaderMap::new();
             if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
@@ -850,29 +1140,34 @@ pub async fn list_automations(
             }
             (StatusCode::OK, headers, Json(json!(page))).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new(), Json(json!({ "error": "rule engine not available" }))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response(),
     }
 }
 
 /// Snake-case name of a `Trigger` variant — matches the serde `type` field value.
 fn trigger_type_name(trigger: &Trigger) -> &'static str {
     match trigger {
-        Trigger::DeviceStateChanged { .. }        => "device_state_changed",
-        Trigger::MqttMessage { .. }               => "mqtt_message",
-        Trigger::TimeOfDay { .. }                 => "time_of_day",
-        Trigger::SunEvent { .. }                  => "sun_event",
-        Trigger::WebhookReceived { .. }           => "webhook_received",
-        Trigger::ManualTrigger                    => "manual_trigger",
-        Trigger::CustomEvent { .. }               => "custom_event",
-        Trigger::SystemStarted                    => "system_started",
-        Trigger::Cron { .. }                      => "cron",
+        Trigger::DeviceStateChanged { .. } => "device_state_changed",
+        Trigger::MqttMessage { .. } => "mqtt_message",
+        Trigger::TimeOfDay { .. } => "time_of_day",
+        Trigger::SunEvent { .. } => "sun_event",
+        Trigger::WebhookReceived { .. } => "webhook_received",
+        Trigger::ManualTrigger => "manual_trigger",
+        Trigger::CustomEvent { .. } => "custom_event",
+        Trigger::SystemStarted => "system_started",
+        Trigger::Cron { .. } => "cron",
         Trigger::DeviceAvailabilityChanged { .. } => "device_availability_changed",
-        Trigger::ButtonEvent { .. }               => "button_event",
-        Trigger::NumericThreshold { .. }          => "numeric_threshold",
-        Trigger::Periodic { .. }                  => "periodic",
-        Trigger::HubVariableChanged { .. }        => "hub_variable_changed",
-        Trigger::CalendarEvent { .. }             => "calendar_event",
-        Trigger::ModeChanged { .. }               => "mode_changed",
+        Trigger::ButtonEvent { .. } => "button_event",
+        Trigger::NumericThreshold { .. } => "numeric_threshold",
+        Trigger::Periodic { .. } => "periodic",
+        Trigger::HubVariableChanged { .. } => "hub_variable_changed",
+        Trigger::CalendarEvent { .. } => "calendar_event",
+        Trigger::ModeChanged { .. } => "mode_changed",
     }
 }
 
@@ -884,7 +1179,9 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
         Trigger::DeviceAvailabilityChanged { device_id: d, .. } => d == device_id,
         _ => false,
     };
-    if in_trigger { return true; }
+    if in_trigger {
+        return true;
+    }
 
     for cond in &rule.conditions {
         if condition_references_device(cond, device_id) {
@@ -892,14 +1189,16 @@ fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
         }
     }
 
-    rule.actions.iter().any(|ra| actions_reference_device(std::slice::from_ref(&ra.action), device_id))
+    rule.actions
+        .iter()
+        .any(|ra| actions_reference_device(std::slice::from_ref(&ra.action), device_id))
 }
 
 fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
     match cond {
-        Condition::DeviceState { device_id: d, .. }  => d == device_id,
-        Condition::TimeElapsed { device_id: d, .. }  => d == device_id,
-        Condition::Not { condition }                 => condition_references_device(condition, device_id),
+        Condition::DeviceState { device_id: d, .. } => d == device_id,
+        Condition::TimeElapsed { device_id: d, .. } => d == device_id,
+        Condition::Not { condition } => condition_references_device(condition, device_id),
         _ => false,
     }
 }
@@ -908,14 +1207,23 @@ fn actions_reference_device(actions: &[Action], device_id: &str) -> bool {
     for action in actions {
         let found = match action {
             Action::SetDeviceState { device_id: d, .. } => d == device_id,
-            Action::Parallel { actions: inner }          => actions_reference_device(inner, device_id),
-            Action::RepeatUntil { actions: inner, .. }   => actions_reference_device(inner, device_id),
-            Action::Conditional { then_actions, else_actions, .. } =>
+            Action::Parallel { actions: inner } => actions_reference_device(inner, device_id),
+            Action::RepeatUntil { actions: inner, .. } => {
+                actions_reference_device(inner, device_id)
+            }
+            Action::Conditional {
+                then_actions,
+                else_actions,
+                ..
+            } => {
                 actions_reference_device(then_actions, device_id)
-                || actions_reference_device(else_actions, device_id),
+                    || actions_reference_device(else_actions, device_id)
+            }
             _ => false,
         };
-        if found { return true; }
+        if found {
+            return true;
+        }
     }
     false
 }
@@ -932,16 +1240,26 @@ pub async fn create_automation(
 
     let rule: Rule = match serde_json::from_value(body) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": format!("invalid rule body: {e}")
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("invalid rule body: {e}")
+                })),
+            )
+                .into_response()
+        }
     };
 
     // Validate priority is within practical range.
     if rule.priority < -1000 || rule.priority > 1000 {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": "priority must be between -1000 and 1000"
-        }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "priority must be between -1000 and 1000"
+            })),
+        )
+            .into_response();
     }
 
     // id already set above; assert it round-tripped correctly.
@@ -950,7 +1268,11 @@ pub async fn create_automation(
     // Write file first — if this fails the in-memory state is unchanged.
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule(&rule) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     }
 
@@ -968,12 +1290,20 @@ pub async fn get_automation(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
     let rules = rh.read().await;
     match rules.iter().find(|r| r.id == id).cloned() {
         Some(rule) => (StatusCode::OK, Json(json!(rule))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "rule not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -988,22 +1318,36 @@ pub async fn update_automation(
 
     let mut rule: Rule = match serde_json::from_value(body) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": format!("invalid rule body: {e}")
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("invalid rule body: {e}")
+                })),
+            )
+                .into_response()
+        }
     };
 
     // Validate priority is within practical range.
     if rule.priority < -1000 || rule.priority > 1000 {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": "priority must be between -1000 and 1000"
-        }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "priority must be between -1000 and 1000"
+            })),
+        )
+            .into_response();
     }
 
     rule.id = id;
 
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     // Check existence and get old name for potential rename.
@@ -1011,14 +1355,24 @@ pub async fn update_automation(
         let rules = rh.read().await;
         match rules.iter().find(|r| r.id == id) {
             Some(r) => r.name.clone(),
-            None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "rule not found" })),
+                )
+                    .into_response()
+            }
         }
     };
 
     // Write file — handles rename (deletes old slug file if name changed).
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule_renamed(&rule, &old_name) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     }
 
@@ -1041,14 +1395,22 @@ pub async fn delete_automation(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     // Verify existence before touching the filesystem.
     {
         let rules = rh.read().await;
         if !rules.iter().any(|r| r.id == id) {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "rule not found" })),
+            )
+                .into_response();
         }
     }
 
@@ -1061,7 +1423,11 @@ pub async fn delete_automation(
                 tracing::warn!(%id, "Rule file not found on disk during delete — removing from memory only");
             }
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
             }
             Ok(true) => {}
         }
@@ -1078,7 +1444,10 @@ pub async fn delete_automation(
 pub async fn list_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoResponse {
     match s.store.list_scenes().await {
         Ok(scenes) => (StatusCode::OK, Json(json!(scenes))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -1090,7 +1459,10 @@ pub async fn create_scene(
     scene.id = Uuid::new_v4();
     match s.store.upsert_scene(&scene).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(scene))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -1101,8 +1473,18 @@ pub async fn activate_scene(
 ) -> impl IntoResponse {
     let scene = match s.store.get_scene(id).await {
         Ok(Some(sc)) => sc,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "scene not found" }))),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "scene not found" })),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        }
     };
 
     if let Some(ph) = &s.publish {
@@ -1110,7 +1492,10 @@ pub async fn activate_scene(
             let topic = format!("homecore/devices/{device_id}/cmd");
             let payload = desired.to_string().into_bytes();
             if let Err(e) = ph.publish(&topic, payload).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                );
             }
         }
         // Emit scene activated event.
@@ -1132,7 +1517,11 @@ pub async fn activate_scene(
 pub async fn export_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoResponse {
     match s.store.list_scenes().await {
         Ok(scenes) => (StatusCode::OK, Json(json!(scenes))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1148,7 +1537,11 @@ pub async fn import_scenes(
     for mut scene in scenes {
         scene.id = Uuid::new_v4();
         if let Err(e) = s.store.upsert_scene(&scene).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
         count += 1;
     }
@@ -1167,11 +1560,19 @@ pub async fn test_automation(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" })));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        );
     };
     let rule = match rh.read().await.iter().find(|r| r.id == id).cloned() {
         Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "rule not found" })),
+            )
+        }
     };
 
     // Evaluate each condition independently and collect results.
@@ -1186,14 +1587,17 @@ pub async fn test_automation(
         condition_results.push(serde_json::to_value(&detail).unwrap_or(serde_json::Value::Null));
     }
 
-    (StatusCode::OK, Json(json!({
-        "rule_id": id,
-        "rule_name": rule.name,
-        "conditions_pass": all_pass,
-        "conditions": condition_results,
-        "would_fire": all_pass,
-        "actions": serde_json::to_value(&rule.actions).unwrap_or(serde_json::Value::Null),
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "rule_id": id,
+            "rule_name": rule.name,
+            "conditions_pass": all_pass,
+            "conditions": condition_results,
+            "would_fire": all_pass,
+            "actions": serde_json::to_value(&rule.actions).unwrap_or(serde_json::Value::Null),
+        })),
+    )
 }
 
 #[derive(serde::Serialize)]
@@ -1218,33 +1622,53 @@ async fn eval_condition_dry_detail(
     let cond_json = serde_json::to_value(condition).unwrap_or(serde_json::Value::Null);
 
     match condition {
-        Condition::DeviceState { device_id, attribute, op, value } => {
+        Condition::DeviceState {
+            device_id,
+            attribute,
+            op,
+            value,
+        } => {
             let device = match store.get_device(device_id).await {
                 Ok(Some(d)) => d,
-                Ok(None) => return ConditionDetail {
-                    condition: cond_json, passed: false, actual: None,
-                    expected: Some(value.clone()), elapsed_ms: None,
-                    reason: Some(format!("device '{device_id}' not found")),
-                },
-                Err(e) => return ConditionDetail {
-                    condition: cond_json, passed: false, actual: None,
-                    expected: Some(value.clone()), elapsed_ms: None,
-                    reason: Some(format!("store error: {e}")),
-                },
+                Ok(None) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: Some(value.clone()),
+                        elapsed_ms: None,
+                        reason: Some(format!("device '{device_id}' not found")),
+                    }
+                }
+                Err(e) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: Some(value.clone()),
+                        elapsed_ms: None,
+                        reason: Some(format!("store error: {e}")),
+                    }
+                }
             };
             match device.attributes.get(attribute) {
                 None => ConditionDetail {
-                    condition: cond_json, passed: false, actual: None,
-                    expected: Some(value.clone()), elapsed_ms: None,
+                    condition: cond_json,
+                    passed: false,
+                    actual: None,
+                    expected: Some(value.clone()),
+                    elapsed_ms: None,
                     reason: Some(format!("attribute '{attribute}' not present")),
                 },
                 Some(actual) => {
                     let passed = compare_values(actual, op, value);
                     ConditionDetail {
-                        condition: cond_json, passed,
+                        condition: cond_json,
+                        passed,
                         actual: Some(actual.clone()),
                         expected: Some(value.clone()),
-                        elapsed_ms: None, reason: None,
+                        elapsed_ms: None,
+                        reason: None,
                     }
                 }
             }
@@ -1257,16 +1681,20 @@ async fn eval_condition_dry_detail(
                 now >= *start || now <= *end
             };
             ConditionDetail {
-                condition: cond_json, passed,
+                condition: cond_json,
+                passed,
                 actual: Some(json!(now.to_string())),
                 expected: Some(json!(format!("{start}–{end}"))),
-                elapsed_ms: None, reason: None,
+                elapsed_ms: None,
+                reason: None,
             }
         }
         Condition::ScriptExpression { script } => {
             let script = script.clone();
             let result = tokio::task::spawn_blocking(move || {
-                hc_scripting::ScriptRuntime::new().eval_condition(&script).ok()
+                hc_scripting::ScriptRuntime::new()
+                    .eval_condition(&script)
+                    .ok()
             })
             .await
             .ok()
@@ -1274,33 +1702,57 @@ async fn eval_condition_dry_detail(
             ConditionDetail {
                 condition: cond_json,
                 passed: result.unwrap_or(false),
-                actual: None, expected: None, elapsed_ms: None,
-                reason: if result.is_none() { Some("script error".into()) } else { None },
+                actual: None,
+                expected: None,
+                elapsed_ms: None,
+                reason: if result.is_none() {
+                    Some("script error".into())
+                } else {
+                    None
+                },
             }
         }
-        Condition::TimeElapsed { device_id, attribute: _, duration_secs } => {
+        Condition::TimeElapsed {
+            device_id,
+            attribute: _,
+            duration_secs,
+        } => {
             let device = match store.get_device(device_id).await {
                 Ok(Some(d)) => d,
-                Ok(None) => return ConditionDetail {
-                    condition: cond_json, passed: false, actual: None, expected: None,
-                    elapsed_ms: None,
-                    reason: Some(format!("device '{device_id}' not found")),
-                },
-                Err(e) => return ConditionDetail {
-                    condition: cond_json, passed: false, actual: None, expected: None,
-                    elapsed_ms: None,
-                    reason: Some(format!("store error: {e}")),
-                },
+                Ok(None) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: None,
+                        elapsed_ms: None,
+                        reason: Some(format!("device '{device_id}' not found")),
+                    }
+                }
+                Err(e) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: None,
+                        elapsed_ms: None,
+                        reason: Some(format!("store error: {e}")),
+                    }
+                }
             };
             // Dry-run uses last_seen as the conservative elapsed baseline.
             let elapsed_secs = (chrono::Utc::now() - device.last_seen).num_seconds().max(0);
             let passed = elapsed_secs as u64 >= *duration_secs;
             ConditionDetail {
-                condition: cond_json, passed,
-                actual: None, expected: None,
+                condition: cond_json,
+                passed,
+                actual: None,
+                expected: None,
                 elapsed_ms: Some(elapsed_secs * 1000),
                 reason: if !passed {
-                    Some(format!("only {elapsed_secs}s elapsed, need {duration_secs}s"))
+                    Some(format!(
+                        "only {elapsed_secs}s elapsed, need {duration_secs}s"
+                    ))
                 } else {
                     None
                 },
@@ -1322,40 +1774,73 @@ async fn eval_condition_dry_detail(
                 let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
                 if !detail.passed {
                     passed = false;
-                    reason = Some(detail.reason.unwrap_or_else(|| "sub-condition failed".into()));
+                    reason = Some(
+                        detail
+                            .reason
+                            .unwrap_or_else(|| "sub-condition failed".into()),
+                    );
                     break;
                 }
             }
-            ConditionDetail { condition: cond_json, passed, actual: None, expected: None, elapsed_ms: None, reason }
+            ConditionDetail {
+                condition: cond_json,
+                passed,
+                actual: None,
+                expected: None,
+                elapsed_ms: None,
+                reason,
+            }
         }
         Condition::Or { conditions } => {
             let mut passed = false;
             for c in conditions {
                 let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
-                if detail.passed { passed = true; break; }
+                if detail.passed {
+                    passed = true;
+                    break;
+                }
             }
             ConditionDetail {
-                condition: cond_json, passed, actual: None, expected: None, elapsed_ms: None,
-                reason: if !passed { Some("no sub-condition passed".into()) } else { None },
+                condition: cond_json,
+                passed,
+                actual: None,
+                expected: None,
+                elapsed_ms: None,
+                reason: if !passed {
+                    Some("no sub-condition passed".into())
+                } else {
+                    None
+                },
             }
         }
         Condition::Xor { conditions } => {
             let mut count = 0usize;
             for c in conditions {
                 let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
-                if detail.passed { count += 1; }
+                if detail.passed {
+                    count += 1;
+                }
             }
             let passed = count == 1;
             ConditionDetail {
-                condition: cond_json, passed, actual: Some(json!(count)), expected: Some(json!(1)),
+                condition: cond_json,
+                passed,
+                actual: Some(json!(count)),
+                expected: Some(json!(1)),
                 elapsed_ms: None,
-                reason: if !passed { Some(format!("{count} sub-conditions passed, need exactly 1")) } else { None },
+                reason: if !passed {
+                    Some(format!("{count} sub-conditions passed, need exactly 1"))
+                } else {
+                    None
+                },
             }
         }
         Condition::PrivateBooleanIs { name, value } => {
             // Dry-run cannot access live runtime state; report as indeterminate.
             ConditionDetail {
-                condition: cond_json, passed: false, actual: None,
+                condition: cond_json,
+                passed: false,
+                actual: None,
                 expected: Some(json!(value)),
                 elapsed_ms: None,
                 reason: Some(format!("private boolean '{name}' not available in dry-run")),
@@ -1364,7 +1849,9 @@ async fn eval_condition_dry_detail(
         Condition::HubVariable { name, value, .. } => {
             // Dry-run cannot access live hub variable state; report as indeterminate.
             ConditionDetail {
-                condition: cond_json, passed: false, actual: None,
+                condition: cond_json,
+                passed: false,
+                actual: None,
                 expected: Some(value.clone()),
                 elapsed_ms: None,
                 reason: Some(format!("hub variable '{name}' not available in dry-run")),
@@ -1373,18 +1860,28 @@ async fn eval_condition_dry_detail(
         Condition::ModeIs { mode_id, on } => {
             // Dry-run checks the persisted device state.
             let actual_on = match store.get_device(mode_id).await {
-                Ok(Some(d)) => d.attributes.get("on").and_then(|v| v.as_bool()).unwrap_or(false),
+                Ok(Some(d)) => d
+                    .attributes
+                    .get("on")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 _ => false,
             };
             let passed = actual_on == *on;
             ConditionDetail {
-                condition: cond_json, passed,
+                condition: cond_json,
+                passed,
                 actual: Some(json!(actual_on)),
                 expected: Some(json!(on)),
                 elapsed_ms: None,
                 reason: if !passed {
-                    Some(format!("mode '{mode_id}' is {} (expected {})", actual_on, on))
-                } else { None },
+                    Some(format!(
+                        "mode '{mode_id}' is {} (expected {})",
+                        actual_on, on
+                    ))
+                } else {
+                    None
+                },
             }
         }
     }
@@ -1399,10 +1896,26 @@ fn compare_values(
     match op {
         CompareOp::Eq => actual == expected,
         CompareOp::Ne => actual != expected,
-        CompareOp::Gt => actual.as_f64().zip(expected.as_f64()).map(|(a, b)| a > b).unwrap_or(false),
-        CompareOp::Gte => actual.as_f64().zip(expected.as_f64()).map(|(a, b)| a >= b).unwrap_or(false),
-        CompareOp::Lt => actual.as_f64().zip(expected.as_f64()).map(|(a, b)| a < b).unwrap_or(false),
-        CompareOp::Lte => actual.as_f64().zip(expected.as_f64()).map(|(a, b)| a <= b).unwrap_or(false),
+        CompareOp::Gt => actual
+            .as_f64()
+            .zip(expected.as_f64())
+            .map(|(a, b)| a > b)
+            .unwrap_or(false),
+        CompareOp::Gte => actual
+            .as_f64()
+            .zip(expected.as_f64())
+            .map(|(a, b)| a >= b)
+            .unwrap_or(false),
+        CompareOp::Lt => actual
+            .as_f64()
+            .zip(expected.as_f64())
+            .map(|(a, b)| a < b)
+            .unwrap_or(false),
+        CompareOp::Lte => actual
+            .as_f64()
+            .zip(expected.as_f64())
+            .map(|(a, b)| a <= b)
+            .unwrap_or(false),
     }
 }
 
@@ -1410,10 +1923,16 @@ fn compare_values(
 
 /// `GET /api/v1/automations/export`
 /// Returns all rules as a JSON array (ready to re-import).
-pub async fn export_automations(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
+pub async fn export_automations(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
     match &s.rules_handle {
         Some(rh) => (StatusCode::OK, Json(json!(rh.read().await.clone()))),
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        ),
     }
 }
 
@@ -1425,7 +1944,10 @@ pub async fn import_automations(
     Json(rules): Json<Vec<Rule>>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" })));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        );
     };
 
     let mut saved = Vec::with_capacity(rules.len());
@@ -1444,7 +1966,10 @@ pub async fn import_automations(
         rh.write().await.push(rule.clone());
         saved.push(rule);
     }
-    (StatusCode::CREATED, Json(json!({ "imported": saved.len(), "rules": saved })))
+    (
+        StatusCode::CREATED,
+        Json(json!({ "imported": saved.len(), "rules": saved })),
+    )
 }
 
 // ---------- Plugins ----------
@@ -1464,7 +1989,11 @@ pub async fn deregister_plugin(
     if map.remove(&id).is_some() {
         StatusCode::NO_CONTENT.into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found" })),
+        )
+            .into_response()
     }
 }
 
@@ -1474,20 +2003,37 @@ pub async fn matter_commission(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Some(obj) = body.as_object() else {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "request body must be a JSON object" }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "request body must be a JSON object" })),
+        )
+            .into_response();
     };
 
     let mut payload = serde_json::Map::new();
-    payload.insert("action".to_string(), Value::String("commission".to_string()));
+    payload.insert(
+        "action".to_string(),
+        Value::String("commission".to_string()),
+    );
     for (k, v) in obj {
         payload.insert(k.clone(), v.clone());
     }
 
-    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    if let Err(e) =
+        publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
 
-    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "commission" }))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "accepted", "action": "commission" })),
+    )
+        .into_response()
 }
 
 pub async fn matter_reinterview(
@@ -1496,30 +2042,56 @@ pub async fn matter_reinterview(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Some(obj) = body.as_object() else {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "request body must be a JSON object" }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "request body must be a JSON object" })),
+        )
+            .into_response();
     };
 
     let mut payload = serde_json::Map::new();
-    payload.insert("action".to_string(), Value::String("reinterview".to_string()));
+    payload.insert(
+        "action".to_string(),
+        Value::String("reinterview".to_string()),
+    );
     for (k, v) in obj {
         payload.insert(k.clone(), v.clone());
     }
 
-    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    if let Err(e) =
+        publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
 
-    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "reinterview" }))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "accepted", "action": "reinterview" })),
+    )
+        .into_response()
 }
 
-pub async fn list_matter_nodes(
-    State(s): State<AppState>,
-    _: PluginsRead,
-) -> impl IntoResponse {
+pub async fn list_matter_nodes(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
     let device = match s.store.get_device(MATTER_CONTROLLER_DEVICE_ID).await {
         Ok(Some(d)) => d,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "matter controller device not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "matter controller device not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     let nodes = device
@@ -1537,7 +2109,11 @@ pub async fn remove_matter_node(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if id.trim().is_empty() {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "node id is required" }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "node id is required" })),
+        )
+            .into_response();
     }
 
     let payload = json!({
@@ -1546,10 +2122,18 @@ pub async fn remove_matter_node(
     });
 
     if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
 
-    (StatusCode::ACCEPTED, Json(json!({ "status": "accepted", "action": "remove_node" }))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "accepted", "action": "remove_node" })),
+    )
+        .into_response()
 }
 
 // ---------- Area device assignment ----------
@@ -1564,36 +2148,58 @@ pub async fn set_area_devices(
 ) -> impl IntoResponse {
     let area = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "area not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "area not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let desired: HashSet<String> = device_ids.into_iter().collect();
     let mut devices = match s.store.list_devices().await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     for device in &mut devices {
         let in_desired = desired.contains(&device.device_id);
-        let in_area = device
-            .area
-            .as_deref()
-            .map(normalize_area_name)
-            .as_deref()
-            == Some(area.name.as_str());
+        let in_area =
+            device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str());
 
         if in_desired {
             if !in_area {
                 device.area = Some(area.name.clone());
                 if let Err(e) = s.store.upsert_device(device).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
                 }
             }
         } else if in_area {
             device.area = None;
             if let Err(e) = s.store.upsert_device(device).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
             }
         }
     }
@@ -1606,7 +2212,13 @@ pub async fn set_area_devices(
             name: area.name,
             device_ids: vec![],
         },
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     (StatusCode::OK, Json(json!(refreshed))).into_response()
@@ -1629,13 +2241,23 @@ pub async fn patch_automation(
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     // Read current rule from handle.
     let mut rule = match rh.read().await.iter().find(|r| r.id == id).cloned() {
         Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "rule not found" })),
+            )
+                .into_response()
+        }
     };
 
     if let Some(enabled) = patch.enabled {
@@ -1648,7 +2270,11 @@ pub async fn patch_automation(
     // Persist to file.
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule(&rule) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     }
 
@@ -1694,7 +2320,11 @@ pub async fn bulk_patch_automations(
     Json(patch): Json<BulkPatchBody>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     let mut updated = Vec::new();
@@ -1726,7 +2356,11 @@ pub async fn bulk_patch_automations(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "updated": updated.len(), "rules": updated }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "updated": updated.len(), "rules": updated })),
+    )
+        .into_response()
 }
 
 // ---------- Automation fire history ----------
@@ -1744,14 +2378,22 @@ pub async fn automation_history(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(fh) = &s.fire_history else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "fire history not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "fire history not available" })),
+        )
+            .into_response();
     };
 
     // Verify rule exists.
     if let Some(rh) = &s.rules_handle {
         let rules = rh.read().await;
         if !rules.iter().any(|r| r.id == id) {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "rule not found" })),
+            )
+                .into_response();
         }
     }
 
@@ -1776,26 +2418,40 @@ pub async fn clone_automation(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     let original = {
         let rules = rh.read().await;
         match rules.iter().find(|r| r.id == id).cloned() {
             Some(r) => r,
-            None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "rule not found" }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "rule not found" })),
+                )
+                    .into_response()
+            }
         }
     };
 
     let mut cloned = original.clone();
-    cloned.id      = Uuid::new_v4();
-    cloned.name    = format!("Copy of {}", original.name);
+    cloned.id = Uuid::new_v4();
+    cloned.name = format!("Copy of {}", original.name);
     cloned.enabled = false; // disabled until operator reviews
-    cloned.error   = None;
+    cloned.error = None;
 
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule(&cloned) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     }
 
@@ -1812,21 +2468,29 @@ pub async fn clone_automation(
 /// renames or deletions.
 ///
 /// Response: `[{ rule_id, rule_name, stale_device_ids: [String] }]`
-pub async fn stale_refs(
-    State(s): State<AppState>,
-    _: AutomationsRead,
-) -> impl IntoResponse {
+pub async fn stale_refs(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     let known_ids: HashSet<String> = match s.store.list_devices().await {
         Ok(devices) => devices.into_iter().map(|d| d.device_id).collect(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     let rules = rh.read().await;
-    let result: Vec<serde_json::Value> = rules.iter()
+    let result: Vec<serde_json::Value> = rules
+        .iter()
         .filter_map(|rule| {
             let stale: Vec<String> = collect_rule_device_refs(rule)
                 .into_iter()
@@ -1864,13 +2528,17 @@ fn collect_rule_device_refs(rule: &Rule) -> Vec<String> {
 
 fn collect_trigger_refs(trigger: &Trigger, ids: &mut Vec<String>) {
     match trigger {
-        Trigger::DeviceStateChanged { device_id, device_ids, .. } => {
+        Trigger::DeviceStateChanged {
+            device_id,
+            device_ids,
+            ..
+        } => {
             ids.push(device_id.clone());
             ids.extend_from_slice(device_ids);
         }
         Trigger::DeviceAvailabilityChanged { device_id, .. } => ids.push(device_id.clone()),
-        Trigger::ButtonEvent { device_id, .. }               => ids.push(device_id.clone()),
-        Trigger::NumericThreshold { device_id, .. }          => ids.push(device_id.clone()),
+        Trigger::ButtonEvent { device_id, .. } => ids.push(device_id.clone()),
+        Trigger::NumericThreshold { device_id, .. } => ids.push(device_id.clone()),
         _ => {}
     }
 }
@@ -1879,9 +2547,13 @@ fn collect_condition_refs(cond: &Condition, ids: &mut Vec<String>) {
     match cond {
         Condition::DeviceState { device_id, .. } => ids.push(device_id.clone()),
         Condition::TimeElapsed { device_id, .. } => ids.push(device_id.clone()),
-        Condition::Not { condition }             => collect_condition_refs(condition, ids),
-        Condition::And { conditions } | Condition::Or { conditions } | Condition::Xor { conditions } => {
-            for c in conditions { collect_condition_refs(c, ids); }
+        Condition::Not { condition } => collect_condition_refs(condition, ids),
+        Condition::And { conditions }
+        | Condition::Or { conditions }
+        | Condition::Xor { conditions } => {
+            for c in conditions {
+                collect_condition_refs(c, ids);
+            }
         }
         _ => {}
     }
@@ -1889,22 +2561,59 @@ fn collect_condition_refs(cond: &Condition, ids: &mut Vec<String>) {
 
 fn collect_action_refs(action: &Action, ids: &mut Vec<String>) {
     match action {
-        Action::SetDeviceState { device_id, .. }         => ids.push(device_id.clone()),
-        Action::SetDeviceStatePerMode { device_id, .. }  => ids.push(device_id.clone()),
-        Action::FadeDevice { device_id, .. }             => ids.push(device_id.clone()),
-        Action::CaptureDeviceState { device_ids, .. }    => ids.extend_from_slice(device_ids),
-        Action::Parallel { actions }                     => { for a in actions { collect_action_refs(a, ids); } }
-        Action::RepeatUntil { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
-        Action::RepeatWhile { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
-        Action::RepeatCount { actions, .. }              => { for a in actions { collect_action_refs(a, ids); } }
-        Action::Conditional { then_actions, else_actions, else_if, .. } => {
-            for a in then_actions { collect_action_refs(a, ids); }
-            for a in else_actions { collect_action_refs(a, ids); }
-            for branch in else_if { for a in &branch.actions { collect_action_refs(a, ids); } }
+        Action::SetDeviceState { device_id, .. } => ids.push(device_id.clone()),
+        Action::SetDeviceStatePerMode { device_id, .. } => ids.push(device_id.clone()),
+        Action::FadeDevice { device_id, .. } => ids.push(device_id.clone()),
+        Action::CaptureDeviceState { device_ids, .. } => ids.extend_from_slice(device_ids),
+        Action::Parallel { actions } => {
+            for a in actions {
+                collect_action_refs(a, ids);
+            }
         }
-        Action::PingHost { then_actions, else_actions, .. } => {
-            for a in then_actions { collect_action_refs(a, ids); }
-            for a in else_actions { collect_action_refs(a, ids); }
+        Action::RepeatUntil { actions, .. } => {
+            for a in actions {
+                collect_action_refs(a, ids);
+            }
+        }
+        Action::RepeatWhile { actions, .. } => {
+            for a in actions {
+                collect_action_refs(a, ids);
+            }
+        }
+        Action::RepeatCount { actions, .. } => {
+            for a in actions {
+                collect_action_refs(a, ids);
+            }
+        }
+        Action::Conditional {
+            then_actions,
+            else_actions,
+            else_if,
+            ..
+        } => {
+            for a in then_actions {
+                collect_action_refs(a, ids);
+            }
+            for a in else_actions {
+                collect_action_refs(a, ids);
+            }
+            for branch in else_if {
+                for a in &branch.actions {
+                    collect_action_refs(a, ids);
+                }
+            }
+        }
+        Action::PingHost {
+            then_actions,
+            else_actions,
+            ..
+        } => {
+            for a in then_actions {
+                collect_action_refs(a, ids);
+            }
+            for a in else_actions {
+                collect_action_refs(a, ids);
+            }
         }
         _ => {}
     }
@@ -1913,10 +2622,7 @@ fn collect_action_refs(action: &Action, ids: &mut Vec<String>) {
 // ---------- Rule groups ----------
 
 /// `GET /api/v1/automations/groups`
-pub async fn list_groups(
-    State(s): State<AppState>,
-    _: AutomationsRead,
-) -> impl IntoResponse {
+pub async fn list_groups(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
     match &s.rule_groups {
         Some(rg) => {
             let groups = rg.read().await;
@@ -1933,7 +2639,11 @@ pub async fn create_group(
     Json(mut group): Json<RuleGroup>,
 ) -> impl IntoResponse {
     let Some(rg) = &s.rule_groups else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "group store not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "group store not available" })),
+        )
+            .into_response();
     };
     group.id = Uuid::new_v4();
     let mut groups = rg.write().await;
@@ -1953,12 +2663,20 @@ pub async fn get_group(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rg) = &s.rule_groups else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
     let groups = rg.read().await;
     match groups.iter().find(|g| g.id == id).cloned() {
         Some(g) => (StatusCode::OK, Json(json!(g))).into_response(),
-        None    => (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -1967,9 +2685,9 @@ pub async fn get_group(
 /// Update group metadata (name, description, rule_ids).  Does not toggle rules.
 #[derive(Deserialize)]
 pub struct GroupPatch {
-    pub name:        Option<String>,
+    pub name: Option<String>,
     pub description: Option<String>,
-    pub rule_ids:    Option<Vec<Uuid>>,
+    pub rule_ids: Option<Vec<Uuid>>,
 }
 
 pub async fn patch_group(
@@ -1979,15 +2697,29 @@ pub async fn patch_group(
     Json(patch): Json<GroupPatch>,
 ) -> impl IntoResponse {
     let Some(rg) = &s.rule_groups else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
     let mut groups = rg.write().await;
     let Some(g) = groups.iter_mut().find(|g| g.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
-    if let Some(name) = patch.name            { g.name        = name; }
-    if let Some(desc) = patch.description     { g.description = Some(desc); }
-    if let Some(ids)  = patch.rule_ids        { g.rule_ids    = ids; }
+    if let Some(name) = patch.name {
+        g.name = name;
+    }
+    if let Some(desc) = patch.description {
+        g.description = Some(desc);
+    }
+    if let Some(ids) = patch.rule_ids {
+        g.rule_ids = ids;
+    }
     let updated = g.clone();
     if let Some(gs) = &s.group_store {
         if let Err(e) = gs.save(&groups) {
@@ -2004,13 +2736,21 @@ pub async fn delete_group(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some(rg) = &s.rule_groups else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
     let mut groups = rg.write().await;
     let before = groups.len();
     groups.retain(|g| g.id != id);
     if groups.len() == before {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     }
     if let Some(gs) = &s.group_store {
         if let Err(e) = gs.save(&groups) {
@@ -2029,25 +2769,43 @@ pub async fn set_group_enabled(
     _: AutomationsWrite,
     Path((id, action)): Path<(Uuid, String)>,
 ) -> impl IntoResponse {
-    let enabled = match action.as_str() {
-        "enable"  => true,
-        "disable" => false,
-        other => return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("unknown action '{other}'; use enable or disable") }))).into_response(),
-    };
+    let enabled =
+        match action.as_str() {
+            "enable" => true,
+            "disable" => false,
+            other => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({ "error": format!("unknown action '{other}'; use enable or disable") }),
+                ),
+            )
+                .into_response(),
+        };
 
     let Some(rg) = &s.rule_groups else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
     let groups = rg.read().await;
     let Some(group) = groups.iter().find(|g| g.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "group not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "group not found" })),
+        )
+            .into_response();
     };
     let rule_ids = group.rule_ids.clone();
     drop(groups);
 
     let Some(rh) = &s.rules_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "rule engine not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        )
+            .into_response();
     };
 
     let mut updated = Vec::new();
@@ -2069,7 +2827,11 @@ pub async fn set_group_enabled(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "enabled": enabled, "updated": updated.len(), "rules": updated }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "enabled": enabled, "updated": updated.len(), "rules": updated })),
+    )
+        .into_response()
 }
 
 // ---------- Webhooks ----------
@@ -2089,11 +2851,16 @@ pub async fn receive_webhook(
     Query(query_params): Query<std::collections::HashMap<String, String>>,
     body: Option<Json<Value>>,
 ) -> impl IntoResponse {
-    let body_value  = body.map(|b| b.0).unwrap_or(Value::Null);
+    let body_value = body.map(|b| b.0).unwrap_or(Value::Null);
     let query_value: Value = if query_params.is_empty() {
         Value::Null
     } else {
-        Value::Object(query_params.into_iter().map(|(k, v)| (k, Value::String(v))).collect())
+        Value::Object(
+            query_params
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect(),
+        )
     };
     let event = hc_types::event::Event::Custom {
         timestamp: chrono::Utc::now(),
@@ -2101,7 +2868,10 @@ pub async fn receive_webhook(
         payload: json!({ "path": path, "body": body_value, "query": query_value }),
     };
     let _ = s.event_bus.publish(event);
-    (StatusCode::OK, Json(json!({ "status": "accepted", "path": path })))
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "accepted", "path": path })),
+    )
 }
 
 // ---------- Events log ----------
@@ -2126,24 +2896,24 @@ pub async fn list_events(
 /// `GET /api/v1/calendars`
 ///
 /// Lists all loaded calendars with metadata and event counts.
-pub async fn list_calendars(
-    State(s): State<AppState>,
-    _: AutomationsRead,
-) -> impl IntoResponse {
+pub async fn list_calendars(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
     let Some(cal_handle) = &s.calendar else {
         return (StatusCode::OK, Json(json!([]))).into_response();
     };
     let calendars = cal_handle.read().await;
-    let list: Vec<Value> = calendars.iter().map(|c| {
-        json!({
-            "id":            c.id,
-            "event_count":   c.events.len(),
-            "upcoming_count": c.upcoming_count(),
-            "source_url":    c.source_url,
-            "fetched_at":    c.fetched_at,
-            "loaded_at":     c.loaded_at,
+    let list: Vec<Value> = calendars
+        .iter()
+        .map(|c| {
+            json!({
+                "id":            c.id,
+                "event_count":   c.events.len(),
+                "upcoming_count": c.upcoming_count(),
+                "source_url":    c.source_url,
+                "fetched_at":    c.fetched_at,
+                "loaded_at":     c.loaded_at,
+            })
         })
-    }).collect();
+        .collect();
     (StatusCode::OK, Json(json!(list))).into_response()
 }
 
@@ -2169,7 +2939,8 @@ pub async fn fetch_calendar(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "calendar store not configured" })),
-        ).into_response();
+        )
+            .into_response();
     };
 
     let expansion_days = s.calendar_expansion_days;
@@ -2181,7 +2952,9 @@ pub async fn fetch_calendar(
         &dir,
         expansion_days,
         body.refresh_hours,
-    ).await {
+    )
+    .await
+    {
         Ok(entry) => {
             let id = entry.id.clone();
             let event_count = entry.events.len();
@@ -2192,16 +2965,21 @@ pub async fn fetch_calendar(
             } else {
                 calendars.push(entry);
             }
-            (StatusCode::OK, Json(json!({
-                "calendar_id": id,
-                "event_count": event_count,
-                "saved_path":  dir.join(format!("{id}.ics")).display().to_string(),
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "calendar_id": id,
+                    "event_count": event_count,
+                    "saved_path":  dir.join(format!("{id}.ics")).display().to_string(),
+                })),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -2218,11 +2996,12 @@ pub async fn delete_calendar(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "calendar store not configured" })),
-        ).into_response();
+        )
+            .into_response();
     };
 
     let dir = cal_dir.as_ref();
-    let ics_path  = dir.join(format!("{id}.ics"));
+    let ics_path = dir.join(format!("{id}.ics"));
     let meta_path = dir.join(format!("{id}.meta.json"));
 
     // Check calendar exists in the live store.
@@ -2232,7 +3011,8 @@ pub async fn delete_calendar(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": format!("calendar '{}' not found", id) })),
-            ).into_response();
+            )
+                .into_response();
         }
     }
 
@@ -2242,7 +3022,8 @@ pub async fn delete_calendar(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("failed to delete {}: {}", ics_path.display(), e) })),
-            ).into_response();
+            )
+                .into_response();
         }
     }
     let _ = std::fs::remove_file(&meta_path); // best-effort
@@ -2256,22 +3037,33 @@ pub async fn delete_calendar(
     // Check for rules that reference this calendar_id (warn only, don't delete).
     let referencing_rules: Vec<Value> = if let Some(rh) = &s.rules_handle {
         let rules = rh.read().await;
-        rules.iter().filter_map(|r| {
-            if let hc_types::rule::Trigger::CalendarEvent { calendar_id: Some(cid), .. } = &r.trigger {
-                if cid == &id {
-                    return Some(json!({ "rule_id": r.id, "rule_name": r.name }));
+        rules
+            .iter()
+            .filter_map(|r| {
+                if let hc_types::rule::Trigger::CalendarEvent {
+                    calendar_id: Some(cid),
+                    ..
+                } = &r.trigger
+                {
+                    if cid == &id {
+                        return Some(json!({ "rule_id": r.id, "rule_name": r.name }));
+                    }
                 }
-            }
-            None
-        }).collect()
+                None
+            })
+            .collect()
     } else {
         vec![]
     };
 
-    (StatusCode::OK, Json(json!({
-        "deleted": id,
-        "referencing_rules": referencing_rules,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "deleted": id,
+            "referencing_rules": referencing_rules,
+        })),
+    )
+        .into_response()
 }
 
 /// `GET /api/v1/calendars/:id/events`
@@ -2280,8 +3072,8 @@ pub async fn delete_calendar(
 /// `limit` (default 100, max 1000).
 #[derive(serde::Deserialize, Default)]
 pub struct CalendarEventsQuery {
-    pub from:  Option<chrono::DateTime<chrono::Utc>>,
-    pub to:    Option<chrono::DateTime<chrono::Utc>>,
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
     pub limit: Option<usize>,
 }
 
@@ -2292,35 +3084,51 @@ pub async fn list_calendar_events(
     Query(q): Query<CalendarEventsQuery>,
 ) -> impl IntoResponse {
     let Some(cal_handle) = &s.calendar else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "calendar store not configured" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "calendar store not configured" })),
+        )
+            .into_response();
     };
 
     let calendars = cal_handle.read().await;
     let Some(cal) = calendars.iter().find(|c| c.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("calendar '{}' not found", id) }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("calendar '{}' not found", id) })),
+        )
+            .into_response();
     };
 
     let now = chrono::Utc::now();
-    let from  = q.from.unwrap_or(now);
-    let to    = q.to.unwrap_or_else(|| now + chrono::Duration::days(400));
+    let from = q.from.unwrap_or(now);
+    let to = q.to.unwrap_or_else(|| now + chrono::Duration::days(400));
     let limit = q.limit.unwrap_or(100).min(1000);
 
-    let events: Vec<Value> = cal.events.iter()
+    let events: Vec<Value> = cal
+        .events
+        .iter()
         .filter(|e| e.start >= from && e.start <= to)
         .take(limit)
-        .map(|e| json!({
-            "uid":        e.uid,
-            "summary":    e.summary,
-            "start":      e.start,
-            "is_all_day": e.is_all_day,
-        }))
+        .map(|e| {
+            json!({
+                "uid":        e.uid,
+                "summary":    e.summary,
+                "start":      e.start,
+                "is_all_day": e.is_all_day,
+            })
+        })
         .collect();
 
-    (StatusCode::OK, Json(json!({
-        "calendar_id": id,
-        "events": events,
-        "total":  events.len(),
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "calendar_id": id,
+            "events": events,
+            "total":  events.len(),
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -2338,7 +3146,8 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db_paths(prefix: &str) -> (String, String) {
-        let base = std::env::temp_dir().join(format!("hc_api_handlers_{prefix}_{}", Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("hc_api_handlers_{prefix}_{}", Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&base);
         (
             base.join("state.redb").to_string_lossy().to_string(),
@@ -2390,9 +3199,15 @@ mod tests {
         areas.sort_by(|a, b| a.name.cmp(&b.name));
 
         assert_eq!(areas.len(), 2);
-        let kitchen = areas.iter().find(|a| a.name == "Kitchen").expect("kitchen exists");
+        let kitchen = areas
+            .iter()
+            .find(|a| a.name == "Kitchen")
+            .expect("kitchen exists");
         assert_eq!(kitchen.device_ids.len(), 2);
-        let office = areas.iter().find(|a| a.name == "Office").expect("office exists");
+        let office = areas
+            .iter()
+            .find(|a| a.name == "Office")
+            .expect("office exists");
         assert_eq!(office.device_ids, vec!["d3".to_string()]);
     }
 
@@ -2415,8 +3230,18 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
-        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
+        let d1 = state
+            .store
+            .get_device("d1")
+            .await
+            .expect("load d1")
+            .expect("d1 exists");
+        let d2 = state
+            .store
+            .get_device("d2")
+            .await
+            .expect("load d2")
+            .expect("d2 exists");
         assert_eq!(d1.area.as_deref(), Some("Great Room"));
         assert_eq!(d2.area.as_deref(), Some("Great Room"));
     }
@@ -2437,8 +3262,18 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
-        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
+        let d1 = state
+            .store
+            .get_device("d1")
+            .await
+            .expect("load d1")
+            .expect("d1 exists");
+        let d2 = state
+            .store
+            .get_device("d2")
+            .await
+            .expect("load d2")
+            .expect("d2 exists");
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);
     }
@@ -2461,9 +3296,24 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let d1 = state.store.get_device("d1").await.expect("load d1").expect("d1 exists");
-        let d2 = state.store.get_device("d2").await.expect("load d2").expect("d2 exists");
-        let d3 = state.store.get_device("d3").await.expect("load d3").expect("d3 exists");
+        let d1 = state
+            .store
+            .get_device("d1")
+            .await
+            .expect("load d1")
+            .expect("d1 exists");
+        let d2 = state
+            .store
+            .get_device("d2")
+            .await
+            .expect("load d2")
+            .expect("d2 exists");
+        let d3 = state
+            .store
+            .get_device("d3")
+            .await
+            .expect("load d3")
+            .expect("d3 exists");
 
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);

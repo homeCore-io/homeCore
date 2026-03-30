@@ -227,6 +227,17 @@ paths:
       tags: [devices]
       security:
         - bearerAuth: []
+      parameters:
+        - in: query
+          name: device_type
+          schema:
+            type: string
+          description: Optional device type filter, for example `media_player`
+        - in: query
+          name: include_schema
+          schema:
+            type: boolean
+          description: Include resolved device schema objects inline
       responses:
         "200":
           description: Array of device state objects
@@ -1075,6 +1086,9 @@ components:
           type: string
         plugin_id:
           type: string
+        device_type:
+          type: string
+          nullable: true
         area:
           type: string
           nullable: true

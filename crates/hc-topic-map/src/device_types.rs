@@ -5,6 +5,7 @@
 //! use to register devices without hand-writing schema JSON.
 
 use anyhow::{anyhow, Context, Result};
+use hc_types::{AttributeKind, AttributeSchema, DeviceSchema};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -60,8 +61,8 @@ impl DeviceTypeRegistry {
 
     /// Parse and resolve from TOML source text.
     pub fn from_str(toml_src: &str) -> Result<Self> {
-        let file: DeviceTypesFile = toml::from_str(toml_src)
-            .context("Failed to parse device-types.toml")?;
+        let file: DeviceTypesFile =
+            toml::from_str(toml_src).context("Failed to parse device-types.toml")?;
         let mut schemas = HashMap::new();
         // Two passes: first collect raw configs, then resolve with inheritance.
         for name in file.types.keys() {
@@ -74,6 +75,13 @@ impl DeviceTypeRegistry {
     /// Return the JSON Schema for a device type, or `None` if unknown.
     pub fn get_schema(&self, type_name: &str) -> Option<&Value> {
         self.schemas.get(type_name)
+    }
+
+    /// Return the HomeCore device schema for a device type, or `None` if unknown.
+    pub fn get_device_schema(&self, type_name: &str) -> Option<DeviceSchema> {
+        self.schemas
+            .get(type_name)
+            .map(json_schema_to_device_schema)
     }
 
     /// List all registered type names.
@@ -93,7 +101,9 @@ fn resolve_type(
     depth: usize,
 ) -> Result<Value> {
     if depth > 8 {
-        return Err(anyhow!("Device type inheritance cycle detected at '{name}'"));
+        return Err(anyhow!(
+            "Device type inheritance cycle detected at '{name}'"
+        ));
     }
     let config = types
         .get(name)
@@ -159,6 +169,82 @@ fn attribute_to_schema(attr: &AttributeConfig) -> Value {
     schema
 }
 
+fn json_schema_to_device_schema(schema: &Value) -> DeviceSchema {
+    let mut attributes = HashMap::new();
+
+    let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
+        return DeviceSchema { attributes };
+    };
+
+    for (name, property) in properties {
+        let kind = infer_attribute_kind(name, property);
+        let writable = property
+            .get("access")
+            .and_then(|v| v.as_str())
+            .map(|access| access != "r")
+            .unwrap_or(true);
+        let min = property.get("minimum").and_then(|v| v.as_f64());
+        let max = property.get("maximum").and_then(|v| v.as_f64());
+        let unit = property
+            .get("unit")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let options = property
+            .get("enum")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            });
+
+        attributes.insert(
+            name.clone(),
+            AttributeSchema {
+                kind,
+                writable,
+                display_name: None,
+                unit,
+                min,
+                max,
+                step: None,
+                options,
+            },
+        );
+    }
+
+    DeviceSchema { attributes }
+}
+
+fn infer_attribute_kind(name: &str, property: &Value) -> AttributeKind {
+    match property
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("object")
+    {
+        "boolean" => AttributeKind::Bool,
+        "integer" => match name {
+            "color_temp" => AttributeKind::ColorTemp,
+            _ => AttributeKind::Integer,
+        },
+        "number" => AttributeKind::Float,
+        "string" => {
+            if property.get("enum").is_some() {
+                AttributeKind::Enum
+            } else {
+                AttributeKind::String
+            }
+        }
+        "object" => match name {
+            "color_xy" => AttributeKind::ColorXy,
+            "color_rgb" => AttributeKind::ColorRgb,
+            _ => AttributeKind::Json,
+        },
+        _ => AttributeKind::Json,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -219,5 +305,19 @@ extends = "switch"
     fn unknown_type_returns_none() {
         let reg = DeviceTypeRegistry::from_str(SAMPLE).unwrap();
         assert!(reg.get_schema("nonexistent").is_none());
+    }
+
+    #[test]
+    fn converts_json_schema_to_device_schema() {
+        let reg = DeviceTypeRegistry::from_str(SAMPLE).unwrap();
+        let schema = reg.get_device_schema("light").unwrap();
+
+        assert!(matches!(schema.attributes["on"].kind, AttributeKind::Bool));
+        assert!(matches!(
+            schema.attributes["brightness"].kind,
+            AttributeKind::Integer
+        ));
+        assert!(schema.attributes["brightness"].writable);
+        assert_eq!(schema.attributes["brightness"].max, Some(255.0));
     }
 }

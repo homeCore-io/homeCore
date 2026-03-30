@@ -21,17 +21,19 @@ use anyhow::Result;
 use chrono::Utc;
 use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
-use hc_topic_map::{EcosystemRouter, InboundResult};
+use hc_topic_map::{DeviceTypeRegistry, EcosystemRouter, InboundResult};
 use hc_types::device::DeviceState;
 use hc_types::event::Event;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub struct StateBridge {
-    bus:     EventBus,
+    bus: EventBus,
     pub_bus: EventBus,
-    store:   StateStore,
-    router:  Option<EcosystemRouter>,
+    store: StateStore,
+    router: Option<EcosystemRouter>,
     publish: Option<PublishHandle>,
+    device_types: Option<Arc<DeviceTypeRegistry>>,
 }
 
 impl StateBridge {
@@ -40,8 +42,9 @@ impl StateBridge {
             bus,
             pub_bus,
             store,
-            router:  None,
+            router: None,
             publish: None,
+            device_types: None,
         }
     }
 
@@ -52,6 +55,11 @@ impl StateBridge {
 
     pub fn with_publish(mut self, publish: PublishHandle) -> Self {
         self.publish = Some(publish);
+        self
+    }
+
+    pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
+        self.device_types = Some(device_types);
         self
     }
 
@@ -84,7 +92,9 @@ impl StateBridge {
                         for result in results {
                             debug!(from = topic, to = %result.target_topic, "Relaying cmd to native topic");
                             if let Some(ph) = &self.publish {
-                                if let Err(e) = ph.publish(&result.target_topic, result.payload).await {
+                                if let Err(e) =
+                                    ph.publish(&result.target_topic, result.payload).await
+                                {
                                     warn!(topic = %result.target_topic, error = %e, "Failed to relay cmd");
                                 }
                             } else {
@@ -94,7 +104,7 @@ impl StateBridge {
                         return Ok(()); // Fully handled.
                     }
                     Ok(None) => {} // Not a mapped device; fall through.
-                    Err(e)   => warn!(topic, error = %e, "Outbound router error"),
+                    Err(e) => warn!(topic, error = %e, "Outbound router error"),
                 }
             }
         }
@@ -102,16 +112,26 @@ impl StateBridge {
         // --- Inbound: try ecosystem router first ---
         if let Some(router) = &self.router {
             match router.route_inbound(topic, payload) {
-                Ok(Some(InboundResult::State { device_id, payload: json_payload, partial })) => {
+                Ok(Some(InboundResult::State {
+                    device_id,
+                    payload: json_payload,
+                    partial,
+                })) => {
                     return self.handle_state(&device_id, &json_payload, partial).await;
                 }
-                Ok(Some(InboundResult::Availability { device_id, available })) => {
+                Ok(Some(InboundResult::Availability {
+                    device_id,
+                    available,
+                })) => {
                     return self.handle_availability(&device_id, available).await;
                 }
                 Ok(None) => {
-                    debug!(topic, "No ecosystem profile match — falling through to canonical handling");
+                    debug!(
+                        topic,
+                        "No ecosystem profile match — falling through to canonical handling"
+                    );
                 }
-                Err(e)   => warn!(topic, error = %e, "Inbound router error"),
+                Err(e) => warn!(topic, error = %e, "Inbound router error"),
             }
         }
 
@@ -161,7 +181,10 @@ impl StateBridge {
             return Ok(());
         }
 
-        debug!(topic, "Topic not handled by any profile or canonical pattern — ignored");
+        debug!(
+            topic,
+            "Topic not handled by any profile or canonical pattern — ignored"
+        );
         Ok(())
     }
 
@@ -179,16 +202,12 @@ impl StateBridge {
             }
         };
 
-        let mut device = self
-            .store
-            .get_device(device_id)
-            .await?
-            .unwrap_or_else(|| {
-                // Derive plugin_id from the device_id prefix convention:
-                // "shelly_abc" → "shelly", "tasmota_abc" → "tasmota", etc.
-                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
-                DeviceState::new(device_id, device_id, plugin_id)
-            });
+        let mut device = self.store.get_device(device_id).await?.unwrap_or_else(|| {
+            // Derive plugin_id from the device_id prefix convention:
+            // "shelly_abc" → "shelly", "tasmota_abc" → "tasmota", etc.
+            let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+            DeviceState::new(device_id, device_id, plugin_id)
+        });
 
         let previous = device.attributes.clone();
         let previous_name = device.name.clone();
@@ -233,8 +252,8 @@ impl StateBridge {
                 "Device name changed via state attribute"
             );
             let _ = self.pub_bus.publish(Event::DeviceNameChanged {
-                timestamp:    Utc::now(),
-                device_id:    device_id.to_string(),
+                timestamp: Utc::now(),
+                device_id: device_id.to_string(),
                 previous_name,
                 current_name: device.name.clone(),
             });
@@ -278,11 +297,7 @@ impl StateBridge {
     /// This is the single point where registration is treated as an upsert —
     /// both new registrations and re-registrations (e.g. after a source rename)
     /// go through here.
-    async fn handle_device_registration(
-        &self,
-        plugin_id: &str,
-        payload: &[u8],
-    ) -> Result<()> {
+    async fn handle_device_registration(&self, plugin_id: &str, payload: &[u8]) -> Result<()> {
         let json: serde_json::Value = serde_json::from_slice(payload)?;
 
         // Both old-style (capabilities) and new-style (device_type) payloads
@@ -305,8 +320,8 @@ impl StateBridge {
                 if area.is_some() {
                     existing.area = area;
                 }
-                if let Some(dt) = device_type {
-                    existing.device_type = Some(dt);
+                if let Some(dt) = device_type.as_ref() {
+                    existing.device_type = Some(dt.clone());
                 }
                 existing.name = new_name.to_string();
 
@@ -323,10 +338,10 @@ impl StateBridge {
                         "Device name changed"
                     );
                     let _ = self.pub_bus.publish(Event::DeviceNameChanged {
-                        timestamp:     Utc::now(),
-                        device_id:     device_id.to_string(),
+                        timestamp: Utc::now(),
+                        device_id: device_id.to_string(),
                         previous_name,
-                        current_name:  new_name.to_string(),
+                        current_name: new_name.to_string(),
                     });
                 }
             }
@@ -334,9 +349,26 @@ impl StateBridge {
                 // First registration — create the device record.
                 let mut device = DeviceState::new(device_id, new_name, plugin_id);
                 device.area = area;
-                device.device_type = device_type;
+                device.device_type = device_type.clone();
                 self.store.upsert_device(&device).await?;
                 info!(device_id, name = new_name, plugin_id, "Device registered");
+            }
+        }
+
+        if let Some(device_type) = device_type.as_deref() {
+            if let Some(registry) = &self.device_types {
+                match registry.get_device_schema(device_type) {
+                    Some(schema) => {
+                        self.store.upsert_device_schema(device_id, &schema).await?;
+                        debug!(device_id, device_type, "Typed device schema stored");
+                    }
+                    None => {
+                        warn!(
+                            device_id,
+                            device_type, "Unknown device_type; no schema resolved"
+                        );
+                    }
+                }
             }
         }
 
@@ -351,14 +383,10 @@ impl StateBridge {
     }
 
     async fn handle_availability(&self, device_id: &str, available: bool) -> Result<()> {
-        let mut device = self
-            .store
-            .get_device(device_id)
-            .await?
-            .unwrap_or_else(|| {
-                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
-                DeviceState::new(device_id, device_id, plugin_id)
-            });
+        let mut device = self.store.get_device(device_id).await?.unwrap_or_else(|| {
+            let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+            DeviceState::new(device_id, device_id, plugin_id)
+        });
 
         device.available = available;
         device.last_seen = Utc::now();

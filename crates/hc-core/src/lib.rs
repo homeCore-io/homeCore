@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use hc_notify::NotificationService;
-use hc_topic_map::EcosystemRouter;
+use hc_topic_map::{DeviceTypeRegistry, EcosystemRouter};
 use hc_types::event::Event;
 use hc_types::rule::{Rule, Trigger};
 use std::str::FromStr;
@@ -56,18 +56,22 @@ pub struct LocationConfig {
 impl Default for LocationConfig {
     fn default() -> Self {
         // Default: Washington D.C.
-        Self { latitude: 38.9072, longitude: -77.0369 }
+        Self {
+            latitude: 38.9072,
+            longitude: -77.0369,
+        }
     }
 }
 
 /// Top-level core runtime.
 pub struct Core {
     internal_bus: EventBus,
-    pub_bus:      EventBus,
+    pub_bus: EventBus,
     state: hc_state::StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
     router: Option<EcosystemRouter>,
+    device_types: Option<Arc<DeviceTypeRegistry>>,
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
     startup_delay_secs: u64,
@@ -91,7 +95,7 @@ pub struct Core {
 impl Core {
     pub fn new(
         internal_bus: EventBus,
-        pub_bus:      EventBus,
+        pub_bus: EventBus,
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
@@ -102,6 +106,7 @@ impl Core {
             publish,
             location: LocationConfig::default(),
             router: None,
+            device_types: None,
             notify: None,
             modes_path: None,
             startup_delay_secs: 10,
@@ -125,13 +130,21 @@ impl Core {
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
-        self.location = LocationConfig { latitude: lat, longitude: lon };
+        self.location = LocationConfig {
+            latitude: lat,
+            longitude: lon,
+        };
         self
     }
 
     /// Attach an ecosystem router for profile-driven topic translation.
     pub fn with_router(mut self, router: EcosystemRouter) -> Self {
         self.router = Some(router);
+        self
+    }
+
+    pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
+        self.device_types = Some(device_types);
         self
     }
 
@@ -194,13 +207,24 @@ impl Core {
     pub async fn start(
         self,
         rules: Vec<Rule>,
-    ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle, Option<CalendarHandle>)> {
+    ) -> Result<(
+        std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>,
+        FireHistoryHandle,
+        Option<CalendarHandle>,
+    )> {
         info!("HomeCore kernel starting");
 
         // State bridge: internal bus MqttMessage → DeviceStateChanged on public bus.
-        let mut bridge = state_bridge::StateBridge::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
+        let mut bridge = state_bridge::StateBridge::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
         if let Some(router) = self.router {
             bridge = bridge.with_router(router);
+        }
+        if let Some(device_types) = self.device_types {
+            bridge = bridge.with_device_types(device_types);
         }
         if let Some(ph) = self.publish.clone() {
             bridge = bridge.with_publish(ph);
@@ -246,9 +270,15 @@ impl Core {
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.
-        match self.state.load_recent_rule_firings(engine::HISTORY_RING_SIZE).await {
+        match self
+            .state
+            .load_recent_rule_firings(engine::HISTORY_RING_SIZE)
+            .await
+        {
             Ok(records) => engine.populate_fire_history(records),
-            Err(e) => warn!(error = %e, "could not load rule fire history from DB — starting empty"),
+            Err(e) => {
+                warn!(error = %e, "could not load rule fire history from DB — starting empty")
+            }
         }
 
         let rules_handle = engine.rules_handle();
@@ -256,11 +286,19 @@ impl Core {
         tokio::spawn(engine.run(shutdown_rx.clone()));
 
         // Timer manager: virtual countdown timer devices.
-        let timer_mgr = timer_manager::TimerManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
+        let timer_mgr = timer_manager::TimerManager::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
         tokio::spawn(timer_mgr.start());
 
         // Switch manager: virtual on/off helper switches.
-        let switch_mgr = switch_manager::SwitchManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
+        let switch_mgr = switch_manager::SwitchManager::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
         tokio::spawn(switch_mgr.start());
 
         // Mode manager: solar + manual named boolean modes.
@@ -285,7 +323,9 @@ impl Core {
 
             let initial = match tokio::task::spawn_blocking(move || {
                 calendar_store::load_dir(&dir, expansion_days)
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(entries)) => {
                     info!(
                         count          = entries.len(),
@@ -319,7 +359,11 @@ impl Core {
             }
 
             // Auto-refresh task for URL-sourced calendars.
-            calendar_store::spawn_auto_refresh(cal_dir.clone(), Arc::clone(&handle), expansion_days);
+            calendar_store::spawn_auto_refresh(
+                cal_dir.clone(),
+                Arc::clone(&handle),
+                expansion_days,
+            );
 
             Some(handle)
         } else {
