@@ -950,11 +950,16 @@ async fn main() -> Result<()> {
         jwt,
         whitelist,
         Some(modes_path),
-    )
-    .with_log_stream(LogStreamState {
-        tx: log_tx,
-        ring: log_ring,
-    })
+    );
+
+    let app_state = if config.logging.stream.enabled {
+        app_state.with_log_stream(LogStreamState {
+            tx: log_tx,
+            ring: log_ring,
+        })
+    } else {
+        app_state
+    }
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups)

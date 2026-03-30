@@ -202,6 +202,8 @@ plugins/examples/http-poller     ← depends on plugin-sdk-rs
   includes `grouped_motion` and `grouped_light_level`, so Hue eventstream updates for grouped
   motion sensors should patch the existing compacted sensor state instead of forcing a full
   bridge refresh.
+- The live log WebSocket endpoint is only attached when `[logging.stream].enabled = true`.
+  Clients should not assume `/api/v1/logs/stream` is always available.
 
 ---
 
