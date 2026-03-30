@@ -29,27 +29,27 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub struct Scheduler {
-    pub_bus:                EventBus,
-    latitude:               f64,
-    longitude:              f64,
+    pub_bus: EventBus,
+    latitude: f64,
+    longitude: f64,
     /// Shared rule set — reads the live handle each tick so hot-reloaded
     /// time-based rules take effect immediately without a restart.
-    rules:                  Arc<RwLock<Vec<Rule>>>,
+    rules: Arc<RwLock<Vec<Rule>>>,
     /// How many minutes back from now to search for missed triggers on startup.
     /// Set to 0 to disable catch-up entirely.
     catchup_window_minutes: u32,
     /// Tracks when each Periodic rule last fired so we can compare elapsed time.
-    last_periodic_fire:     Arc<DashMap<Uuid, Instant>>,
+    last_periodic_fire: Arc<DashMap<Uuid, Instant>>,
     /// Optional calendar store for `CalendarEvent` triggers.
     calendar: Option<CalendarHandle>,
 }
 
 impl Scheduler {
     pub fn new(
-        pub_bus:                EventBus,
-        latitude:               f64,
-        longitude:              f64,
-        rules:                  Arc<RwLock<Vec<Rule>>>,
+        pub_bus: EventBus,
+        latitude: f64,
+        longitude: f64,
+        rules: Arc<RwLock<Vec<Rule>>>,
         catchup_window_minutes: u32,
     ) -> Self {
         Self {
@@ -75,8 +75,8 @@ impl Scheduler {
     /// Stops cleanly when `shutdown` receives `true`.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         info!(
-            lat                    = self.latitude,
-            lon                    = self.longitude,
+            lat = self.latitude,
+            lon = self.longitude,
             catchup_window_minutes = self.catchup_window_minutes,
             "Scheduler started"
         );
@@ -107,7 +107,10 @@ impl Scheduler {
                             let day_match = days.is_empty() || days.contains(&current_day);
                             time_match && day_match
                         }
-                        Trigger::SunEvent { event, offset_minutes } => {
+                        Trigger::SunEvent {
+                            event,
+                            offset_minutes,
+                        } => {
                             if let Some(sun_time) = solar_event_time(
                                 self.latitude,
                                 self.longitude,
@@ -163,16 +166,30 @@ impl Scheduler {
                     let utc_now = chrono::Utc::now();
 
                     for rule in rules.iter() {
-                        if !rule.enabled { continue; }
-                        let Trigger::CalendarEvent { calendar_id, title_contains, offset_minutes } = &rule.trigger
-                        else { continue; };
+                        if !rule.enabled {
+                            continue;
+                        }
+                        let Trigger::CalendarEvent {
+                            calendar_id,
+                            title_contains,
+                            offset_minutes,
+                        } = &rule.trigger
+                        else {
+                            continue;
+                        };
 
                         // The "target" event start time that would cause this rule
                         // to fire right now after applying offset_minutes.
                         let target = utc_now - chrono::Duration::minutes(*offset_minutes as i64);
 
-                        let fired = calendars.iter()
-                            .filter(|cal| calendar_id.as_deref().map(|id| id == cal.id).unwrap_or(true))
+                        let fired = calendars
+                            .iter()
+                            .filter(|cal| {
+                                calendar_id
+                                    .as_deref()
+                                    .map(|id| id == cal.id)
+                                    .unwrap_or(true)
+                            })
                             .flat_map(|cal| cal.events.iter().map(move |ev| (cal, ev)))
                             .any(|(cal, ev)| {
                                 // Event start must fall within the current minute window
@@ -181,7 +198,9 @@ impl Scheduler {
                                 let in_window = start.date_naive() == target.date_naive()
                                     && start.hour() == target.hour()
                                     && start.minute() == target.minute();
-                                if !in_window { return false; }
+                                if !in_window {
+                                    return false;
+                                }
                                 if let Some(filter) = title_contains {
                                     if !ev.summary.to_lowercase().contains(&filter.to_lowercase()) {
                                         return false;
@@ -199,17 +218,30 @@ impl Scheduler {
                         if fired {
                             let payload = {
                                 // Find the matched event for the payload (first match).
-                                let ev_info = calendars.iter()
-                                    .filter(|cal| calendar_id.as_deref().map(|id| id == cal.id).unwrap_or(true))
-                                    .flat_map(|cal| cal.events.iter().map(move |ev| (cal.id.as_str(), ev)))
+                                let ev_info = calendars
+                                    .iter()
+                                    .filter(|cal| {
+                                        calendar_id
+                                            .as_deref()
+                                            .map(|id| id == cal.id)
+                                            .unwrap_or(true)
+                                    })
+                                    .flat_map(|cal| {
+                                        cal.events.iter().map(move |ev| (cal.id.as_str(), ev))
+                                    })
                                     .find(|(_, ev)| {
                                         let start = ev.start;
                                         let in_window = start.date_naive() == target.date_naive()
                                             && start.hour() == target.hour()
                                             && start.minute() == target.minute();
-                                        if !in_window { return false; }
+                                        if !in_window {
+                                            return false;
+                                        }
                                         if let Some(filter) = title_contains {
-                                            return ev.summary.to_lowercase().contains(&filter.to_lowercase());
+                                            return ev
+                                                .summary
+                                                .to_lowercase()
+                                                .contains(&filter.to_lowercase());
                                         }
                                         true
                                     });
@@ -225,7 +257,7 @@ impl Scheduler {
                             };
                             debug!(rule_id = %rule.id, "Scheduler firing CalendarEvent trigger");
                             let _ = self.pub_bus.publish(Event::Custom {
-                                timestamp:  chrono::Utc::now(),
+                                timestamp: chrono::Utc::now(),
                                 event_type: "scheduler_tick".into(),
                                 payload,
                             });
@@ -265,11 +297,12 @@ impl Scheduler {
         let now = Local::now();
         // Strip seconds and nanoseconds from both endpoints so in_catchup_window
         // comparisons are at minute granularity (matches how trigger times are stored).
-        let now_time = NaiveTime::from_hms_opt(now.hour(), now.minute(), 0)
-            .unwrap_or_else(|| now.time());
+        let now_time =
+            NaiveTime::from_hms_opt(now.hour(), now.minute(), 0).unwrap_or_else(|| now.time());
         let window_start_dt = now - chrono::Duration::minutes(self.catchup_window_minutes as i64);
-        let window_start_naive = NaiveTime::from_hms_opt(window_start_dt.hour(), window_start_dt.minute(), 0)
-            .unwrap_or_else(|| window_start_dt.time());
+        let window_start_naive =
+            NaiveTime::from_hms_opt(window_start_dt.hour(), window_start_dt.minute(), 0)
+                .unwrap_or_else(|| window_start_dt.time());
         let today = now.date_naive();
         let weekday = now.weekday();
         // Keep DateTime versions for cron window check.
@@ -285,8 +318,17 @@ impl Scheduler {
             }
 
             let fires = match &rule.trigger {
-                Trigger::SunEvent { event, offset_minutes } => {
-                    match solar_event_time(self.latitude, self.longitude, today, *event, *offset_minutes) {
+                Trigger::SunEvent {
+                    event,
+                    offset_minutes,
+                } => {
+                    match solar_event_time(
+                        self.latitude,
+                        self.longitude,
+                        today,
+                        *event,
+                        *offset_minutes,
+                    ) {
                         Some(sun_time) => in_catchup_window(sun_time, window_start_naive, now_time),
                         None => false,
                     }
@@ -326,9 +368,9 @@ impl Scheduler {
                     "Scheduler catch-up: firing missed time trigger"
                 );
                 if let Err(e) = self.pub_bus.publish(Event::Custom {
-                    timestamp:  chrono::Utc::now(),
+                    timestamp: chrono::Utc::now(),
                     event_type: "scheduler_tick".into(),
-                    payload:    serde_json::json!({ "rule_id": rule.id }),
+                    payload: serde_json::json!({ "rule_id": rule.id }),
                 }) {
                     warn!(rule_id = %rule.id, error = %e, "Scheduler catch-up: failed to publish event");
                 }
@@ -337,12 +379,15 @@ impl Scheduler {
 
         if fired > 0 {
             info!(
-                count                  = fired,
-                window_minutes         = self.catchup_window_minutes,
+                count = fired,
+                window_minutes = self.catchup_window_minutes,
                 "Scheduler catch-up complete"
             );
         } else {
-            debug!(window_minutes = self.catchup_window_minutes, "Scheduler catch-up: no missed triggers found");
+            debug!(
+                window_minutes = self.catchup_window_minutes,
+                "Scheduler catch-up: no missed triggers found"
+            );
         }
     }
 }
@@ -354,8 +399,7 @@ impl Scheduler {
 fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime) -> bool {
     // Callers pass window_start and now already stripped to minute precision.
     // Strip trigger to minute precision too for a consistent comparison.
-    let t = NaiveTime::from_hms_opt(trigger.hour(), trigger.minute(), 0)
-        .unwrap_or(trigger);
+    let t = NaiveTime::from_hms_opt(trigger.hour(), trigger.minute(), 0).unwrap_or(trigger);
     if window_start <= now {
         // Normal case: window is contained within a single calendar day.
         t >= window_start && t <= now
@@ -437,8 +481,7 @@ pub(crate) fn solar_event_time(
     let day_of_year = date.ordinal() as f64;
 
     // Solar declination (radians).
-    let decl = 0.006918
-        - 0.399912 * (2.0 * std::f64::consts::PI * day_of_year / 365.0).cos()
+    let decl = 0.006918 - 0.399912 * (2.0 * std::f64::consts::PI * day_of_year / 365.0).cos()
         + 0.070257 * (2.0 * std::f64::consts::PI * day_of_year / 365.0).sin()
         - 0.006758 * (4.0 * std::f64::consts::PI * day_of_year / 365.0).cos()
         + 0.000907 * (4.0 * std::f64::consts::PI * day_of_year / 365.0).sin();
@@ -459,8 +502,8 @@ pub(crate) fn solar_event_time(
     };
 
     let lat_rad = lat.to_radians();
-    let cos_hour_angle = (zenith_deg.to_radians().cos() - decl.sin() * lat_rad.sin())
-        / (decl.cos() * lat_rad.cos());
+    let cos_hour_angle =
+        (zenith_deg.to_radians().cos() - decl.sin() * lat_rad.sin()) / (decl.cos() * lat_rad.cos());
 
     // No event this day (e.g. polar summer/winter).
     if cos_hour_angle < -1.0 || cos_hour_angle > 1.0 {
@@ -495,9 +538,9 @@ fn periodic_to_secs(every_n: u32, unit: &PeriodicUnit) -> u64 {
     let n = every_n.max(1) as u64;
     match unit {
         PeriodicUnit::Minutes => n * 60,
-        PeriodicUnit::Hours   => n * 3600,
-        PeriodicUnit::Days    => n * 86400,
-        PeriodicUnit::Weeks   => n * 604800,
+        PeriodicUnit::Hours => n * 3600,
+        PeriodicUnit::Days => n * 86400,
+        PeriodicUnit::Weeks => n * 604800,
     }
 }
 

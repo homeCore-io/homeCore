@@ -17,7 +17,11 @@ pub enum Segment {
     /// Whole-segment capture: `{name}`.
     Capture(String),
     /// Partial capture with optional literal prefix and/or suffix: `shelly_{device}`.
-    PartialCapture { prefix: String, name: String, suffix: String },
+    PartialCapture {
+        prefix: String,
+        name: String,
+        suffix: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -33,12 +37,16 @@ pub fn parse_pattern(pattern: &str) -> Vec<Segment> {
             if let (Some(open), Some(close)) = (seg.find('{'), seg.find('}')) {
                 if open < close {
                     let prefix = seg[..open].to_string();
-                    let name   = seg[open + 1..close].to_string();
+                    let name = seg[open + 1..close].to_string();
                     let suffix = seg[close + 1..].to_string();
                     if prefix.is_empty() && suffix.is_empty() {
                         return Segment::Capture(name);
                     } else {
-                        return Segment::PartialCapture { prefix, name, suffix };
+                        return Segment::PartialCapture {
+                            prefix,
+                            name,
+                            suffix,
+                        };
                     }
                 }
             }
@@ -66,7 +74,11 @@ pub fn match_segments(segments: &[Segment], topic: &str) -> Option<HashMap<Strin
             Segment::Capture(name) => {
                 vars.insert(name.clone(), (*part).to_string());
             }
-            Segment::PartialCapture { prefix, name, suffix } => {
+            Segment::PartialCapture {
+                prefix,
+                name,
+                suffix,
+            } => {
                 if part.starts_with(prefix.as_str()) && part.ends_with(suffix.as_str()) {
                     let inner_end = part.len() - suffix.len();
                     let value = &part[prefix.len()..inner_end];
@@ -96,9 +108,7 @@ pub fn render_template(template: &str, vars: &HashMap<String, String>) -> String
 /// Sanitize a string for use in a HomeCore device ID.
 /// Replaces characters that are awkward in MQTT topics or HTTP paths.
 pub fn sanitize_id(s: &str) -> String {
-    s.replace(':', "_")
-     .replace(' ', "_")
-     .replace('/', "_")
+    s.replace(':', "_").replace(' ', "_").replace('/', "_")
 }
 
 // ---------------------------------------------------------------------------

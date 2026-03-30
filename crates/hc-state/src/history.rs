@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,9 @@ impl HistoryStore {
                 ON rule_fire_history (rule_id, fired_at);",
         )
         .context("history DB migration failed")?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Append a single attribute update.
@@ -106,7 +108,12 @@ impl HistoryStore {
                     let recorded_at = DateTime::parse_from_rfc3339(&ts_str)
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now());
-                    out.push(HistoryEntry { device_id: did, attribute: attr, value, recorded_at });
+                    out.push(HistoryEntry {
+                        device_id: did,
+                        attribute: attr,
+                        value,
+                        recorded_at,
+                    });
                 }
             };
         }

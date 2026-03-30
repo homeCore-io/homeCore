@@ -59,10 +59,10 @@ async fn main() -> Result<()> {
     );
 
     let plugin_config = PluginConfig {
-        plugin_id:   cfg.plugin.id.clone(),
+        plugin_id: cfg.plugin.id.clone(),
         broker_host: cfg.plugin.broker_host.clone(),
         broker_port: cfg.plugin.broker_port,
-        password:    cfg.plugin.password.clone(),
+        password: cfg.plugin.password.clone(),
     };
 
     let client = PluginClient::connect(plugin_config).await?;
@@ -71,7 +71,9 @@ async fn main() -> Result<()> {
     // transitions each one to online.
     for p in &cfg.pollers {
         let name = &p.name;
-        client.register_device(&p.device_id, name, p.capabilities.clone()).await?;
+        client
+            .register_device(&p.device_id, name, p.capabilities.clone())
+            .await?;
         client.set_available(&p.device_id, false).await?;
         info!(device_id = %p.device_id, url = %p.url, "Device registered");
     }
@@ -110,9 +112,7 @@ fn config_path_from_args() -> String {
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 /// Pre-compile every Rhai transform script.  Returns an error on the first

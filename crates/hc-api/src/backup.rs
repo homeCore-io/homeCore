@@ -34,12 +34,13 @@ pub struct BackupPaths {
     pub rules_dir: PathBuf,
 }
 
-pub async fn backup_handler(
-    State(state): State<AppState>,
-    AuthUser(claims): AuthUser,
-) -> Response {
+pub async fn backup_handler(State(state): State<AppState>, AuthUser(claims): AuthUser) -> Response {
     if !claims.is_admin() {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin role required" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
     }
 
     let paths = match &state.backup_paths {
@@ -59,20 +60,18 @@ pub async fn backup_handler(
     let result = tokio::task::spawn_blocking(move || build_zip(&paths)).await;
 
     match result {
-        Ok(Ok(bytes)) => {
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "application/zip"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        &format!("attachment; filename=\"{filename}\""),
-                    ),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
+        Ok(Ok(bytes)) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/zip"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{filename}\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
         Ok(Err(e)) => {
             warn!(error = %e, "Backup creation failed");
             (
@@ -106,7 +105,12 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
     add_file_opt(&mut zip, &paths.config_path, "config/homecore.toml", opts)?;
     // modes.toml lives in the same directory as the main config
     if let Some(parent) = paths.config_path.parent() {
-        add_file_opt(&mut zip, &parent.join("modes.toml"), "config/modes.toml", opts)?;
+        add_file_opt(
+            &mut zip,
+            &parent.join("modes.toml"),
+            "config/modes.toml",
+            opts,
+        )?;
     }
 
     // ── Rule files ─────────────────────────────────────────────────────────

@@ -35,19 +35,19 @@ use crate::config::RotationStrategy;
 /// Implements `std::io::Write`; pass to `tracing_appender::non_blocking` for
 /// async, non-blocking log dispatch.
 pub struct RotatingWriter {
-    file:           File,
+    file: File,
     /// Bytes written to the current active file.
-    bytes_written:  u64,
+    bytes_written: u64,
     /// Rotate when `bytes_written >= max_bytes`.  `0` = no size limit.
-    max_bytes:      u64,
-    rotation:       RotationStrategy,
+    max_bytes: u64,
+    rotation: RotationStrategy,
     /// The period string that was current when `file` was opened.
     /// Used to detect when the period rolls over.  Empty for `Never`.
     current_period: String,
-    dir:            PathBuf,
-    prefix:         String,
+    dir: PathBuf,
+    prefix: String,
     /// When `true`, spawn a background thread to gzip each rotated file.
-    compress:       bool,
+    compress: bool,
     /// How many size-triggered rotations have happened in `current_period`.
     /// Used to generate unique suffixes (`.1`, `.2`, …).
     period_counter: u32,
@@ -60,23 +60,33 @@ impl RotatingWriter {
     /// size is used as the initial `bytes_written` so that a file already near
     /// the size limit will rotate promptly.
     pub fn new(
-        dir:       PathBuf,
-        prefix:    String,
-        rotation:  RotationStrategy,
+        dir: PathBuf,
+        prefix: String,
+        rotation: RotationStrategy,
         max_bytes: u64,
-        compress:  bool,
+        compress: bool,
     ) -> io::Result<Self> {
         let current_period = period_str(&rotation);
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { file, bytes_written, max_bytes, rotation, current_period, dir, prefix, compress, period_counter: 0 })
+        Ok(Self {
+            file,
+            bytes_written,
+            max_bytes,
+            rotation,
+            current_period,
+            dir,
+            prefix,
+            compress,
+            period_counter: 0,
+        })
     }
 
     fn maybe_rotate(&mut self) -> io::Result<()> {
         let new_period = period_str(&self.rotation);
         let period_changed = !new_period.is_empty() && new_period != self.current_period;
-        let size_exceeded  = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
+        let size_exceeded = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
 
         if !period_changed && !size_exceeded {
             return Ok(());
@@ -90,7 +100,7 @@ impl RotatingWriter {
         }
 
         let rotated = self.next_rotated_path();
-        let active  = active_path(&self.dir, &self.prefix);
+        let active = active_path(&self.dir, &self.prefix);
 
         std::fs::rename(&active, &rotated)?;
 
@@ -98,7 +108,7 @@ impl RotatingWriter {
             compress_in_background(rotated);
         }
 
-        self.file          = open_append(&active)?;
+        self.file = open_append(&active)?;
         self.bytes_written = 0;
         self.period_counter += 1;
 
@@ -123,10 +133,16 @@ impl RotatingWriter {
         }
 
         // Find the first unused numeric suffix.
-        let start = if self.period_counter == 0 { 1 } else { self.period_counter };
+        let start = if self.period_counter == 0 {
+            1
+        } else {
+            self.period_counter
+        };
         let mut n = start;
         loop {
-            let candidate = self.dir.join(format!("{}.{}.{}.log", self.prefix, period, n));
+            let candidate = self
+                .dir
+                .join(format!("{}.{}.{}.log", self.prefix, period, n));
             if !candidate.exists() {
                 return candidate;
             }
@@ -165,10 +181,10 @@ fn open_append(path: &Path) -> io::Result<File> {
 fn period_str(rotation: &RotationStrategy) -> String {
     let now = chrono::Local::now();
     match rotation {
-        RotationStrategy::Hourly  => now.format("%Y-%m-%d_%H").to_string(),
-        RotationStrategy::Daily   => now.format("%Y-%m-%d").to_string(),
-        RotationStrategy::Weekly  => now.format("%Y-W%V").to_string(),
-        RotationStrategy::Never   => String::new(),
+        RotationStrategy::Hourly => now.format("%Y-%m-%d_%H").to_string(),
+        RotationStrategy::Daily => now.format("%Y-%m-%d").to_string(),
+        RotationStrategy::Weekly => now.format("%Y-W%V").to_string(),
+        RotationStrategy::Never => String::new(),
     }
 }
 
@@ -181,8 +197,8 @@ fn compress_in_background(src: PathBuf) {
 
         let result: io::Result<()> = (|| {
             use flate2::{write::GzEncoder, Compression};
-            let mut input   = File::open(&src)?;
-            let output      = File::create(&gz_path)?;
+            let mut input = File::open(&src)?;
+            let output = File::create(&gz_path)?;
             let mut encoder = GzEncoder::new(output, Compression::default());
             io::copy(&mut input, &mut encoder)?;
             encoder.finish()?;

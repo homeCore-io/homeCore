@@ -39,14 +39,13 @@ pub async fn run_poller(cfg: PollerConfig, publisher: DevicePublisher) {
     // (startup validation catches them earlier, but this is the safety net).
     let engine = build_engine();
     let compiled: Option<AST> = cfg.transform.as_deref().and_then(|src| {
-        engine.compile(src)
+        engine
+            .compile(src)
             .map_err(|e| warn!(device_id = %cfg.device_id, error = %e, "Transform compile error"))
             .ok()
     });
 
-    let mut interval = tokio::time::interval(
-        std::time::Duration::from_secs(cfg.interval_secs),
-    );
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     info!(
@@ -121,7 +120,10 @@ fn apply_field_map(response: &Value, field_map: &HashMap<String, String>) -> Val
                 state.insert(attr.clone(), val);
             }
             None => {
-                warn!(attr, path, "Field path not found in response — attribute omitted");
+                warn!(
+                    attr,
+                    path, "Field path not found in response — attribute omitted"
+                );
             }
         }
     }
@@ -205,10 +207,10 @@ fn build_engine() -> Engine {
 
 pub fn json_to_dynamic(value: &Value) -> Dynamic {
     match value {
-        Value::Null       => Dynamic::UNIT,
-        Value::Bool(b)    => Dynamic::from(*b),
-        Value::String(s)  => Dynamic::from(s.clone()),
-        Value::Number(n)  => {
+        Value::Null => Dynamic::UNIT,
+        Value::Bool(b) => Dynamic::from(*b),
+        Value::String(s) => Dynamic::from(s.clone()),
+        Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Dynamic::from(i)
             } else {
@@ -286,15 +288,21 @@ mod tests {
     #[test]
     fn extract_nested_key() {
         let v = json!({ "main": { "temp": 18.0, "humidity": 60 } });
-        assert_eq!(extract_path(&v, "main.temp"),     Some(json!(18.0)));
+        assert_eq!(extract_path(&v, "main.temp"), Some(json!(18.0)));
         assert_eq!(extract_path(&v, "main.humidity"), Some(json!(60)));
     }
 
     #[test]
     fn extract_array_index() {
         let v = json!({ "weather": [{ "description": "clear sky" }, { "description": "clouds" }] });
-        assert_eq!(extract_path(&v, "weather[0].description"), Some(json!("clear sky")));
-        assert_eq!(extract_path(&v, "weather[1].description"), Some(json!("clouds")));
+        assert_eq!(
+            extract_path(&v, "weather[0].description"),
+            Some(json!("clear sky"))
+        );
+        assert_eq!(
+            extract_path(&v, "weather[1].description"),
+            Some(json!("clouds"))
+        );
     }
 
     #[test]
@@ -307,7 +315,7 @@ mod tests {
     fn extract_missing_returns_none() {
         let v = json!({ "main": { "temp": 5 } });
         assert_eq!(extract_path(&v, "main.humidity"), None);
-        assert_eq!(extract_path(&v, "missing"),       None);
+        assert_eq!(extract_path(&v, "missing"), None);
     }
 
     #[test]
@@ -324,13 +332,13 @@ mod tests {
         });
         let mut field_map = HashMap::new();
         field_map.insert("temperature".into(), "main.temp".into());
-        field_map.insert("humidity".into(),    "main.humidity".into());
-        field_map.insert("desc".into(),        "weather[0].description".into());
+        field_map.insert("humidity".into(), "main.humidity".into());
+        field_map.insert("desc".into(), "weather[0].description".into());
 
         let state = apply_field_map(&response, &field_map);
         assert_eq!(state["temperature"], json!(22.0));
-        assert_eq!(state["humidity"],    json!(55));
-        assert_eq!(state["desc"],        json!("sunny"));
+        assert_eq!(state["humidity"], json!(55));
+        assert_eq!(state["desc"], json!("sunny"));
     }
 
     #[test]
@@ -338,7 +346,7 @@ mod tests {
         let response = json!({ "temp": 20.0 });
         let mut field_map = HashMap::new();
         field_map.insert("temperature".into(), "temp".into());
-        field_map.insert("humidity".into(),    "missing.path".into());
+        field_map.insert("humidity".into(), "missing.path".into());
 
         let state = apply_field_map(&response, &field_map);
         assert!(state.get("temperature").is_some());
@@ -413,7 +421,7 @@ mod tests {
 
         let state = apply_transform(&response, &engine, &ast).unwrap();
         assert_eq!(state["temperature"], json!(21.0));
-        assert_eq!(state["humidity"],    json!(65));
+        assert_eq!(state["humidity"], json!(65));
     }
 
     #[test]

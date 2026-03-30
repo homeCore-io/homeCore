@@ -49,10 +49,24 @@ use tracing::debug;
 /// by the rule executor after the script returns.
 #[derive(Debug)]
 pub enum ScriptSideEffect {
-    SetDeviceState { device_id: String, state: JsonValue },
-    Notify         { channel: String, title: String, message: String },
-    PublishMqtt    { topic: String, payload: String },
-    CallService    { method: String, url: String, body: String },
+    SetDeviceState {
+        device_id: String,
+        state: JsonValue,
+    },
+    Notify {
+        channel: String,
+        title: String,
+        message: String,
+    },
+    PublishMqtt {
+        topic: String,
+        payload: String,
+    },
+    CallService {
+        method: String,
+        url: String,
+        body: String,
+    },
 }
 
 pub type EffectsBuf = Arc<Mutex<Vec<ScriptSideEffect>>>;
@@ -126,28 +140,27 @@ impl ScriptRuntime {
         // set_device_state("id", #{ on: true, brightness: 200 })
         {
             let b = Arc::clone(&buf);
-            self.engine.register_fn(
-                "set_device_state",
-                move |id: &str, state: rhai::Map| {
+            self.engine
+                .register_fn("set_device_state", move |id: &str, state: rhai::Map| {
                     let json = rhai_map_to_json(state);
                     b.lock().unwrap().push(ScriptSideEffect::SetDeviceState {
                         device_id: id.to_string(),
                         state: json,
                     });
-                },
-            );
+                });
         }
 
         // notify("channel", "message")
         {
             let b = Arc::clone(&buf);
-            self.engine.register_fn("notify", move |channel: &str, message: &str| {
-                b.lock().unwrap().push(ScriptSideEffect::Notify {
-                    channel: channel.to_string(),
-                    title:   "HomeCore Alert".to_string(),
-                    message: message.to_string(),
+            self.engine
+                .register_fn("notify", move |channel: &str, message: &str| {
+                    b.lock().unwrap().push(ScriptSideEffect::Notify {
+                        channel: channel.to_string(),
+                        title: "HomeCore Alert".to_string(),
+                        message: message.to_string(),
+                    });
                 });
-            });
         }
 
         // notify_titled("channel", "title", "message")
@@ -158,7 +171,7 @@ impl ScriptRuntime {
                 move |channel: &str, title: &str, message: &str| {
                     b.lock().unwrap().push(ScriptSideEffect::Notify {
                         channel: channel.to_string(),
-                        title:   title.to_string(),
+                        title: title.to_string(),
                         message: message.to_string(),
                     });
                 },
@@ -171,8 +184,8 @@ impl ScriptRuntime {
             self.engine.register_fn("http_get", move |url: &str| {
                 b.lock().unwrap().push(ScriptSideEffect::CallService {
                     method: "GET".to_string(),
-                    url:    url.to_string(),
-                    body:   String::new(),
+                    url: url.to_string(),
+                    body: String::new(),
                 });
             });
         }
@@ -180,24 +193,26 @@ impl ScriptRuntime {
         // http_post("url", "{\"key\":\"value\"}")
         {
             let b = Arc::clone(&buf);
-            self.engine.register_fn("http_post", move |url: &str, body: &str| {
-                b.lock().unwrap().push(ScriptSideEffect::CallService {
-                    method: "POST".to_string(),
-                    url:    url.to_string(),
-                    body:   body.to_string(),
+            self.engine
+                .register_fn("http_post", move |url: &str, body: &str| {
+                    b.lock().unwrap().push(ScriptSideEffect::CallService {
+                        method: "POST".to_string(),
+                        url: url.to_string(),
+                        body: body.to_string(),
+                    });
                 });
-            });
         }
 
         // publish_mqtt("topic", "payload")
         {
             let b = Arc::clone(&buf);
-            self.engine.register_fn("publish_mqtt", move |topic: &str, payload: &str| {
-                b.lock().unwrap().push(ScriptSideEffect::PublishMqtt {
-                    topic:   topic.to_string(),
-                    payload: payload.to_string(),
+            self.engine
+                .register_fn("publish_mqtt", move |topic: &str, payload: &str| {
+                    b.lock().unwrap().push(ScriptSideEffect::PublishMqtt {
+                        topic: topic.to_string(),
+                        payload: payload.to_string(),
+                    });
                 });
-            });
         }
 
         self
@@ -209,11 +224,15 @@ impl ScriptRuntime {
     /// - `hub_var("name")` — current value of the named hub variable, or `()` if unset
     pub fn with_hub_vars(mut self, hub_vars: HashMap<String, JsonValue>) -> Self {
         let vars: Arc<HashMap<String, rhai::Dynamic>> = Arc::new(
-            hub_vars.into_iter().map(|(k, v)| (k, json_to_dynamic(v))).collect()
+            hub_vars
+                .into_iter()
+                .map(|(k, v)| (k, json_to_dynamic(v)))
+                .collect(),
         );
-        self.engine.register_fn("hub_var", move |name: &str| -> rhai::Dynamic {
-            vars.get(name).cloned().unwrap_or(rhai::Dynamic::UNIT)
-        });
+        self.engine
+            .register_fn("hub_var", move |name: &str| -> rhai::Dynamic {
+                vars.get(name).cloned().unwrap_or(rhai::Dynamic::UNIT)
+            });
         self
     }
 
@@ -229,21 +248,44 @@ impl ScriptRuntime {
     ///   query-string parameters (e.g. `trigger_extra()["token"]`); unit otherwise
     /// - `trigger_label()` — user-defined label from `rule.trigger_label`, or `""`
     pub fn with_trigger_context(mut self, ctx: &TriggerContext) -> Self {
-        let device_id     = ctx.device_id.clone().unwrap_or_default();
-        let attribute     = ctx.attribute.clone().unwrap_or_default();
-        let value         = ctx.value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
-        let prev_value    = ctx.prev_value.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
-        let event_type    = ctx.event_type.clone().unwrap_or_default();
-        let extra         = ctx.extra.clone().map(json_to_dynamic).unwrap_or(Dynamic::UNIT);
+        let device_id = ctx.device_id.clone().unwrap_or_default();
+        let attribute = ctx.attribute.clone().unwrap_or_default();
+        let value = ctx
+            .value
+            .clone()
+            .map(json_to_dynamic)
+            .unwrap_or(Dynamic::UNIT);
+        let prev_value = ctx
+            .prev_value
+            .clone()
+            .map(json_to_dynamic)
+            .unwrap_or(Dynamic::UNIT);
+        let event_type = ctx.event_type.clone().unwrap_or_default();
+        let extra = ctx
+            .extra
+            .clone()
+            .map(json_to_dynamic)
+            .unwrap_or(Dynamic::UNIT);
         let trigger_label = ctx.trigger_label.clone().unwrap_or_default();
 
-        self.engine.register_fn("trigger_device",     move || -> String  { device_id.clone() });
-        self.engine.register_fn("trigger_attribute",  move || -> String  { attribute.clone() });
-        self.engine.register_fn("trigger_value",      move || -> Dynamic { value.clone() });
-        self.engine.register_fn("trigger_prev_value", move || -> Dynamic { prev_value.clone() });
-        self.engine.register_fn("trigger_event_type", move || -> String  { event_type.clone() });
-        self.engine.register_fn("trigger_extra",      move || -> Dynamic { extra.clone() });
-        self.engine.register_fn("trigger_label",      move || -> String  { trigger_label.clone() });
+        self.engine
+            .register_fn("trigger_device", move || -> String { device_id.clone() });
+        self.engine
+            .register_fn("trigger_attribute", move || -> String { attribute.clone() });
+        self.engine
+            .register_fn("trigger_value", move || -> Dynamic { value.clone() });
+        self.engine
+            .register_fn("trigger_prev_value", move || -> Dynamic {
+                prev_value.clone()
+            });
+        self.engine
+            .register_fn("trigger_event_type", move || -> String {
+                event_type.clone()
+            });
+        self.engine
+            .register_fn("trigger_extra", move || -> Dynamic { extra.clone() });
+        self.engine
+            .register_fn("trigger_label", move || -> String { trigger_label.clone() });
         self
     }
 
@@ -257,9 +299,10 @@ impl ScriptRuntime {
                 .map(|(k, v)| (k.into(), json_to_dynamic(v)))
                 .collect(),
         );
-        self.engine.register_fn("rule_var", move |name: &str| -> Dynamic {
-            rhai_vars.get(name).cloned().unwrap_or(Dynamic::UNIT)
-        });
+        self.engine
+            .register_fn("rule_var", move |name: &str| -> Dynamic {
+                rhai_vars.get(name).cloned().unwrap_or(Dynamic::UNIT)
+            });
         self
     }
 
@@ -317,8 +360,8 @@ impl Default for ScriptRuntime {
 
 fn json_to_dynamic(v: JsonValue) -> Dynamic {
     match v {
-        JsonValue::Null      => Dynamic::UNIT,
-        JsonValue::Bool(b)   => Dynamic::from(b),
+        JsonValue::Null => Dynamic::UNIT,
+        JsonValue::Bool(b) => Dynamic::from(b),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Dynamic::from(i)
@@ -326,7 +369,7 @@ fn json_to_dynamic(v: JsonValue) -> Dynamic {
                 Dynamic::from(n.as_f64().unwrap_or(0.0))
             }
         }
-        JsonValue::String(s)  => Dynamic::from(s),
+        JsonValue::String(s) => Dynamic::from(s),
         JsonValue::Array(arr) => {
             let v: rhai::Array = arr.into_iter().map(json_to_dynamic).collect();
             Dynamic::from(v)
@@ -398,16 +441,25 @@ mod tests {
     #[test]
     fn device_state_returns_attributes() {
         let mut devices = HashMap::new();
-        devices.insert("yolink_abc".to_string(), json!({ "locked": true, "battery": 75 }));
+        devices.insert(
+            "yolink_abc".to_string(),
+            json!({ "locked": true, "battery": 75 }),
+        );
         let rt = ScriptRuntime::new_with_devices(devices);
-        assert!(rt.eval_condition(r#"device_state("yolink_abc")["locked"] == true"#).unwrap());
-        assert!(rt.eval_condition(r#"device_state("yolink_abc")["battery"] > 50"#).unwrap());
+        assert!(rt
+            .eval_condition(r#"device_state("yolink_abc")["locked"] == true"#)
+            .unwrap());
+        assert!(rt
+            .eval_condition(r#"device_state("yolink_abc")["battery"] > 50"#)
+            .unwrap());
     }
 
     #[test]
     fn device_state_unknown_returns_empty_map() {
         let rt = ScriptRuntime::new_with_devices(HashMap::new());
-        assert!(rt.eval_condition(r#"device_state("no_such_device").is_empty()"#).unwrap());
+        assert!(rt
+            .eval_condition(r#"device_state("no_such_device").is_empty()"#)
+            .unwrap());
     }
 
     #[test]
@@ -418,43 +470,57 @@ mod tests {
     #[test]
     fn current_hour_returns_valid_range() {
         let rt = ScriptRuntime::new();
-        let hour: bool = rt.eval_condition("current_hour() >= 0 && current_hour() <= 23").unwrap();
+        let hour: bool = rt
+            .eval_condition("current_hour() >= 0 && current_hour() <= 23")
+            .unwrap();
         assert!(hour);
     }
 
     #[test]
     fn side_effects_collected() {
         let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
-        let rt = ScriptRuntime::new_with_devices(HashMap::new())
-            .with_side_effects(Arc::clone(&buf));
-        rt.run_action(r#"
+        let rt =
+            ScriptRuntime::new_with_devices(HashMap::new()).with_side_effects(Arc::clone(&buf));
+        rt.run_action(
+            r#"
             set_device_state("plug_1", #{ on: true });
             notify("pushover", "hello");
             http_get("http://localhost/ping");
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let effects = buf.lock().unwrap();
         assert_eq!(effects.len(), 3);
-        assert!(matches!(effects[0], ScriptSideEffect::SetDeviceState { .. }));
+        assert!(matches!(
+            effects[0],
+            ScriptSideEffect::SetDeviceState { .. }
+        ));
         assert!(matches!(effects[1], ScriptSideEffect::Notify { .. }));
-        assert!(matches!(effects[2], ScriptSideEffect::CallService { method: ref m, .. } if m == "GET"));
+        assert!(
+            matches!(effects[2], ScriptSideEffect::CallService { method: ref m, .. } if m == "GET")
+        );
     }
 
     #[test]
     fn trigger_context_functions() {
         let ctx = TriggerContext {
-            device_id:  Some("light_1".into()),
-            attribute:  Some("on".into()),
-            value:      Some(json!(true)),
+            device_id: Some("light_1".into()),
+            attribute: Some("on".into()),
+            value: Some(json!(true)),
             prev_value: Some(json!(false)),
             event_type: Some("device_state_changed".into()),
-            extra:      None,
+            extra: None,
         };
         let rt = ScriptRuntime::new().with_trigger_context(&ctx);
-        assert!(rt.eval_condition(r#"trigger_device() == "light_1""#).unwrap());
+        assert!(rt
+            .eval_condition(r#"trigger_device() == "light_1""#)
+            .unwrap());
         assert!(rt.eval_condition(r#"trigger_attribute() == "on""#).unwrap());
         assert!(rt.eval_condition("trigger_value() == true").unwrap());
         assert!(rt.eval_condition("trigger_prev_value() == false").unwrap());
-        assert!(rt.eval_condition(r#"trigger_event_type() == "device_state_changed""#).unwrap());
+        assert!(rt
+            .eval_condition(r#"trigger_event_type() == "device_state_changed""#)
+            .unwrap());
     }
 
     #[test]
@@ -473,9 +539,9 @@ mod tests {
         // Verifies that current_hour() is usable in branch logic.
         let rt = ScriptRuntime::new();
         // Always-true OR always-false — just confirms syntax parses correctly.
-        let result = rt.eval_condition(
-            r#"current_hour() >= 0 || current_hour() < 0"#
-        ).unwrap();
+        let result = rt
+            .eval_condition(r#"current_hour() >= 0 || current_hour() < 0"#)
+            .unwrap();
         assert!(result);
     }
 }

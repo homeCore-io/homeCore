@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use lettre::{
-    message::header::ContentType, transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
+    AsyncTransport, Message, Tokio1Executor,
 };
 use serde::Deserialize;
 
@@ -43,8 +43,12 @@ pub struct EmailConfig {
     pub starttls: bool,
 }
 
-fn default_smtp_port() -> u16 { 587 }
-fn default_starttls() -> bool { true }
+fn default_smtp_port() -> u16 {
+    587
+}
+fn default_starttls() -> bool {
+    true
+}
 
 /// SMTP notification channel.
 pub struct EmailChannel {
@@ -64,7 +68,11 @@ impl EmailChannel {
                 .context("SMTP relay setup failed")?
         };
         let transport = builder.port(cfg.smtp_port).credentials(creds).build();
-        Ok(Self { transport, from: cfg.from.clone(), to: cfg.to.clone() })
+        Ok(Self {
+            transport,
+            from: cfg.from.clone(),
+            to: cfg.to.clone(),
+        })
     }
 }
 

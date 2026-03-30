@@ -21,8 +21,7 @@ impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Cannot read config file '{path}': {e}"))?;
-        toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("TOML parse error in '{path}': {e}"))
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("TOML parse error in '{path}': {e}"))
     }
 }
 
@@ -42,17 +41,23 @@ pub struct PluginSection {
 impl Default for PluginSection {
     fn default() -> Self {
         Self {
-            id:          default_plugin_id(),
+            id: default_plugin_id(),
             broker_host: default_broker_host(),
             broker_port: default_broker_port(),
-            password:    String::new(),
+            password: String::new(),
         }
     }
 }
 
-fn default_plugin_id()    -> String { "plugin.http-poller".into() }
-fn default_broker_host()  -> String { "127.0.0.1".into() }
-fn default_broker_port()  -> u16    { 1883 }
+fn default_plugin_id() -> String {
+    "plugin.http-poller".into()
+}
+fn default_broker_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_broker_port() -> u16 {
+    1883
+}
 
 /// Configuration for a single polled device.
 #[derive(Debug, Clone, Deserialize)]
@@ -87,5 +92,9 @@ pub struct PollerConfig {
     pub transform: Option<String>,
 }
 
-fn default_interval() -> u64 { 30 }
-fn default_timeout()  -> u64 { 10 }
+fn default_interval() -> u64 {
+    30
+}
+fn default_timeout() -> u64 {
+    10
+}

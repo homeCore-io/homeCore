@@ -51,7 +51,9 @@ impl UserStore {
     pub fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let read_txn = self.db.begin_read()?;
         let name_table = read_txn.open_table(USERS_BY_NAME)?;
-        let Some(id_entry) = name_table.get(username)? else { return Ok(None) };
+        let Some(id_entry) = name_table.get(username)? else {
+            return Ok(None);
+        };
         let id_str = id_entry.value().to_string();
         drop(id_entry);
         drop(name_table);
@@ -79,7 +81,9 @@ impl UserStore {
         let id_str = id.to_string();
         let read_txn = self.db.begin_read()?;
         let id_table = read_txn.open_table(USERS_BY_ID)?;
-        let Some(v) = id_table.get(id_str.as_str())? else { return Ok(false) };
+        let Some(v) = id_table.get(id_str.as_str())? else {
+            return Ok(false);
+        };
         let user: User = serde_json::from_str(v.value())?;
         let username = user.username.clone();
         drop(v);

@@ -54,8 +54,7 @@ impl RuleFileStore {
             }
         };
 
-        let content = toml::to_string_pretty(rule)
-            .context("serializing rule to TOML")?;
+        let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
 
         std::fs::write(&path, content)
             .with_context(|| format!("writing rule file {}", path.display()))?;
@@ -120,8 +119,7 @@ impl RuleFileStore {
         let new_slug = slugify(&rule.name);
         let new_path = self.dir.join(format!("{new_slug}.toml"));
 
-        let content = toml::to_string_pretty(rule)
-            .context("serializing rule to TOML")?;
+        let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
 
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating rules directory {}", self.dir.display()))?;
@@ -142,8 +140,9 @@ impl RuleFileStore {
             if old_slug != new_slug {
                 let old_path = self.dir.join(format!("{old_slug}.toml"));
                 if old_path.exists() {
-                    std::fs::remove_file(&old_path)
-                        .with_context(|| format!("removing old rule file {}", old_path.display()))?;
+                    std::fs::remove_file(&old_path).with_context(|| {
+                        format!("removing old rule file {}", old_path.display())
+                    })?;
                 }
             }
         }
@@ -162,7 +161,13 @@ impl RuleFileStore {
 pub fn slugify(name: &str) -> String {
     let raw: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     // Collapse runs of underscores and strip leading/trailing ones.
@@ -199,13 +204,17 @@ pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
-        let Ok(mut rule) = toml::from_str::<Rule>(&content) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut rule) = toml::from_str::<Rule>(&content) else {
+            continue;
+        };
 
         if rule_references_device(&rule, device_id) {
             replace_device_refs(&mut rule, device_id, &placeholder);
             rule.enabled = false;
-            rule.error   = Some(format!("references deleted device: {device_id}"));
+            rule.error = Some(format!("references deleted device: {device_id}"));
 
             let updated = toml::to_string_pretty(&rule)
                 .with_context(|| format!("serialising rule {}", rule.name))?;
@@ -229,8 +238,14 @@ pub fn nullify_device_refs(dir: &Path, device_id: &str) -> Result<Vec<String>> {
 /// references `device_id` (does not search inside Rhai script strings).
 fn rule_references_device(rule: &Rule, device_id: &str) -> bool {
     trigger_references_device(&rule.trigger, device_id)
-        || rule.conditions.iter().any(|c| condition_references_device(c, device_id))
-        || rule.actions.iter().any(|ra| action_references_device(&ra.action, device_id))
+        || rule
+            .conditions
+            .iter()
+            .any(|c| condition_references_device(c, device_id))
+        || rule
+            .actions
+            .iter()
+            .any(|ra| action_references_device(&ra.action, device_id))
 }
 
 fn trigger_references_device(trigger: &Trigger, device_id: &str) -> bool {
@@ -248,11 +263,23 @@ fn condition_references_device(cond: &Condition, device_id: &str) -> bool {
 fn action_references_device(action: &Action, device_id: &str) -> bool {
     match action {
         Action::SetDeviceState { device_id: id, .. } => id == device_id,
-        Action::Parallel { actions } => actions.iter().any(|a| action_references_device(a, device_id)),
-        Action::RepeatUntil { actions, .. } => actions.iter().any(|a| action_references_device(a, device_id)),
-        Action::Conditional { then_actions, else_actions, .. } => {
-            then_actions.iter().any(|a| action_references_device(a, device_id))
-                || else_actions.iter().any(|a| action_references_device(a, device_id))
+        Action::Parallel { actions } => actions
+            .iter()
+            .any(|a| action_references_device(a, device_id)),
+        Action::RepeatUntil { actions, .. } => actions
+            .iter()
+            .any(|a| action_references_device(a, device_id)),
+        Action::Conditional {
+            then_actions,
+            else_actions,
+            ..
+        } => {
+            then_actions
+                .iter()
+                .any(|a| action_references_device(a, device_id))
+                || else_actions
+                    .iter()
+                    .any(|a| action_references_device(a, device_id))
         }
         _ => false,
     }
@@ -272,10 +299,14 @@ fn replace_device_refs(rule: &mut Rule, device_id: &str, placeholder: &str) {
 fn replace_in_trigger(trigger: &mut Trigger, device_id: &str, placeholder: &str) {
     match trigger {
         Trigger::DeviceStateChanged { device_id: id, .. } => {
-            if id == device_id { *id = placeholder.to_string(); }
+            if id == device_id {
+                *id = placeholder.to_string();
+            }
         }
         Trigger::DeviceAvailabilityChanged { device_id: id, .. } => {
-            if id == device_id { *id = placeholder.to_string(); }
+            if id == device_id {
+                *id = placeholder.to_string();
+            }
         }
         _ => {}
     }
@@ -297,14 +328,26 @@ fn replace_in_action(action: &mut Action, device_id: &str, placeholder: &str) {
             }
         }
         Action::Parallel { actions } => {
-            for a in actions { replace_in_action(a, device_id, placeholder); }
+            for a in actions {
+                replace_in_action(a, device_id, placeholder);
+            }
         }
         Action::RepeatUntil { actions, .. } => {
-            for a in actions { replace_in_action(a, device_id, placeholder); }
+            for a in actions {
+                replace_in_action(a, device_id, placeholder);
+            }
         }
-        Action::Conditional { then_actions, else_actions, .. } => {
-            for a in then_actions { replace_in_action(a, device_id, placeholder); }
-            for a in else_actions { replace_in_action(a, device_id, placeholder); }
+        Action::Conditional {
+            then_actions,
+            else_actions,
+            ..
+        } => {
+            for a in then_actions {
+                replace_in_action(a, device_id, placeholder);
+            }
+            for a in else_actions {
+                replace_in_action(a, device_id, placeholder);
+            }
         }
         _ => {}
     }

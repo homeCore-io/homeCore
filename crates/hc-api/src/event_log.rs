@@ -73,7 +73,12 @@ impl EventLog {
         if g.entries.len() == g.capacity {
             g.entries.pop_front();
         }
-        g.entries.push_back(LogEntry { seq, event_type, device_id, event: json });
+        g.entries.push_back(LogEntry {
+            seq,
+            event_type,
+            device_id,
+            event: json,
+        });
     }
 
     /// Query the log.  Results are newest-first.
@@ -82,7 +87,10 @@ impl EventLog {
         let limit = filter.limit.unwrap_or(50).min(1_000) as usize;
 
         let type_filter: Option<Vec<&str>> = filter.event_type.as_deref().map(|s| {
-            s.split(',').map(str::trim).filter(|t| !t.is_empty()).collect()
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect()
         });
 
         g.entries
@@ -253,7 +261,10 @@ mod tests {
         for i in 0..20u64 {
             log.push(&rule_fired(&i.to_string()));
         }
-        let results = log.query(&EventLogQuery { limit: Some(5), ..Default::default() });
+        let results = log.query(&EventLogQuery {
+            limit: Some(5),
+            ..Default::default()
+        });
         assert_eq!(results.len(), 5);
         // Should be the 5 most recent
         assert_eq!(results[0].seq, 20);
@@ -266,7 +277,10 @@ mod tests {
             log.push(&rule_fired(&i.to_string()));
         }
         // Requesting more than 1000 should be capped
-        let results = log.query(&EventLogQuery { limit: Some(9999), ..Default::default() });
+        let results = log.query(&EventLogQuery {
+            limit: Some(9999),
+            ..Default::default()
+        });
         assert_eq!(results.len(), 1000);
     }
 

@@ -67,15 +67,16 @@ struct PushoverPayload<'a> {
 impl NotifyChannel for PushoverChannel {
     async fn send(&self, title: &str, message: &str) -> Result<()> {
         let payload = PushoverPayload {
-            token:    &self.cfg.api_token,
-            user:     &self.cfg.user_key,
+            token: &self.cfg.api_token,
+            user: &self.cfg.user_key,
             title,
             message,
-            device:   self.cfg.device.as_deref(),
+            device: self.cfg.device.as_deref(),
             priority: self.cfg.priority,
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(PUSHOVER_API_URL)
             .json(&payload)
             .send()

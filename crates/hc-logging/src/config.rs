@@ -1,18 +1,42 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-fn default_level() -> String { "info".into() }
-fn default_true() -> bool { true }
-fn default_ring_size() -> usize { 500 }
-fn default_log_dir() -> String { String::new() }
-fn default_prefix() -> String { "homecore".into() }
-fn default_rules_prefix() -> String { "rules".into() }
-fn default_max_size_mb() -> u64 { 100 }
-fn default_compress() -> bool { true }
-fn default_syslog_host() -> String { "127.0.0.1".into() }
-fn default_syslog_port() -> u16 { 514 }
-fn default_facility() -> String { "user".into() }
-fn default_app_name() -> String { "homecore".into() }
+fn default_level() -> String {
+    "info".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_ring_size() -> usize {
+    500
+}
+fn default_log_dir() -> String {
+    String::new()
+}
+fn default_prefix() -> String {
+    "homecore".into()
+}
+fn default_rules_prefix() -> String {
+    "rules".into()
+}
+fn default_max_size_mb() -> u64 {
+    100
+}
+fn default_compress() -> bool {
+    true
+}
+fn default_syslog_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_syslog_port() -> u16 {
+    514
+}
+fn default_facility() -> String {
+    "user".into()
+}
+fn default_app_name() -> String {
+    "homecore".into()
+}
 
 /// Whether timestamps in log output use the local system timezone or UTC.
 ///
@@ -120,7 +144,13 @@ pub struct StderrConfig {
 }
 
 impl Default for StderrConfig {
-    fn default() -> Self { Self { enabled: true, format: OutputFormat::Pretty, ansi: true } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            format: OutputFormat::Pretty,
+            ansi: true,
+        }
+    }
 }
 
 // ── file ───────────────────────────────────────────────────────────────────
@@ -206,7 +236,9 @@ pub struct RulesFileConfig {
     pub format: OutputFormat,
 }
 
-fn default_rules_format() -> OutputFormat { OutputFormat::Pretty }
+fn default_rules_format() -> OutputFormat {
+    OutputFormat::Pretty
+}
 
 impl Default for RulesFileConfig {
     fn default() -> Self {
@@ -309,26 +341,26 @@ pub enum SyslogProtocol {
 /// the base PRI; individual severities are added on top).
 pub fn facility_code(name: &str) -> u8 {
     match name.to_lowercase().as_str() {
-        "kern"     => 0,
-        "user"     => 1,
-        "mail"     => 2,
-        "daemon"   => 3,
-        "auth"     => 4,
-        "syslog"   => 5,
-        "lpr"      => 6,
-        "news"     => 7,
-        "uucp"     => 8,
-        "cron"     => 9,
+        "kern" => 0,
+        "user" => 1,
+        "mail" => 2,
+        "daemon" => 3,
+        "auth" => 4,
+        "syslog" => 5,
+        "lpr" => 6,
+        "news" => 7,
+        "uucp" => 8,
+        "cron" => 9,
         "authpriv" => 10,
-        "ftp"      => 11,
-        "local0"   => 16,
-        "local1"   => 17,
-        "local2"   => 18,
-        "local3"   => 19,
-        "local4"   => 20,
-        "local5"   => 21,
-        "local6"   => 22,
-        "local7"   => 23,
-        _          => 1, // default: user
+        "ftp" => 11,
+        "local0" => 16,
+        "local1" => 17,
+        "local2" => 18,
+        "local3" => 19,
+        "local4" => 20,
+        "local5" => 21,
+        "local6" => 22,
+        "local7" => 23,
+        _ => 1, // default: user
     }
 }

@@ -8,7 +8,7 @@
 use anyhow::{anyhow, Result};
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2, Algorithm, Params, Version,
+    Algorithm, Argon2, Params, Version,
 };
 use rand_core::OsRng;
 
@@ -16,8 +16,7 @@ use rand_core::OsRng;
 /// This is CPU-intensive and should be called from `spawn_blocking`.
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let params = Params::new(65536, 3, 4, None)
-        .map_err(|e| anyhow!("Argon2 params error: {e}"))?;
+    let params = Params::new(65536, 3, 4, None).map_err(|e| anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     argon2
         .hash_password(password.as_bytes(), &salt)
@@ -29,8 +28,12 @@ pub fn hash_password(password: &str) -> Result<String> {
 /// Returns `true` if the password matches.
 /// This is CPU-intensive and should be called from `spawn_blocking`.
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(hash) else { return false };
-    Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -42,7 +45,10 @@ mod tests {
         let salt = SaltString::generate(&mut OsRng);
         let params = Params::new(8192, 1, 1, None).unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string()
+        argon2
+            .hash_password(password.as_bytes(), &salt)
+            .unwrap()
+            .to_string()
     }
 
     #[test]

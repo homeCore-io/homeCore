@@ -49,8 +49,8 @@ impl DeviceStore {
         let mut out = Vec::new();
         for entry in table.iter()? {
             let (_, v): (_, _) = entry?;
-            let state: DeviceState = serde_json::from_str(v.value())
-                .context("device state deserialisation failed")?;
+            let state: DeviceState =
+                serde_json::from_str(v.value()).context("device state deserialisation failed")?;
             out.push(state);
         }
         Ok(out)

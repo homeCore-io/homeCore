@@ -45,12 +45,16 @@ async fn main() -> Result<()> {
         "brightness": { "type": "integer", "minimum": 0, "maximum": 255 }
     });
 
-    client.register_device(DEVICE_ID, "Virtual Light 01", capabilities).await?;
+    client
+        .register_device(DEVICE_ID, "Virtual Light 01", capabilities)
+        .await?;
     client.subscribe_commands(DEVICE_ID).await?;
     client.set_available(DEVICE_ID, true).await?;
 
     // Shared state updated by both the command handler and the periodic tick.
-    let state = Arc::new(Mutex::new(serde_json::json!({ "on": false, "brightness": 128 })));
+    let state = Arc::new(Mutex::new(
+        serde_json::json!({ "on": false, "brightness": 128 }),
+    ));
 
     // Grab a publisher before run() consumes the client.
     let publisher = client.device_publisher();
@@ -64,7 +68,10 @@ async fn main() -> Result<()> {
 
     info!("Virtual device running — press Ctrl-C to stop");
     info!("  Periodic toggle: every 5 seconds");
-    info!("  Send commands via: PATCH /api/v1/devices/{}/state", DEVICE_ID);
+    info!(
+        "  Send commands via: PATCH /api/v1/devices/{}/state",
+        DEVICE_ID
+    );
 
     // Spawn periodic state publisher: toggles on/off and steps brightness every 5s.
     {
@@ -118,7 +125,5 @@ async fn main() -> Result<()> {
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }

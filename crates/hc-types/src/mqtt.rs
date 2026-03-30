@@ -55,6 +55,9 @@ pub struct TopicFilter {
 
 impl TopicFilter {
     pub fn new(pattern: impl Into<String>) -> Self {
-        Self { pattern: pattern.into(), qos: QoS::AtMostOnce }
+        Self {
+            pattern: pattern.into(),
+            qos: QoS::AtMostOnce,
+        }
     }
 }

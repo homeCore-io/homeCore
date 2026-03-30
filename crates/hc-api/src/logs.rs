@@ -6,6 +6,7 @@
 //!   target=hc_core      Optional target prefix filter
 //!   history=50          Lines of ring-buffer history to send first (max 500)
 
+use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -15,7 +16,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use crate::AppState;
 use hc_types::LogLine;
 use serde::Deserialize;
 use serde_json::json;
@@ -28,22 +28,26 @@ use tracing::debug;
 /// Shared state for the log streaming endpoint, held in `AppState`.
 #[derive(Clone)]
 pub struct LogStreamState {
-    pub tx:   broadcast::Sender<LogLine>,
+    pub tx: broadcast::Sender<LogLine>,
     pub ring: Arc<Mutex<VecDeque<LogLine>>>,
 }
 
 #[derive(Deserialize)]
 pub struct LogStreamQuery {
-    pub token:   Option<String>,
+    pub token: Option<String>,
     #[serde(default = "default_level")]
-    pub level:   String,
-    pub target:  Option<String>,
+    pub level: String,
+    pub target: Option<String>,
     #[serde(default = "default_history")]
     pub history: usize,
 }
 
-fn default_level() -> String { "info".to_string() }
-fn default_history() -> usize { 50 }
+fn default_level() -> String {
+    "info".to_string()
+}
+fn default_history() -> usize {
+    50
+}
 
 pub async fn log_stream_handler(
     ws: WebSocketUpgrade,
@@ -53,16 +57,15 @@ pub async fn log_stream_handler(
 ) -> Response {
     // Authenticate — same pattern as /events/stream.
     let ip = match addr.ip() {
-        std::net::IpAddr::V6(v6) => {
-            v6.to_ipv4_mapped()
-                .map(std::net::IpAddr::V4)
-                .unwrap_or(std::net::IpAddr::V6(v6))
-        }
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
         v4 => v4,
     };
 
-    let is_whitelisted = !state.whitelist.is_empty()
-        && state.whitelist.iter().any(|net| net.contains(&ip));
+    let is_whitelisted =
+        !state.whitelist.is_empty() && state.whitelist.iter().any(|net| net.contains(&ip));
 
     if !is_whitelisted {
         let token = params.token.as_deref().unwrap_or("");
@@ -161,9 +164,13 @@ async fn handle_socket(
 }
 
 fn passes_filter(line: &LogLine, min_level: u8, target: Option<&str>) -> bool {
-    if level_to_u8(&line.level) < min_level { return false; }
+    if level_to_u8(&line.level) < min_level {
+        return false;
+    }
     if let Some(t) = target {
-        if !line.target.starts_with(t) { return false; }
+        if !line.target.starts_with(t) {
+            return false;
+        }
     }
     true
 }
@@ -173,11 +180,13 @@ fn level_to_u8(level: &str) -> u8 {
     match level.to_uppercase().as_str() {
         "TRACE" => 1,
         "DEBUG" => 2,
-        "INFO"  => 3,
-        "WARN"  => 4,
+        "INFO" => 3,
+        "WARN" => 4,
         "ERROR" => 5,
-        _       => 3,
+        _ => 3,
     }
 }
 
-fn parse_level(s: &str) -> u8 { level_to_u8(s) }
+fn parse_level(s: &str) -> u8 {
+    level_to_u8(s)
+}

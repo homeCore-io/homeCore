@@ -33,7 +33,11 @@ pub struct DeviceState {
 
 impl DeviceState {
     /// Create a minimal `DeviceState` with empty attributes.
-    pub fn new(device_id: impl Into<String>, name: impl Into<String>, plugin_id: impl Into<String>) -> Self {
+    pub fn new(
+        device_id: impl Into<String>,
+        name: impl Into<String>,
+        plugin_id: impl Into<String>,
+    ) -> Self {
         Self {
             device_id: device_id.into(),
             name: name.into(),

@@ -50,8 +50,7 @@ impl DevicePublisher {
         schema: &hc_types::DeviceSchema,
     ) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/schema");
-        let payload = serde_json::to_vec(schema)
-            .context("serialising device schema")?;
+        let payload = serde_json::to_vec(schema).context("serialising device schema")?;
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
@@ -92,11 +91,7 @@ pub struct PluginClient {
 impl PluginClient {
     /// Connect to the HomeCore broker and return a ready client.
     pub async fn connect(config: PluginConfig) -> Result<Self> {
-        let mut opts = MqttOptions::new(
-            &config.plugin_id,
-            &config.broker_host,
-            config.broker_port,
-        );
+        let mut opts = MqttOptions::new(&config.plugin_id, &config.broker_host, config.broker_port);
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(true);
         if !config.password.is_empty() {
@@ -105,7 +100,11 @@ impl PluginClient {
 
         let (client, eventloop) = AsyncClient::new(opts, 64);
         info!(plugin_id = %config.plugin_id, "Plugin connecting");
-        Ok(Self { client, eventloop, config })
+        Ok(Self {
+            client,
+            eventloop,
+            config,
+        })
     }
 
     /// Publish a full device state update (retained so new subscribers see it).
@@ -153,7 +152,12 @@ impl PluginClient {
             "capabilities": capabilities,
         });
         self.client
-            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(&payload)?)
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(&payload)?,
+            )
             .await
             .context("register_device failed")?;
         info!(device_id, "Device registered");
@@ -188,7 +192,12 @@ impl PluginClient {
             payload["area"] = serde_json::Value::String(a.to_string());
         }
         self.client
-            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(&payload)?)
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(&payload)?,
+            )
             .await
             .context("register_device_typed failed")?;
         info!(device_id, device_type, "Device registered (typed)");
@@ -203,8 +212,7 @@ impl PluginClient {
         schema: &hc_types::DeviceSchema,
     ) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/schema");
-        let payload = serde_json::to_vec(schema)
-            .context("serialising device schema")?;
+        let payload = serde_json::to_vec(schema).context("serialising device schema")?;
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
@@ -216,7 +224,9 @@ impl PluginClient {
     /// Call this **before** `run()` — `run()` consumes `self`, so any handles
     /// must be obtained first.  The returned publisher is `Clone`.
     pub fn device_publisher(&self) -> DevicePublisher {
-        DevicePublisher { client: self.client.clone() }
+        DevicePublisher {
+            client: self.client.clone(),
+        }
     }
 
     /// Subscribe to command messages for a device.

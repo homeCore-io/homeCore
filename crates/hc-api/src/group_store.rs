@@ -57,8 +57,7 @@ impl GroupStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating directory {}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(groups)
-            .context("serialising groups")?;
+        let json = serde_json::to_string_pretty(groups).context("serialising groups")?;
         std::fs::write(&self.path, json)
             .with_context(|| format!("writing groups file {}", self.path.display()))
     }

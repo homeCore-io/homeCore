@@ -47,7 +47,10 @@ impl LoggingConfig {
         if rules_dir.is_empty() {
             *rules_dir = self.file.dir.clone();
         } else if !std::path::Path::new(rules_dir.as_str()).is_absolute() {
-            *rules_dir = base_dir.join(rules_dir.as_str()).to_string_lossy().into_owned();
+            *rules_dir = base_dir
+                .join(rules_dir.as_str())
+                .to_string_lossy()
+                .into_owned();
         }
     }
 }
@@ -56,8 +59,8 @@ use anyhow::Result;
 use config::{FileConfig, OutputFormat, StderrConfig, TimeDisplay};
 use filter::build_filter;
 use syslog_layer::SyslogLayer;
-use tracing_subscriber::{prelude::*, Registry};
 use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::{prelude::*, Registry};
 
 // ── timestamp formatter ────────────────────────────────────────────────────
 
@@ -72,7 +75,9 @@ struct HcTimer {
 
 impl HcTimer {
     fn from_display(display: &TimeDisplay) -> Self {
-        Self { utc: matches!(display, TimeDisplay::Utc) }
+        Self {
+            utc: matches!(display, TimeDisplay::Utc),
+        }
     }
 }
 
@@ -81,7 +86,11 @@ impl FormatTime for HcTimer {
         if self.utc {
             write!(w, "{}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"))
         } else {
-            write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+            write!(
+                w,
+                "{}",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+            )
         }
     }
 }
@@ -151,7 +160,10 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
     // at debug level — provides a clean, noise-free rule audit trail.
     if config.rules_file.enabled {
         std::fs::create_dir_all(&config.rules_file.dir).unwrap_or_else(|e| {
-            eprintln!("hc-logging: cannot create rules log dir {}: {e}", config.rules_file.dir);
+            eprintln!(
+                "hc-logging: cannot create rules log dir {}: {e}",
+                config.rules_file.dir
+            );
         });
         // Hard-wired filter: only hc_core at debug, everything else OFF.
         let filter = tracing_subscriber::EnvFilter::new("hc_core=debug");
@@ -178,7 +190,7 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
         let filter = build_filter(config, config.syslog.level.as_deref());
         match SyslogLayer::new(&config.syslog, use_local_time) {
             Ok(layer) => layers.push(layer.with_filter(filter).boxed()),
-            Err(e)    => eprintln!("hc-logging: syslog init failed ({e}); skipping syslog output"),
+            Err(e) => eprintln!("hc-logging: syslog init failed ({e}); skipping syslog output"),
         }
     }
 
@@ -186,7 +198,11 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
     // there is always at least one output.
     if layers.is_empty() {
         let filter = build_filter(config, None);
-        layers.push(build_stderr_layer(&StderrConfig::default(), filter, timer.clone()));
+        layers.push(build_stderr_layer(
+            &StderrConfig::default(),
+            filter,
+            timer.clone(),
+        ));
     }
 
     // ── broadcast layer (optional, for WS log streaming) ──────────────────
@@ -199,7 +215,10 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
         .try_init()
         .map_err(|e| anyhow::anyhow!("Failed to install global tracing subscriber: {e}"))?;
 
-    Ok(LoggingHandle { _file_guard: file_guard, _rules_file_guard: rules_file_guard })
+    Ok(LoggingHandle {
+        _file_guard: file_guard,
+        _rules_file_guard: rules_file_guard,
+    })
 }
 
 // ── layer builders ─────────────────────────────────────────────────────────

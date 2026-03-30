@@ -104,9 +104,9 @@ struct TimerHandle {
 // ---------------------------------------------------------------------------
 
 pub struct TimerManager {
-    bus:     EventBus,
+    bus: EventBus,
     pub_bus: EventBus,
-    state:   StateStore,
+    state: StateStore,
     handles: Arc<RwLock<HashMap<String, TimerHandle>>>,
 }
 
@@ -180,8 +180,7 @@ impl TimerManager {
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&Utc));
                     let remaining_secs = if let Some(started) = started_at {
-                        let elapsed =
-                            (Utc::now() - started).num_seconds().max(0) as u64;
+                        let elapsed = (Utc::now() - started).num_seconds().max(0) as u64;
                         duration_secs.saturating_sub(elapsed)
                     } else {
                         duration_secs
@@ -198,8 +197,13 @@ impl TimerManager {
                             remaining_secs,
                             "TimerManager: reconstructing running timer"
                         );
-                        self.spawn_timer_task(&dev.device_id, remaining_secs, duration_secs, repeat)
-                            .await;
+                        self.spawn_timer_task(
+                            &dev.device_id,
+                            remaining_secs,
+                            duration_secs,
+                            repeat,
+                        )
+                        .await;
                     } else {
                         info!(
                             device_id = %dev.device_id,
@@ -234,7 +238,11 @@ impl TimerManager {
         debug!(%device_id, ?cmd, "Timer command received");
 
         match cmd {
-            TimerCommand::Start { duration_secs, label, repeat } => {
+            TimerCommand::Start {
+                duration_secs,
+                label,
+                repeat,
+            } => {
                 self.cancel_task(device_id).await;
                 let repeat = repeat.unwrap_or(false);
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
@@ -396,8 +404,15 @@ impl TimerManager {
             }
         });
 
-        let handle = TimerHandle { duration_secs, ctrl_tx, _join: join };
-        self.handles.write().await.insert(device_id.to_string(), handle);
+        let handle = TimerHandle {
+            duration_secs,
+            ctrl_tx,
+            _join: join,
+        };
+        self.handles
+            .write()
+            .await
+            .insert(device_id.to_string(), handle);
     }
 
     async fn cancel_task(&self, device_id: &str) {
@@ -447,7 +462,8 @@ impl TimerManager {
             return;
         };
         let previous = dev.attributes.clone();
-        dev.attributes.insert("state".into(), serde_json::json!(new_state));
+        dev.attributes
+            .insert("state".into(), serde_json::json!(new_state));
         if new_state == "running" {
             dev.attributes.insert(
                 "started_at".into(),
@@ -465,7 +481,8 @@ impl TimerManager {
             return;
         }
         let current = dev.attributes;
-        let changed: Vec<String> = current.keys()
+        let changed: Vec<String> = current
+            .keys()
             .filter(|k| previous.get(*k) != current.get(*k))
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
@@ -485,14 +502,19 @@ impl TimerManager {
 // ---------------------------------------------------------------------------
 
 async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
-    let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
+    let Ok(Some(mut dev)) = state.get_device(device_id).await else {
+        return;
+    };
     let previous = dev.attributes.clone();
-    dev.attributes.insert("state".into(), serde_json::json!("finished"));
-    dev.attributes.insert("remaining_secs".into(), serde_json::json!(0_u64));
+    dev.attributes
+        .insert("state".into(), serde_json::json!("finished"));
+    dev.attributes
+        .insert("remaining_secs".into(), serde_json::json!(0_u64));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
     let current = dev.attributes;
-    let changed: Vec<String> = current.keys()
+    let changed: Vec<String> = current
+        .keys()
         .filter(|k| previous.get(*k) != current.get(*k))
         .chain(previous.keys().filter(|k| !current.contains_key(*k)))
         .cloned()
@@ -506,24 +528,24 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     });
 }
 
-async fn reset_for_repeat(
-    device_id: &str,
-    duration_secs: u64,
-    state: &StateStore,
-    bus: &EventBus,
-) {
-    let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
+async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStore, bus: &EventBus) {
+    let Ok(Some(mut dev)) = state.get_device(device_id).await else {
+        return;
+    };
     let previous = dev.attributes.clone();
-    dev.attributes.insert("state".into(), serde_json::json!("running"));
+    dev.attributes
+        .insert("state".into(), serde_json::json!("running"));
     dev.attributes.insert(
         "started_at".into(),
         serde_json::json!(Utc::now().to_rfc3339()),
     );
-    dev.attributes.insert("remaining_secs".into(), serde_json::json!(duration_secs));
+    dev.attributes
+        .insert("remaining_secs".into(), serde_json::json!(duration_secs));
     dev.last_seen = Utc::now();
     let _ = state.upsert_device(&dev).await;
     let current = dev.attributes;
-    let changed: Vec<String> = current.keys()
+    let changed: Vec<String> = current
+        .keys()
         .filter(|k| previous.get(*k) != current.get(*k))
         .chain(previous.keys().filter(|k| !current.contains_key(*k)))
         .cloned()

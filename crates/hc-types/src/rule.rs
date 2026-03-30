@@ -37,7 +37,9 @@ pub enum RunMode {
     },
 }
 
-fn default_max_queue() -> usize { 10 }
+fn default_max_queue() -> usize {
+    10
+}
 
 /// A complete automation rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +127,9 @@ pub struct Rule {
     pub run_mode: RunMode,
 }
 
-fn is_parallel(m: &RunMode) -> bool { *m == RunMode::Parallel }
+fn is_parallel(m: &RunMode) -> bool {
+    *m == RunMode::Parallel
+}
 
 /// What causes a rule to be evaluated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,7 +490,9 @@ pub enum LogLevel {
     Error,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// A wrapper that pairs an `Action` with a per-action enable flag.
 ///
@@ -547,9 +553,7 @@ pub enum Action {
         payload: JsonValue,
     },
     /// A Rhai script executed in the sandboxed runtime.
-    RunScript {
-        script: String,
-    },
+    RunScript { script: String },
     Notify {
         channel: String,
         message: String,
@@ -571,9 +575,7 @@ pub enum Action {
         cancel_key: Option<String>,
     },
     /// A group of actions executed concurrently via `tokio::join!`.
-    Parallel {
-        actions: Vec<Action>,
-    },
+    Parallel { actions: Vec<Action> },
     /// Repeat `actions` until `condition` (Rhai expression → bool) is true.
     /// The condition is checked *after* each iteration (post-condition loop —
     /// body always runs at least once).
@@ -619,9 +621,7 @@ pub enum Action {
     /// pending delays or lower-priority rules.
     ExitRule,
     /// Inline comment / documentation that is logged when action logging is enabled.
-    Comment {
-        text: String,
-    },
+    Comment { text: String },
     /// Pause the action sequence until a matching event arrives on the bus,
     /// with an optional timeout.
     WaitForEvent {
@@ -663,18 +663,12 @@ pub enum Action {
     },
     /// Directly run the actions of another rule (bypassing its trigger and
     /// required expression).  Equivalent to Hubitat's "Run Rule Actions".
-    RunRuleActions {
-        rule_id: Uuid,
-    },
+    RunRuleActions { rule_id: Uuid },
     /// Pause another rule (prevent its actions from running on trigger events
     /// while paused).
-    PauseRule {
-        rule_id: Uuid,
-    },
+    PauseRule { rule_id: Uuid },
     /// Resume a previously paused rule.
-    ResumeRule {
-        rule_id: Uuid,
-    },
+    ResumeRule { rule_id: Uuid },
     /// Cancel pending cancellable delays.
     ///
     /// If `key` is `Some`, only cancels the delay with that key.
@@ -693,10 +687,7 @@ pub enum Action {
     /// Set this rule's Private Boolean to `value`.
     ///
     /// Other rules can read this boolean via `Condition::PrivateBooleanIs`.
-    SetPrivateBoolean {
-        name: String,
-        value: bool,
-    },
+    SetPrivateBoolean { name: String, value: bool },
     /// Write a message to the structured log at the given level.
     LogMessage {
         message: String,
@@ -800,9 +791,7 @@ pub enum Action {
     /// type = "restore_device_state"
     /// key  = "pre_movie"
     /// ```
-    RestoreDeviceState {
-        key: String,
-    },
+    RestoreDeviceState { key: String },
     /// Delay for a duration that depends on the currently active mode.
     ///
     /// The first matching mode entry wins; if no mode matches and `default_secs`
@@ -921,15 +910,15 @@ pub enum Action {
 /// Injected into Rhai scripts as `trigger_device()`, `trigger_value()`, etc.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TriggerContext {
-    pub device_id:  Option<String>,
-    pub attribute:  Option<String>,
-    pub value:      Option<JsonValue>,
+    pub device_id: Option<String>,
+    pub attribute: Option<String>,
+    pub value: Option<JsonValue>,
     pub prev_value: Option<JsonValue>,
     pub event_type: Option<String>,
     /// Auxiliary context data — for webhook triggers this holds the query
     /// parameter map (`trigger_extra()` in Rhai scripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra:      Option<JsonValue>,
+    pub extra: Option<JsonValue>,
     /// User-defined label from `rule.trigger_label` (accessible as `trigger_label()` in Rhai).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_label: Option<String>,

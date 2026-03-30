@@ -33,7 +33,6 @@ pub struct MetricsCollector {
     pub(crate) registry: Registry,
 
     // ── Counters (incremented by background bus listener) ────────────────────
-
     /// Total automation rule fire events since process start.
     pub rule_fires_total: IntCounter,
     /// Total `DeviceStateChanged` events since process start.
@@ -44,7 +43,6 @@ pub struct MetricsCollector {
     pub events_total: IntCounterVec,
 
     // ── Gauges (refreshed on every /metrics scrape) ──────────────────────────
-
     /// Current number of registered devices (including virtual).
     pub devices_total: IntGauge,
     /// Current total number of automation rules (enabled + disabled).

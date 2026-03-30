@@ -67,14 +67,18 @@ enum SwitchCommand {
 // ---------------------------------------------------------------------------
 
 pub struct SwitchManager {
-    bus:     EventBus,
+    bus: EventBus,
     pub_bus: EventBus,
-    state:   StateStore,
+    state: StateStore,
 }
 
 impl SwitchManager {
     pub fn new(bus: EventBus, pub_bus: EventBus, state: StateStore) -> Self {
-        Self { bus, pub_bus, state }
+        Self {
+            bus,
+            pub_bus,
+            state,
+        }
     }
 
     /// Listen for commands on the internal bus and apply them to switch devices.
@@ -106,9 +110,14 @@ impl SwitchManager {
         // Accept both:
         //   {"command": "on" | "off" | "toggle"}  — explicit command form
         //   {"on": true | false}                   — state-patch form (from TUI / curl)
-        let cmd: SwitchCommand = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
+        let cmd: SwitchCommand = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload)
+        {
             if let Some(on) = v.get("on").and_then(|b| b.as_bool()) {
-                if on { SwitchCommand::On } else { SwitchCommand::Off }
+                if on {
+                    SwitchCommand::On
+                } else {
+                    SwitchCommand::Off
+                }
             } else {
                 match serde_json::from_value(v) {
                     Ok(c) => c,
@@ -136,7 +145,11 @@ impl SwitchManager {
             }
         };
 
-        let current_on = dev.attributes.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+        let current_on = dev
+            .attributes
+            .get("on")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let new_on = match cmd {
             SwitchCommand::On => true,
@@ -150,7 +163,8 @@ impl SwitchManager {
         }
 
         let previous = dev.attributes.clone();
-        dev.attributes.insert("on".into(), serde_json::json!(new_on));
+        dev.attributes
+            .insert("on".into(), serde_json::json!(new_on));
         dev.last_seen = Utc::now();
 
         if let Err(e) = self.state.upsert_device(&dev).await {
@@ -159,7 +173,8 @@ impl SwitchManager {
         }
 
         let current = dev.attributes;
-        let changed: Vec<String> = current.keys()
+        let changed: Vec<String> = current
+            .keys()
             .filter(|k| previous.get(*k) != current.get(*k))
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()

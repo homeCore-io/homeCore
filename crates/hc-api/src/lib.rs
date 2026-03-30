@@ -112,13 +112,19 @@ impl AppState {
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(hc_types::event::Event::PluginRegistered { plugin_id, timestamp }) => {
+                        Ok(hc_types::event::Event::PluginRegistered {
+                            plugin_id,
+                            timestamp,
+                        }) => {
                             let mut map = plugins_clone.write().await;
-                            map.insert(plugin_id.clone(), PluginRecord {
-                                plugin_id,
-                                registered_at: timestamp,
-                                status: "active".into(),
-                            });
+                            map.insert(
+                                plugin_id.clone(),
+                                PluginRecord {
+                                    plugin_id,
+                                    registered_at: timestamp,
+                                    status: "active".into(),
+                                },
+                            );
                         }
                         Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
                             let mut map = plugins_clone.write().await;
@@ -206,8 +212,8 @@ impl AppState {
 
     /// Attach the rule group store and pre-loaded groups.
     pub fn with_group_store(mut self, gs: GroupStore, groups: Vec<RuleGroup>) -> Self {
-        self.group_store  = Some(Arc::new(gs));
-        self.rule_groups  = Some(Arc::new(RwLock::new(groups)));
+        self.group_store = Some(Arc::new(gs));
+        self.rule_groups = Some(Arc::new(RwLock::new(groups)));
         self
     }
 
@@ -218,8 +224,8 @@ impl AppState {
         dir: std::path::PathBuf,
         expansion_days: u32,
     ) -> Self {
-        self.calendar               = Some(handle);
-        self.calendar_dir           = Some(Arc::new(dir));
+        self.calendar = Some(handle);
+        self.calendar_dir = Some(Arc::new(dir));
         self.calendar_expansion_days = expansion_days;
         self
     }
@@ -245,30 +251,69 @@ pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         // Auth / user management
         .route("/auth/me", get(auth_handlers::me))
-        .route("/auth/change-password", post(auth_handlers::change_password))
-        .route("/auth/users", get(auth_handlers::list_users).post(auth_handlers::create_user))
+        .route(
+            "/auth/change-password",
+            post(auth_handlers::change_password),
+        )
+        .route(
+            "/auth/users",
+            get(auth_handlers::list_users).post(auth_handlers::create_user),
+        )
         .route("/auth/users/:id", delete(auth_handlers::delete_user))
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
         // Devices
-        .route("/devices", get(handlers::list_devices).patch(handlers::bulk_patch_devices).delete(handlers::bulk_delete_devices))
-        .route("/devices/:id", get(handlers::get_device).patch(handlers::update_device).delete(handlers::delete_device))
+        .route(
+            "/devices",
+            get(handlers::list_devices)
+                .patch(handlers::bulk_patch_devices)
+                .delete(handlers::bulk_delete_devices),
+        )
+        .route(
+            "/devices/:id",
+            get(handlers::get_device)
+                .patch(handlers::update_device)
+                .delete(handlers::delete_device),
+        )
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
         .route("/devices/:id/schema", get(handlers::get_device_schema))
         // Timers (timer devices are also visible via /devices)
-        .route("/timers", get(handlers::list_timers).post(handlers::create_timer))
+        .route(
+            "/timers",
+            get(handlers::list_timers).post(handlers::create_timer),
+        )
         .route("/timers/:id", get(handlers::get_timer))
         // Switches (switch devices are also visible via /devices)
-        .route("/switches", get(handlers::list_switches).post(handlers::create_switch))
+        .route(
+            "/switches",
+            get(handlers::list_switches).post(handlers::create_switch),
+        )
         // Modes (mode devices are also visible via /devices)
-        .route("/modes", get(handlers::list_modes).post(handlers::create_mode))
-        .route("/modes/:id", get(handlers::get_mode).delete(handlers::delete_mode))
+        .route(
+            "/modes",
+            get(handlers::list_modes).post(handlers::create_mode),
+        )
+        .route(
+            "/modes/:id",
+            get(handlers::get_mode).delete(handlers::delete_mode),
+        )
         // Areas
-        .route("/areas", get(handlers::list_areas).post(handlers::create_area))
-        .route("/areas/:id", patch(handlers::patch_area).delete(handlers::delete_area))
+        .route(
+            "/areas",
+            get(handlers::list_areas).post(handlers::create_area),
+        )
+        .route(
+            "/areas/:id",
+            patch(handlers::patch_area).delete(handlers::delete_area),
+        )
         .route("/areas/:id/devices", put(handlers::set_area_devices))
         // Automations
-        .route("/automations", get(handlers::list_automations).post(handlers::create_automation).patch(handlers::bulk_patch_automations))
+        .route(
+            "/automations",
+            get(handlers::list_automations)
+                .post(handlers::create_automation)
+                .patch(handlers::bulk_patch_automations),
+        )
         .route(
             "/automations/:id",
             get(handlers::get_automation)
@@ -277,27 +322,53 @@ pub fn router(state: AppState) -> Router {
                 .delete(handlers::delete_automation),
         )
         .route("/automations/:id/test", post(handlers::test_automation))
-        .route("/automations/:id/history", get(handlers::automation_history))
+        .route(
+            "/automations/:id/history",
+            get(handlers::automation_history),
+        )
         .route("/automations/:id/clone", post(handlers::clone_automation))
         .route("/automations/stale-refs", get(handlers::stale_refs))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
         // Rule groups
-        .route("/automations/groups", get(handlers::list_groups).post(handlers::create_group))
-        .route("/automations/groups/:id", get(handlers::get_group).patch(handlers::patch_group).delete(handlers::delete_group))
-        .route("/automations/groups/:id/:action", post(handlers::set_group_enabled))
+        .route(
+            "/automations/groups",
+            get(handlers::list_groups).post(handlers::create_group),
+        )
+        .route(
+            "/automations/groups/:id",
+            get(handlers::get_group)
+                .patch(handlers::patch_group)
+                .delete(handlers::delete_group),
+        )
+        .route(
+            "/automations/groups/:id/:action",
+            post(handlers::set_group_enabled),
+        )
         // Scenes
-        .route("/scenes", get(handlers::list_scenes).post(handlers::create_scene))
+        .route(
+            "/scenes",
+            get(handlers::list_scenes).post(handlers::create_scene),
+        )
         .route("/scenes/export", get(handlers::export_scenes))
         .route("/scenes/import", post(handlers::import_scenes))
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
         .route("/plugins/:id", delete(handlers::deregister_plugin))
-        .route("/plugins/matter/commission", post(handlers::matter_commission))
+        .route(
+            "/plugins/matter/commission",
+            post(handlers::matter_commission),
+        )
         .route("/plugins/matter/nodes", get(handlers::list_matter_nodes))
-        .route("/plugins/matter/reinterview", post(handlers::matter_reinterview))
-        .route("/plugins/matter/nodes/:id", delete(handlers::remove_matter_node))
+        .route(
+            "/plugins/matter/reinterview",
+            post(handlers::matter_reinterview),
+        )
+        .route(
+            "/plugins/matter/nodes/:id",
+            delete(handlers::remove_matter_node),
+        )
         // Events
         .route("/events", get(handlers::list_events))
         // Calendars
@@ -336,8 +407,12 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let signal = async move {
         loop {
-            if shutdown.changed().await.is_err() { break; }
-            if *shutdown.borrow() { break; }
+            if shutdown.changed().await.is_err() {
+                break;
+            }
+            if *shutdown.borrow() {
+                break;
+            }
         }
         info!("API server: shutdown signal received — draining connections");
     };
