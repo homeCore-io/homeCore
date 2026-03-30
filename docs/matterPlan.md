@@ -18,7 +18,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
     - Runtime/controller lifecycle: Node snapshot API and controller reinterview sync of endpoint metadata + device registry.
     - Bridge admin/control plane: Admin actions (list_endpoints, get_endpoint, get_bridge_metrics, refresh_endpoints), shared topic routing, endpoint-ID parsing, validation errors, pagination.
     - Device-type command parity: Switch, shade, cover/shade alias, actuator safety, correlation propagation.
-  - Completed in this session (2026-03-30):
+  - Completed in this session (2026-03-30 continuation):
     - **Runtime robustness enhancement** (commit c23d7a9):
       - Enhanced `tryInterviewNodeEndpoints()` with detailed diagnostic logging for each attempt method.
       - Added support for additional matter.js API patterns: `discoverNode`, `forgetNode`, `decommissionNode`.
@@ -32,30 +32,49 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
       - 6 new tests covering getKnownNodeIds() discovery, getNodeInfo() endpoint details, null/empty scenarios.
       - Tests verify node info accuracy and removal tracking.
       - Total test count increased from 71 to 77; all passing.
-  - Verified baseline:
-    - Plugin tests: `tests/phase0.test.ts` + `tests/mapper.test.ts` passing (77 total tests, +6 in this session).
-    - Build: `npm run build` passing clean (tsc).
-    - Latest checkpoint commit in `plugins/hc-matter`: `cfec5ac` (discovery integration).
-    - All 3 session commits integrated: c23d7a9 → e8804b5 → cfec5ac.
-  - Remaining for Phase 2 completion (after runtime API work):
+    - **Sensor state observation** (commit d6a7338):
+      - Added `handleSensorStateUpdate()` method for contact, motion, temperature, humidity sensor state routing.
+      - Implemented `extractDeviceIdFromStateTopic()` to parse homecore device state topics.
+      - Enhanced `handleMessage()` to route state updates separately from command topic routing.
+      - Sensor type validation with full backward compatibility maintained.
+      - 2 new sensor integration tests added (contact_sensor and motion_sensor state updates).
+      - Total test count: 79; all passing.
+    - **Device-type mapper utilities** (commit e6b422b):
+      - Added `isActuatorType()`, `isSensorType()` for type classification consistency across codebase.
+      - Implemented type list helpers: `getSupportedDeviceTypes()`, `getActuatorTypes()`, `getSensorTypes()`.
+      - Enhanced `toMatterValue()` and `fromMatterValue()` with comprehensive bounds checking:
+        - Brightness: 0-100% → 0-254 range clamping
+        - Humidity: 0-100% → 0-10000 range clamping
+        - Position: 0-100% preservation
+        - Temperature: °C ↔ centidegrees with 1 decimal precision
+      - 8 new mapper unit tests added covering all classification functions and bounds scenarios.
+      - Total test count: 87; all passing (up from 71 at session start).
+  - Verified baseline (end of session):
+    - Plugin tests: `tests/phase0.test.ts` + `tests/mapper.test.ts` passing (87 total tests, +16 in this session). ✅
+    - Build: `npm run build` passing clean (tsc, no errors). ✅
+    - Latest checkpoint commit in `plugins/hc-matter`: `e6b422b` (mapper device utilities).
+    - All 5 session commits integrated: c23d7a9 → e8804b5 → cfec5ac → d6a7338 → e6b422b. ✅
+  - Remaining for Phase 2 completion:
     - Implement concrete bridge endpoint exposure to external Matter controllers (not only HomeCore topic forwarding).
-    - Expand supported device-type mappings beyond current actuator baseline with real matter.js cluster bindings.
+    - Expand supported device-type mappings beyond current 9-type baseline with additional sensor variants or actuator types.
     - Optional: integrate with real matter.js Controller discovery if/when full controller support is added.
 
-### Session Resume Checklist (2026-03-30)
+### Session Resume Checklist (2026-03-30 continuation update)
 1. Workspace entry point:
    - `cd plugins/hc-matter`
-2. Latest session commits:
+2. Latest session commits (5 features, all integrated):
    - `c23d7a9`: Runtime diagnostic robustness (interview/removal logging)
    - `e8804b5`: Node discovery and queryability (getKnownNodeIds, getNodeInfo)
    - `cfec5ac`: Discovery integration tests (6 new tests, 77 total)
+   - `d6a7338`: Sensor state observation (controller routing, 2 new tests, 79 total)
+   - `e6b422b`: Mapper device utilities (type classification, bounds checking, 8 new tests, 87 total)
 3. Verification status:
-   - Tests: 77/77 passing (baseline 71, +6 new discovery tests)
+   - Tests: 87/87 passing (baseline 71, +16 new tests added in session)
    - Build: tsc clean, no errors
-   - All commits integrated and clean tree
+   - All commits integrated and clean working tree
 4. Next highest-priority work:
-   - Implement concrete bridge endpoint exposure (Phase 2 remaining)
-   - Expand device-type mappings with matter.js cluster bindings
+   - Implement concrete bridge endpoint exposure (Phase 2 remaining, highest priority)
+   - Expand device-type mappings with additional sensor variants (Phase 2 extension)
 5. Maintenance checklist:
    - Keep tests in lockstep with each implementation pass
    - Maintain simulation mode compatibility
