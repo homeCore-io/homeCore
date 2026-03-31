@@ -240,7 +240,7 @@ brightness = 80.0
 [actions.state]
 locked = true
 
-# Timer (core.timer device)
+# Timer (core.timer device, device_type = "timer")
 [actions.state]
 command       = "start"
 duration_secs = 300
@@ -249,7 +249,7 @@ label         = "optional label"
 [actions.state]
 command = "cancel"
 
-# Virtual switch (core.switch device)
+# Virtual switch (core.switch device, device_type = "vswitch")
 [actions.state]
 command = "on"      # or "off" or "toggle"
 
@@ -707,6 +707,7 @@ the same trigger/condition/action primitives.
 ### Timers (`core.timer`)
 
 Countdown timers that fire a `DeviceStateChanged` event when they elapse.
+These built-ins publish `device_type = "timer"`.
 Device IDs are always prefixed `timer_`.
 
 #### Create
@@ -798,6 +799,7 @@ label         = "Garage OH1 auto-close"
 
 Software-only on/off switches — useful as flags and guards in automation logic
 (e.g., "auto-close enabled", "vacation mode", "guest mode").
+These built-ins publish `device_type = "vswitch"`.
 Device IDs are always prefixed `switch_`.
 
 #### Create

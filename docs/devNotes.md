@@ -5850,6 +5850,11 @@ can trigger on them.
 | `core.timer`  | `timer_`      | `timer_manager::TimerManager` | `/api/v1/timers`   |
 | `core.switch` | `switch_`     | `switch_manager::SwitchManager` | `/api/v1/switches` |
 
+Native built-ins also publish explicit `device_type` values:
+
+- `core.timer` → `timer`
+- `core.switch` → `vswitch`
+
 ---
 
 ### Virtual Switch
@@ -5868,7 +5873,8 @@ Content-Type: application/json
 ```
 
 This creates a device with `device_id = "switch_vacation_mode"`, `plugin_id = "core.switch"`,
-and initial state `{"on": false}`. The device is immediately visible via `GET /api/v1/devices`.
+`device_type = "vswitch"`, and initial state `{"on": false}`. The device is immediately visible
+via `GET /api/v1/devices`.
 
 #### Commands
 

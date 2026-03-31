@@ -25,6 +25,17 @@ use crate::AppState;
 
 const MATTER_CONTROLLER_DEVICE_ID: &str = "matter_controller";
 
+fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
+    if device.device_type.is_none() {
+        if device.plugin_id == "core.switch" {
+            device.device_type = Some("vswitch".to_string());
+        } else if device.plugin_id == "core.timer" {
+            device.device_type = Some("timer".to_string());
+        }
+    }
+    device
+}
+
 // ---------- Health ----------
 
 pub async fn health() -> impl IntoResponse {
@@ -110,6 +121,7 @@ pub async fn list_devices(
 
     let filtered: Vec<_> = all_devices
         .into_iter()
+        .map(normalize_native_device_type)
         .filter(|device| {
             params
                 .device_type
@@ -158,7 +170,10 @@ pub async fn get_device(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match s.store.get_device(&id).await {
-        Ok(Some(device)) => (StatusCode::OK, Json(json!(device))),
+        Ok(Some(device)) => (
+            StatusCode::OK,
+            Json(json!(normalize_native_device_type(device))),
+        ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "device not found" })),
@@ -618,6 +633,7 @@ pub async fn create_timer(
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.timer");
+    dev.device_type = Some("timer".to_string());
     dev.available = true;
     dev.attributes.insert("state".into(), json!("idle"));
     dev.attributes.insert("duration_secs".into(), json!(0_u64));
@@ -640,6 +656,7 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
             let timers: Vec<_> = devices
                 .into_iter()
                 .filter(|d| d.plugin_id == "core.timer")
+                .map(normalize_native_device_type)
                 .map(compute_timer_remaining)
                 .collect();
             (StatusCode::OK, Json(json!(timers)))
@@ -663,7 +680,11 @@ pub async fn get_timer(
     };
     match s.store.get_device(&device_id).await {
         Ok(Some(dev)) => {
-            (StatusCode::OK, Json(json!(compute_timer_remaining(dev)))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!(compute_timer_remaining(normalize_native_device_type(dev)))),
+            )
+                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -738,6 +759,7 @@ pub async fn create_switch(
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.switch");
+    dev.device_type = Some("vswitch".to_string());
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
@@ -757,6 +779,7 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
             let switches: Vec<_> = devices
                 .into_iter()
                 .filter(|d| d.plugin_id == "core.switch")
+                .map(normalize_native_device_type)
                 .collect();
             (StatusCode::OK, Json(json!(switches)))
         }
