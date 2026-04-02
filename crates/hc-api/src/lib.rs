@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 pub mod auth_handlers;
 pub mod auth_middleware;
@@ -449,10 +449,12 @@ pub async fn serve(
     port: u16,
     state: AppState,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    drain_timeout_secs: u64,
 ) -> Result<()> {
     let addr = format!("{host}:{port}");
     info!(%addr, "HomeCore API server starting");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let mut shutdown_timeout = shutdown.clone();
     let signal = async move {
         loop {
             if shutdown.changed().await.is_err() {
@@ -464,11 +466,53 @@ pub async fn serve(
         }
         info!("API server: shutdown signal received — draining connections");
     };
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(signal)
-    .await?;
-    Ok(())
+    let mut server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(signal)
+        .await
+    });
+
+    loop {
+        tokio::select! {
+            joined = &mut server => {
+                joined??;
+                return Ok(());
+            }
+            changed = shutdown_timeout.changed() => {
+                match changed {
+                    Ok(()) if *shutdown_timeout.borrow() => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(drain_timeout_secs),
+                            &mut server,
+                        )
+                        .await
+                        {
+                            Ok(joined) => {
+                                joined??;
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                warn!(
+                                    drain_timeout_secs,
+                                    "API server graceful shutdown timed out — aborting remaining connections"
+                                );
+                                server.abort();
+                                let _ = server.await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(_) => {
+                        let joined = server.await;
+                        joined??;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 }
