@@ -236,6 +236,14 @@ plugin_ready_delay_secs = 10
 drain_timeout_secs = 10
 
 # ---------------------------------------------------------------------------
+# Internal Web Admin
+# ---------------------------------------------------------------------------
+[web_admin]
+# Mount the first-party admin surface at /admin.
+# Disable this if you want the HomeCore server to expose only the machine API.
+enabled = true
+
+# ---------------------------------------------------------------------------
 # Scheduler
 #
 # catchup_window_minutes: on startup the scheduler fires any time-based rules

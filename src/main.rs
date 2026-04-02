@@ -175,6 +175,8 @@ struct AppConfig {
     #[serde(default)]
     logging: LoggingConfig,
     #[serde(default)]
+    web_admin: WebAdminSection,
+    #[serde(default)]
     plugins: Vec<PluginEntry>,
     #[serde(default)]
     calendars: CalendarsSection,
@@ -423,6 +425,25 @@ impl Default for ShutdownConfig {
     fn default() -> Self {
         Self {
             drain_timeout_secs: default_drain_timeout(),
+        }
+    }
+}
+
+/// `[web_admin]` section of homecore.toml.
+#[derive(Deserialize)]
+struct WebAdminSection {
+    /// Enable the internal admin UI mount served by HomeCore.
+    ///
+    /// When enabled, HomeCore mounts the first-party admin scaffold at
+    /// `/admin` while preserving the existing external API under `/api/v1`.
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+impl Default for WebAdminSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
         }
     }
 }
@@ -994,6 +1015,7 @@ async fn main() -> Result<()> {
             app_state,
             api_shutdown_rx,
             drain_timeout_secs,
+            config.web_admin.enabled,
         )
         .await
     });

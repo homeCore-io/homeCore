@@ -1348,7 +1348,9 @@ dependencies = [
  "hc-mqtt-client",
  "hc-scripting",
  "hc-state",
+ "hc-topic-map",
  "hc-types",
+ "hc-web-admin",
  "http-body-util",
  "ipnet",
  "jsonwebtoken",
@@ -1514,6 +1516,13 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "uuid",
+]
+
+[[package]]
+name = "hc-web-admin"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
 ]
 
 [[package]]

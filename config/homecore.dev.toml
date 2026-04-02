@@ -124,6 +124,9 @@ plugin_ready_delay_secs = 10
 [shutdown]
 drain_timeout_secs = 10
 
+[web_admin]
+enabled = true
+
 [scheduler]
 catchup_window_minutes = 15
 

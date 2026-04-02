@@ -13,6 +13,7 @@ members = [
     "crates/hc-core",
     "crates/hc-state",
     "crates/hc-api",
+    "crates/hc-web-admin",
     "crates/hc-auth",
     "crates/hc-scripting",
     "crates/hc-notify",

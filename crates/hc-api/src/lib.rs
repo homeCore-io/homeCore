@@ -252,7 +252,7 @@ impl AppState {
 }
 
 /// Build the top-level axum `Router`.
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
     // Public routes — no auth required (auth is handled inside the handler).
     let public = Router::new()
         .route("/health", get(handlers::health))
@@ -434,7 +434,13 @@ pub fn router(state: AppState) -> Router {
         .merge(protected)
         .with_state(state);
 
-    Router::new().nest("/api/v1", api)
+    let app = Router::new().nest("/api/v1", api);
+
+    if web_admin_enabled {
+        app.nest("/admin", hc_web_admin::router())
+    } else {
+        app
+    }
 }
 
 /// Bind and serve the API on the given address.
@@ -450,6 +456,7 @@ pub async fn serve(
     state: AppState,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     drain_timeout_secs: u64,
+    web_admin_enabled: bool,
 ) -> Result<()> {
     let addr = format!("{host}:{port}");
     info!(%addr, "HomeCore API server starting");
@@ -469,7 +476,7 @@ pub async fn serve(
     let mut server = tokio::spawn(async move {
         axum::serve(
             listener,
-            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            router(state, web_admin_enabled).into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(signal)
         .await
