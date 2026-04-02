@@ -975,6 +975,7 @@ async fn main() -> Result<()> {
         config.server.port,
         app_state,
         shutdown_rx,
+        config.shutdown.drain_timeout_secs,
     )
     .await?;
 

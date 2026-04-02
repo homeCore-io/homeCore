@@ -38,7 +38,7 @@ pub struct StateBridge {
     bus: EventBus,
     pub_bus: EventBus,
     store: StateStore,
-    router: Option<EcosystemRouter>,
+    router: Option<Arc<EcosystemRouter>>,
     publish: Option<PublishHandle>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
     pending_command_changes: DashMap<String, DeviceChange>,
@@ -57,7 +57,7 @@ impl StateBridge {
         }
     }
 
-    pub fn with_router(mut self, router: EcosystemRouter) -> Self {
+    pub fn with_router(mut self, router: Arc<EcosystemRouter>) -> Self {
         self.router = Some(router);
         self
     }

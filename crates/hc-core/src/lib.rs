@@ -8,7 +8,7 @@ use hc_types::rule::{Rule, Trigger};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub mod calendar_store;
 pub mod device_naming;
@@ -72,7 +72,7 @@ pub struct Core {
     state: hc_state::StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
-    router: Option<EcosystemRouter>,
+    router: Option<Arc<EcosystemRouter>>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
@@ -141,7 +141,7 @@ impl Core {
 
     /// Attach an ecosystem router for profile-driven topic translation.
     pub fn with_router(mut self, router: EcosystemRouter) -> Self {
-        self.router = Some(router);
+        self.router = Some(Arc::new(router));
         self
     }
 
@@ -217,21 +217,38 @@ impl Core {
         info!("HomeCore kernel starting");
 
         // State bridge: internal bus MqttMessage → DeviceStateChanged on public bus.
-        let mut bridge = state_bridge::StateBridge::new(
-            self.internal_bus.clone(),
-            self.pub_bus.clone(),
-            self.state.clone(),
-        );
-        if let Some(router) = self.router {
-            bridge = bridge.with_router(router);
-        }
-        if let Some(device_types) = self.device_types {
-            bridge = bridge.with_device_types(device_types);
-        }
-        if let Some(ph) = self.publish.clone() {
-            bridge = bridge.with_publish(ph);
-        }
-        tokio::spawn(bridge.run());
+        let bridge_bus = self.internal_bus.clone();
+        let bridge_pub_bus = self.pub_bus.clone();
+        let bridge_state = self.state.clone();
+        let bridge_router = self.router.clone();
+        let bridge_device_types = self.device_types.clone();
+        let bridge_publish = self.publish.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut bridge = state_bridge::StateBridge::new(
+                    bridge_bus.clone(),
+                    bridge_pub_bus.clone(),
+                    bridge_state.clone(),
+                );
+                if let Some(router) = bridge_router.clone() {
+                    bridge = bridge.with_router(router);
+                }
+                if let Some(device_types) = bridge_device_types.clone() {
+                    bridge = bridge.with_device_types(device_types);
+                }
+                if let Some(ph) = bridge_publish.clone() {
+                    bridge = bridge.with_publish(ph);
+                }
+
+                let handle = tokio::spawn(bridge.run());
+                match handle.await {
+                    Ok(()) => warn!("State bridge task exited; restarting"),
+                    Err(e) => error!(error = %e, "State bridge task panicked; restarting"),
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
 
         // If no external shutdown was provided, create a never-firing watch so
         // the engine and scheduler signatures remain uniform.
