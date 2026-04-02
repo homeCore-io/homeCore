@@ -20,7 +20,8 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
+use std::time::Duration;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Wait for SIGTERM or SIGINT and return.
@@ -41,6 +42,17 @@ async fn wait_for_shutdown_signal() {
             .await
             .expect("failed to listen for Ctrl-C");
         info!("Received Ctrl-C — initiating graceful shutdown");
+    }
+}
+
+async fn wait_for_shutdown_watch(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if shutdown.changed().await.is_err() {
+            break;
+        }
+        if *shutdown.borrow() {
+            break;
+        }
     }
 }
 
@@ -970,14 +982,49 @@ async fn main() -> Result<()> {
     } else {
         app_state
     };
-    hc_api::serve(
-        &config.server.host,
-        config.server.port,
-        app_state,
-        shutdown_rx,
-        config.shutdown.drain_timeout_secs,
-    )
-    .await?;
+    let api_host = config.server.host.clone();
+    let api_port = config.server.port;
+    let drain_timeout_secs = config.shutdown.drain_timeout_secs;
+    let api_shutdown_rx = shutdown_rx.clone();
+
+    let mut api_task = tokio::spawn(async move {
+        hc_api::serve(
+            &api_host,
+            api_port,
+            app_state,
+            api_shutdown_rx,
+            drain_timeout_secs,
+        )
+        .await
+    });
+    let shutdown_wait = wait_for_shutdown_watch(shutdown_rx.clone());
+    tokio::pin!(shutdown_wait);
+
+    tokio::select! {
+        result = &mut api_task => {
+            result??;
+        }
+        _ = &mut shutdown_wait => {
+            match tokio::time::timeout(
+                Duration::from_secs(drain_timeout_secs + 1),
+                &mut api_task,
+            )
+            .await
+            {
+                Ok(result) => {
+                    result??;
+                }
+                Err(_) => {
+                    warn!(
+                        drain_timeout_secs,
+                        "HomeCore shutdown timed out waiting for API task — aborting"
+                    );
+                    api_task.abort();
+                    let _ = api_task.await;
+                }
+            }
+        }
+    }
 
     Ok(())
 }
