@@ -4,6 +4,12 @@ Status: Draft, living document
 Last Updated: 2026-04-02
 Scope: Fold `hc-web-leptos` into the `core` workspace as an internal HomeCore admin UI without reducing external client or API functionality and without degrading core performance or reliability.
 
+## Architectural Note
+
+2026-04-02: All clients are external by design to protect `homecore` performance and stability.
+
+That means the current integration direction in this document is not an approved implementation path unless that architectural decision changes. Future web-admin work should assume process separation from `core` and should optimize the external-client model rather than embedding browser UI concerns into the core runtime.
+
 ## Intent
 
 HomeCore should gain an internal Rust-native administrative web surface that is built, shipped, and versioned with `core`.
