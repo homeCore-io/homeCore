@@ -265,12 +265,6 @@ impl StateBridge {
 
         self.store.upsert_device(&device).await?;
 
-        for (attr, val) in &device.attributes {
-            if previous.get(attr) != Some(val) {
-                let _ = self.store.append_history(device_id, attr, val).await;
-            }
-        }
-
         // Fire DeviceNameChanged if the name attribute caused a rename.
         if device.name != previous_name {
             info!(
@@ -302,6 +296,12 @@ impl StateBridge {
             }
         }
 
+        let history_entries: Vec<(String, Value)> = current
+            .iter()
+            .filter(|(attr, val)| previous.get(*attr) != Some(*val))
+            .map(|(attr, val)| (attr.clone(), val.clone()))
+            .collect();
+
         // Only publish if at least one attribute value actually changed.
         if !changed.is_empty() {
             let _ = self.pub_bus.publish(Event::DeviceStateChanged {
@@ -313,6 +313,8 @@ impl StateBridge {
                 change,
             });
         }
+
+        Self::persist_history_async(self.store.clone(), device_id.to_string(), history_entries);
 
         Ok(())
     }
@@ -491,6 +493,24 @@ impl StateBridge {
 }
 
 impl StateBridge {
+    fn persist_history_async(
+        store: StateStore,
+        device_id: String,
+        entries: Vec<(String, Value)>,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+
+        tokio::spawn(async move {
+            for (attribute, value) in entries {
+                if let Err(error) = store.append_history(&device_id, &attribute, &value).await {
+                    warn!(device_id, attribute, %error, "Failed to append state history");
+                }
+            }
+        });
+    }
+
     fn record_pending_command_change(&self, device_id: &str, payload: &[u8]) {
         let Ok(command) = serde_json::from_slice::<serde_json::Value>(payload) else {
             return;
