@@ -29,7 +29,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -48,6 +48,8 @@ pub struct EventStreamQuery {
     pub event_types: Option<String>,
     /// If set, only events with a matching device_id are forwarded.
     pub device_id: Option<String>,
+    /// Optional client fingerprint to correlate reconnect storms.
+    pub client_id: Option<String>,
 }
 
 pub async fn ws_events_handler(
@@ -55,6 +57,7 @@ pub async fn ws_events_handler(
     Query(query): Query<EventStreamQuery>,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     // Validate before accepting the upgrade.
     let claims = match authenticate_ws(&query, &state, addr.ip()) {
@@ -62,7 +65,12 @@ pub async fn ws_events_handler(
         Err(resp) => return resp,
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, query, claims))
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query, claims, addr.ip(), user_agent))
 }
 
 /// Authenticate a WebSocket upgrade request.
@@ -116,6 +124,8 @@ async fn handle_socket(
     state: AppState,
     query: EventStreamQuery,
     claims: Claims,
+    remote_ip: IpAddr,
+    user_agent: Option<String>,
 ) {
     let mut rx = state.event_bus.subscribe();
 
@@ -127,9 +137,13 @@ async fn handle_socket(
             .collect()
     });
     let device_filter = query.device_id.clone();
+    let client_id = query.client_id.clone();
 
     info!(
+        ip = %remote_ip,
         user = %claims.sub,
+        client_id = client_id.as_deref().unwrap_or("-"),
+        user_agent = user_agent.as_deref().unwrap_or("-"),
         types = ?type_filter,
         device = ?device_filter,
         "WebSocket client connected to event stream"
@@ -163,7 +177,13 @@ async fn handle_socket(
                     }
                 };
                 if socket.send(Message::Text(json.into())).await.is_err() {
-                    debug!(user = %claims.sub, "WebSocket client disconnected");
+                    debug!(
+                        ip = %remote_ip,
+                        user = %claims.sub,
+                        client_id = client_id.as_deref().unwrap_or("-"),
+                        user_agent = user_agent.as_deref().unwrap_or("-"),
+                        "WebSocket client disconnected"
+                    );
                     break;
                 }
             }
@@ -174,7 +194,13 @@ async fn handle_socket(
         }
     }
 
-    info!(user = %claims.sub, "WebSocket client disconnected");
+    info!(
+        ip = %remote_ip,
+        user = %claims.sub,
+        client_id = client_id.as_deref().unwrap_or("-"),
+        user_agent = user_agent.as_deref().unwrap_or("-"),
+        "WebSocket client disconnected"
+    );
 }
 
 #[cfg(test)]
