@@ -23,7 +23,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
-use hc_topic_map::{canonical_device_type_name, DeviceTypeRegistry, EcosystemRouter, InboundResult};
+use hc_topic_map::{
+    canonical_device_type_name, DeviceTypeRegistry, EcosystemRouter, InboundResult,
+};
 use hc_types::device::{
     extract_change_from_command_payload, extract_change_from_state_payload, DeviceChange,
     DeviceState,
@@ -155,7 +157,10 @@ impl StateBridge {
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "devices" {
             let device_id = parts[2];
             if payload.is_empty() {
-                debug!(device_id, topic, "Ignoring empty payload for canonical device topic");
+                debug!(
+                    device_id,
+                    topic, "Ignoring empty payload for canonical device topic"
+                );
                 return Ok(());
             }
             match parts[3] {
@@ -341,13 +346,16 @@ impl StateBridge {
             .ok_or_else(|| anyhow::anyhow!("registration missing name"))?;
         let area = json["area"].as_str().map(str::to_string);
         let raw_device_type = json["device_type"].as_str().map(str::to_string);
-        let device_type = raw_device_type
-            .as_deref()
-            .map(canonical_device_type_name);
+        let device_type = raw_device_type.as_deref().map(canonical_device_type_name);
 
         if let (Some(raw), Some(canonical)) = (raw_device_type.as_deref(), device_type.as_deref()) {
             if raw != canonical {
-                info!(device_id, raw_device_type = raw, canonical_device_type = canonical, "Normalized device_type alias");
+                info!(
+                    device_id,
+                    raw_device_type = raw,
+                    canonical_device_type = canonical,
+                    "Normalized device_type alias"
+                );
             }
         }
 
@@ -460,9 +468,15 @@ impl StateBridge {
                     "source": "plugin_unregister",
                 }),
             });
-            info!(device_id, plugin_id, device_removed, schema_removed, "Device unregistered");
+            info!(
+                device_id,
+                plugin_id, device_removed, schema_removed, "Device unregistered"
+            );
         } else {
-            debug!(device_id, plugin_id, "Unregister ignored for unknown device");
+            debug!(
+                device_id,
+                plugin_id, "Unregister ignored for unknown device"
+            );
         }
 
         Ok(())
@@ -493,11 +507,7 @@ impl StateBridge {
 }
 
 impl StateBridge {
-    fn persist_history_async(
-        store: StateStore,
-        device_id: String,
-        entries: Vec<(String, Value)>,
-    ) {
+    fn persist_history_async(store: StateStore, device_id: String, entries: Vec<(String, Value)>) {
         if entries.is_empty() {
             return;
         }
@@ -523,21 +533,19 @@ impl StateBridge {
     }
 
     fn resolve_state_change(&self, device_id: &str, incoming: &serde_json::Value) -> DeviceChange {
-        if let Some(change) = self.pending_command_changes.get(device_id) {
-            let pending = change.clone();
+        // Take ownership of any pending command provenance up front so we do
+        // not hold a DashMap guard while deciding whether to discard it.
+        if let Some((_, pending)) = self.pending_command_changes.remove(device_id) {
             if (Utc::now() - pending.changed_at).num_seconds() <= 5 {
                 if let Some(explicit) = extract_change_from_state_payload(incoming) {
                     if is_generic_plugin_external_change(&explicit) {
-                        self.pending_command_changes.remove(device_id);
                         return pending;
                     }
                     return explicit;
                 }
 
-                self.pending_command_changes.remove(device_id);
                 return pending;
             }
-            self.pending_command_changes.remove(device_id);
         }
 
         if let Some(change) = extract_change_from_state_payload(incoming) {
@@ -578,7 +586,8 @@ fn apply_partial_merge_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_partial_merge_patch;
+    use super::{apply_partial_merge_patch, is_generic_plugin_external_change};
+    use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -600,5 +609,20 @@ mod tests {
         assert_eq!(target.get("temperature"), Some(&json!(70.0)));
         assert_eq!(target.get("illuminance"), Some(&json!(145.0)));
         assert!(!target.contains_key("legacy"));
+    }
+
+    #[test]
+    fn generic_external_plugin_change_is_detected() {
+        let change = DeviceChange::external("plugin.hue");
+        assert!(is_generic_plugin_external_change(&change));
+    }
+
+    #[test]
+    fn homecore_change_is_not_treated_as_generic_external() {
+        let change = DeviceChange {
+            kind: DeviceChangeKind::Homecore,
+            ..DeviceChange::unknown()
+        };
+        assert!(!is_generic_plugin_external_change(&change));
     }
 }
