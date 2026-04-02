@@ -10,6 +10,7 @@
 //! - `homecore/devices/{id}/state/partial`  → JSON merge-patch
 //! - `homecore/devices/{id}/availability`   → "online" | "offline"
 //! - `homecore/plugins/{id}/register`       → plugin registration
+//! - `homecore/plugins/{id}/unregister`     → plugin device retirement
 //!
 //! Ecosystem-mapped topics:
 //! - Any topic matched by the `EcosystemRouter` is translated before processing.
@@ -19,10 +20,14 @@
 use crate::{device_naming::ensure_unique_canonical_name, EventBus};
 use anyhow::Result;
 use chrono::Utc;
+use dashmap::DashMap;
 use hc_mqtt_client::PublishHandle;
 use hc_state::StateStore;
-use hc_topic_map::{DeviceTypeRegistry, EcosystemRouter, InboundResult};
-use hc_types::device::DeviceState;
+use hc_topic_map::{canonical_device_type_name, DeviceTypeRegistry, EcosystemRouter, InboundResult};
+use hc_types::device::{
+    extract_change_from_command_payload, extract_change_from_state_payload, DeviceChange,
+    DeviceState,
+};
 use hc_types::event::Event;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -36,6 +41,7 @@ pub struct StateBridge {
     router: Option<EcosystemRouter>,
     publish: Option<PublishHandle>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
+    pending_command_changes: DashMap<String, DeviceChange>,
 }
 
 impl StateBridge {
@@ -47,6 +53,7 @@ impl StateBridge {
             router: None,
             publish: None,
             device_types: None,
+            pending_command_changes: DashMap::new(),
         }
     }
 
@@ -86,6 +93,10 @@ impl StateBridge {
     }
 
     async fn handle_mqtt(&self, topic: &str, payload: &[u8]) -> Result<()> {
+        if let Some(device_id) = parse_cmd_topic(topic) {
+            self.record_pending_command_change(device_id, payload);
+        }
+
         // --- Outbound: relay mapped cmd topics to native device topics ---
         if topic.starts_with("homecore/devices/") && topic.ends_with("/cmd") {
             if let Some(router) = &self.router {
@@ -143,6 +154,10 @@ impl StateBridge {
         // homecore/devices/{id}/state | state/partial | availability | schema | cmd
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "devices" {
             let device_id = parts[2];
+            if payload.is_empty() {
+                debug!(device_id, topic, "Ignoring empty payload for canonical device topic");
+                return Ok(());
+            }
             match parts[3] {
                 "state" => {
                     let json: serde_json::Value = serde_json::from_slice(payload)?;
@@ -166,19 +181,23 @@ impl StateBridge {
             }
         }
 
-        // homecore/plugins/{id}/register
+        // homecore/plugins/{id}/register | unregister
         if parts.len() >= 4
             && parts[0] == "homecore"
             && parts[1] == "plugins"
-            && parts[3] == "register"
+            && (parts[3] == "register" || parts[3] == "unregister")
         {
             let plugin_id = parts[2];
-            let _ = self.pub_bus.publish(Event::PluginRegistered {
-                timestamp: Utc::now(),
-                plugin_id: plugin_id.to_string(),
-            });
-            if let Err(e) = self.handle_device_registration(plugin_id, payload).await {
-                warn!(plugin_id, error = %e, "Device registration upsert failed");
+            if parts[3] == "register" {
+                let _ = self.pub_bus.publish(Event::PluginRegistered {
+                    timestamp: Utc::now(),
+                    plugin_id: plugin_id.to_string(),
+                });
+                if let Err(e) = self.handle_device_registration(plugin_id, payload).await {
+                    warn!(plugin_id, error = %e, "Device registration upsert failed");
+                }
+            } else if let Err(e) = self.handle_device_unregistration(plugin_id, payload).await {
+                warn!(plugin_id, error = %e, "Device unregister failed");
             }
             return Ok(());
         }
@@ -213,6 +232,9 @@ impl StateBridge {
 
         let previous = device.attributes.clone();
         let previous_name = device.name.clone();
+        let change = self.resolve_state_change(device_id, incoming);
+        let mut attrs = attrs;
+        attrs.remove("_hc");
 
         // Extract "name" before attrs is potentially consumed by into_iter().
         let incoming_name: Option<String> = attrs
@@ -227,6 +249,7 @@ impl StateBridge {
         }
         device.last_seen = Utc::now();
         device.available = true;
+        device.last_change = Some(change.clone());
 
         // Sync display name from the "name" attribute when it arrives in a state
         // update (e.g. from ZwaveJS UI nodeInfo). Keeps device.name in sync with
@@ -287,6 +310,7 @@ impl StateBridge {
                 previous,
                 current,
                 changed,
+                change,
             });
         }
 
@@ -314,7 +338,16 @@ impl StateBridge {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("registration missing name"))?;
         let area = json["area"].as_str().map(str::to_string);
-        let device_type = json["device_type"].as_str().map(str::to_string);
+        let raw_device_type = json["device_type"].as_str().map(str::to_string);
+        let device_type = raw_device_type
+            .as_deref()
+            .map(canonical_device_type_name);
+
+        if let (Some(raw), Some(canonical)) = (raw_device_type.as_deref(), device_type.as_deref()) {
+            if raw != canonical {
+                info!(device_id, raw_device_type = raw, canonical_device_type = canonical, "Normalized device_type alias");
+            }
+        }
 
         match self.store.get_device(device_id).await? {
             Some(mut existing) => {
@@ -394,6 +427,45 @@ impl StateBridge {
         Ok(())
     }
 
+    async fn handle_device_unregistration(&self, plugin_id: &str, payload: &[u8]) -> Result<()> {
+        let json: serde_json::Value = serde_json::from_slice(payload)?;
+        let device_id = json["device_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("unregister missing device_id"))?;
+
+        if let Some(existing) = self.store.get_device(device_id).await? {
+            if existing.plugin_id != plugin_id {
+                warn!(
+                    device_id,
+                    claimed_plugin_id = plugin_id,
+                    actual_plugin_id = %existing.plugin_id,
+                    "Ignoring unregister for device owned by another plugin"
+                );
+                return Ok(());
+            }
+        }
+
+        let device_removed = self.store.delete_device(device_id).await?;
+        let schema_removed = self.store.delete_device_schema(device_id).await?;
+
+        if device_removed || schema_removed {
+            let _ = self.pub_bus.publish(Event::Custom {
+                timestamp: Utc::now(),
+                event_type: "device_deleted".to_string(),
+                payload: serde_json::json!({
+                    "device_id": device_id,
+                    "plugin_id": plugin_id,
+                    "source": "plugin_unregister",
+                }),
+            });
+            info!(device_id, plugin_id, device_removed, schema_removed, "Device unregistered");
+        } else {
+            debug!(device_id, plugin_id, "Unregister ignored for unknown device");
+        }
+
+        Ok(())
+    }
+
     async fn handle_availability(&self, device_id: &str, available: bool) -> Result<()> {
         let mut device = self.store.get_device(device_id).await?.unwrap_or_else(|| {
             let plugin_id = device_id.split('_').next().unwrap_or("unknown");
@@ -416,6 +488,59 @@ impl StateBridge {
 
         Ok(())
     }
+}
+
+impl StateBridge {
+    fn record_pending_command_change(&self, device_id: &str, payload: &[u8]) {
+        let Ok(command) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(change) = extract_change_from_command_payload(&command) else {
+            return;
+        };
+        self.pending_command_changes
+            .insert(device_id.to_string(), change);
+    }
+
+    fn resolve_state_change(&self, device_id: &str, incoming: &serde_json::Value) -> DeviceChange {
+        if let Some(change) = self.pending_command_changes.get(device_id) {
+            let pending = change.clone();
+            if (Utc::now() - pending.changed_at).num_seconds() <= 5 {
+                if let Some(explicit) = extract_change_from_state_payload(incoming) {
+                    if is_generic_plugin_external_change(&explicit) {
+                        self.pending_command_changes.remove(device_id);
+                        return pending;
+                    }
+                    return explicit;
+                }
+
+                self.pending_command_changes.remove(device_id);
+                return pending;
+            }
+            self.pending_command_changes.remove(device_id);
+        }
+
+        if let Some(change) = extract_change_from_state_payload(incoming) {
+            return change;
+        }
+
+        DeviceChange::unknown()
+    }
+}
+
+fn is_generic_plugin_external_change(change: &DeviceChange) -> bool {
+    change.kind == hc_types::device::DeviceChangeKind::External
+        && change.correlation_id.is_none()
+        && change.actor_id.is_none()
+        && change.actor_name.is_none()
+}
+
+fn parse_cmd_topic(topic: &str) -> Option<&str> {
+    let parts: Vec<&str> = topic.splitn(4, '/').collect();
+    if parts.len() == 4 && parts[0] == "homecore" && parts[1] == "devices" && parts[3] == "cmd" {
+        return Some(parts[2]);
+    }
+    None
 }
 
 fn apply_partial_merge_patch(

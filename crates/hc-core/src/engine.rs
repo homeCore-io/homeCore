@@ -1362,6 +1362,75 @@ impl RuleEngine {
                     },
                 ))
             }
+
+            Condition::DeviceLastChange {
+                device_id,
+                kind,
+                source,
+                actor_id,
+                actor_name,
+            } => {
+                let device = device_log_name(&self.state, device_id).await;
+                let Ok(Some(device_state)) = self.state.get_device(device_id).await else {
+                    return Ok((
+                        false,
+                        ConditionTrace {
+                            condition_type: "device_last_change".into(),
+                            passed: false,
+                            actual: None,
+                            expected: None,
+                            reason: format!("device '{}' not found", device),
+                        },
+                    ));
+                };
+
+                let Some(change) = device_state.last_change else {
+                    return Ok((
+                        false,
+                        ConditionTrace {
+                            condition_type: "device_last_change".into(),
+                            passed: false,
+                            actual: None,
+                            expected: None,
+                            reason: format!("device '{}' has no last_change metadata", device),
+                        },
+                    ));
+                };
+
+                let passed = kind.as_ref().map(|v| *v == change.kind).unwrap_or(true)
+                    && source
+                        .as_deref()
+                        .map(|v| change.source.as_deref() == Some(v))
+                        .unwrap_or(true)
+                    && actor_id
+                        .as_deref()
+                        .map(|v| change.actor_id.as_deref() == Some(v))
+                        .unwrap_or(true)
+                    && actor_name
+                        .as_deref()
+                        .map(|v| change.actor_name.as_deref() == Some(v))
+                        .unwrap_or(true);
+
+                Ok((
+                    passed,
+                    ConditionTrace {
+                        condition_type: "device_last_change".into(),
+                        passed,
+                        actual: serde_json::to_value(&change).ok(),
+                        expected: Some(serde_json::json!({
+                            "kind": kind,
+                            "source": source,
+                            "actor_id": actor_id,
+                            "actor_name": actor_name,
+                        })),
+                        reason: if passed {
+                            format!("{}.last_change matched requested provenance", device)
+                        } else {
+                            format!("{}.last_change did not match requested provenance", device)
+                        },
+                    },
+                ))
+            }
         }
     }
 
@@ -1395,6 +1464,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             device_id,
             current,
             previous,
+            change,
             ..
         } => {
             // Find the attribute specified in this rule's trigger (if any).
@@ -1429,6 +1499,11 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
                 value,
                 prev_value,
                 event_type: Some("device_state_changed".into()),
+                change_kind: Some(change.kind.clone()),
+                change_source: change.source.clone(),
+                change_actor_id: change.actor_id.clone(),
+                change_actor_name: change.actor_name.clone(),
+                correlation_id: change.correlation_id.clone(),
                 extra: None,
                 trigger_label: label,
             }
@@ -1441,6 +1516,11 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             )),
             prev_value: None,
             event_type: Some(format!("mqtt:{topic}")),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
             extra: None,
             trigger_label: label,
         },
@@ -1455,6 +1535,11 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             value: payload.get("body").cloned(),
             prev_value: None,
             event_type: Some(event_type.clone()),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
             extra: payload.get("query").cloned(),
             trigger_label: label,
         },
@@ -1468,6 +1553,11 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             value: Some(payload.clone()),
             prev_value: None,
             event_type: Some(event_type.clone()),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
             extra: None,
             trigger_label: label,
         },
@@ -1481,6 +1571,11 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             value: Some(JsonValue::Bool(*available)),
             prev_value: None,
             event_type: Some("device_availability_changed".into()),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
             extra: None,
             trigger_label: label,
         },
@@ -1656,12 +1751,15 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                 from,
                 not_from,
                 not_to,
+                change_kind,
+                change_source,
                 ..
             },
             Event::DeviceStateChanged {
                 device_id: eid,
                 current,
                 previous,
+                change,
                 ..
             },
         ) => {
@@ -1671,7 +1769,7 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                 return NoMatch("device_id mismatch");
             }
             match attribute {
-                None => Matched, // Any attribute change fires
+                None => {}
                 Some(attr) => {
                     let Some(curr_val) = current.get(attr.as_str()) else {
                         return NoMatch("attribute not in current state");
@@ -1701,9 +1799,19 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                             return NoMatch("previous value matches 'not_from' exclusion");
                         }
                     }
-                    Matched
                 }
             }
+            if let Some(expected_kind) = change_kind {
+                if change.kind != *expected_kind {
+                    return NoMatch("change_kind mismatch");
+                }
+            }
+            if let Some(expected_source) = change_source {
+                if change.source.as_deref() != Some(expected_source.as_str()) {
+                    return NoMatch("change_source mismatch");
+                }
+            }
+            Matched
         }
         // ── ButtonEvent ───────────────────────────────────────────────────
         (
@@ -2006,6 +2114,7 @@ fn num_cmp(a: &JsonValue, b: &JsonValue) -> Option<std::cmp::Ordering> {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
 
     fn dsc_event(device_id: &str, attr: &str, prev: JsonValue, curr: JsonValue) -> Event {
@@ -2019,6 +2128,7 @@ mod tests {
             previous,
             current,
             changed: vec![attr.into()],
+            change: DeviceChange::unknown(),
         }
     }
 
@@ -2094,6 +2204,8 @@ mod tests {
             not_from: None,
             not_to: None,
             for_duration_secs: None,
+            change_kind: None,
+            change_source: None,
         };
         // from = true (was locked), now false (unlocked) — matches
         let ev = dsc_event("door_1", "locked", json!(true), json!(false));
@@ -2120,6 +2232,8 @@ mod tests {
             not_from: None,
             not_to: None,
             for_duration_secs: None,
+            change_kind: None,
+            change_source: None,
         };
         // Fires for motion_2 (in device_ids)
         let ev = dsc_event("motion_2", "motion", json!("inactive"), json!("active"));
@@ -2136,28 +2250,80 @@ mod tests {
     }
 
     #[test]
+    fn device_state_trigger_matches_change_provenance_filters() {
+        let trigger = Trigger::DeviceStateChanged {
+            device_id: "hall_switch".into(),
+            device_ids: vec![],
+            attribute: Some("on".into()),
+            to: Some(json!(true)),
+            from: None,
+            not_from: None,
+            not_to: None,
+            for_duration_secs: None,
+            change_kind: Some(DeviceChangeKind::Physical),
+            change_source: Some("physical".into()),
+        };
+
+        let mut event = dsc_event("hall_switch", "on", json!(false), json!(true));
+        if let Event::DeviceStateChanged { change, .. } = &mut event {
+            *change = DeviceChange::physical(Some("physical".into()));
+        }
+
+        assert!(matches!(
+            trigger_check(&trigger, &event),
+            TriggerResult::Matched
+        ));
+    }
+
+    #[test]
+    fn device_state_trigger_rejects_wrong_change_provenance() {
+        let trigger = Trigger::DeviceStateChanged {
+            device_id: "hall_switch".into(),
+            device_ids: vec![],
+            attribute: Some("on".into()),
+            to: Some(json!(true)),
+            from: None,
+            not_from: None,
+            not_to: None,
+            for_duration_secs: None,
+            change_kind: Some(DeviceChangeKind::Homecore),
+            change_source: Some("rule".into()),
+        };
+
+        let mut event = dsc_event("hall_switch", "on", json!(false), json!(true));
+        if let Event::DeviceStateChanged { change, .. } = &mut event {
+            *change = DeviceChange::physical(Some("physical".into()));
+        }
+
+        assert!(matches!(
+            trigger_check(&trigger, &event),
+            TriggerResult::NoMatch(_)
+        ));
+    }
+
+    #[test]
     fn numeric_threshold_crosses_above() {
         let trigger = Trigger::NumericThreshold {
-            device_id: "temp_sensor".into(),
+            device_id: "temperature_sensor".into(),
             attribute: "temperature".into(),
             op: ThresholdOp::CrossesAbove,
             value: 80.0,
             for_duration_secs: None,
         };
         // Crossing upward: 75 → 82
-        let ev = dsc_event("temp_sensor", "temperature", json!(75.0), json!(82.0));
+        let ev = dsc_event("temperature_sensor", "temperature", json!(75.0), json!(82.0));
         assert!(matches!(
             trigger_check(&trigger, &ev),
             TriggerResult::Matched
         ));
         // Already above, no crossing: 81 → 85
-        let ev2 = dsc_event("temp_sensor", "temperature", json!(81.0), json!(85.0));
+        let ev2 = dsc_event("temperature_sensor", "temperature", json!(81.0), json!(85.0));
         assert!(matches!(
             trigger_check(&trigger, &ev2),
             TriggerResult::NoMatch(_)
         ));
         // Crossing downward: not a CrossesAbove
-        let ev3 = dsc_event("temp_sensor", "temperature", json!(85.0), json!(75.0));
+        let ev3 = dsc_event("temperature_sensor", "temperature", json!(85.0), json!(75.0));
         assert!(matches!(
             trigger_check(&trigger, &ev3),
             TriggerResult::NoMatch(_)

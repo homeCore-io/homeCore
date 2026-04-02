@@ -277,7 +277,8 @@ fn trigger_references_device(trigger: &Trigger, device_id: &str, devices: &[Devi
 fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
     match cond {
         Condition::DeviceState { device_id: id, .. }
-        | Condition::TimeElapsed { device_id: id, .. } => {
+        | Condition::TimeElapsed { device_id: id, .. }
+        | Condition::DeviceLastChange { device_id: id, .. } => {
             hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
         }
         Condition::Not { condition } => condition_references_device(condition, device_id, devices),

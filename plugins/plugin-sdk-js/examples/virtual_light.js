@@ -52,7 +52,7 @@ class VirtualLightPlugin extends PluginBase {
     for (const key of Object.keys(CAPABILITIES)) {
       if (key in payload) this._state[key] = payload[key];
     }
-    this.publishState(deviceId, { ...this._state });
+    this.publishStateForCommand(deviceId, { ...this._state }, payload, 'virtual_light');
     console.log(`[${this.pluginId}] State after command:`, this._state);
   }
 }

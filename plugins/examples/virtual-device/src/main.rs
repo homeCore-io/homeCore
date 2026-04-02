@@ -112,8 +112,17 @@ async fn main() -> Result<()> {
             };
             // Publish from a spawned task — the callback is sync, publish is async.
             let pub_clone = publisher.clone();
+            let cmd_for_publish = cmd.clone();
             tokio::spawn(async move {
-                if let Err(e) = pub_clone.publish_state(DEVICE_ID, &new_state).await {
+                if let Err(e) = pub_clone
+                    .publish_state_for_command(
+                        DEVICE_ID,
+                        &new_state,
+                        &cmd_for_publish,
+                        "virtual_device",
+                    )
+                    .await
+                {
                     tracing::warn!(error = %e, "Failed to publish state after command");
                 }
                 info!(state = ?new_state, "State published after command");

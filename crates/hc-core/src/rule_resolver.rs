@@ -92,7 +92,9 @@ fn resolve_trigger(trigger: &mut Trigger, devices: &[DeviceState]) -> Result<()>
 
 fn resolve_condition(condition: &mut Condition, devices: &[DeviceState]) -> Result<()> {
     match condition {
-        Condition::DeviceState { device_id, .. } | Condition::TimeElapsed { device_id, .. } => {
+        Condition::DeviceState { device_id, .. }
+        | Condition::TimeElapsed { device_id, .. }
+        | Condition::DeviceLastChange { device_id, .. } => {
             resolve_reference_in_place(device_id, devices)?;
         }
         Condition::Not { condition } => resolve_condition(condition, devices)?,
@@ -246,6 +248,8 @@ mod tests {
                 not_from: None,
                 not_to: None,
                 for_duration_secs: None,
+                change_kind: None,
+                change_source: None,
             },
             conditions: vec![Condition::DeviceState {
                 device_id: device_ref.into(),

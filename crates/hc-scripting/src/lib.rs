@@ -244,6 +244,11 @@ impl ScriptRuntime {
     /// - `trigger_value()` — new attribute value (or unit if unavailable)
     /// - `trigger_prev_value()` — previous attribute value (or unit)
     /// - `trigger_event_type()` — event type string
+    /// - `trigger_change_kind()` — origin class for device-state triggers, or `""`
+    /// - `trigger_change_source()` — specific change source label, or `""`
+    /// - `trigger_change_actor_id()` — actor id when known, or `""`
+    /// - `trigger_change_actor_name()` — actor label when known, or `""`
+    /// - `trigger_correlation_id()` — correlation id when present, or `""`
     /// - `trigger_extra()` — auxiliary context; for webhook triggers this is a map of
     ///   query-string parameters (e.g. `trigger_extra()["token"]`); unit otherwise
     /// - `trigger_label()` — user-defined label from `rule.trigger_label`, or `""`
@@ -261,6 +266,15 @@ impl ScriptRuntime {
             .map(json_to_dynamic)
             .unwrap_or(Dynamic::UNIT);
         let event_type = ctx.event_type.clone().unwrap_or_default();
+        let change_kind = ctx
+            .change_kind
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string())
+            .unwrap_or_default();
+        let change_source = ctx.change_source.clone().unwrap_or_default();
+        let change_actor_id = ctx.change_actor_id.clone().unwrap_or_default();
+        let change_actor_name = ctx.change_actor_name.clone().unwrap_or_default();
+        let correlation_id = ctx.correlation_id.clone().unwrap_or_default();
         let extra = ctx
             .extra
             .clone()
@@ -281,6 +295,26 @@ impl ScriptRuntime {
         self.engine
             .register_fn("trigger_event_type", move || -> String {
                 event_type.clone()
+            });
+        self.engine
+            .register_fn("trigger_change_kind", move || -> String {
+                change_kind.clone()
+            });
+        self.engine
+            .register_fn("trigger_change_source", move || -> String {
+                change_source.clone()
+            });
+        self.engine
+            .register_fn("trigger_change_actor_id", move || -> String {
+                change_actor_id.clone()
+            });
+        self.engine
+            .register_fn("trigger_change_actor_name", move || -> String {
+                change_actor_name.clone()
+            });
+        self.engine
+            .register_fn("trigger_correlation_id", move || -> String {
+                correlation_id.clone()
             });
         self.engine
             .register_fn("trigger_extra", move || -> Dynamic { extra.clone() });
@@ -464,7 +498,7 @@ mod tests {
 
     #[test]
     fn run_action_executes_script() {
-        ScriptRuntime::new().run_action("let x = 42;").unwrap();
+        let _ = ScriptRuntime::new().run_action("let x = 42;").unwrap();
     }
 
     #[test]
@@ -481,14 +515,15 @@ mod tests {
         let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
         let rt =
             ScriptRuntime::new_with_devices(HashMap::new()).with_side_effects(Arc::clone(&buf));
-        rt.run_action(
+        let _ = rt
+            .run_action(
             r#"
             set_device_state("plug_1", #{ on: true });
             notify("pushover", "hello");
             http_get("http://localhost/ping");
         "#,
         )
-        .unwrap();
+            .unwrap();
         let effects = buf.lock().unwrap();
         assert_eq!(effects.len(), 3);
         assert!(matches!(
@@ -509,6 +544,12 @@ mod tests {
             value: Some(json!(true)),
             prev_value: Some(json!(false)),
             event_type: Some("device_state_changed".into()),
+            trigger_label: None,
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
             extra: None,
         };
         let rt = ScriptRuntime::new().with_trigger_context(&ctx);

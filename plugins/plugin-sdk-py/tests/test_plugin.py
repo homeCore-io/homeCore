@@ -56,6 +56,26 @@ class TestPublishMethods(unittest.TestCase):
             retain=True,
         )
 
+    def test_publish_state_attaches_change_metadata(self):
+        plugin = _make_plugin()
+        mc = _attach_mock_client(plugin)
+        plugin.publish_state(
+            "light.01",
+            {"on": True},
+            change={"kind": "external", "source": "wall_switch"},
+        )
+        mc.publish.assert_called_once_with(
+            "homecore/devices/light.01/state",
+            json.dumps(
+                {
+                    "on": True,
+                    "_hc": {"change": {"kind": "external", "source": "wall_switch"}},
+                }
+            ),
+            qos=1,
+            retain=True,
+        )
+
     def test_publish_state_partial(self):
         plugin = _make_plugin()
         mc = _attach_mock_client(plugin)
@@ -65,6 +85,43 @@ class TestPublishMethods(unittest.TestCase):
             json.dumps({"brightness": 128}),
             qos=1,
             retain=False,
+        )
+
+    def test_publish_state_for_command_preserves_command_metadata(self):
+        plugin = _make_plugin()
+        mc = _attach_mock_client(plugin)
+        plugin.publish_state_for_command(
+            "light.01",
+            {"on": True},
+            {
+                "on": True,
+                "_hc": {
+                    "command": {
+                        "changed_at": "2026-04-01T12:00:00Z",
+                        "kind": "homecore",
+                        "source": "api",
+                        "correlation_id": "corr-1",
+                    }
+                },
+            },
+        )
+        mc.publish.assert_called_once_with(
+            "homecore/devices/light.01/state",
+            json.dumps(
+                {
+                    "on": True,
+                    "_hc": {
+                        "change": {
+                            "changed_at": "2026-04-01T12:00:00Z",
+                            "kind": "homecore",
+                            "source": "api",
+                            "correlation_id": "corr-1",
+                        }
+                    },
+                }
+            ),
+            qos=1,
+            retain=True,
         )
 
     def test_register_device(self):
@@ -116,6 +173,39 @@ class TestPublishMethods(unittest.TestCase):
         payload = json.loads(payload_str)
         self.assertIsNone(payload["area"])
         self.assertEqual(payload["device_type"], "temperature_sensor")
+
+    def test_unregister_device(self):
+        plugin = _make_plugin()
+        mc = _attach_mock_client(plugin)
+        plugin.unregister_device("sensor.01")
+
+        expected = [
+            call(
+                "homecore/devices/sensor.01/state",
+                "",
+                qos=1,
+                retain=True,
+            ),
+            call(
+                "homecore/devices/sensor.01/availability",
+                "",
+                qos=1,
+                retain=True,
+            ),
+            call(
+                "homecore/devices/sensor.01/schema",
+                "",
+                qos=1,
+                retain=True,
+            ),
+            call(
+                "homecore/plugins/plugin.test/unregister",
+                json.dumps({"device_id": "sensor.01"}),
+                qos=1,
+                retain=False,
+            ),
+        ]
+        self.assertEqual(mc.publish.call_args_list, expected)
 
     def test_publish_availability_online(self):
         plugin = _make_plugin()

@@ -67,10 +67,12 @@ class PluginBase {
    *
    * @param {string} deviceId - Canonical HomeCore device identifier.
    * @param {object} state    - Attribute map to publish.
+   * @param {object} [options] - Optional publish metadata.
+   * @param {object} [options.change] - `_hc.change` payload describing provenance.
    */
-  publishState(deviceId, state) {
+  publishState(deviceId, state, options = {}) {
     const topic   = `homecore/devices/${deviceId}/state`;
-    const payload = JSON.stringify(state);
+    const payload = JSON.stringify(this._withStateChangeMetadata(state, options.change));
     this._publish(topic, payload, { retain: true, qos: 1 });
   }
 
@@ -95,8 +97,9 @@ class PluginBase {
    * that HomeCore resolves against its built-in device-type catalog.  This is the
    * recommended registration path for well-known device categories.
    *
-   * Example types: `"light"`, `"light_color"`, `"switch"`, `"temperature_sensor"`,
-   * `"power_monitor"`, `"cover"`, `"lock"`, `"climate"`, …
+   * Example types: `"light"`, `"switch"`, `"motion_sensor"`, `"contact_sensor"`,
+   * `"temperature_sensor"`, `"power_monitor"`, `"cover"`, `"lock"`,
+   * `"climate"`, `"virtual_switch"`, …
    *
    * @param {string}      deviceId   - Stable unique device identifier.
    * @param {string}      name       - Human-readable label.
@@ -110,17 +113,65 @@ class PluginBase {
   }
 
   /**
+   * Retire a device from HomeCore by clearing retained topics and publishing
+   * a plugin-scoped unregister message.
+   *
+   * @param {string} deviceId - Stable unique device identifier.
+   */
+  unregisterDevice(deviceId) {
+    this._publish(`homecore/devices/${deviceId}/state`, '', { retain: true, qos: 1 });
+    this._publish(`homecore/devices/${deviceId}/availability`, '', { retain: true, qos: 1 });
+    this._publish(`homecore/devices/${deviceId}/schema`, '', { retain: true, qos: 1 });
+    const topic = `homecore/plugins/${this.pluginId}/unregister`;
+    const payload = JSON.stringify({ device_id: deviceId });
+    this._publish(topic, payload, { qos: 1 });
+  }
+
+  /**
    * Publish a partial state update (JSON merge-patch, QoS 1, not retained).
    *
    * Use this for high-frequency sensors that send diffs rather than full state.
    *
    * @param {string} deviceId - Canonical HomeCore device identifier.
    * @param {object} patch    - Attributes to merge into the current state.
+   * @param {object} [options] - Optional publish metadata.
+   * @param {object} [options.change] - `_hc.change` payload describing provenance.
    */
-  publishStatePartial(deviceId, patch) {
+  publishStatePartial(deviceId, patch, options = {}) {
     const topic   = `homecore/devices/${deviceId}/state/partial`;
-    const payload = JSON.stringify(patch);
+    const payload = JSON.stringify(this._withStateChangeMetadata(patch, options.change));
     this._publish(topic, payload, { retain: false, qos: 1 });
+  }
+
+  /**
+   * Publish a state update that is the direct result of a HomeCore command.
+   *
+   * This preserves `_hc.command` metadata as `_hc.change` so rules can tell the
+   * resulting state update came from HomeCore.
+   *
+   * @param {string} deviceId - Canonical HomeCore device identifier.
+   * @param {object} state - Attribute map to publish.
+   * @param {object} commandPayload - Original HomeCore command payload.
+   * @param {string} [fallbackSource] - Source label if the command had no metadata.
+   */
+  publishStateForCommand(deviceId, state, commandPayload, fallbackSource = this.pluginId) {
+    this.publishState(deviceId, state, {
+      change: this.changeFromCommand(commandPayload, fallbackSource),
+    });
+  }
+
+  /**
+   * Publish a partial state update that is the direct result of a HomeCore command.
+   *
+   * @param {string} deviceId - Canonical HomeCore device identifier.
+   * @param {object} patch - Merge-patch payload to publish.
+   * @param {object} commandPayload - Original HomeCore command payload.
+   * @param {string} [fallbackSource] - Source label if the command had no metadata.
+   */
+  publishStatePartialForCommand(deviceId, patch, commandPayload, fallbackSource = this.pluginId) {
+    this.publishStatePartial(deviceId, patch, {
+      change: this.changeFromCommand(commandPayload, fallbackSource),
+    });
   }
 
   /**
@@ -166,6 +217,42 @@ class PluginBase {
    * Override to register devices and subscribe to additional topics.
    */
   onConnect() {}
+
+  /**
+   * Extract a HomeCore change record from an inbound command payload.
+   *
+   * @param {object} commandPayload - Decoded JSON command payload.
+   * @returns {object|null}
+   */
+  extractCommandChange(commandPayload) {
+    if (!commandPayload || typeof commandPayload !== 'object' || Array.isArray(commandPayload)) {
+      return null;
+    }
+    const hc = commandPayload._hc;
+    if (!hc || typeof hc !== 'object' || Array.isArray(hc)) {
+      return null;
+    }
+    const change = hc.command;
+    if (!change || typeof change !== 'object' || Array.isArray(change)) {
+      return null;
+    }
+    return { ...change };
+  }
+
+  /**
+   * Resolve a command payload into a concrete HomeCore-originated change record.
+   *
+   * @param {object} commandPayload - Decoded JSON command payload.
+   * @param {string} [fallbackSource] - Source label if the command had no metadata.
+   * @returns {object}
+   */
+  changeFromCommand(commandPayload, fallbackSource = this.pluginId) {
+    return this.extractCommandChange(commandPayload) || {
+      changed_at: new Date().toISOString(),
+      kind: 'homecore',
+      source: fallbackSource,
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -232,6 +319,19 @@ class PluginBase {
     this._client.publish(topic, payload, opts, (err) => {
       if (err) console.error(`[${this.pluginId}] publish error on ${topic}:`, err.message);
     });
+  }
+
+  _withStateChangeMetadata(payload, change) {
+    if (!change || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return payload;
+    }
+    const nextPayload = { ...payload };
+    const nextHc = nextPayload._hc && typeof nextPayload._hc === 'object' && !Array.isArray(nextPayload._hc)
+      ? { ...nextPayload._hc }
+      : {};
+    nextHc.change = { ...change };
+    nextPayload._hc = nextHc;
+    return nextPayload;
   }
 }
 

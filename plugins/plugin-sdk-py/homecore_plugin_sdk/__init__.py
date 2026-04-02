@@ -74,25 +74,85 @@ class PluginBase(ABC):
     # Public API
     # ------------------------------------------------------------------
 
-    def publish_state(self, device_id: str, state: dict) -> None:
+    def publish_state(
+        self,
+        device_id: str,
+        state: dict,
+        *,
+        change: dict | None = None,
+    ) -> None:
         """Publish a full device state update (retained, QoS 1).
 
         :param device_id: The canonical HomeCore device identifier.
         :param state: Dict of attribute names → values.
+        :param change: Optional ``_hc.change`` provenance payload.
         """
         topic = f"homecore/devices/{device_id}/state"
-        self._publish(topic, json.dumps(state), qos=1, retain=True)
+        self._publish(
+            topic,
+            json.dumps(self._with_state_change_metadata(state, change)),
+            qos=1,
+            retain=True,
+        )
 
-    def publish_state_partial(self, device_id: str, patch: dict) -> None:
+    def publish_state_partial(
+        self,
+        device_id: str,
+        patch: dict,
+        *,
+        change: dict | None = None,
+    ) -> None:
         """Publish a partial state update (JSON merge-patch, QoS 1, not retained).
 
         Use this for high-frequency sensors that send diffs rather than full state blobs.
 
         :param device_id: The canonical HomeCore device identifier.
         :param patch: Dict of attributes to merge into the current state.
+        :param change: Optional ``_hc.change`` provenance payload.
         """
         topic = f"homecore/devices/{device_id}/state/partial"
-        self._publish(topic, json.dumps(patch), qos=1, retain=False)
+        self._publish(
+            topic,
+            json.dumps(self._with_state_change_metadata(patch, change)),
+            qos=1,
+            retain=False,
+        )
+
+    def publish_state_for_command(
+        self,
+        device_id: str,
+        state: dict,
+        command_payload: dict,
+        *,
+        fallback_source: str | None = None,
+    ) -> None:
+        """Publish a full state update caused by a HomeCore command."""
+        self.publish_state(
+            device_id,
+            state,
+            change=self.change_from_command(
+                command_payload,
+                fallback_source=fallback_source,
+            ),
+        )
+
+    def publish_state_partial_for_command(
+        self,
+        device_id: str,
+        patch: dict,
+        command_payload: dict,
+        *,
+        fallback_source: str | None = None,
+    ) -> None:
+        """Publish a partial state update caused by a HomeCore command."""
+        self.publish_state_partial(
+            device_id,
+            patch,
+            change=self.change_from_command(
+                command_payload,
+                fallback_source=fallback_source,
+            ),
+        )
 
     def register_device(
         self,
@@ -133,9 +193,9 @@ class PluginBase(ABC):
         string that HomeCore resolves against its built-in device-type catalog.
         This is the recommended path for well-known device categories.
 
-        Example device types: ``"light"``, ``"light_color"``, ``"switch"``,
-        ``"temperature_sensor"``, ``"power_monitor"``, ``"cover"``, ``"lock"``,
-        ``"climate"``, …
+        Example device types: ``"light"``, ``"switch"``, ``"motion_sensor"``,
+        ``"contact_sensor"``, ``"temperature_sensor"``, ``"power_monitor"``,
+        ``"cover"``, ``"lock"``, ``"climate"``, ``"virtual_switch"``, …
 
         :param device_id: Stable unique identifier for the device.
         :param name: Human-readable label.
@@ -152,6 +212,21 @@ class PluginBase(ABC):
                 "device_type": device_type,
             }
         )
+        self._publish(topic, payload, qos=1)
+
+    def unregister_device(self, device_id: str) -> None:
+        """Retire a device from HomeCore.
+
+        Clears retained state/availability/schema topics and then publishes a
+        plugin-scoped unregister message so HomeCore deletes the stored device.
+        """
+        self._publish(f"homecore/devices/{device_id}/state", "", qos=1, retain=True)
+        self._publish(
+            f"homecore/devices/{device_id}/availability", "", qos=1, retain=True
+        )
+        self._publish(f"homecore/devices/{device_id}/schema", "", qos=1, retain=True)
+        topic = f"homecore/plugins/{self.PLUGIN_ID}/unregister"
+        payload = json.dumps({"device_id": device_id})
         self._publish(topic, payload, qos=1)
 
     def publish_availability(self, device_id: str, available: bool) -> None:
@@ -186,6 +261,31 @@ class PluginBase(ABC):
     def on_connect(self) -> None:
         """Called after the broker connection is established.  Override to
         register devices and perform startup subscriptions."""
+
+    def extract_command_change(self, command_payload: dict) -> dict | None:
+        """Extract ``_hc.command`` metadata from a decoded HomeCore command payload."""
+        if not isinstance(command_payload, dict):
+            return None
+        hc = command_payload.get("_hc")
+        if not isinstance(hc, dict):
+            return None
+        change = hc.get("command")
+        if not isinstance(change, dict):
+            return None
+        return dict(change)
+
+    def change_from_command(
+        self,
+        command_payload: dict,
+        *,
+        fallback_source: str | None = None,
+    ) -> dict:
+        """Resolve a command payload into a concrete HomeCore-originated change."""
+        return self.extract_command_change(command_payload) or {
+            "changed_at": self._iso_now(),
+            "kind": "homecore",
+            "source": fallback_source or self.PLUGIN_ID,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -253,3 +353,18 @@ class PluginBase(ABC):
             return
         logger.debug("publish topic=%s retain=%s", topic, retain)
         self._client.publish(topic, payload, qos=qos, retain=retain)
+
+    def _with_state_change_metadata(self, payload: dict, change: dict | None) -> dict:
+        if not change or not isinstance(payload, dict):
+            return payload
+        next_payload = dict(payload)
+        hc = next_payload.get("_hc")
+        next_hc = dict(hc) if isinstance(hc, dict) else {}
+        next_hc["change"] = dict(change)
+        next_payload["_hc"] = next_hc
+        return next_payload
+
+    def _iso_now(self) -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

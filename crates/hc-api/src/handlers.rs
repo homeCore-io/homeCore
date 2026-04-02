@@ -8,17 +8,19 @@ use axum::{
 };
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
+use hc_topic_map::canonical_device_type_name;
 use hc_types::dashboard::{DashboardDefinition, DashboardResponse, DashboardVisibility};
-use hc_types::device::{Area, DeviceState};
+use hc_types::device::{with_command_change_metadata, Area, DeviceChange, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::auth_middleware::{
-    AreasRead, AreasWrite, AutomationsRead, AutomationsWrite, DashboardsRead, DashboardsWrite,
-    DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
+    AreasRead, AreasWrite, AuthUser, AutomationsRead, AutomationsWrite, DashboardsRead,
+    DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead,
+    ScenesWrite,
 };
 use crate::group_store::RuleGroup;
 use crate::AppState;
@@ -28,10 +30,12 @@ const MATTER_CONTROLLER_DEVICE_ID: &str = "matter_controller";
 fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
     if device.device_type.is_none() {
         if device.plugin_id == "core.switch" {
-            device.device_type = Some("vswitch".to_string());
+            device.device_type = Some("virtual_switch".to_string());
         } else if device.plugin_id == "core.timer" {
             device.device_type = Some("timer".to_string());
         }
+    } else if let Some(device_type) = device.device_type.as_deref() {
+        device.device_type = Some(canonical_device_type_name(device_type));
     }
     device
 }
@@ -107,6 +111,10 @@ pub async fn list_devices(
     _: DevicesRead,
     Query(params): Query<DeviceListQuery>,
 ) -> impl IntoResponse {
+    let wanted_type = params
+        .device_type
+        .as_deref()
+        .map(canonical_device_type_name);
     let all_devices = match s.store.list_devices().await {
         Ok(d) => d,
         Err(e) => {
@@ -123,8 +131,7 @@ pub async fn list_devices(
         .into_iter()
         .map(normalize_native_device_type)
         .filter(|device| {
-            params
-                .device_type
+            wanted_type
                 .as_deref()
                 .map(|wanted| device.device_type.as_deref() == Some(wanted))
                 .unwrap_or(true)
@@ -205,11 +212,14 @@ pub async fn get_device_schema(
 
 pub async fn command_device(
     State(s): State<AppState>,
-    _: DevicesWrite,
+    DevicesWrite(claims): DevicesWrite,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    if let Err(e) = publish_device_command(&s, &id, body).await {
+    let change = DeviceChange::homecore("api")
+        .with_actor(Some(claims.uid), Some(claims.sub))
+        .with_correlation_id(Some(Uuid::new_v4().to_string()));
+    if let Err(e) = publish_device_command(&s, &id, body, change).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -219,8 +229,14 @@ pub async fn command_device(
     (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
 }
 
-async fn publish_device_command(s: &AppState, device_id: &str, body: Value) -> anyhow::Result<()> {
+async fn publish_device_command(
+    s: &AppState,
+    device_id: &str,
+    body: Value,
+    change: DeviceChange,
+) -> anyhow::Result<()> {
     let topic = format!("homecore/devices/{device_id}/cmd");
+    let body = with_command_change_metadata(body, &change);
     let payload = serde_json::to_vec(&body)?;
 
     if let Some(ph) = &s.publish {
@@ -259,6 +275,24 @@ pub async fn update_device(
 
             if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
                 device.name = name.to_string();
+            }
+            if let Some(status_icon) = body.get("status_icon") {
+                if status_icon.is_null() {
+                    device.status_icon = None;
+                } else if let Some(value) = status_icon.as_str() {
+                    let trimmed = value.trim();
+                    device.status_icon = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                } else {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "status_icon must be a string or null" })),
+                    )
+                        .into_response();
+                }
             }
             if let Some(area) = body.get("area") {
                 device.area = if area.is_null() {
@@ -759,7 +793,7 @@ pub async fn create_switch(
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.switch");
-    dev.device_type = Some("vswitch".to_string());
+    dev.device_type = Some("virtual_switch".to_string());
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
@@ -1328,7 +1362,8 @@ fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState])
 fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
     match cond {
         Condition::DeviceState { device_id: d, .. }
-        | Condition::TimeElapsed { device_id: d, .. } => {
+        | Condition::TimeElapsed { device_id: d, .. }
+        | Condition::DeviceLastChange { device_id: d, .. } => {
             rule_resolver::reference_points_to_device(d, device_id, devices)
         }
         Condition::Not { condition } => condition_references_device(condition, device_id, devices),
@@ -1708,6 +1743,7 @@ fn default_dashboard_layout(
                         *w
                     },
                     h: *h,
+                    section_id: None,
                 },
             )
             .collect(),
@@ -1723,8 +1759,8 @@ fn default_dashboard_layout(
 
 fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
     use hc_types::dashboard::{
-        DashboardDefinition, DashboardRefreshPolicy, DashboardVisibility, DashboardWidget,
-        DashboardWidgetType,
+        DashboardBreakpoint, DashboardDefinition, DashboardRefreshPolicy, DashboardSection,
+        DashboardVisibility, DashboardWidget, DashboardWidgetType,
     };
 
     let now = chrono::Utc::now();
@@ -1741,13 +1777,27 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
         refresh_policy,
         config,
     };
+    let section =
+        |id: &str, breakpoint: DashboardBreakpoint, title: &str, order: i32, y: i32, min_h: i32| {
+            DashboardSection {
+                id: id.to_string(),
+                breakpoint,
+                title: title.to_string(),
+                order,
+                y,
+                layout_policy: hc_types::dashboard::DashboardSectionLayoutPolicy::Grid,
+                min_h,
+                hidden: false,
+            }
+        };
 
     vec![
         DashboardDefinition {
             id: "starter_getting_started".to_string(),
             name: "Getting Started".to_string(),
             description: Some(
-                "Starter dashboard with home status, examples, and setup guidance.".to_string(),
+                "Clean developer workspace focused on the dashboard features currently in progress."
+                    .to_string(),
             ),
             owner_user_id: owner_user_id.to_string(),
             visibility: DashboardVisibility::Private,
@@ -1755,75 +1805,116 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             icon: "home".into(),
             created_at: now,
             updated_at: now,
+            sections: vec![
+                section("mobile-overview", DashboardBreakpoint::Mobile, "Overview", 0, 0, 4),
+                section("mobile-devices", DashboardBreakpoint::Mobile, "Devices", 1, 4, 6),
+                section("mobile-activity", DashboardBreakpoint::Mobile, "Activity", 2, 10, 3),
+                section("tablet-overview", DashboardBreakpoint::Tablet, "Overview", 0, 0, 2),
+                section("tablet-devices", DashboardBreakpoint::Tablet, "Devices", 1, 2, 3),
+                section("tablet-activity", DashboardBreakpoint::Tablet, "Activity", 2, 5, 2),
+                section("desktop-overview", DashboardBreakpoint::Desktop, "Overview", 0, 0, 2),
+                section("desktop-devices", DashboardBreakpoint::Desktop, "Devices", 1, 2, 3),
+                section("desktop-activity", DashboardBreakpoint::Desktop, "Activity", 2, 5, 2),
+                section("tv-overview", DashboardBreakpoint::Tv, "Overview", 0, 0, 2),
+                section("tv-devices", DashboardBreakpoint::Tv, "Devices", 1, 2, 3),
+                section("tv-activity", DashboardBreakpoint::Tv, "Activity", 2, 5, 2),
+            ],
             widgets: vec![
                 widget(
-                    "welcome",
+                    "intro",
                     DashboardWidgetType::Markdown,
-                    "Welcome",
-                    None,
-                    DashboardRefreshPolicy::Passive,
-                    json!({
-                        "markdown": "## Welcome to HomeCore\nUse this starter dashboard as your baseline.\n\n- Review **Devices** and assign areas.\n- Confirm **Scenes** and **Modes** are useful.\n- Open **Automations** to inspect active rules.\n- Duplicate this dashboard before tailoring it for rooms or wall tablets."
-                    }),
+                    "Dashboard Workbench",
+                    Some("Starter sample with the newer card treatments"),
+                    DashboardRefreshPolicy::Manual,
+                    json!({"markdown": "Use this dashboard as a clean composer sandbox. It includes a summary card, a compact device list, a richer device grid, and a recent events feed."}),
                 ),
                 widget(
                     "summary",
                     DashboardWidgetType::StatSummary,
                     "Home Summary",
-                    None,
+                    Some("Quick system counts"),
                     DashboardRefreshPolicy::Live,
-                    json!({"metrics": ["devices", "on", "offline", "media_playing"]}),
+                    json!({"metrics": ["devices", "on", "offline"]}),
                 ),
                 widget(
-                    "modes",
-                    DashboardWidgetType::ModeChips,
-                    "Modes",
-                    None,
+                    "list",
+                    DashboardWidgetType::DeviceList,
+                    "Device List",
+                    Some("Compact device inventory"),
                     DashboardRefreshPolicy::Live,
-                    json!({}),
+                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 8}),
                 ),
                 widget(
-                    "scenes",
-                    DashboardWidgetType::SceneRow,
-                    "Scenes",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({}),
-                ),
-                widget(
-                    "devices",
+                    "grid",
                     DashboardWidgetType::DeviceGrid,
-                    "Quick Device View",
-                    Some("Example device widget bound to your active devices."),
+                    "Device Grid",
+                    Some("Richer tile sample"),
                     DashboardRefreshPolicy::Live,
-                    json!({"selection_mode": "query", "query": "", "show_offline": false, "limit": 6}),
+                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 6}),
                 ),
                 widget(
                     "events",
                     DashboardWidgetType::EventFeed,
                     "Recent Events",
-                    None,
+                    Some("Activity sample"),
                     DashboardRefreshPolicy::Live,
-                    json!({"limit": 8, "group_by": "type"}),
-                ),
-                widget(
-                    "links",
-                    DashboardWidgetType::DashboardLink,
-                    "Next Steps",
-                    Some("Manage dashboards, clone this one, or create room-specific views."),
-                    DashboardRefreshPolicy::Passive,
-                    json!({}),
+                    json!({"limit": 6}),
                 ),
             ],
-            layouts: default_dashboard_layout(&[
-                ("welcome", 0, 0, 12, 2),
-                ("summary", 0, 2, 12, 2),
-                ("modes", 0, 4, 12, 1),
-                ("scenes", 0, 5, 12, 1),
-                ("devices", 0, 6, 7, 2),
-                ("events", 7, 6, 5, 2),
-                ("links", 0, 8, 12, 1),
-            ]),
+            layouts: vec![
+                hc_types::dashboard::DashboardLayout {
+                    breakpoint: DashboardBreakpoint::Mobile,
+                    columns: 1,
+                    row_height: 150.0,
+                    gap: 12.0,
+                    placements: vec![
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 0, y: 2, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 4, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 0, y: 7, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 10, w: 1, h: 3, section_id: Some("mobile-activity".into()) },
+                    ],
+                },
+                hc_types::dashboard::DashboardLayout {
+                    breakpoint: DashboardBreakpoint::Tablet,
+                    columns: 12,
+                    row_height: 150.0,
+                    gap: 12.0,
+                    placements: vec![
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tablet-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tablet-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tablet-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tablet-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tablet-activity".into()) },
+                    ],
+                },
+                hc_types::dashboard::DashboardLayout {
+                    breakpoint: DashboardBreakpoint::Desktop,
+                    columns: 12,
+                    row_height: 150.0,
+                    gap: 12.0,
+                    placements: vec![
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("desktop-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("desktop-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("desktop-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("desktop-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("desktop-activity".into()) },
+                    ],
+                },
+                hc_types::dashboard::DashboardLayout {
+                    breakpoint: DashboardBreakpoint::Tv,
+                    columns: 12,
+                    row_height: 180.0,
+                    gap: 16.0,
+                    placements: vec![
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tv-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tv-overview".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tv-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tv-devices".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tv-activity".into()) },
+                    ],
+                },
+            ],
         },
         DashboardDefinition {
             id: "template_home_overview".to_string(),
@@ -1835,6 +1926,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             icon: "dashboard".into(),
             created_at: now,
             updated_at: now,
+            sections: vec![],
             widgets: vec![
                 widget(
                     "summary",
@@ -1895,6 +1987,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             icon: "shield".into(),
             created_at: now,
             updated_at: now,
+            sections: vec![],
             widgets: vec![
                 widget(
                     "summary",
@@ -1946,6 +2039,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             icon: "chair".into(),
             created_at: now,
             updated_at: now,
+            sections: vec![],
             widgets: vec![
                 widget(
                     "devices",
@@ -2010,6 +2104,27 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
         return Err("dashboard must define at least one layout".into());
     }
 
+    let mut section_ids = HashSet::new();
+    let mut section_breakpoints = HashMap::new();
+    for section in &dashboard.sections {
+        if section.id.trim().is_empty() {
+            return Err("section id cannot be empty".into());
+        }
+        if section.title.trim().is_empty() {
+            return Err(format!("section '{}' title cannot be empty", section.id));
+        }
+        if section.y < 0 {
+            return Err(format!("section '{}' must have non-negative y", section.id));
+        }
+        if section.min_h <= 0 {
+            return Err(format!("section '{}' must have min_h > 0", section.id));
+        }
+        if !section_ids.insert(section.id.as_str()) {
+            return Err(format!("duplicate section id '{}'", section.id));
+        }
+        section_breakpoints.insert(section.id.as_str(), section.breakpoint);
+    }
+
     let mut widget_ids = HashSet::new();
     for widget in &dashboard.widgets {
         if widget.id.trim().is_empty() {
@@ -2061,6 +2176,20 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     "layout {:?} has duplicate placement for widget '{}'",
                     layout.breakpoint, placement.widget_id
                 ));
+            }
+            if let Some(section_id) = placement.section_id.as_deref() {
+                if !section_ids.contains(section_id) {
+                    return Err(format!(
+                        "layout {:?} references unknown section '{}'",
+                        layout.breakpoint, section_id
+                    ));
+                }
+                if section_breakpoints.get(section_id).copied() != Some(layout.breakpoint) {
+                    return Err(format!(
+                        "layout {:?} references section '{}' from a different breakpoint",
+                        layout.breakpoint, section_id
+                    ));
+                }
             }
             if placement.x < 0 || placement.y < 0 {
                 return Err(format!(
@@ -2754,6 +2883,61 @@ pub async fn import_dashboard(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
+pub async fn reload_dashboards(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let store = store.clone();
+    let loaded = match tokio::task::spawn_blocking(move || store.load()).await {
+        Ok(Ok(data)) => data,
+        Ok(Err(error)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("dashboard reload task failed: {error}") })),
+            )
+                .into_response()
+        }
+    };
+
+    let dashboards_total = loaded.dashboards.len();
+    let user_defaults_total = loaded.user_defaults.len();
+    *handle.write().await = loaded;
+
+    Json(json!({
+        "status": "reloaded",
+        "dashboards_total": dashboards_total,
+        "user_defaults_total": user_defaults_total
+    }))
+    .into_response()
+}
+
 pub async fn delete_dashboard(
     State(s): State<AppState>,
     user: DashboardsWrite,
@@ -2888,7 +3072,7 @@ pub async fn create_scene(
 
 pub async fn activate_scene(
     State(s): State<AppState>,
-    _: ScenesWrite,
+    ScenesWrite(_claims): ScenesWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let scene = match s.store.get_scene(id).await {
@@ -2908,9 +3092,16 @@ pub async fn activate_scene(
     };
 
     if let Some(ph) = &s.publish {
+        let change = DeviceChange::homecore("scene")
+            .with_actor(Some(id.to_string()), Some(scene.name.clone()))
+            .with_correlation_id(Some(Uuid::new_v4().to_string()));
         for (device_id, desired) in &scene.states {
             let topic = format!("homecore/devices/{device_id}/cmd");
-            let payload = desired.to_string().into_bytes();
+            let payload = serde_json::to_vec(&with_command_change_metadata(
+                desired.clone(),
+                &change,
+            ))
+            .unwrap_or_else(|_| desired.to_string().into_bytes());
             if let Err(e) = ph.publish(&topic, payload).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3178,6 +3369,87 @@ async fn eval_condition_dry_detail(
                 },
             }
         }
+        Condition::DeviceLastChange {
+            device_id,
+            kind,
+            source,
+            actor_id,
+            actor_name,
+        } => {
+            let device = match store.get_device(device_id).await {
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: None,
+                        elapsed_ms: None,
+                        reason: Some(format!("device '{device_id}' not found")),
+                    }
+                }
+                Err(e) => {
+                    return ConditionDetail {
+                        condition: cond_json,
+                        passed: false,
+                        actual: None,
+                        expected: None,
+                        elapsed_ms: None,
+                        reason: Some(format!("store error: {e}")),
+                    }
+                }
+            };
+
+            let Some(change) = device.last_change else {
+                return ConditionDetail {
+                    condition: cond_json,
+                    passed: false,
+                    actual: None,
+                    expected: None,
+                    elapsed_ms: None,
+                    reason: Some(format!("device '{device_id}' has no last_change metadata")),
+                };
+            };
+
+            let passed = kind.as_ref().map(|v| *v == change.kind).unwrap_or(true)
+                && source
+                    .as_deref()
+                    .map(|v| change.source.as_deref() == Some(v))
+                    .unwrap_or(true)
+                && actor_id
+                    .as_deref()
+                    .map(|v| change.actor_id.as_deref() == Some(v))
+                    .unwrap_or(true)
+                && actor_name
+                    .as_deref()
+                    .map(|v| change.actor_name.as_deref() == Some(v))
+                    .unwrap_or(true);
+
+            ConditionDetail {
+                condition: cond_json,
+                passed,
+                actual: Some(json!({
+                    "kind": change.kind,
+                    "source": change.source,
+                    "actor_id": change.actor_id,
+                    "actor_name": change.actor_name,
+                    "correlation_id": change.correlation_id,
+                    "changed_at": change.changed_at,
+                })),
+                expected: Some(json!({
+                    "kind": kind,
+                    "source": source,
+                    "actor_id": actor_id,
+                    "actor_name": actor_name,
+                })),
+                elapsed_ms: None,
+                reason: if passed {
+                    None
+                } else {
+                    Some("last_change metadata did not match requested filters".into())
+                },
+            }
+        }
         Condition::Not { condition: inner } => {
             let mut inner_detail = Box::pin(eval_condition_dry_detail(inner, store)).await;
             inner_detail.passed = !inner_detail.passed;
@@ -3431,7 +3703,7 @@ pub async fn deregister_plugin(
 
 pub async fn matter_commission(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Some(obj) = body.as_object() else {
@@ -3451,8 +3723,16 @@ pub async fn matter_commission(
         payload.insert(k.clone(), v.clone());
     }
 
-    if let Err(e) =
-        publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await
+    let change = DeviceChange::homecore("api")
+        .with_actor(Some(claims.uid), Some(claims.sub))
+        .with_correlation_id(Some(Uuid::new_v4().to_string()));
+    if let Err(e) = publish_device_command(
+        &s,
+        MATTER_CONTROLLER_DEVICE_ID,
+        Value::Object(payload),
+        change,
+    )
+    .await
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3470,7 +3750,7 @@ pub async fn matter_commission(
 
 pub async fn matter_reinterview(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Some(obj) = body.as_object() else {
@@ -3490,8 +3770,16 @@ pub async fn matter_reinterview(
         payload.insert(k.clone(), v.clone());
     }
 
-    if let Err(e) =
-        publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, Value::Object(payload)).await
+    let change = DeviceChange::homecore("api")
+        .with_actor(Some(claims.uid), Some(claims.sub))
+        .with_correlation_id(Some(Uuid::new_v4().to_string()));
+    if let Err(e) = publish_device_command(
+        &s,
+        MATTER_CONTROLLER_DEVICE_ID,
+        Value::Object(payload),
+        change,
+    )
+    .await
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3537,7 +3825,7 @@ pub async fn list_matter_nodes(State(s): State<AppState>, _: PluginsRead) -> imp
 
 pub async fn remove_matter_node(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if id.trim().is_empty() {
@@ -3553,7 +3841,11 @@ pub async fn remove_matter_node(
         "node_id": id,
     });
 
-    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload).await {
+    let change = DeviceChange::homecore("api")
+        .with_actor(Some(claims.uid), Some(claims.sub))
+        .with_correlation_id(Some(Uuid::new_v4().to_string()));
+    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload, change).await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -4029,8 +4321,9 @@ fn collect_trigger_refs(trigger: &Trigger, ids: &mut Vec<String>) {
 
 fn collect_condition_refs(cond: &Condition, ids: &mut Vec<String>) {
     match cond {
-        Condition::DeviceState { device_id, .. } => ids.push(device_id.clone()),
-        Condition::TimeElapsed { device_id, .. } => ids.push(device_id.clone()),
+        Condition::DeviceState { device_id, .. }
+        | Condition::TimeElapsed { device_id, .. }
+        | Condition::DeviceLastChange { device_id, .. } => ids.push(device_id.clone()),
         Condition::Not { condition } => collect_condition_refs(condition, ids),
         Condition::And { conditions }
         | Condition::Or { conditions }
@@ -4618,7 +4911,7 @@ pub async fn list_calendar_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite, DashboardsWrite};
+    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite};
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
     use axum::extract::{Path, State};
     use axum::response::IntoResponse;
@@ -4699,6 +4992,7 @@ mod tests {
             icon: "dashboard".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            sections: vec![],
             layouts: vec![DashboardLayout {
                 breakpoint: DashboardBreakpoint::Desktop,
                 columns: 12,
@@ -4710,6 +5004,7 @@ mod tests {
                     y: 0,
                     w: 12,
                     h: 1,
+                    section_id: None,
                 }],
             }],
             widgets: vec![DashboardWidget {
@@ -4883,6 +5178,54 @@ mod tests {
             .expect("d2 exists");
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);
+    }
+
+    #[tokio::test]
+    async fn update_device_round_trips_status_icon() {
+        let state = mk_state().await;
+        seed_device(&state, "lamp_1", Some("Living Room")).await;
+
+        let resp = update_device(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Path("lamp_1".to_string()),
+            Json(json!({ "status_icon": "lightbulb" })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated: DeviceState = parse_json(resp).await;
+        assert_eq!(updated.status_icon.as_deref(), Some("lightbulb"));
+
+        let stored = state
+            .store
+            .get_device("lamp_1")
+            .await
+            .expect("load lamp_1")
+            .expect("lamp_1 exists");
+        assert_eq!(stored.status_icon.as_deref(), Some("lightbulb"));
+
+        let clear_resp = update_device(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Path("lamp_1".to_string()),
+            Json(json!({ "status_icon": null })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(clear_resp.status(), StatusCode::OK);
+        let cleared: DeviceState = parse_json(clear_resp).await;
+        assert_eq!(cleared.status_icon, None);
+
+        let stored_cleared = state
+            .store
+            .get_device("lamp_1")
+            .await
+            .expect("reload lamp_1")
+            .expect("lamp_1 still exists");
+        assert_eq!(stored_cleared.status_icon, None);
     }
 
     #[tokio::test]
@@ -5141,6 +5484,46 @@ mod tests {
         let data = handle.read().await;
         assert!(!data.user_defaults.contains_key("owner"));
         assert!(data.dashboards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_dashboards_refreshes_in_memory_store_from_disk() {
+        let state = mk_state().await;
+        seed_dashboard(&state, sample_dashboard("memory_only", "owner")).await;
+
+        let store = state
+            .dashboard_store
+            .as_ref()
+            .expect("dashboard store")
+            .clone();
+        store
+            .save(&DashboardStoreData {
+                dashboards: vec![sample_dashboard("disk_only", "owner")],
+                user_defaults: std::collections::HashMap::from([(
+                    "owner".to_string(),
+                    "disk_only".to_string(),
+                )]),
+            })
+            .expect("save dashboards file");
+
+        let resp = reload_dashboards(State(state.clone()), AuthUser(whitelist_claims()))
+            .await
+            .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert_eq!(body["status"], "reloaded");
+        assert_eq!(body["dashboards_total"], 1);
+        assert_eq!(body["user_defaults_total"], 1);
+
+        let handle = state.dashboards.as_ref().expect("dashboard handle");
+        let data = handle.read().await;
+        assert_eq!(data.dashboards.len(), 1);
+        assert_eq!(data.dashboards[0].id, "disk_only");
+        assert_eq!(
+            data.user_defaults.get("owner").map(String::as_str),
+            Some("disk_only")
+        );
     }
 
     #[tokio::test]

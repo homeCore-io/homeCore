@@ -28,6 +28,7 @@ use hc_mqtt_client::PublishHandle;
 use hc_notify::NotificationService;
 use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
 use hc_state::StateStore;
+use hc_types::device::{with_command_change_metadata, DeviceChange};
 use hc_types::event::Event;
 use hc_types::rule::{Action, LogLevel, RuleAction, TriggerContext, VariableOp};
 use serde_json::Value as JsonValue;
@@ -95,6 +96,31 @@ async fn device_log_name(state: Option<&StateStore>, device_id: &str) -> String 
             .unwrap_or_else(|| device_id.to_string()),
         _ => device_id.to_string(),
     }
+}
+
+fn correlation_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn rule_change(ctx: &ExecutorContext, source: &str) -> DeviceChange {
+    DeviceChange::homecore(source.to_string())
+        .with_actor(Some(ctx.rule_id.to_string()), Some(ctx.rule_name.clone()))
+        .with_correlation_id(Some(correlation_id()))
+}
+
+async fn publish_device_command(
+    publish: Option<PublishHandle>,
+    device_id: &str,
+    payload: JsonValue,
+    change: DeviceChange,
+) -> Result<()> {
+    let topic = format!("homecore/devices/{device_id}/cmd");
+    let payload = with_command_change_metadata(payload, &change);
+    match publish {
+        Some(ph) => ph.publish(&topic, serde_json::to_vec(&payload)?).await?,
+        None => warn!(device_id, "device command dropped — no publish handle"),
+    }
+    Ok(())
 }
 
 /// Shared HTTP client — initialised once, reused for every `CallService` action.
@@ -576,18 +602,15 @@ fn run_single_action(
                 } else {
                     state
                 };
-                let topic = format!("homecore/devices/{device_id}/cmd");
                 debug!(device = %device, payload = %actual_state, track_event_value, "action: SetDeviceState");
-                match &ctx.publish {
-                    Some(ph) => {
-                        ph.publish(&topic, actual_state.to_string().into_bytes())
-                            .await?;
-                        debug!(device = %device, "action: SetDeviceState — published");
-                    }
-                    None => {
-                        warn!(device = %device, "action: SetDeviceState — no publish handle, dropped")
-                    }
-                }
+                publish_device_command(
+                    ctx.publish.clone(),
+                    &device_id,
+                    actual_state,
+                    rule_change(&ctx, "rule"),
+                )
+                .await?;
+                debug!(device = %device, "action: SetDeviceState — published");
             }
 
             // ── PublishMqtt ────────────────────────────────────────────────────────
@@ -1203,14 +1226,14 @@ fn run_single_action(
                         debug!(rule = %ctx.rule_name, device = %device, "action: SetDeviceStatePerMode — no mode matched and no default, skipping");
                     }
                     Some(state) => {
-                        let topic = format!("homecore/devices/{device_id}/cmd");
                         info!(rule = %ctx.rule_name, device = %device, state = %state, "action: SetDeviceStatePerMode — applying");
-                        match ctx.publish.clone() {
-                            Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
-                            None => {
-                                warn!(rule = %ctx.rule_name, device = %device, "action: SetDeviceStatePerMode — no publish handle")
-                            }
-                        }
+                        publish_device_command(
+                            ctx.publish.clone(),
+                            &device_id,
+                            state,
+                            rule_change(&ctx, "rule"),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1309,19 +1332,19 @@ fn run_single_action(
             // ── SetMode ───────────────────────────────────────────────────────────
             Action::SetMode { mode_id, command } => {
                 use hc_types::rule::ModeCommand;
-                let payload_str = match command {
-                    ModeCommand::On => r#"{"command":"on"}"#,
-                    ModeCommand::Off => r#"{"command":"off"}"#,
-                    ModeCommand::Toggle => r#"{"command":"toggle"}"#,
+                let payload = match command {
+                    ModeCommand::On => serde_json::json!({ "command": "on" }),
+                    ModeCommand::Off => serde_json::json!({ "command": "off" }),
+                    ModeCommand::Toggle => serde_json::json!({ "command": "toggle" }),
                 };
-                let topic = format!("homecore/devices/{mode_id}/cmd");
                 info!(rule = %ctx.rule_name, mode_id, command = ?command, "action: SetMode");
-                match ctx.publish.clone() {
-                    Some(ph) => ph.publish(&topic, payload_str.as_bytes().to_vec()).await?,
-                    None => {
-                        warn!(rule = %ctx.rule_name, mode_id, "action: SetMode — no publish handle")
-                    }
-                }
+                publish_device_command(
+                    ctx.publish.clone(),
+                    &mode_id,
+                    payload,
+                    rule_change(&ctx, "rule"),
+                )
+                .await?;
             }
 
             // ── ActivateScenePerMode ──────────────────────────────────────────────
@@ -1361,17 +1384,17 @@ fn run_single_action(
                     }
                     Ok(Some(scene)) => {
                         info!(rule = %ctx.rule_name, scene_id = %sid, scene_name = %scene.name, "action: ActivateScenePerMode — activating");
+                        let scene_change = DeviceChange::homecore("scene")
+                            .with_actor(Some(sid.to_string()), Some(scene.name.clone()))
+                            .with_correlation_id(Some(correlation_id()));
                         for (device_id, desired) in &scene.states {
-                            let topic = format!("homecore/devices/{device_id}/cmd");
-                            match ctx.publish.clone() {
-                                Some(ph) => {
-                                    ph.publish(&topic, desired.to_string().into_bytes()).await?
-                                }
-                                None => {
-                                    warn!(rule = %ctx.rule_name, device_id, "action: ActivateScenePerMode — no publish handle");
-                                    break;
-                                }
-                            }
+                            publish_device_command(
+                                ctx.publish.clone(),
+                                device_id,
+                                desired.clone(),
+                                scene_change.clone(),
+                            )
+                            .await?;
                         }
                         if let Some(ref bus) = ctx.event_bus {
                             let ev = hc_types::event::Event::SceneActivated {
@@ -1417,16 +1440,17 @@ fn run_single_action(
                         for (device_id, attrs) in snapshot {
                             let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                             let state = JsonValue::Object(attrs.into_iter().collect());
-                            let topic = format!("homecore/devices/{device_id}/cmd");
-                            match ctx.publish.clone() {
-                                Some(ph) => {
-                                    ph.publish(&topic, state.to_string().into_bytes()).await?
-                                }
-                                None => {
-                                    warn!(rule = %ctx.rule_name, device = %device, "action: RestoreDeviceState — no publish handle");
-                                    break;
-                                }
+                            if ctx.publish.is_none() {
+                                warn!(rule = %ctx.rule_name, device = %device, "action: RestoreDeviceState — no publish handle");
+                                break;
                             }
+                            publish_device_command(
+                                ctx.publish.clone(),
+                                &device_id,
+                                state,
+                                rule_change(&ctx, "rule"),
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1492,14 +1516,17 @@ fn run_single_action(
                     }
 
                     let state = JsonValue::Object(state_obj);
-                    let topic = format!("homecore/devices/{device_id}/cmd");
-                    match ctx.publish.clone() {
-                        Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
-                        None => {
-                            warn!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — no publish handle");
-                            break;
-                        }
+                    if ctx.publish.is_none() {
+                        warn!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — no publish handle");
+                        break;
                     }
+                    publish_device_command(
+                        ctx.publish.clone(),
+                        &device_id,
+                        state,
+                        rule_change(&ctx, "rule"),
+                    )
+                    .await?;
                 }
                 debug!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — complete");
             }
@@ -1572,14 +1599,14 @@ async fn execute_script_effect(
     match effect {
         ScriptSideEffect::SetDeviceState { device_id, state } => {
             let device = device_log_name(state_store.as_ref(), &device_id).await;
-            let topic = format!("homecore/devices/{device_id}/cmd");
             debug!(device = %device, payload = %state, "RunScript: set_device_state");
-            match publish {
-                Some(ph) => ph.publish(&topic, state.to_string().into_bytes()).await?,
-                None => {
-                    warn!(device = %device, "RunScript: set_device_state — no publish handle, dropped")
-                }
-            }
+            publish_device_command(
+                publish,
+                &device_id,
+                state,
+                DeviceChange::homecore("script").with_correlation_id(Some(correlation_id())),
+            )
+            .await?;
         }
 
         ScriptSideEffect::Notify {

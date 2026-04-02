@@ -104,6 +104,23 @@ describe('PluginBase', () => {
     );
   });
 
+  test('publishState attaches _hc.change metadata when provided', () => {
+    const plugin = new TestPlugin();
+    plugin.run();
+    plugin.publishState('light.01', { on: true }, {
+      change: { kind: 'external', source: 'wall_switch' },
+    });
+    expect(mockClient.publish).toHaveBeenCalledWith(
+      'homecore/devices/light.01/state',
+      JSON.stringify({
+        on: true,
+        _hc: { change: { kind: 'external', source: 'wall_switch' } },
+      }),
+      { retain: true, qos: 1 },
+      expect.any(Function),
+    );
+  });
+
   test('publishStatePartial sends non-retained QoS 1 message', () => {
     const plugin = new TestPlugin();
     plugin.run();
@@ -112,6 +129,42 @@ describe('PluginBase', () => {
       'homecore/devices/light.01/state/partial',
       JSON.stringify({ brightness: 100 }),
       { retain: false, qos: 1 },
+      expect.any(Function),
+    );
+  });
+
+  test('publishStateForCommand preserves HomeCore command metadata', () => {
+    const plugin = new TestPlugin();
+    plugin.run();
+    plugin.publishStateForCommand(
+      'light.01',
+      { on: true },
+      {
+        on: true,
+        _hc: {
+          command: {
+            changed_at: '2026-04-01T12:00:00Z',
+            kind: 'homecore',
+            source: 'api',
+            correlation_id: 'corr-1',
+          },
+        },
+      },
+    );
+    expect(mockClient.publish).toHaveBeenCalledWith(
+      'homecore/devices/light.01/state',
+      JSON.stringify({
+        on: true,
+        _hc: {
+          change: {
+            changed_at: '2026-04-01T12:00:00Z',
+            kind: 'homecore',
+            source: 'api',
+            correlation_id: 'corr-1',
+          },
+        },
+      }),
+      { retain: true, qos: 1 },
       expect.any(Function),
     );
   });
@@ -169,6 +222,41 @@ describe('PluginBase', () => {
     const payload = JSON.parse(mockClient.publish.mock.calls[0][1]);
     expect(payload.area).toBeNull();
     expect(payload.device_type).toBe('temperature_sensor');
+  });
+
+  test('unregisterDevice clears retained topics and publishes unregister command', () => {
+    const plugin = new TestPlugin();
+    plugin.run();
+    plugin.unregisterDevice('sensor.01');
+
+    expect(mockClient.publish).toHaveBeenNthCalledWith(
+      1,
+      'homecore/devices/sensor.01/state',
+      '',
+      { retain: true, qos: 1 },
+      expect.any(Function),
+    );
+    expect(mockClient.publish).toHaveBeenNthCalledWith(
+      2,
+      'homecore/devices/sensor.01/availability',
+      '',
+      { retain: true, qos: 1 },
+      expect.any(Function),
+    );
+    expect(mockClient.publish).toHaveBeenNthCalledWith(
+      3,
+      'homecore/devices/sensor.01/schema',
+      '',
+      { retain: true, qos: 1 },
+      expect.any(Function),
+    );
+    expect(mockClient.publish).toHaveBeenNthCalledWith(
+      4,
+      'homecore/plugins/plugin.test/unregister',
+      JSON.stringify({ device_id: 'sensor.01' }),
+      { qos: 1 },
+      expect.any(Function),
+    );
   });
 
   test('publishAvailability sends "online" when available=true', () => {

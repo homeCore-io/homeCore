@@ -163,6 +163,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hc_types::device::DeviceChange;
 
     fn rule_fired(rule_id: &str) -> Event {
         Event::RuleFired {
@@ -181,6 +182,7 @@ mod tests {
             previous: Default::default(),
             current: Default::default(),
             changed: Default::default(),
+            change: DeviceChange::unknown(),
         }
     }
 

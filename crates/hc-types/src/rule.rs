@@ -3,6 +3,7 @@
 //! Rules are pure data — created and modified through the REST API, stored as
 //! JSON/TOML, and evaluated at runtime without any Rust recompilation.
 
+use crate::device::DeviceChangeKind;
 use chrono::{NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -162,6 +163,12 @@ pub enum Trigger {
         /// many seconds (sticky / "and stays" trigger).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         for_duration_secs: Option<u64>,
+        /// Optional filter for the origin class of the triggering change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change_kind: Option<DeviceChangeKind>,
+        /// Optional exact-match filter for the specific change source label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change_source: Option<String>,
     },
     MqttMessage {
         topic_pattern: String,
@@ -385,6 +392,19 @@ pub enum Condition {
         device_id: String,
         attribute: String,
         duration_secs: u64,
+    },
+    /// Passes when the device's last change provenance matches the supplied filters.
+    DeviceLastChange {
+        #[serde(alias = "device")]
+        device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<DeviceChangeKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_name: Option<String>,
     },
     /// Inverts the result of the wrapped condition.
     Not {
@@ -925,6 +945,16 @@ pub struct TriggerContext {
     pub value: Option<JsonValue>,
     pub prev_value: Option<JsonValue>,
     pub event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<DeviceChangeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_actor_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     /// Auxiliary context data — for webhook triggers this holds the query
     /// parameter map (`trigger_extra()` in Rhai scripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]

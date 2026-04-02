@@ -67,7 +67,12 @@ class VirtualLightPlugin(PluginBase):
         with self._lock:
             self._state.update({k: v for k, v in payload.items() if k in CAPABILITIES})
             state = dict(self._state)
-        self.publish_state(device_id, state)
+        self.publish_state_for_command(
+            device_id,
+            state,
+            payload,
+            fallback_source="virtual_light",
+        )
         logger.info("State after command: %s", state)
 
     # ------------------------------------------------------------------

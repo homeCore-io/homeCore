@@ -5,6 +5,7 @@
 //! the rule engine and state store consume and produce further event variants.
 
 use chrono::{DateTime, Utc};
+use crate::device::DeviceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -20,6 +21,8 @@ pub enum Event {
         current: HashMap<String, serde_json::Value>,
         /// Attribute keys whose values changed (added, updated, or removed).
         changed: Vec<String>,
+        /// Provenance for this state transition.
+        change: DeviceChange,
     },
     /// A device came online or went offline.
     DeviceAvailabilityChanged {

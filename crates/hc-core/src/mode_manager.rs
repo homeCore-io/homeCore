@@ -30,6 +30,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use hc_types::device::{extract_change_from_command_payload, DeviceChange};
 use hc_types::event::Event;
 use hc_types::rule::SunEventType;
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -415,12 +416,12 @@ impl ModeManager {
                         mode.off_offset_minutes,
                     )
                     .unwrap_or(false);
-                    self.write_mode_state(mode, on).await;
+                    self.write_mode_state(mode, on, None).await;
                 }
                 ModeKind::Manual => {
                     // Only initialise if device doesn't exist yet.
                     if let Ok(None) = self.state.get_device(&mode.id).await {
-                        self.write_mode_state(mode, false).await;
+                        self.write_mode_state(mode, false, None).await;
                     }
                 }
             }
@@ -430,12 +431,12 @@ impl ModeManager {
     async fn flip_mode(&self, mode_id: &str, new_on: bool, modes: &[ModeConfig]) {
         if let Some(mode) = modes.iter().find(|m| m.id == mode_id) {
             info!(mode_id, on = new_on, "ModeManager: solar transition");
-            self.write_mode_state(mode, new_on).await;
+            self.write_mode_state(mode, new_on, None).await;
         }
     }
 
     /// Persist the device state for a mode and publish `DeviceStateChanged`.
-    async fn write_mode_state(&self, mode: &ModeConfig, on: bool) {
+    async fn write_mode_state(&self, mode: &ModeConfig, on: bool, change: Option<DeviceChange>) {
         let today = Local::now().date_naive();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
@@ -489,6 +490,8 @@ impl ModeManager {
 
         dev.last_seen = chrono::Utc::now();
         dev.available = true;
+        let change = change.unwrap_or_else(|| DeviceChange::homecore("mode_manager"));
+        dev.last_change = Some(change.clone());
 
         if let Err(e) = self.state.upsert_device(&dev).await {
             warn!(device_id = %mode.id, error = %e, "ModeManager: failed to persist device state");
@@ -518,6 +521,7 @@ impl ModeManager {
             previous,
             current,
             changed,
+            change,
         });
     }
 
@@ -567,7 +571,8 @@ impl ModeManager {
             if let Some(on) = new_on {
                 info!(mode_id, on, "ModeManager: manual mode command");
                 let mode_cfg = modes[mode_idx].clone();
-                self.write_mode_state(&mode_cfg, on).await;
+                let change = extract_change_from_command_payload(cmd).unwrap_or_default();
+                self.write_mode_state(&mode_cfg, on, Some(change)).await;
             }
             return;
         }
@@ -653,7 +658,7 @@ impl ModeManager {
                         }
                     }
                 };
-                self.write_mode_state(new_mode, on).await;
+                self.write_mode_state(new_mode, on, None).await;
             }
         }
     }

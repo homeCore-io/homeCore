@@ -41,6 +41,7 @@
 
 use chrono::Utc;
 use hc_state::StateStore;
+use hc_types::device::extract_change_from_command_payload;
 use hc_types::event::Event;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -110,26 +111,27 @@ impl SwitchManager {
         // Accept both:
         //   {"command": "on" | "off" | "toggle"}  — explicit command form
         //   {"on": true | false}                   — state-patch form (from TUI / curl)
-        let cmd: SwitchCommand = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload)
-        {
-            if let Some(on) = v.get("on").and_then(|b| b.as_bool()) {
-                if on {
-                    SwitchCommand::On
-                } else {
-                    SwitchCommand::Off
-                }
-            } else {
-                match serde_json::from_value(v) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(%device_id, error = %e, "Switch: invalid command payload");
-                        return;
-                    }
-                }
-            }
+        let value = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
+            v
         } else {
             warn!(%device_id, "Switch: command payload is not valid JSON");
             return;
+        };
+        let change = extract_change_from_command_payload(&value).unwrap_or_default();
+        let cmd: SwitchCommand = if let Some(on) = value.get("on").and_then(|b| b.as_bool()) {
+            if on {
+                SwitchCommand::On
+            } else {
+                SwitchCommand::Off
+            }
+        } else {
+            match serde_json::from_value(value) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(%device_id, error = %e, "Switch: invalid command payload");
+                    return;
+                }
+            }
         };
         debug!(%device_id, ?cmd, "Switch command received");
 
@@ -166,6 +168,7 @@ impl SwitchManager {
         dev.attributes
             .insert("on".into(), serde_json::json!(new_on));
         dev.last_seen = Utc::now();
+        dev.last_change = Some(change.clone());
 
         if let Err(e) = self.state.upsert_device(&dev).await {
             warn!(%device_id, error = %e, "Switch: failed to persist state");
@@ -185,6 +188,7 @@ impl SwitchManager {
             previous,
             current,
             changed,
+            change,
         });
     }
 }

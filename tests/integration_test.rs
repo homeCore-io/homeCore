@@ -61,6 +61,8 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
             not_from: None,
             not_to: None,
             for_duration_secs: None,
+            change_kind: None,
+            change_source: None,
         },
         conditions: vec![],
         actions: vec![RuleAction {
