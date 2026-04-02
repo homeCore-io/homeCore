@@ -58,7 +58,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
           - Light on/off command routing
           - Brightness control with inverse scale conversion
           - Lock command handling
-          - Cover/shade position control
+          - Cover position control
         - **Complete round-trip scenarios**:
           - Full brightness adjustment cycle (command → HomeCore → HomeCore response → Bridge update)
           - Multiple concurrent device state changes
@@ -95,7 +95,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
   - Completed in prior session:
     - Runtime/controller lifecycle: Node snapshot API and controller reinterview sync of endpoint metadata + device registry.
     - Bridge admin/control plane: Admin actions (list_endpoints, get_endpoint, get_bridge_metrics, refresh_endpoints), shared topic routing, endpoint-ID parsing, validation errors, pagination.
-    - Device-type command parity: Switch, shade, cover/shade alias, actuator safety, correlation propagation.
+    - Device-type command parity: Switch, cover, legacy alias handling, actuator safety, correlation propagation.
   - Completed in session 2026-03-30 (first wave - runtime API expansion):
     - **Runtime robustness enhancement** (commit c23d7a9):
       - Enhanced `tryInterviewNodeEndpoints()` with detailed diagnostic logging for each attempt method.
@@ -131,7 +131,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
     - **Endpoint factory foundation** (commit a16eeb9):
       - Created `src/bridge/endpoint-factory.ts` with cluster composition engine.
       - Implemented `EndpointCompositionConfig` and `ComposedEndpoint` structures.
-      - Added cluster composition for all 10 device types (light, dimmer_light, switch, sensors, lock, cover/shade).
+      - Added cluster composition for the initial device set (light, switches, sensors, lock, cover) with legacy alias handling.
       - Implemented spec-based cluster/attribute model aligned with Matter protocol (OnOff, LevelControl, ColorControl, TemperatureMeasurement, RelativeHumidityMeasurement, OccupancySensing, BooleanState, DoorLock, WindowCovering clusters).
       - Created comprehensive factory functions: `composeDeviceClusters()`, `composeEndpoint()`, `getClusterIds()`, `findAttributeSpec()`, `getWritableAttributes()`.
       - Added 22 comprehensive tests covering all device types, cluster composition, attribute lookup, and writable attribute discovery.
@@ -397,19 +397,20 @@ Normalizes HomeCore ↔ Matter device/cluster semantics:
 
 | HomeCore Type         | Matter Device      | Clusters                        |
 |-----------------------|-------------------|---------------------------------|
-| `light`               | ExtendedColorLight | OnOff, LevelControl, ColorControl |
-| `dimmer_light`        | DimmableLight      | OnOff, LevelControl             |
+| `light`               | DimmableLight      | OnOff, LevelControl             |
+| `light_color`         | ExtendedColorLight | OnOff, LevelControl, ColorControl |
 | `switch`              | OnOffSwitch        | OnOff, Scenes                   |
 | `contact_sensor`      | ContactSensor      | BooleanState, Occupancy         |
 | `motion_sensor`       | OccupancySensor    | Occupancy, BooleanState         |
-| `temp_sensor`         | TemperatureSensor  | TemperatureMeasurement          |
+| `occupancy_sensor`    | OccupancySensor    | Occupancy                       |
+| `temperature_sensor`  | TemperatureSensor  | TemperatureMeasurement          |
 | `humidity_sensor`     | HumiditySensor     | RelativeHumidityMeasurement     |
 | `lock`                | DoorLock           | DoorLock                        |
-| `cover`/`shade`       | WindowCovering     | WindowCovering                  |
+| `cover`               | WindowCovering     | WindowCovering                  |
 
 **Attribute Mappings**:
 - HomeCore `on` + `brightness_pct` ↔ Matter `OnOff.onOff` + `LevelControl.currentLevel`
-- HomeCore `temperature_c` ↔ Matter `TemperatureMeasurement.measuredValue` (centidegrees)
+- HomeCore `temperature` ↔ Matter `TemperatureMeasurement.measuredValue` (centidegrees)
 - HomeCore `open`/`closed` ↔ Matter `BooleanState.stateValue`
 - HomeCore `locked`/`unlocked` ↔ Matter `DoorLock.lockState`
 
@@ -748,4 +749,3 @@ plugins/hc-matter/
 - [HomeCore Plugin Architecture (AGENTS.md)](../AGENTS.md)
 - [HomeCore MQTT Contract (AGENTS.md)](../AGENTS.md)
 - [Matter Specification](https://buildwithmatter.com)
-

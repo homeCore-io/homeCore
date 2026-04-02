@@ -19,8 +19,7 @@ use uuid::Uuid;
 
 use crate::auth_middleware::{
     AreasRead, AreasWrite, AuthUser, AutomationsRead, AutomationsWrite, DashboardsRead,
-    DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead,
-    ScenesWrite,
+    DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
 };
 use crate::group_store::RuleGroup;
 use crate::AppState;
@@ -123,7 +122,7 @@ pub async fn list_devices(
                 HeaderMap::new(),
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -269,7 +268,7 @@ pub async fn update_device(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": e.to_string() })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             };
 
@@ -298,7 +297,9 @@ pub async fn update_device(
                 device.area = if area.is_null() {
                     None
                 } else {
-                    area.as_str().map(|s| s.to_string())
+                    area.as_str()
+                        .map(normalize_area_name)
+                        .filter(|value| !value.is_empty())
                 };
             }
             if let Some(canonical_name) = body.get("canonical_name") {
@@ -316,7 +317,7 @@ pub async fn update_device(
                                 StatusCode::UNPROCESSABLE_ENTITY,
                                 Json(json!({ "error": e.to_string() })),
                             )
-                                .into_response()
+                                .into_response();
                         }
                     }
                 } else {
@@ -340,7 +341,7 @@ pub async fn update_device(
                             StatusCode::UNPROCESSABLE_ENTITY,
                             Json(json!({ "error": e.to_string() })),
                         )
-                            .into_response()
+                            .into_response();
                     }
                 }
             }
@@ -376,7 +377,7 @@ pub async fn delete_device(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -446,7 +447,7 @@ pub async fn bulk_patch_devices(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": "ids array required" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -459,7 +460,7 @@ pub async fn bulk_patch_devices(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(json!({ "error": "area must be a string or null" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         })
     } else {
@@ -490,7 +491,7 @@ pub async fn bulk_patch_devices(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     }
@@ -525,7 +526,7 @@ pub async fn bulk_delete_devices(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": "ids array required" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -539,7 +540,7 @@ pub async fn bulk_delete_devices(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -551,7 +552,7 @@ pub async fn bulk_delete_devices(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
             Ok(true) => {
                 deleted += 1;
@@ -713,13 +714,13 @@ pub async fn get_timer(
         format!("timer_{id}")
     };
     match s.store.get_device(&device_id).await {
-        Ok(Some(dev)) => {
-            (
-                StatusCode::OK,
-                Json(json!(compute_timer_remaining(normalize_native_device_type(dev)))),
-            )
-                .into_response()
-        }
+        Ok(Some(dev)) => (
+            StatusCode::OK,
+            Json(json!(compute_timer_remaining(
+                normalize_native_device_type(dev)
+            ))),
+        )
+            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "timer not found" })),
@@ -834,7 +835,7 @@ pub async fn list_modes(State(s): State<AppState>, _: DevicesRead) -> impl IntoR
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "modes not configured" })),
-            )
+            );
         }
     };
     let configs = match hc_core::mode_manager::load_modes(&path) {
@@ -843,7 +844,7 @@ pub async fn list_modes(State(s): State<AppState>, _: DevicesRead) -> impl IntoR
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
-            )
+            );
         }
     };
     let devices = s.store.list_devices().await.unwrap_or_default();
@@ -870,7 +871,7 @@ pub async fn get_mode(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "modes not configured" })),
             )
-                .into_response()
+                .into_response();
         }
     };
     let configs = match hc_core::mode_manager::load_modes(&path) {
@@ -880,7 +881,7 @@ pub async fn get_mode(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
     match configs.into_iter().find(|c| c.id == id) {
@@ -919,7 +920,7 @@ pub async fn create_mode(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "modes not configured" })),
-            )
+            );
         }
     };
     if !body.id.starts_with("mode_") {
@@ -969,7 +970,7 @@ pub async fn delete_mode(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "modes not configured" })),
             )
-                .into_response()
+                .into_response();
         }
     };
     if let Err(e) = hc_core::mode_manager::remove_mode(&path, &id) {
@@ -988,13 +989,14 @@ pub async fn delete_mode(
 // ---------- Areas ----------
 
 fn normalize_area_name(name: &str) -> String {
-    name.trim().to_string()
+    device_naming::normalize_name_segment(name)
 }
 
 fn area_id_from_name(name: &str) -> Uuid {
+    let normalized = normalize_area_name(name);
     Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
-        format!("homecore:area:{}", name).as_bytes(),
+        format!("homecore:area:{}", normalized).as_bytes(),
     )
 }
 
@@ -1025,22 +1027,51 @@ fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
         .collect()
 }
 
-async fn find_area_by_id(store: &StateStore, id: Uuid) -> Result<Option<Area>, String> {
+fn merge_declared_and_derived_areas(declared: Vec<Area>, devices: &[DeviceState]) -> Vec<Area> {
+    let mut merged: HashMap<Uuid, Area> = derive_areas_from_devices(devices)
+        .into_iter()
+        .map(|area| (area.id, area))
+        .collect();
+
+    for mut area in declared {
+        let name = normalize_area_name(&area.name);
+        if name.is_empty() {
+            continue;
+        }
+
+        area.id = area_id_from_name(&name);
+        area.name = name;
+        area.device_ids = merged
+            .remove(&area.id)
+            .map(|existing| existing.device_ids)
+            .unwrap_or_default();
+        merged.insert(area.id, area);
+    }
+
+    let mut areas: Vec<Area> = merged.into_values().collect();
+    areas.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    areas
+}
+
+async fn list_area_state(store: &StateStore) -> Result<Vec<Area>, String> {
     let devices = store.list_devices().await.map_err(|e| e.to_string())?;
-    Ok(derive_areas_from_devices(&devices)
+    let declared = store.list_areas().await.map_err(|e| e.to_string())?;
+    Ok(merge_declared_and_derived_areas(declared, &devices))
+}
+
+async fn find_area_by_id(store: &StateStore, id: Uuid) -> Result<Option<Area>, String> {
+    Ok(list_area_state(store)
+        .await?
         .into_iter()
         .find(|a| a.id == id))
 }
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {
-    match s.store.list_devices().await {
-        Ok(devices) => (
-            StatusCode::OK,
-            Json(json!(derive_areas_from_devices(&devices))),
-        ),
+    match list_area_state(&s.store).await {
+        Ok(areas) => (StatusCode::OK, Json(json!(areas))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(json!({ "error": e })),
         ),
     }
 }
@@ -1063,17 +1094,14 @@ pub async fn create_area(
         );
     }
 
-    // Canonical model: areas are derived from device.area.
-    // This endpoint validates/declares the area name and returns its stable ID.
-    match s.store.list_devices().await {
-        Ok(_) => {
-            let area = Area {
-                id: area_id_from_name(&name),
-                name,
-                device_ids: vec![],
-            };
-            (StatusCode::CREATED, Json(json!(area)))
-        }
+    let area = Area {
+        id: area_id_from_name(&name),
+        name,
+        device_ids: vec![],
+    };
+
+    match s.store.upsert_area(&area).await {
+        Ok(()) => (StatusCode::CREATED, Json(json!(area))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -1108,16 +1136,37 @@ pub async fn patch_area(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "area not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e })),
             )
-                .into_response()
+                .into_response();
         }
     };
+
+    let new_id = area_id_from_name(&new_name);
+    if new_id != id {
+        match find_area_by_id(&s.store, new_id).await {
+            Ok(Some(_)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "area name already exists" })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let mut devices = match s.store.list_devices().await {
         Ok(v) => v,
@@ -1126,7 +1175,7 @@ pub async fn patch_area(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1143,12 +1192,27 @@ pub async fn patch_area(
         }
     }
 
+    let updated_area = Area {
+        id: new_id,
+        name: new_name.clone(),
+        device_ids: vec![],
+    };
+    if let Err(e) = s.store.upsert_area(&updated_area).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+    if id != new_id {
+        let _ = s.store.delete_area(id).await;
+    }
+
     (
         StatusCode::OK,
-        Json(json!(Area {
-            id: area_id_from_name(&new_name),
-            name: new_name,
-            device_ids: area.device_ids,
+        Json(json!(match find_area_by_id(&s.store, new_id).await {
+            Ok(Some(area)) => area,
+            _ => updated_area,
         })),
     )
         .into_response()
@@ -1166,14 +1230,14 @@ pub async fn delete_area(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "area not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1184,7 +1248,7 @@ pub async fn delete_area(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1200,6 +1264,8 @@ pub async fn delete_area(
             }
         }
     }
+
+    let _ = s.store.delete_area(id).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1245,7 +1311,7 @@ pub async fn list_automations(
                 HeaderMap::new(),
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1445,7 +1511,7 @@ pub async fn create_automation(
                     "error": format!("invalid rule body: {e}")
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1470,7 +1536,7 @@ pub async fn create_automation(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1537,7 +1603,7 @@ pub async fn update_automation(
                     "error": format!("invalid rule body: {e}")
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1561,7 +1627,7 @@ pub async fn update_automation(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1583,7 +1649,7 @@ pub async fn update_automation(
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "rule not found" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
@@ -2883,7 +2949,10 @@ pub async fn import_dashboard(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
-pub async fn reload_dashboards(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
+pub async fn reload_dashboards(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> impl IntoResponse {
     if !claims.is_admin() {
         return (
             StatusCode::FORBIDDEN,
@@ -2915,14 +2984,14 @@ pub async fn reload_dashboards(State(s): State<AppState>, AuthUser(claims): Auth
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": error.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("dashboard reload task failed: {error}") })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3081,13 +3150,13 @@ pub async fn activate_scene(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "scene not found" })),
-            )
+            );
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
-            )
+            );
         }
     };
 
@@ -3097,11 +3166,9 @@ pub async fn activate_scene(
             .with_correlation_id(Some(Uuid::new_v4().to_string()));
         for (device_id, desired) in &scene.states {
             let topic = format!("homecore/devices/{device_id}/cmd");
-            let payload = serde_json::to_vec(&with_command_change_metadata(
-                desired.clone(),
-                &change,
-            ))
-            .unwrap_or_else(|_| desired.to_string().into_bytes());
+            let payload =
+                serde_json::to_vec(&with_command_change_metadata(desired.clone(), &change))
+                    .unwrap_or_else(|_| desired.to_string().into_bytes());
             if let Err(e) = ph.publish(&topic, payload).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3182,7 +3249,7 @@ pub async fn test_automation(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "rule not found" })),
-            )
+            );
         }
     };
 
@@ -3249,7 +3316,7 @@ async fn eval_condition_dry_detail(
                         expected: Some(value.clone()),
                         elapsed_ms: None,
                         reason: Some(format!("device '{device_id}' not found")),
-                    }
+                    };
                 }
                 Err(e) => {
                     return ConditionDetail {
@@ -3259,7 +3326,7 @@ async fn eval_condition_dry_detail(
                         expected: Some(value.clone()),
                         elapsed_ms: None,
                         reason: Some(format!("store error: {e}")),
-                    }
+                    };
                 }
             };
             match device.attributes.get(attribute) {
@@ -3338,7 +3405,7 @@ async fn eval_condition_dry_detail(
                         expected: None,
                         elapsed_ms: None,
                         reason: Some(format!("device '{device_id}' not found")),
-                    }
+                    };
                 }
                 Err(e) => {
                     return ConditionDetail {
@@ -3348,7 +3415,7 @@ async fn eval_condition_dry_detail(
                         expected: None,
                         elapsed_ms: None,
                         reason: Some(format!("store error: {e}")),
-                    }
+                    };
                 }
             };
             // Dry-run uses last_seen as the conservative elapsed baseline.
@@ -3386,7 +3453,7 @@ async fn eval_condition_dry_detail(
                         expected: None,
                         elapsed_ms: None,
                         reason: Some(format!("device '{device_id}' not found")),
-                    }
+                    };
                 }
                 Err(e) => {
                     return ConditionDetail {
@@ -3396,7 +3463,7 @@ async fn eval_condition_dry_detail(
                         expected: None,
                         elapsed_ms: None,
                         reason: Some(format!("store error: {e}")),
-                    }
+                    };
                 }
             };
 
@@ -3803,14 +3870,14 @@ pub async fn list_matter_nodes(State(s): State<AppState>, _: PluginsRead) -> imp
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "matter controller device not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3844,8 +3911,7 @@ pub async fn remove_matter_node(
     let change = DeviceChange::homecore("api")
         .with_actor(Some(claims.uid), Some(claims.sub))
         .with_correlation_id(Some(Uuid::new_v4().to_string()));
-    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload, change).await
-    {
+    if let Err(e) = publish_device_command(&s, MATTER_CONTROLLER_DEVICE_ID, payload, change).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -3877,14 +3943,14 @@ pub async fn set_area_devices(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "area not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3896,7 +3962,7 @@ pub async fn set_area_devices(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3928,6 +3994,22 @@ pub async fn set_area_devices(
         }
     }
 
+    if let Err(e) = s
+        .store
+        .upsert_area(&Area {
+            id: area.id,
+            name: area.name.clone(),
+            device_ids: vec![],
+        })
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
     // Return the updated derived area membership.
     let refreshed = match find_area_by_id(&s.store, id).await {
         Ok(Some(a)) => a,
@@ -3941,7 +4023,7 @@ pub async fn set_area_devices(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3980,7 +4062,7 @@ pub async fn patch_automation(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "rule not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -4018,7 +4100,7 @@ pub async fn patch_automation(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         let mut rules = rh.write().await;
@@ -4107,7 +4189,7 @@ pub async fn bulk_patch_automations(
                         StatusCode::UNPROCESSABLE_ENTITY,
                         Json(json!({ "error": e.to_string() })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
@@ -4198,7 +4280,7 @@ pub async fn clone_automation(
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "rule not found" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
@@ -4228,7 +4310,7 @@ pub async fn clone_automation(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     }
@@ -4260,7 +4342,7 @@ pub async fn stale_refs(State(s): State<AppState>, _: AutomationsRead) -> impl I
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -4911,7 +4993,9 @@ pub async fn list_calendar_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth_middleware::{whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite};
+    use crate::auth_middleware::{
+        whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite,
+    };
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
     use axum::extract::{Path, State};
     use axum::response::IntoResponse;
@@ -5103,14 +5187,43 @@ mod tests {
         assert_eq!(areas.len(), 2);
         let kitchen = areas
             .iter()
-            .find(|a| a.name == "Kitchen")
+            .find(|a| a.name == "kitchen")
             .expect("kitchen exists");
         assert_eq!(kitchen.device_ids.len(), 2);
         let office = areas
             .iter()
-            .find(|a| a.name == "Office")
+            .find(|a| a.name == "office")
             .expect("office exists");
         assert_eq!(office.device_ids, vec!["d3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn create_area_persists_empty_area_for_listing() {
+        let state = mk_state().await;
+
+        let create_resp = create_area(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Json(CreateAreaBody {
+                name: "Library".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let list_resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
+            .await
+            .into_response();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+
+        let areas: Vec<Area> = parse_json(list_resp).await;
+        let library = areas
+            .iter()
+            .find(|area| area.name == "library")
+            .expect("library exists");
+        assert!(library.device_ids.is_empty());
     }
 
     #[tokio::test]
@@ -5144,8 +5257,14 @@ mod tests {
             .await
             .expect("load d2")
             .expect("d2 exists");
-        assert_eq!(d1.area.as_deref(), Some("Great Room"));
-        assert_eq!(d2.area.as_deref(), Some("Great Room"));
+        assert_eq!(d1.area.as_deref(), Some("great_room"));
+        assert_eq!(d2.area.as_deref(), Some("great_room"));
+        let renamed = state
+            .store
+            .get_area(area_id_from_name("Great Room"))
+            .await
+            .expect("load renamed area");
+        assert!(renamed.is_some());
     }
 
     #[tokio::test]
@@ -5267,7 +5386,46 @@ mod tests {
 
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);
-        assert_eq!(d3.area.as_deref(), Some("Kitchen"));
+        assert_eq!(d3.area.as_deref(), Some("kitchen"));
+    }
+
+    #[tokio::test]
+    async fn set_area_devices_can_assign_declared_empty_area() {
+        let state = mk_state().await;
+        seed_device(&state, "d1", None).await;
+
+        let office = Area {
+            id: area_id_from_name("Office"),
+            name: "office".to_string(),
+            device_ids: vec![],
+        };
+        state
+            .store
+            .upsert_area(&office)
+            .await
+            .expect("declare area");
+
+        let resp = set_area_devices(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(office.id),
+            Json(vec!["d1".to_string()]),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated: Area = parse_json(resp).await;
+        assert_eq!(updated.name, "office");
+        assert_eq!(updated.device_ids, vec!["d1".to_string()]);
+
+        let d1 = state
+            .store
+            .get_device("d1")
+            .await
+            .expect("load d1")
+            .expect("d1 exists");
+        assert_eq!(d1.area.as_deref(), Some("office"));
     }
 
     #[tokio::test]

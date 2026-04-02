@@ -379,6 +379,7 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
             post(handlers::create_dashboard_from_template),
         )
         .route("/dashboards/import", post(handlers::import_dashboard))
+        .route("/dashboards/reload", post(handlers::reload_dashboards))
         .route(
             "/dashboards/:id",
             get(handlers::get_dashboard)

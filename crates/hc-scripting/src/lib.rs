@@ -269,7 +269,12 @@ impl ScriptRuntime {
         let change_kind = ctx
             .change_kind
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default().trim_matches('"').to_string())
+            .map(|v| {
+                serde_json::to_string(v)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string()
+            })
             .unwrap_or_default();
         let change_source = ctx.change_source.clone().unwrap_or_default();
         let change_actor_id = ctx.change_actor_id.clone().unwrap_or_default();
@@ -517,12 +522,12 @@ mod tests {
             ScriptRuntime::new_with_devices(HashMap::new()).with_side_effects(Arc::clone(&buf));
         let _ = rt
             .run_action(
-            r#"
+                r#"
             set_device_state("plug_1", #{ on: true });
             notify("pushover", "hello");
             http_get("http://localhost/ping");
         "#,
-        )
+            )
             .unwrap();
         let effects = buf.lock().unwrap();
         assert_eq!(effects.len(), 3);

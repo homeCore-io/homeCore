@@ -270,7 +270,7 @@ paths:
       operationId: updateDevice
       summary: Update device metadata
       description: |
-        Updates metadata fields such as `name`, `area`, and `canonical_name`.
+        Updates metadata fields such as `name`, `area`, `canonical_name`, and `status_icon`.
 
         `canonical_name` is the stable, rule-facing identifier used by HomeCore
         for readable automations. It must be unique across the hub after
@@ -295,10 +295,14 @@ paths:
                 canonical_name:
                   type: string
                   nullable: true
+                status_icon:
+                  type: string
+                  nullable: true
             example:
               name: Floor Lamp
               area: living_room
               canonical_name: living_room.floor_lamp
+              status_icon: lightbulb
       responses:
         "200":
           description: Updated device state
@@ -408,6 +412,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Area"
+
+  /areas/{id}:
+    patch:
+      operationId: patchArea
+      summary: Rename an area
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaCreate"
+      responses:
+        "200":
+          description: Updated area
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteArea
+      summary: Delete an area and clear it from member devices
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      responses:
+        "204":
+          description: Area deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /areas/{id}/devices:
     put:
@@ -1397,6 +1439,9 @@ components:
           type: integer
         h:
           type: integer
+        section_id:
+          type: string
+          nullable: true
 
     DashboardLayout:
       type: object
@@ -1454,7 +1499,7 @@ components:
     DashboardDefinition:
       type: object
       required:
-        [id, name, owner_user_id, visibility, tags, icon, created_at, updated_at, layouts, widgets]
+        [id, name, owner_user_id, visibility, tags, icon, created_at, updated_at, sections, layouts, widgets]
       properties:
         id:
           type: string
@@ -1480,6 +1525,10 @@ components:
         updated_at:
           type: string
           format: date-time
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardSection"
         layouts:
           type: array
           items:
@@ -1498,6 +1547,32 @@ components:
               type: boolean
               description: Derived per authenticated user; not a shared dashboard property
 
+    DashboardSection:
+      type: object
+      required: [id, breakpoint, title, order, y, layout_policy, min_h, hidden]
+      properties:
+        id:
+          type: string
+        breakpoint:
+          $ref: "#/components/schemas/DashboardBreakpoint"
+        title:
+          type: string
+        order:
+          type: integer
+        y:
+          type: integer
+        layout_policy:
+          $ref: "#/components/schemas/DashboardSectionLayoutPolicy"
+        min_h:
+          type: integer
+          minimum: 1
+        hidden:
+          type: boolean
+
+    DashboardSectionLayoutPolicy:
+      type: string
+      enum: [grid, stack, row]
+
     # ---- Devices ----
 
     DeviceState:
@@ -1511,6 +1586,10 @@ components:
           type: string
           nullable: true
           description: Stable, HomeCore-managed identifier intended for rule authoring and logs
+        status_icon:
+          type: string
+          nullable: true
+          description: Optional UI-facing status icon override for device surfaces
         name:
           type: string
         plugin_id:
@@ -1559,6 +1638,7 @@ components:
           format: uuid
         name:
           type: string
+          description: Normalized internal area name in snake_case, e.g. `living_room`.
         device_ids:
           type: array
           items:
@@ -1570,6 +1650,7 @@ components:
       properties:
         name:
           type: string
+          description: Human or machine area name. HomeCore normalizes this to snake_case internally.
 
     # ---- Automations ----
 

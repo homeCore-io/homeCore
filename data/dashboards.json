@@ -1,0 +1,400 @@
+{
+  "dashboards": [
+    {
+      "id": "dashboard_a75a32c1475c44eab51c149aaecc6fce",
+      "name": "Getting Started",
+      "description": "Clean developer workspace focused on the dashboard features currently in progress.",
+      "owner_user_id": "250a66bf-5402-423f-98b3-6ad31b6fa6a0",
+      "visibility": "private",
+      "tags": [
+        "starter",
+        "home",
+        "overview"
+      ],
+      "icon": "home",
+      "created_at": "2026-03-31T12:58:07.956138270Z",
+      "updated_at": "2026-03-31T18:38:27.775343236Z",
+      "sections": [
+        {
+          "id": "mobile-overview",
+          "breakpoint": "mobile",
+          "title": "Overview",
+          "order": 0,
+          "y": 0,
+          "layout_policy": "grid",
+          "min_h": 4,
+          "hidden": false
+        },
+        {
+          "id": "mobile-devices",
+          "breakpoint": "mobile",
+          "title": "Devices",
+          "order": 1,
+          "y": 4,
+          "layout_policy": "grid",
+          "min_h": 6,
+          "hidden": false
+        },
+        {
+          "id": "mobile-activity",
+          "breakpoint": "mobile",
+          "title": "Activity",
+          "order": 2,
+          "y": 10,
+          "layout_policy": "grid",
+          "min_h": 3,
+          "hidden": false
+        },
+        {
+          "id": "tablet-overview",
+          "breakpoint": "tablet",
+          "title": "Overview",
+          "order": 0,
+          "y": 0,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        },
+        {
+          "id": "tablet-devices",
+          "breakpoint": "tablet",
+          "title": "Devices",
+          "order": 1,
+          "y": 2,
+          "layout_policy": "grid",
+          "min_h": 3,
+          "hidden": false
+        },
+        {
+          "id": "tablet-activity",
+          "breakpoint": "tablet",
+          "title": "Activity",
+          "order": 2,
+          "y": 5,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        },
+        {
+          "id": "desktop-overview",
+          "breakpoint": "desktop",
+          "title": "Overview",
+          "order": 0,
+          "y": 0,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        },
+        {
+          "id": "desktop-devices",
+          "breakpoint": "desktop",
+          "title": "Devices",
+          "order": 1,
+          "y": 2,
+          "layout_policy": "grid",
+          "min_h": 3,
+          "hidden": false
+        },
+        {
+          "id": "desktop-activity",
+          "breakpoint": "desktop",
+          "title": "Activity",
+          "order": 2,
+          "y": 5,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        },
+        {
+          "id": "tv-overview",
+          "breakpoint": "tv",
+          "title": "Overview",
+          "order": 0,
+          "y": 0,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        },
+        {
+          "id": "tv-devices",
+          "breakpoint": "tv",
+          "title": "Devices",
+          "order": 1,
+          "y": 2,
+          "layout_policy": "grid",
+          "min_h": 3,
+          "hidden": false
+        },
+        {
+          "id": "tv-activity",
+          "breakpoint": "tv",
+          "title": "Activity",
+          "order": 2,
+          "y": 5,
+          "layout_policy": "grid",
+          "min_h": 2,
+          "hidden": false
+        }
+      ],
+      "layouts": [
+        {
+          "breakpoint": "mobile",
+          "columns": 1,
+          "row_height": 150.0,
+          "gap": 12.0,
+          "placements": [
+            {
+              "widget_id": "intro",
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 2,
+              "section_id": "mobile-overview"
+            },
+            {
+              "widget_id": "summary",
+              "x": 0,
+              "y": 2,
+              "w": 1,
+              "h": 2,
+              "section_id": "mobile-overview"
+            },
+            {
+              "widget_id": "list",
+              "x": 0,
+              "y": 4,
+              "w": 1,
+              "h": 3,
+              "section_id": "mobile-devices"
+            },
+            {
+              "widget_id": "grid",
+              "x": 0,
+              "y": 7,
+              "w": 1,
+              "h": 3,
+              "section_id": "mobile-devices"
+            },
+            {
+              "widget_id": "events",
+              "x": 0,
+              "y": 10,
+              "w": 1,
+              "h": 3,
+              "section_id": "mobile-activity"
+            }
+          ]
+        },
+        {
+          "breakpoint": "tablet",
+          "columns": 12,
+          "row_height": 150.0,
+          "gap": 12.0,
+          "placements": [
+            {
+              "widget_id": "intro",
+              "x": 0,
+              "y": 0,
+              "w": 8,
+              "h": 2,
+              "section_id": "tablet-overview"
+            },
+            {
+              "widget_id": "summary",
+              "x": 8,
+              "y": 0,
+              "w": 4,
+              "h": 2,
+              "section_id": "tablet-overview"
+            },
+            {
+              "widget_id": "list",
+              "x": 0,
+              "y": 2,
+              "w": 5,
+              "h": 3,
+              "section_id": "tablet-devices"
+            },
+            {
+              "widget_id": "grid",
+              "x": 5,
+              "y": 2,
+              "w": 7,
+              "h": 3,
+              "section_id": "tablet-devices"
+            },
+            {
+              "widget_id": "events",
+              "x": 0,
+              "y": 5,
+              "w": 12,
+              "h": 2,
+              "section_id": "tablet-activity"
+            }
+          ]
+        },
+        {
+          "breakpoint": "desktop",
+          "columns": 12,
+          "row_height": 150.0,
+          "gap": 12.0,
+          "placements": [
+            {
+              "widget_id": "intro",
+              "x": 0,
+              "y": 0,
+              "w": 8,
+              "h": 2,
+              "section_id": "desktop-overview"
+            },
+            {
+              "widget_id": "summary",
+              "x": 8,
+              "y": 0,
+              "w": 4,
+              "h": 2,
+              "section_id": "desktop-overview"
+            },
+            {
+              "widget_id": "list",
+              "x": 0,
+              "y": 2,
+              "w": 5,
+              "h": 3,
+              "section_id": "desktop-devices"
+            },
+            {
+              "widget_id": "grid",
+              "x": 5,
+              "y": 2,
+              "w": 7,
+              "h": 3,
+              "section_id": "desktop-devices"
+            },
+            {
+              "widget_id": "events",
+              "x": 0,
+              "y": 5,
+              "w": 12,
+              "h": 2,
+              "section_id": "desktop-activity"
+            }
+          ]
+        },
+        {
+          "breakpoint": "tv",
+          "columns": 12,
+          "row_height": 180.0,
+          "gap": 16.0,
+          "placements": [
+            {
+              "widget_id": "intro",
+              "x": 0,
+              "y": 0,
+              "w": 8,
+              "h": 2,
+              "section_id": "tv-overview"
+            },
+            {
+              "widget_id": "summary",
+              "x": 8,
+              "y": 0,
+              "w": 4,
+              "h": 2,
+              "section_id": "tv-overview"
+            },
+            {
+              "widget_id": "list",
+              "x": 0,
+              "y": 2,
+              "w": 5,
+              "h": 3,
+              "section_id": "tv-devices"
+            },
+            {
+              "widget_id": "grid",
+              "x": 5,
+              "y": 2,
+              "w": 7,
+              "h": 3,
+              "section_id": "tv-devices"
+            },
+            {
+              "widget_id": "events",
+              "x": 0,
+              "y": 5,
+              "w": 12,
+              "h": 2,
+              "section_id": "tv-activity"
+            }
+          ]
+        }
+      ],
+      "widgets": [
+        {
+          "id": "intro",
+          "type": "markdown",
+          "title": "Dashboard Workbench",
+          "subtitle": "Starter sample with the newer card treatments",
+          "refresh_policy": "manual",
+          "config": {
+            "markdown": "Use this dashboard as a clean composer sandbox. It includes a summary card, a compact device list, a richer device grid, and a recent events feed."
+          }
+        },
+        {
+          "id": "summary",
+          "type": "stat_summary",
+          "title": "Home Summary",
+          "subtitle": "Quick system counts",
+          "refresh_policy": "live",
+          "config": {
+            "metrics": [
+              "devices",
+              "on",
+              "offline"
+            ]
+          }
+        },
+        {
+          "id": "list",
+          "type": "device_list",
+          "title": "Device List",
+          "subtitle": "Compact device inventory",
+          "refresh_policy": "live",
+          "config": {
+            "limit": 8,
+            "query": "",
+            "selection_mode": "query",
+            "show_offline": true
+          }
+        },
+        {
+          "id": "grid",
+          "type": "device_grid",
+          "title": "Device Grid",
+          "subtitle": "Richer tile sample",
+          "refresh_policy": "live",
+          "config": {
+            "limit": 6,
+            "query": "",
+            "selection_mode": "query",
+            "show_offline": true
+          }
+        },
+        {
+          "id": "events",
+          "type": "event_feed",
+          "title": "Recent Events",
+          "subtitle": "Activity sample",
+          "refresh_policy": "live",
+          "config": {
+            "limit": 6
+          }
+        }
+      ]
+    }
+  ],
+  "user_defaults": {
+    "250a66bf-5402-423f-98b3-6ad31b6fa6a0": "dashboard_a75a32c1475c44eab51c149aaecc6fce"
+  }
+}

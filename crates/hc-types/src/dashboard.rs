@@ -28,6 +28,15 @@ pub enum DashboardRefreshPolicy {
     Passive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardSectionLayoutPolicy {
+    #[default]
+    Grid,
+    Stack,
+    Row,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardWidgetType {
@@ -53,6 +62,27 @@ pub struct DashboardWidgetPlacement {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardSection {
+    pub id: String,
+    pub breakpoint: DashboardBreakpoint,
+    pub title: String,
+    pub order: i32,
+    pub y: i32,
+    #[serde(default)]
+    pub layout_policy: DashboardSectionLayoutPolicy,
+    #[serde(default = "default_section_min_h")]
+    pub min_h: i32,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+fn default_section_min_h() -> i32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +122,8 @@ pub struct DashboardDefinition {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub sections: Vec<DashboardSection>,
     #[serde(default)]
     pub layouts: Vec<DashboardLayout>,
     #[serde(default)]

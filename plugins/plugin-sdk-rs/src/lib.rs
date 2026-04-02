@@ -6,9 +6,7 @@
 //! - [`DeviceRegistration`] — fluent builder for capability schemas.
 
 use anyhow::{Context, Result};
-use hc_types::device::{
-    change_from_command_payload, with_state_change_metadata, DeviceChange,
-};
+use hc_types::device::{change_from_command_payload, with_state_change_metadata, DeviceChange};
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::Value;
 use std::time::Duration;

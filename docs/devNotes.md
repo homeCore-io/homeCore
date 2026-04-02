@@ -2788,7 +2788,7 @@ Fires only on the crossing edge (e.g. temperature going from ≤80 → >80), not
 ```toml
 [rule.trigger]
 type      = "numeric_threshold"
-device_id = "temp_sensor_attic"
+device_id = "temperature_sensor_attic"
 attribute = "temperature"
 op        = "CrossesAbove"   # Above | Below | CrossesAbove | CrossesBelow
 value     = 80.0
@@ -6250,9 +6250,9 @@ JSON. Uses `#[serde(default)]` so old records deserialize as `None`.
 
 **Known values:**
 - `"scene"` — Lutron scenes, Hue scenes
-- `"switch"`, `"shade"`, `"keypad"`, `"pico_remote"`, `"binary_sensor"` — Lutron
+- `"light"`, `"switch"`, `"cover"`, `"occupancy_sensor"`, `"keypad"`, `"pico_remote"` — Lutron
 - `"timeclock_event"` — Lutron timeclock events
-- `"hue_light"`, `"hue_group"` — Hue plugin devices
+- `"light"`, `"light_color"` — Hue plugin devices
 
 **Usage:** `GET /api/v1/devices` — check the `device_type` field to filter or
 categorize devices. The hc-web Devices page excludes `device_type == "scene"`;
@@ -6572,7 +6572,10 @@ Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM
 |---|---|
 | Dimmable light, keypad dimmer (UOM 51, cat 1) | `light` |
 | Relay/switch, outlet module (UOM 78, cat 2) | `switch` |
-| Door/window, motion, moisture sensors | `binary_sensor` |
+| Door/window sensors | `contact_sensor` |
+| Motion sensors | `motion_sensor` |
+| Moisture sensors | `water_sensor` |
+| Unclassified binary sensors | `binary_sensor` |
 | Temperature, humidity, power, voltage, … | `sensor` |
 | Deadbolt / Z-Wave lock (UOM 11) | `lock` |
 | Garage door, shade, motor (UOM 97, cat 14) | `cover` |
@@ -6593,7 +6596,10 @@ Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM
 |---|---|
 | `light` | `on: bool`, `brightness: 0–255`, `brightness_pct: 0–100` |
 | `switch` | `on: bool` |
-| `binary_sensor` | `on: bool`, `device_class: motion\|opening\|moisture` (when detectable) |
+| `contact_sensor` | `open: bool`, `contact: bool` |
+| `motion_sensor` | `motion: bool`, `occupancy: bool` |
+| `water_sensor` | `leak: bool`, `water_detected: bool` |
+| `binary_sensor` | fallback only: `on: bool`, `device_class: motion\|opening\|moisture` (when detectable) |
 | `sensor` | `value: f64`, `unit: str` |
 | `lock` | `locked: bool` |
 | `cover` | `position: 0–100`, `state: open\|closed` |

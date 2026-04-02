@@ -51,6 +51,20 @@ pub struct DeviceTypeRegistry {
     schemas: HashMap<String, Value>,
 }
 
+/// Normalize a device type name to the HomeCore canonical taxonomy where the
+/// alias is unambiguous. Unknown names are preserved as-is so callers can still
+/// surface them or warn on them.
+pub fn canonical_device_type_name(type_name: &str) -> String {
+    match type_name.trim().to_ascii_lowercase().as_str() {
+        "vswitch" | "virtual_switch" => "virtual_switch".to_string(),
+        "temp_sensor" => "temperature_sensor".to_string(),
+        "motion" => "motion_sensor".to_string(),
+        "occupancy_group" => "occupancy_sensor".to_string(),
+        "shade" => "cover".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl DeviceTypeRegistry {
     /// Load and resolve all types from a `device-types.toml` file.
     pub fn from_file(path: &str) -> Result<Self> {
@@ -74,13 +88,15 @@ impl DeviceTypeRegistry {
 
     /// Return the JSON Schema for a device type, or `None` if unknown.
     pub fn get_schema(&self, type_name: &str) -> Option<&Value> {
-        self.schemas.get(type_name)
+        let canonical = canonical_device_type_name(type_name);
+        self.schemas.get(&canonical)
     }
 
     /// Return the HomeCore device schema for a device type, or `None` if unknown.
     pub fn get_device_schema(&self, type_name: &str) -> Option<DeviceSchema> {
+        let canonical = canonical_device_type_name(type_name);
         self.schemas
-            .get(type_name)
+            .get(&canonical)
             .map(json_schema_to_device_schema)
     }
 
@@ -275,6 +291,17 @@ extends = "switch"
   unit   = "W"
   access = "r"
 "#;
+
+    #[test]
+    fn canonicalizes_aliases() {
+        assert_eq!(canonical_device_type_name("vswitch"), "virtual_switch");
+        assert_eq!(canonical_device_type_name("motion"), "motion_sensor");
+        assert_eq!(
+            canonical_device_type_name("occupancy_group"),
+            "occupancy_sensor"
+        );
+        assert_eq!(canonical_device_type_name("switch"), "switch");
+    }
 
     #[test]
     fn loads_simple_type() {

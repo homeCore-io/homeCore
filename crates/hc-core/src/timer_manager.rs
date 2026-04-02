@@ -374,7 +374,8 @@ impl TimerManager {
                 self.cancel_task(device_id).await;
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
                 extra.insert("remaining_secs", serde_json::json!(duration_secs));
-                self.set_state(device_id, "running", Some(extra), change).await;
+                self.set_state(device_id, "running", Some(extra), change)
+                    .await;
                 self.spawn_timer_task(device_id, duration_secs, duration_secs, repeat)
                     .await;
             }

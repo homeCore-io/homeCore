@@ -32,6 +32,14 @@ description = "Binary on/off switch"
   type   = "boolean"
   access = "rw"
 
+[types.virtual_switch]
+description = "Software-only switch / automation guard"
+extends     = "switch"
+
+[types.vswitch]
+description = "Legacy alias for virtual_switch"
+extends     = "virtual_switch"
+
 
 # ---------------------------------------------------------------------------
 # Lights
@@ -49,6 +57,17 @@ description = "Dimmable light (on/off + brightness)"
   minimum = 0
   maximum = 255
   access  = "rw"
+
+  [types.light.attributes.brightness_pct]
+  type    = "number"
+  minimum = 0
+  maximum = 100
+  unit    = "%"
+  access  = "rw"
+
+[types.dimmer_light]
+description = "Legacy alias for dimmable light"
+extends     = "light"
 
 [types.light_color]
 description = "Color-tunable dimmable light"
@@ -106,8 +125,40 @@ description = "Temperature (and optional humidity) sensor"
   maximum = 100
   access  = "r"
 
+  [types.temperature_sensor.attributes.humidity_pct]
+  type    = "number"
+  unit    = "%"
+  minimum = 0
+  maximum = 100
+  access  = "r"
+
+[types.temp_sensor]
+description = "Legacy alias for temperature_sensor"
+extends     = "temperature_sensor"
+
+[types.humidity_sensor]
+description = "Humidity sensor"
+
+  [types.humidity_sensor.attributes.humidity]
+  type    = "number"
+  unit    = "%"
+  minimum = 0
+  maximum = 100
+  access  = "r"
+
+  [types.humidity_sensor.attributes.humidity_pct]
+  type    = "number"
+  unit    = "%"
+  minimum = 0
+  maximum = 100
+  access  = "r"
+
 [types.contact_sensor]
 description = "Door/window contact sensor"
+
+  [types.contact_sensor.attributes.open]
+  type   = "boolean"
+  access = "r"
 
   [types.contact_sensor.attributes.contact]
   type   = "boolean"
@@ -120,6 +171,10 @@ description = "Door/window contact sensor"
 [types.motion_sensor]
 description = "PIR or radar motion sensor"
 
+  [types.motion_sensor.attributes.motion]
+  type   = "boolean"
+  access = "r"
+
   [types.motion_sensor.attributes.occupancy]
   type   = "boolean"
   access = "r"
@@ -127,6 +182,52 @@ description = "PIR or radar motion sensor"
   [types.motion_sensor.attributes.illuminance]
   type   = "integer"
   unit   = "lux"
+  access = "r"
+
+[types.motion]
+description = "Legacy alias for motion_sensor"
+extends     = "motion_sensor"
+
+[types.occupancy_sensor]
+description = "Occupancy / presence sensor"
+
+  [types.occupancy_sensor.attributes.occupied]
+  type   = "boolean"
+  access = "r"
+
+  [types.occupancy_sensor.attributes.occupancy]
+  type   = "boolean"
+  access = "r"
+
+[types.binary_sensor]
+description = "Legacy generic binary sensor"
+
+  [types.binary_sensor.attributes.motion]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.contact]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.water_detected]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.vibration]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.occupied]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.occupancy]
+  type   = "boolean"
+  access = "r"
+
+  [types.binary_sensor.attributes.tamper]
+  type   = "boolean"
   access = "r"
 
 [types.smoke_sensor]
@@ -142,6 +243,10 @@ description = "Smoke / CO alarm sensor"
 
 [types.water_sensor]
 description = "Water / flood sensor"
+
+  [types.water_sensor.attributes.leak]
+  type   = "boolean"
+  access = "r"
 
   [types.water_sensor.attributes.water_detected]
   type   = "boolean"
@@ -232,6 +337,10 @@ description = "Motorised cover — roller blind, curtain, garage door"
   maximum = 100
   unit    = "%"
   access  = "rw"
+
+[types.shade]
+description = "Legacy alias for cover"
+extends     = "cover"
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +463,33 @@ description = "Audio/video player (Sonos, Chromecast, etc.)"
   [types.media_player.attributes.available_playlists]
   type   = "object"
   access = "r"
+
+
+# ---------------------------------------------------------------------------
+# Timer
+# ---------------------------------------------------------------------------
+
+[types.timer]
+description = "Software timer"
+
+  [types.timer.attributes.state]
+  type   = "string"
+  enum   = ["idle", "running", "paused"]
+  access = "r"
+
+  [types.timer.attributes.duration_secs]
+  type    = "integer"
+  minimum = 0
+  access  = "rw"
+
+  [types.timer.attributes.remaining_secs]
+  type    = "integer"
+  minimum = 0
+  access  = "r"
+
+  [types.timer.attributes.repeat]
+  type   = "boolean"
+  access = "rw"
 
 
 # ---------------------------------------------------------------------------

@@ -2311,19 +2311,34 @@ mod tests {
             for_duration_secs: None,
         };
         // Crossing upward: 75 → 82
-        let ev = dsc_event("temperature_sensor", "temperature", json!(75.0), json!(82.0));
+        let ev = dsc_event(
+            "temperature_sensor",
+            "temperature",
+            json!(75.0),
+            json!(82.0),
+        );
         assert!(matches!(
             trigger_check(&trigger, &ev),
             TriggerResult::Matched
         ));
         // Already above, no crossing: 81 → 85
-        let ev2 = dsc_event("temperature_sensor", "temperature", json!(81.0), json!(85.0));
+        let ev2 = dsc_event(
+            "temperature_sensor",
+            "temperature",
+            json!(81.0),
+            json!(85.0),
+        );
         assert!(matches!(
             trigger_check(&trigger, &ev2),
             TriggerResult::NoMatch(_)
         ));
         // Crossing downward: not a CrossesAbove
-        let ev3 = dsc_event("temperature_sensor", "temperature", json!(85.0), json!(75.0));
+        let ev3 = dsc_event(
+            "temperature_sensor",
+            "temperature",
+            json!(85.0),
+            json!(75.0),
+        );
         assert!(matches!(
             trigger_check(&trigger, &ev3),
             TriggerResult::NoMatch(_)

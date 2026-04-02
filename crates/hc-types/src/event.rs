@@ -4,8 +4,8 @@
 //! bridge converts incoming MQTT messages into `Event::MqttMessage` variants;
 //! the rule engine and state store consume and produce further event variants.
 
-use chrono::{DateTime, Utc};
 use crate::device::DeviceChange;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

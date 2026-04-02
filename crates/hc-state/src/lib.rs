@@ -132,6 +132,12 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.list()).await?
     }
 
+    pub async fn delete_device_schema(&self, device_id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.schemas);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.delete(&id)).await?
+    }
+
     // --- Rules ---
 
     pub async fn get_rule(&self, id: Uuid) -> Result<Option<Rule>> {

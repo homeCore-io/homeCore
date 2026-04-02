@@ -4,6 +4,7 @@ tmp.md
 debug/
 target/
 let
+core/data/
 
 # Ignore plugins
 plugins/hc-yolink/
