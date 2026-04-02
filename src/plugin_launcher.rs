@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 /// A resolved plugin entry ready for launching.
@@ -33,23 +34,29 @@ pub struct PluginProcess {
 
 /// Spawn all plugins.  Each is managed by its own background task; this
 /// function returns immediately.
-pub fn spawn_all(plugins: Vec<PluginProcess>) {
+pub fn spawn_all(plugins: Vec<PluginProcess>, shutdown: watch::Receiver<bool>) {
     for p in plugins {
-        tokio::spawn(supervise(p));
+        tokio::spawn(supervise(p, shutdown.clone()));
     }
 }
 
 /// Supervisor loop for a single plugin.  Runs forever, restarting the process
 /// after each exit.
-async fn supervise(entry: PluginProcess) {
+async fn supervise(entry: PluginProcess, mut shutdown: watch::Receiver<bool>) {
     const MIN_BACKOFF: u64 = 2;
     const MAX_BACKOFF: u64 = 60;
     /// A run lasting at least this many seconds resets the backoff.
     const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
     let mut backoff_secs: u64 = MIN_BACKOFF;
 
     loop {
+        if shutdown_requested(&shutdown) {
+            info!(plugin_id = %entry.id, "Plugin supervisor stopping for shutdown");
+            break;
+        }
+
         info!(
             plugin_id = %entry.id,
             binary    = %entry.binary.display(),
@@ -80,29 +87,51 @@ async fn supervise(entry: PluginProcess) {
             }
         };
 
-        // Wait for the process to finish.
-        let uptime = match child.wait().await {
-            Ok(status) => {
-                let uptime = started_at.elapsed();
-                if status.success() {
-                    info!(
-                        plugin_id   = %entry.id,
-                        uptime_secs = uptime.as_secs(),
-                        "Plugin exited cleanly"
-                    );
-                } else {
-                    warn!(
-                        plugin_id   = %entry.id,
-                        code        = ?status.code(),
-                        uptime_secs = uptime.as_secs(),
-                        "Plugin exited with error status"
-                    );
+        // Wait for the process to finish or for HomeCore shutdown.
+        let uptime = tokio::select! {
+            result = child.wait() => {
+                match result {
+                    Ok(status) => {
+                        let uptime = started_at.elapsed();
+                        if status.success() {
+                            info!(
+                                plugin_id   = %entry.id,
+                                uptime_secs = uptime.as_secs(),
+                                "Plugin exited cleanly"
+                            );
+                        } else {
+                            warn!(
+                                plugin_id   = %entry.id,
+                                code        = ?status.code(),
+                                uptime_secs = uptime.as_secs(),
+                                "Plugin exited with error status"
+                            );
+                        }
+                        uptime
+                    }
+                    Err(e) => {
+                        error!(plugin_id = %entry.id, error = %e, "wait() failed for plugin");
+                        Duration::ZERO
+                    }
                 }
-                uptime
             }
-            Err(e) => {
-                error!(plugin_id = %entry.id, error = %e, "wait() failed for plugin");
-                Duration::ZERO
+            _ = wait_for_shutdown(&mut shutdown) => {
+                info!(plugin_id = %entry.id, "Shutdown requested — waiting for plugin to exit");
+                match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        warn!(plugin_id = %entry.id, error = %e, "Plugin wait() failed during shutdown");
+                    }
+                    Err(_) => {
+                        warn!(plugin_id = %entry.id, "Plugin did not exit in time — killing");
+                        if let Err(e) = child.start_kill() {
+                            warn!(plugin_id = %entry.id, error = %e, "Failed to kill plugin during shutdown");
+                        }
+                        let _ = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await;
+                    }
+                }
+                info!(plugin_id = %entry.id, "Plugin supervisor stopped");
+                break;
             }
         };
 
@@ -118,6 +147,30 @@ async fn supervise(entry: PluginProcess) {
             backoff_secs,
             "Plugin will restart after backoff"
         );
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+            _ = wait_for_shutdown(&mut shutdown) => {
+                info!(plugin_id = %entry.id, "Plugin supervisor stopping during restart backoff");
+                break;
+            }
+        }
+    }
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if shutdown_requested(shutdown) {
+        return;
+    }
+    loop {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+        if shutdown_requested(shutdown) {
+            return;
+        }
     }
 }

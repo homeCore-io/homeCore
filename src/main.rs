@@ -870,7 +870,7 @@ async fn main() -> Result<()> {
                     config: PathBuf::from(&p.config),
                 })
                 .collect();
-            plugin_launcher::spawn_all(processes);
+            plugin_launcher::spawn_all(processes, shutdown_rx.clone());
         }
     }
 
@@ -1022,11 +1022,13 @@ async fn main() -> Result<()> {
     let shutdown_wait = wait_for_shutdown_watch(shutdown_rx.clone());
     tokio::pin!(shutdown_wait);
 
+    let mut shutdown_requested = false;
     tokio::select! {
         result = &mut api_task => {
             result??;
         }
         _ = &mut shutdown_wait => {
+            shutdown_requested = true;
             match tokio::time::timeout(
                 Duration::from_secs(drain_timeout_secs + 1),
                 &mut api_task,
@@ -1046,6 +1048,11 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    if shutdown_requested {
+        info!("HomeCore shutdown sequence complete");
+        std::process::exit(0);
     }
 
     Ok(())
