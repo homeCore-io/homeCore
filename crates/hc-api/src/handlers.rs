@@ -948,17 +948,20 @@ pub async fn create_mode(
 }
 
 /// `DELETE /api/v1/modes/:id` — remove a mode.
-/// Rejects `mode_night` (built-in) with 400.
+/// Rejects built-in solar modes with 400.
 pub async fn delete_mode(
     State(s): State<AppState>,
     _: DevicesWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if id == hc_core::mode_manager::MODE_NIGHT_ID {
+    if matches!(
+        id.as_str(),
+        hc_core::mode_manager::MODE_NIGHT_ID | hc_core::mode_manager::MODE_DAY_ID
+    ) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "mode_night is a built-in mode and cannot be deleted"
+                "error": format!("{id} is a built-in mode and cannot be deleted")
             })),
         )
             .into_response();

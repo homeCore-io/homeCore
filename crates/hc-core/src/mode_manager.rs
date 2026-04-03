@@ -8,10 +8,10 @@
 //! - `solar`  — turned on/off automatically by sunrise/sunset (+ configurable offsets)
 //! - `manual` — purely user/rule controlled; the manager only creates the device
 //!
-//! # `mode_night`
+//! # Built-in solar modes
 //!
-//! Built-in solar mode.  Always present — written to `modes.toml` on first
-//! startup if missing, and rejected by the DELETE API.
+//! `mode_night` and `mode_day` are always present — written to `modes.toml` on
+//! first startup if missing, and rejected by the DELETE API.
 //!
 //! # Hot-reload
 //!
@@ -48,6 +48,7 @@ use hc_state::StateStore;
 // ── Constants ──────────────────────────────────────────────────────────────
 
 pub const MODE_PLUGIN_ID: &str = "core.mode";
+pub const MODE_DAY_ID: &str = "mode_day";
 pub const MODE_NIGHT_ID: &str = "mode_night";
 
 // ── Config types ───────────────────────────────────────────────────────────
@@ -110,6 +111,18 @@ fn default_mode_night() -> ModeConfig {
     }
 }
 
+fn default_mode_day() -> ModeConfig {
+    ModeConfig {
+        id: MODE_DAY_ID.to_string(),
+        name: "Day Mode".to_string(),
+        kind: ModeKind::Solar,
+        on_event: Some(SunEventType::Sunrise),
+        off_event: Some(SunEventType::Sunset),
+        on_offset_minutes: 0,
+        off_offset_minutes: 0,
+    }
+}
+
 /// Parse `modes.toml`.  Returns an empty vec when the file does not yet exist.
 pub fn load_modes(path: &Path) -> Result<Vec<ModeConfig>> {
     if !path.exists() {
@@ -136,7 +149,7 @@ pub fn write_modes(path: &Path, modes: &[ModeConfig]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
-/// Ensure `modes.toml` exists and contains a `mode_night` entry.
+/// Ensure `modes.toml` exists and contains the built-in solar modes.
 /// Idempotent — safe to call on every startup.
 pub fn ensure_default_modes(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -144,10 +157,18 @@ pub fn ensure_default_modes(path: &Path) -> Result<()> {
             .with_context(|| format!("creating config dir {}", parent.display()))?;
     }
     let mut modes = load_modes(path).unwrap_or_default();
+    let mut changed = false;
+    if !modes.iter().any(|m| m.id == MODE_DAY_ID) {
+        modes.insert(0, default_mode_day());
+        changed = true;
+    }
     if !modes.iter().any(|m| m.id == MODE_NIGHT_ID) {
         modes.insert(0, default_mode_night());
+        changed = true;
+    }
+    if changed {
         write_modes(path, &modes)?;
-        info!(path = %path.display(), "Wrote default mode_night to modes.toml");
+        info!(path = %path.display(), "Ensured built-in solar modes in modes.toml");
     }
     Ok(())
 }

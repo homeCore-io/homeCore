@@ -10,3 +10,12 @@ on_event  = "sunset"    # solar event that turns night mode ON
 off_event = "sunrise"   # solar event that turns night mode OFF
 # on_offset_minutes  = 0    # negative = before event, positive = after
 # off_offset_minutes = 0
+
+[[modes]]
+id   = "mode_day"
+name = "Day Mode"
+kind = "solar"
+on_event  = "sunrise"   # solar event that turns day mode ON
+off_event = "sunset"    # solar event that turns day mode OFF
+# on_offset_minutes  = 0    # negative = before event, positive = after
+# off_offset_minutes = 0
