@@ -943,6 +943,61 @@ paths:
               schema:
                 $ref: "#/components/schemas/Scene"
 
+  /scenes/{id}:
+    get:
+      operationId: getScene
+      summary: Get a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      responses:
+        "200":
+          description: Scene
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scene"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateScene
+      summary: Replace a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SceneCreate"
+      responses:
+        "200":
+          description: Updated scene
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scene"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteScene
+      summary: Delete a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      responses:
+        "204":
+          description: Scene deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /scenes/{id}/activate:
     post:
       operationId: activateScene
@@ -953,8 +1008,17 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SceneId"
       responses:
-        "202":
-          description: Scene activation accepted
+        "200":
+          description: Scene activated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activated]
+                properties:
+                  activated:
+                    type: string
+                    description: Name of the activated scene
         "404":
           $ref: "#/components/responses/NotFound"
 

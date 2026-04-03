@@ -399,6 +399,12 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
             "/scenes",
             get(handlers::list_scenes).post(handlers::create_scene),
         )
+        .route(
+            "/scenes/:id",
+            get(handlers::get_scene)
+                .put(handlers::update_scene)
+                .delete(handlers::delete_scene),
+        )
         .route("/scenes/export", get(handlers::export_scenes))
         .route("/scenes/import", post(handlers::import_scenes))
         .route("/scenes/:id/activate", post(handlers::activate_scene))

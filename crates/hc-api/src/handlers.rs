@@ -3114,6 +3114,12 @@ pub async fn set_default_dashboard(
 
 // ---------- Scenes ----------
 
+#[derive(Deserialize)]
+pub struct SceneUpsertBody {
+    pub name: String,
+    pub states: HashMap<String, Value>,
+}
+
 pub async fn list_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoResponse {
     match s.store.list_scenes().await {
         Ok(scenes) => (StatusCode::OK, Json(json!(scenes))),
@@ -3127,15 +3133,81 @@ pub async fn list_scenes(State(s): State<AppState>, _: ScenesRead) -> impl IntoR
 pub async fn create_scene(
     State(s): State<AppState>,
     _: ScenesWrite,
-    Json(mut scene): Json<Scene>,
+    Json(body): Json<SceneUpsertBody>,
 ) -> impl IntoResponse {
-    scene.id = Uuid::new_v4();
+    let scene = Scene {
+        id: Uuid::new_v4(),
+        name: body.name,
+        states: body.states,
+    };
     match s.store.upsert_scene(&scene).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(scene))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         ),
+    }
+}
+
+pub async fn get_scene(
+    State(s): State<AppState>,
+    _: ScenesRead,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match s.store.get_scene(id).await {
+        Ok(Some(scene)) => (StatusCode::OK, Json(json!(scene))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "scene not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn update_scene(
+    State(s): State<AppState>,
+    _: ScenesWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SceneUpsertBody>,
+) -> impl IntoResponse {
+    let scene = Scene {
+        id,
+        name: body.name,
+        states: body.states,
+    };
+
+    match s.store.upsert_scene(&scene).await {
+        Ok(_) => (StatusCode::OK, Json(json!(scene))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn delete_scene(
+    State(s): State<AppState>,
+    _: ScenesWrite,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match s.store.delete_scene(id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "scene not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
