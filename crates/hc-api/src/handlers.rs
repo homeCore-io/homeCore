@@ -3238,14 +3238,22 @@ pub async fn activate_scene(
             .with_correlation_id(Some(Uuid::new_v4().to_string()));
         for (device_id, desired) in &scene.states {
             let topic = format!("homecore/devices/{device_id}/cmd");
-            let payload =
-                serde_json::to_vec(&with_command_change_metadata(desired.clone(), &change))
-                    .unwrap_or_else(|_| desired.to_string().into_bytes());
-            if let Err(e) = ph.publish(&topic, payload).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                );
+            // If payload is {"actions":[...]}, publish each item in sequence.
+            let items: Vec<&Value> = desired
+                .get("actions")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().collect())
+                .unwrap_or_else(|| vec![desired]);
+            for item in items {
+                let payload =
+                    serde_json::to_vec(&with_command_change_metadata(item.clone(), &change))
+                        .unwrap_or_else(|_| item.to_string().into_bytes());
+                if let Err(e) = ph.publish(&topic, payload).await {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    );
+                }
             }
         }
         // Emit scene activated event.
