@@ -510,6 +510,10 @@ impl TimerManager {
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
+        let remaining = current
+            .get("remaining_secs")
+            .and_then(|v| v.as_u64());
+
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
@@ -517,6 +521,14 @@ impl TimerManager {
             current,
             changed,
             change,
+        });
+
+        // Emit a dedicated timer event for the activity stream.
+        let _ = self.pub_bus.publish(Event::TimerStateChanged {
+            timestamp: Utc::now(),
+            timer_id: device_id.to_string(),
+            state: new_state.to_string(),
+            remaining_secs: remaining,
         });
     }
 }
@@ -552,6 +564,12 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
         current,
         changed,
         change,
+    });
+    let _ = bus.publish(Event::TimerStateChanged {
+        timestamp: Utc::now(),
+        timer_id: device_id.to_string(),
+        state: "finished".to_string(),
+        remaining_secs: Some(0),
     });
 }
 

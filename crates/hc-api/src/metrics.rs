@@ -222,6 +222,11 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::MqttMessage { .. } => "mqtt_message",
                         Event::Custom { .. } => "custom",
                         Event::SystemAlert { .. } => "system_alert",
+                        Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
+                        Event::ActionFailed { .. } => "action_failed",
+                        Event::DeviceCommandSent { .. } => "device_command_sent",
+                        Event::ModeChanged { .. } => "mode_changed",
+                        Event::TimerStateChanged { .. } => "timer_state_changed",
                     };
                     metrics.events_total.with_label_values(&[label]).inc();
 

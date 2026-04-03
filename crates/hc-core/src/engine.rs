@@ -781,13 +781,26 @@ impl RuleEngine {
                 trigger_context: trigger_ctx,
                 outcome: FireOutcome::ConditionFailed {
                     at_index: failed_idx,
-                    reason,
+                    reason: reason.clone(),
                 },
                 conditions: condition_traces,
                 actions: vec![],
                 eval_ms,
             };
             self.push_history(rule.id, firing);
+
+            // Emit RuleEvaluationFailed event so the activity stream shows why
+            // a rule didn't fire.
+            let _ = self.pub_bus.publish(Event::RuleEvaluationFailed {
+                timestamp: Utc::now(),
+                rule_id: rule.id.to_string(),
+                rule_name: rule.name.clone(),
+                trigger_type: trigger_type(&rule.trigger).to_string(),
+                failed_condition_index: failed_idx,
+                reason,
+                eval_ms,
+            });
+
             return Ok(false);
         }
 
@@ -821,6 +834,8 @@ impl RuleEngine {
         let bus = self.pub_bus.clone();
         let rule_id = rule.id;
         let rule_name = rule.name.clone();
+        // Per-firing correlation ID threaded through actions → device commands → events.
+        let firing_correlation_id = Uuid::new_v4().to_string();
         let in_flight = Arc::clone(&self.in_flight);
         let rule_counter_spawn = Arc::clone(&rule_counter);
         let fire_history = Arc::clone(&self.fire_history);
@@ -850,6 +865,7 @@ impl RuleEngine {
             log_actions: rule.log_actions,
             exit_flag: Arc::new(AtomicBool::new(false)),
             trace: Some(Arc::clone(&action_trace_buf)),
+            correlation_id: Some(firing_correlation_id.clone()),
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
@@ -887,12 +903,15 @@ impl RuleEngine {
             }
             Self::persist_firing(state_for_persist, rule_id, firing);
 
+            let total_ms = eval_ms + action_start.elapsed().as_millis() as u64;
             let _ = bus.publish(Event::RuleFired {
                 timestamp: chrono::Utc::now(),
                 rule_id: rule_id.to_string(),
                 rule_name,
                 trigger_type: trigger_type_str,
                 action_count,
+                elapsed_ms: Some(total_ms),
+                correlation_id: Some(firing_correlation_id),
             });
             rule_counter_spawn.fetch_sub(1, Ordering::SeqCst);
             in_flight.fetch_sub(1, Ordering::SeqCst);

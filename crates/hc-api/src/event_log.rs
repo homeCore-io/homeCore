@@ -136,9 +136,11 @@ pub struct EventLogQuery {
 /// Extract the device_id from events that carry one.
 pub fn event_device_id(event: &Event) -> Option<&str> {
     match event {
-        Event::DeviceStateChanged { device_id, .. } => Some(device_id),
-        Event::DeviceAvailabilityChanged { device_id, .. } => Some(device_id),
-        Event::DeviceNameChanged { device_id, .. } => Some(device_id),
+        Event::DeviceStateChanged { device_id, .. }
+        | Event::DeviceAvailabilityChanged { device_id, .. }
+        | Event::DeviceNameChanged { device_id, .. }
+        | Event::DeviceCommandSent { device_id, .. } => Some(device_id),
+        Event::TimerStateChanged { timer_id, .. } => Some(timer_id),
         _ => None,
     }
 }
@@ -156,6 +158,11 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::DeviceNameChanged { .. } => "device_name_changed",
         Event::Custom { .. } => "custom",
         Event::SystemAlert { .. } => "system_alert",
+        Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
+        Event::ActionFailed { .. } => "action_failed",
+        Event::DeviceCommandSent { .. } => "device_command_sent",
+        Event::ModeChanged { .. } => "mode_changed",
+        Event::TimerStateChanged { .. } => "timer_state_changed",
     }
 }
 
@@ -172,6 +179,8 @@ mod tests {
             rule_name: "test rule".to_string(),
             trigger_type: "ManualTrigger".to_string(),
             action_count: 0,
+            elapsed_ms: None,
+            correlation_id: None,
         }
     }
 

@@ -98,28 +98,37 @@ async fn device_log_name(state: Option<&StateStore>, device_id: &str) -> String 
     }
 }
 
-fn correlation_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
 fn rule_change(ctx: &ExecutorContext, source: &str) -> DeviceChange {
     DeviceChange::homecore(source.to_string())
         .with_actor(Some(ctx.rule_id.to_string()), Some(ctx.rule_name.clone()))
-        .with_correlation_id(Some(correlation_id()))
+        .with_correlation_id(ctx.correlation_id.clone())
 }
 
 async fn publish_device_command(
-    publish: Option<PublishHandle>,
+    ctx: &ExecutorContext,
     device_id: &str,
     payload: JsonValue,
     change: DeviceChange,
 ) -> Result<()> {
     let topic = format!("homecore/devices/{device_id}/cmd");
     let payload = with_command_change_metadata(payload, &change);
-    match publish {
+    match &ctx.publish {
         Some(ph) => ph.publish(&topic, serde_json::to_vec(&payload)?).await?,
         None => warn!(device_id, "device command dropped — no publish handle"),
     }
+
+    // Emit DeviceCommandSent event for troubleshooting visibility.
+    if let Some(ref bus) = ctx.event_bus {
+        let _ = bus.publish(Event::DeviceCommandSent {
+            timestamp: chrono::Utc::now(),
+            device_id: device_id.to_string(),
+            command: payload,
+            source: "rule".to_string(),
+            source_id: Some(ctx.rule_id.to_string()),
+            correlation_id: ctx.correlation_id.clone(),
+        });
+    }
+
     Ok(())
 }
 
@@ -185,6 +194,8 @@ pub struct ExecutorContext {
     /// When `Some`, each top-level action appends an `ActionTrace` after it
     /// completes.  `None` disables tracing (e.g. for `RunRuleActions` calls).
     pub trace: Option<Arc<Mutex<Vec<ActionTrace>>>>,
+    /// Per-firing correlation ID threaded through device commands and events.
+    pub correlation_id: Option<String>,
 }
 
 impl ExecutorContext {
@@ -210,6 +221,7 @@ impl ExecutorContext {
             log_actions: false,
             exit_flag: Arc::new(AtomicBool::new(false)),
             trace: None,
+            correlation_id: None,
         })
     }
 }
@@ -397,6 +409,22 @@ async fn execute_one(
                 message: e.to_string(),
             },
         };
+
+        // Emit ActionFailed event for errors so the activity stream shows them.
+        if let ActionOutcome::Error { ref message } = outcome {
+            if let Some(ref bus) = ctx.event_bus {
+                let _ = bus.publish(Event::ActionFailed {
+                    timestamp: chrono::Utc::now(),
+                    rule_id: ctx.rule_id.to_string(),
+                    rule_name: ctx.rule_name.clone(),
+                    action_index: idx,
+                    action_type: action_type.clone(),
+                    error: message.clone(),
+                    correlation_id: ctx.correlation_id.clone(),
+                });
+            }
+        }
+
         trace_buf.lock().unwrap().push(ActionTrace {
             index: idx,
             action_type,
@@ -604,7 +632,7 @@ fn run_single_action(
                 };
                 debug!(device = %device, payload = %actual_state, track_event_value, "action: SetDeviceState");
                 publish_device_command(
-                    ctx.publish.clone(),
+                    &ctx,
                     &device_id,
                     actual_state,
                     rule_change(&ctx, "rule"),
@@ -771,6 +799,7 @@ fn run_single_action(
                         ctx.publish.clone(),
                         ctx.notify.clone(),
                         ctx.state.clone(),
+                        ctx.correlation_id.clone(),
                     )
                     .await?;
                 }
@@ -1050,6 +1079,7 @@ fn run_single_action(
                             log_actions: target_log,
                             exit_flag: Arc::new(AtomicBool::new(false)),
                             trace: None, // sub-calls not traced in parent history
+                            correlation_id: ctx.correlation_id.clone(),
                         });
                         let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
                         // Use execute_actions so per-action enabled flags are respected.
@@ -1228,7 +1258,7 @@ fn run_single_action(
                     Some(state) => {
                         info!(rule = %ctx.rule_name, device = %device, state = %state, "action: SetDeviceStatePerMode — applying");
                         publish_device_command(
-                            ctx.publish.clone(),
+                            &ctx,
                             &device_id,
                             state,
                             rule_change(&ctx, "rule"),
@@ -1339,7 +1369,7 @@ fn run_single_action(
                 };
                 info!(rule = %ctx.rule_name, mode_id, command = ?command, "action: SetMode");
                 publish_device_command(
-                    ctx.publish.clone(),
+                    &ctx,
                     &mode_id,
                     payload,
                     rule_change(&ctx, "rule"),
@@ -1386,10 +1416,10 @@ fn run_single_action(
                         info!(rule = %ctx.rule_name, scene_id = %sid, scene_name = %scene.name, "action: ActivateScenePerMode — activating");
                         let scene_change = DeviceChange::homecore("scene")
                             .with_actor(Some(sid.to_string()), Some(scene.name.clone()))
-                            .with_correlation_id(Some(correlation_id()));
+                            .with_correlation_id(ctx.correlation_id.clone());
                         for (device_id, desired) in &scene.states {
                             publish_device_command(
-                                ctx.publish.clone(),
+                                &ctx,
                                 device_id,
                                 desired.clone(),
                                 scene_change.clone(),
@@ -1445,7 +1475,7 @@ fn run_single_action(
                                 break;
                             }
                             publish_device_command(
-                                ctx.publish.clone(),
+                                &ctx,
                                 &device_id,
                                 state,
                                 rule_change(&ctx, "rule"),
@@ -1521,7 +1551,7 @@ fn run_single_action(
                         break;
                     }
                     publish_device_command(
-                        ctx.publish.clone(),
+                        &ctx,
                         &device_id,
                         state,
                         rule_change(&ctx, "rule"),
@@ -1595,18 +1625,19 @@ async fn execute_script_effect(
     publish: Option<PublishHandle>,
     notify: Option<Arc<NotificationService>>,
     state_store: Option<StateStore>,
+    correlation_id: Option<String>,
 ) -> Result<()> {
     match effect {
         ScriptSideEffect::SetDeviceState { device_id, state } => {
             let device = device_log_name(state_store.as_ref(), &device_id).await;
             debug!(device = %device, payload = %state, "RunScript: set_device_state");
-            publish_device_command(
-                publish,
-                &device_id,
-                state,
-                DeviceChange::homecore("script").with_correlation_id(Some(correlation_id())),
-            )
-            .await?;
+            let topic = format!("homecore/devices/{device_id}/cmd");
+            let change = DeviceChange::homecore("script").with_correlation_id(correlation_id);
+            let payload = with_command_change_metadata(state, &change);
+            match publish {
+                Some(ph) => ph.publish(&topic, serde_json::to_vec(&payload)?).await?,
+                None => warn!(%device_id, "device command dropped — no publish handle"),
+            }
         }
 
         ScriptSideEffect::Notify {

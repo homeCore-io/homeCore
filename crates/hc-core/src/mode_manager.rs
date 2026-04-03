@@ -527,8 +527,17 @@ impl ModeManager {
             .cloned()
             .collect();
 
-        // Fire mode_changed custom event so Trigger::ModeChanged rules can react.
+        // Fire mode_changed events so Trigger::ModeChanged rules can react.
         if changed.contains(&"on".to_string()) {
+            // First-class event for activity stream and filtering.
+            let _ = self.pub_bus.publish(Event::ModeChanged {
+                timestamp: chrono::Utc::now(),
+                mode_id: mode.id.clone(),
+                mode_name: mode.name.clone(),
+                on,
+            });
+            // Keep the Custom event for backward compatibility with existing
+            // Trigger::ModeChanged rules that match on event_type == "mode_changed".
             let _ = self.pub_bus.publish(Event::Custom {
                 timestamp: chrono::Utc::now(),
                 event_type: "mode_changed".to_string(),
