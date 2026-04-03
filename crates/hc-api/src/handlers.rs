@@ -22,9 +22,60 @@ use crate::auth_middleware::{
     DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
 };
 use crate::group_store::RuleGroup;
+use crate::managed_modes::{
+    build_managed_rules, install_managed_rules, managed_rule_owner, remove_managed_rules,
+    validate_definition,
+};
+use crate::mode_definition_store::{
+    mode_definitions_path, CriteriaModeConfig, CriteriaOffBehavior, ModeDefinition,
+    ModeDefinitionStore,
+};
 use crate::AppState;
 
 const MATTER_CONTROLLER_DEVICE_ID: &str = "matter_controller";
+
+fn mode_definition_store_for(state: &AppState) -> Option<ModeDefinitionStore> {
+    state
+        .modes_path
+        .as_ref()
+        .map(|path| ModeDefinitionStore::new(mode_definitions_path(path.as_ref())))
+}
+
+fn load_mode_definitions(state: &AppState) -> anyhow::Result<Vec<ModeDefinition>> {
+    match mode_definition_store_for(state) {
+        Some(store) => store.load(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn save_mode_definitions(state: &AppState, definitions: &[ModeDefinition]) -> anyhow::Result<()> {
+    if let Some(store) = mode_definition_store_for(state) {
+        store.save(definitions)?;
+    }
+    Ok(())
+}
+
+fn managed_rule_response(mode_id: &str, rule_id: Uuid) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": format!(
+                "rule '{rule_id}' is managed by criteria-driven mode '{mode_id}' and cannot be edited directly"
+            )
+        })),
+    )
+        .into_response()
+}
+
+fn load_mode_definitions_response(state: &AppState) -> Result<Vec<ModeDefinition>, axum::response::Response> {
+    load_mode_definitions(state).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response()
+    })
+}
 
 fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
     if device.device_type.is_none() {
@@ -848,11 +899,21 @@ pub async fn list_modes(State(s): State<AppState>, _: DevicesRead) -> impl IntoR
         }
     };
     let devices = s.store.list_devices().await.unwrap_or_default();
+    let definitions = match load_mode_definitions(&s) {
+        Ok(definitions) => definitions,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
+    };
     let result: Vec<Value> = configs
         .into_iter()
         .map(|cfg| {
             let state = devices.iter().find(|d| d.device_id == cfg.id);
-            json!({ "config": cfg, "state": state })
+            let definition = definitions.iter().find(|def| def.mode_id == cfg.id);
+            json!({ "config": cfg, "state": state, "definition": definition })
         })
         .collect();
     (StatusCode::OK, Json(json!(result)))
@@ -884,12 +945,23 @@ pub async fn get_mode(
                 .into_response();
         }
     };
+    let definitions = match load_mode_definitions(&s) {
+        Ok(definitions) => definitions,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
     match configs.into_iter().find(|c| c.id == id) {
         Some(cfg) => {
             let state = s.store.get_device(&id).await.ok().flatten();
+            let definition = definitions.iter().find(|def| def.mode_id == id);
             (
                 StatusCode::OK,
-                Json(json!({ "config": cfg, "state": state })),
+                Json(json!({ "config": cfg, "state": state, "definition": definition })),
             )
                 .into_response()
         }
@@ -901,17 +973,34 @@ pub async fn get_mode(
     }
 }
 
+fn default_criteria_reevaluate_minutes() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutModeDefinitionBody {
+    pub on_condition: Condition,
+    #[serde(default)]
+    pub off_behavior: CriteriaOffBehavior,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_condition: Option<Condition>,
+    #[serde(default = "default_criteria_reevaluate_minutes")]
+    pub reevaluate_every_n_minutes: u32,
+}
+
 #[derive(Deserialize)]
 pub struct CreateModeBody {
     pub id: String,
     pub name: String,
     pub kind: hc_core::mode_manager::ModeKind,
+    #[serde(default)]
+    pub criteria_definition: Option<PutModeDefinitionBody>,
 }
 
 /// `POST /api/v1/modes` — create a new mode (appends to modes.toml).
 pub async fn create_mode(
     State(s): State<AppState>,
-    _: DevicesWrite,
+    DevicesWrite(claims): DevicesWrite,
     Json(body): Json<CreateModeBody>,
 ) -> impl IntoResponse {
     let path = match s.modes_path.as_ref() {
@@ -920,14 +1009,23 @@ pub async fn create_mode(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "modes not configured" })),
-            );
+            )
+                .into_response();
         }
     };
     if !body.id.starts_with("mode_") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "id must start with 'mode_'" })),
-        );
+        )
+            .into_response();
+    }
+    if body.criteria_definition.is_some() && !claims.has_scope("automations:write") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "scope 'automations:write' required for criteria-driven modes" })),
+        )
+            .into_response();
     }
     let cfg = hc_core::mode_manager::ModeConfig {
         id: body.id,
@@ -939,12 +1037,257 @@ pub async fn create_mode(
         off_offset_minutes: 0,
     };
     match hc_core::mode_manager::append_mode(&path, cfg.clone()) {
-        Ok(_) => (StatusCode::CREATED, Json(json!(cfg))),
-        Err(e) => (
+        Ok(_) => {}
+        Err(e) => return (
             StatusCode::CONFLICT,
             Json(json!({ "error": e.to_string() })),
-        ),
+        )
+            .into_response(),
     }
+
+    if let Some(criteria) = body.criteria_definition {
+        let mut definitions = match load_mode_definitions(&s) {
+            Ok(definitions) => definitions,
+            Err(e) => {
+                let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        let mut definition = ModeDefinition {
+            mode_id: cfg.id.clone(),
+            criteria: CriteriaModeConfig {
+                on_condition: criteria.on_condition,
+                off_behavior: criteria.off_behavior,
+                off_condition: criteria.off_condition,
+                reevaluate_every_n_minutes: criteria.reevaluate_every_n_minutes,
+            },
+            generated_rule_ids: Vec::new(),
+        };
+        let mode_ids = match hc_core::mode_manager::load_modes(&path) {
+            Ok(modes) => modes.into_iter().map(|mode| mode.id).collect::<HashSet<_>>(),
+            Err(e) => {
+                let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        if let Err(e) = validate_definition(&cfg, &mode_ids, &definitions, &definition) {
+            let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let rules = match build_managed_rules(&cfg, &definition) {
+            Ok(rules) => rules,
+            Err(e) => {
+                let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        let generated_rule_ids = match install_managed_rules(&s, &[], &rules).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        definition.generated_rule_ids = generated_rule_ids.clone();
+        definitions.retain(|def| def.mode_id != definition.mode_id);
+        definitions.push(definition);
+        if let Err(e) = save_mode_definitions(&s, &definitions) {
+            let _ = remove_managed_rules(&s, &generated_rule_ids).await;
+            let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    (StatusCode::CREATED, Json(json!(cfg))).into_response()
+}
+
+/// `GET /api/v1/modes/:id/definition` — criteria definition for a managed mode.
+pub async fn get_mode_definition(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let definitions = match load_mode_definitions_response(&s) {
+        Ok(definitions) => definitions,
+        Err(resp) => return resp,
+    };
+    match definitions.into_iter().find(|definition| definition.mode_id == id) {
+        Some(definition) => (StatusCode::OK, Json(json!(definition))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "mode definition not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `PUT /api/v1/modes/:id/definition` — create or replace a criteria-driven mode definition.
+pub async fn put_mode_definition(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<PutModeDefinitionBody>,
+) -> impl IntoResponse {
+    let path = match s.modes_path.as_ref() {
+        Some(p) => p.as_ref().clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "modes not configured" })),
+            )
+                .into_response();
+        }
+    };
+
+    let modes = match hc_core::mode_manager::load_modes(&path) {
+        Ok(modes) => modes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let Some(mode) = modes.iter().find(|mode| mode.id == id).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "mode not found" })),
+        )
+            .into_response();
+    };
+
+    let mut definitions = match load_mode_definitions_response(&s) {
+        Ok(definitions) => definitions,
+        Err(resp) => return resp,
+    };
+    let previous_rule_ids = definitions
+        .iter()
+        .find(|definition| definition.mode_id == id)
+        .map(|definition| definition.generated_rule_ids.clone())
+        .unwrap_or_default();
+
+    let mut definition = ModeDefinition {
+        mode_id: id.clone(),
+        criteria: CriteriaModeConfig {
+            on_condition: body.on_condition,
+            off_behavior: body.off_behavior,
+            off_condition: body.off_condition,
+            reevaluate_every_n_minutes: body.reevaluate_every_n_minutes,
+        },
+        generated_rule_ids: previous_rule_ids.clone(),
+    };
+    let mode_ids = modes.into_iter().map(|mode| mode.id).collect::<HashSet<_>>();
+    if let Err(e) = validate_definition(&mode, &mode_ids, &definitions, &definition) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    let rules = match build_managed_rules(&mode, &definition) {
+        Ok(rules) => rules,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let generated_rule_ids = match install_managed_rules(&s, &previous_rule_ids, &rules).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    definition.generated_rule_ids = generated_rule_ids;
+
+    let created = !definitions.iter().any(|existing| existing.mode_id == id);
+    definitions.retain(|existing| existing.mode_id != id);
+    definitions.push(definition.clone());
+    if let Err(e) = save_mode_definitions(&s, &definitions) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    (
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(json!(definition)),
+    )
+        .into_response()
+}
+
+/// `DELETE /api/v1/modes/:id/definition` — remove criteria definition and generated rules.
+pub async fn delete_mode_definition(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut definitions = match load_mode_definitions_response(&s) {
+        Ok(definitions) => definitions,
+        Err(resp) => return resp,
+    };
+    let Some(pos) = definitions.iter().position(|definition| definition.mode_id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "mode definition not found" })),
+        )
+            .into_response();
+    };
+    let definition = definitions.remove(pos);
+    if let Err(e) = remove_managed_rules(&s, &definition.generated_rule_ids).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+    if let Err(e) = save_mode_definitions(&s, &definitions) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `DELETE /api/v1/modes/:id` — remove a mode.
@@ -965,6 +1308,27 @@ pub async fn delete_mode(
             })),
         )
             .into_response();
+    }
+    let mut definitions = match load_mode_definitions_response(&s) {
+        Ok(definitions) => definitions,
+        Err(resp) => return resp,
+    };
+    if let Some(pos) = definitions.iter().position(|definition| definition.mode_id == id) {
+        let definition = definitions.remove(pos);
+        if let Err(e) = remove_managed_rules(&s, &definition.generated_rule_ids).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        if let Err(e) = save_mode_definitions(&s, &definitions) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
     }
     let path = match s.modes_path.as_ref() {
         Some(p) => p.as_ref().clone(),
@@ -1594,6 +1958,21 @@ pub async fn update_automation(
     Path(id): Path<Uuid>,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    match load_mode_definitions(&s) {
+        Ok(definitions) => {
+            if let Some(mode_id) = managed_rule_owner(&definitions, id) {
+                return managed_rule_response(mode_id, id);
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
     // Path id is authoritative — inject it so clients don't need to send it.
     body["id"] = serde_json::Value::String(id.to_string());
 
@@ -1694,6 +2073,21 @@ pub async fn delete_automation(
     _: AutomationsWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    match load_mode_definitions(&s) {
+        Ok(definitions) => {
+            if let Some(mode_id) = managed_rule_owner(&definitions, id) {
+                return managed_rule_response(mode_id, id);
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
     let Some(rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4129,6 +4523,21 @@ pub async fn patch_automation(
     Path(id): Path<Uuid>,
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
+    match load_mode_definitions(&s) {
+        Ok(definitions) => {
+            if let Some(mode_id) = managed_rule_owner(&definitions, id) {
+                return managed_rule_response(mode_id, id);
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
     let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4233,6 +4642,20 @@ pub async fn bulk_patch_automations(
             .into_response();
     };
 
+    let managed_rule_ids = match load_mode_definitions(&s) {
+        Ok(definitions) => definitions
+            .iter()
+            .flat_map(|definition| definition.generated_rule_ids.iter().copied())
+            .collect::<HashSet<_>>(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
     let mut updated = Vec::new();
     {
         let mut rules = source_rh.write().await;
@@ -4244,7 +4667,7 @@ pub async fn bulk_patch_automations(
             } else {
                 true
             };
-            if selected {
+            if selected && !managed_rule_ids.contains(&rule.id) {
                 if let Some(enabled) = patch.enabled {
                     rule.enabled = enabled;
                 }

@@ -5,6 +5,7 @@
 //! - `history.db`        — time-series state history (SQLite)
 //! - `config/homecore.toml` — main config file (if present)
 //! - `config/modes.toml`    — modes config (if present)
+//! - `config/mode_definitions.json` — criteria-mode definitions (if present)
 //! - `rules/*.toml`         — all rule files (if present)
 //!
 //! The archive is streamed as `application/zip` with a timestamped filename.
@@ -109,6 +110,12 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
             &mut zip,
             &parent.join("modes.toml"),
             "config/modes.toml",
+            opts,
+        )?;
+        add_file_opt(
+            &mut zip,
+            &parent.join("mode_definitions.json"),
+            "config/mode_definitions.json",
             opts,
         )?;
     }

@@ -26,7 +26,9 @@ pub mod event_log;
 pub mod group_store;
 pub mod handlers;
 pub mod logs;
+pub mod managed_modes;
 pub mod metrics;
+pub mod mode_definition_store;
 pub mod rule_file_store;
 pub mod ws;
 
@@ -316,6 +318,12 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
         .route(
             "/modes/:id",
             get(handlers::get_mode).delete(handlers::delete_mode),
+        )
+        .route(
+            "/modes/:id/definition",
+            get(handlers::get_mode_definition)
+                .put(handlers::put_mode_definition)
+                .delete(handlers::delete_mode_definition),
         )
         // Areas
         .route(
