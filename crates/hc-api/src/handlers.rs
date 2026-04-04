@@ -4496,15 +4496,12 @@ pub async fn get_plugin_config(
     // Local plugin: read config file directly.
     if let Some(ref path) = config_path {
         if let Ok(content) = std::fs::read_to_string(path) {
-            return match content.parse::<toml::Value>() {
-                Ok(parsed) => {
-                    let json_val = serde_json::to_value(parsed).unwrap_or_default();
-                    (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "toml", "config": json_val }))).into_response()
-                }
-                Err(e) => {
-                    (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "raw", "raw": content, "parse_error": e.to_string() }))).into_response()
-                }
-            };
+            let mut resp = json!({ "plugin_id": id, "format": "toml", "raw": content });
+            // Also include parsed JSON for clients that want structured access.
+            if let Ok(parsed) = content.parse::<toml::Value>() {
+                resp["config"] = serde_json::to_value(parsed).unwrap_or_default();
+            }
+            return (StatusCode::OK, Json(resp)).into_response();
         }
     }
 
