@@ -1056,6 +1056,31 @@ async fn main() -> Result<()> {
         publish_handle_rpc,
         &pub_bus_rpc,
     ));
+
+    // Reconcile plugin status: plugins that registered before the AppState
+    // subscriber was active will still show "starting".  Check device store
+    // for evidence of registration and promote to "active".
+    {
+        let reg = app_state.plugins.clone();
+        let store = app_state.store.clone();
+        tokio::spawn(async move {
+            // Small delay to let any in-flight registrations settle.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Ok(devices) = store.list_devices().await {
+                let active_plugins: std::collections::HashSet<String> = devices
+                    .iter()
+                    .map(|d| d.plugin_id.clone())
+                    .collect();
+                let mut map = reg.write().await;
+                for rec in map.values_mut() {
+                    if rec.status == "starting" && active_plugins.contains(&rec.plugin_id) {
+                        rec.status = "active".into();
+                    }
+                }
+            }
+        });
+    }
+
     let api_host = config.server.host.clone();
     let api_port = config.server.port;
     let drain_timeout_secs = config.shutdown.drain_timeout_secs;
