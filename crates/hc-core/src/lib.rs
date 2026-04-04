@@ -14,6 +14,7 @@ pub mod calendar_store;
 pub mod device_naming;
 pub mod engine;
 pub mod executor;
+pub mod glue;
 pub mod mode_manager;
 pub mod rule_loader;
 pub mod rule_resolver;
@@ -319,6 +320,16 @@ impl Core {
             self.state.clone(),
         );
         tokio::spawn(switch_mgr.start());
+
+        // Glue manager: unified handler for counter + future glue device types.
+        // Timer and switch commands still go through their dedicated managers above;
+        // the glue manager handles new types (counter, number, select, etc.).
+        let glue_mgr = glue::GlueManager::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
+        tokio::spawn(glue_mgr.start());
 
         // Mode manager: solar + manual named boolean modes.
         if let Some(modes_path) = self.modes_path.clone() {
