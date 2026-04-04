@@ -488,6 +488,7 @@ impl StateBridge {
             DeviceState::new(device_id, device_id, plugin_id)
         });
 
+        let changed = device.available != available;
         device.available = available;
         device.last_seen = Utc::now();
         if device.canonical_name.is_none() {
@@ -496,11 +497,16 @@ impl StateBridge {
         }
         self.store.upsert_device(&device).await?;
 
-        let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
-            timestamp: Utc::now(),
-            device_id: device_id.to_string(),
-            available,
-        });
+        // Only emit an event when availability actually changes — plugins
+        // re-publish availability on every refresh cycle, and emitting an
+        // event each time floods the activity stream with no-op updates.
+        if changed {
+            let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
+                timestamp: Utc::now(),
+                device_id: device_id.to_string(),
+                available,
+            });
+        }
 
         Ok(())
     }
