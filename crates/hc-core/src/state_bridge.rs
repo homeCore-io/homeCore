@@ -32,8 +32,8 @@ use hc_types::device::{
 };
 use hc_types::event::Event;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 pub struct StateBridge {
@@ -44,6 +44,9 @@ pub struct StateBridge {
     publish: Option<PublishHandle>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
     pending_command_changes: DashMap<String, DeviceChange>,
+    /// Track which plugins have already emitted a PluginRegistered event
+    /// this session, so we only emit once per plugin (not once per device).
+    registered_plugins: Mutex<HashSet<String>>,
 }
 
 impl StateBridge {
@@ -56,6 +59,7 @@ impl StateBridge {
             publish: None,
             device_types: None,
             pending_command_changes: DashMap::new(),
+            registered_plugins: Mutex::new(HashSet::new()),
         }
     }
 
@@ -194,10 +198,18 @@ impl StateBridge {
         {
             let plugin_id = parts[2];
             if parts[3] == "register" {
-                let _ = self.pub_bus.publish(Event::PluginRegistered {
-                    timestamp: Utc::now(),
-                    plugin_id: plugin_id.to_string(),
-                });
+                // Only emit PluginRegistered once per plugin per session —
+                // plugins send one registration message per device, which
+                // would flood the event stream with duplicates.
+                {
+                    let mut seen = self.registered_plugins.lock().unwrap();
+                    if seen.insert(plugin_id.to_string()) {
+                        let _ = self.pub_bus.publish(Event::PluginRegistered {
+                            timestamp: Utc::now(),
+                            plugin_id: plugin_id.to_string(),
+                        });
+                    }
+                }
                 if let Err(e) = self.handle_device_registration(plugin_id, payload).await {
                     warn!(plugin_id, error = %e, "Device registration upsert failed");
                 }
