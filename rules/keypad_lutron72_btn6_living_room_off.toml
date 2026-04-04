@@ -1,9 +1,9 @@
-# Keypad lutron_72 Button 1 — Living Room Off
+# Keypad lutron_72 Button 6 — Living Room Off
 #
-# When button 1 is pressed and the living room group is currently on,
+# When button 6 is pressed and the living room group is currently on,
 # turn off the Hue group and clear the keypad button LED.
 
-id = "12c084ab-f8f3-4271-a96d-97ac7560895c"
+id       = "12c084ab-f8f3-4271-a96d-97ac7560895c"
 name     = "Keypad lutron_72 Btn6 - Living Room Off"
 enabled  = true
 priority = 10

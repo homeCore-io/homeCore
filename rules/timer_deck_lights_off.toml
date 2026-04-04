@@ -1,4 +1,9 @@
-id = "ea75205d-22fe-4e5b-a1c0-65eb24ce54a6"
+# Deck Lights Off — Timer Finished
+#
+# When the deck lights timer finishes: activate the deck-off scene
+# to turn off all deck lights.
+
+id       = "ea75205d-22fe-4e5b-a1c0-65eb24ce54a6"
 name     = "Deck Lights Off - Timer Finished"
 enabled  = true
 priority = 10
@@ -10,6 +15,6 @@ attribute = "state"
 to        = "finished"
 
 [[actions]]
-type = "set_device_state"
+type      = "set_device_state"
 device_id = "lutron_scene_deck_off_phantom"
-state = { activate = true }
+state     = { activate = true }

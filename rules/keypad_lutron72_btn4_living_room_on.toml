@@ -1,9 +1,9 @@
-# Keypad lutron_72 Button 1 — Living Room On
+# Keypad lutron_72 Button 4 — Living Room On
 #
-# When button 1 is pressed and the living room group is currently off,
-# turn on the Hue group and light the keypad button LED.
+# When button 4 is pressed and the living room light is currently off,
+# turn on the Hue light and light the keypad button LED.
 
-id = "dba5d032-b5c3-4ea2-9647-307419d2b556"
+id       = "dba5d032-b5c3-4ea2-9647-307419d2b556"
 name     = "Keypad lutron_72 Btn4 - Living Room On"
 enabled  = true
 priority = 10

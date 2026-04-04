@@ -1,5 +1,9 @@
+# Door Opened — Laundry Room
+#
+# When the laundry room door opens: turn on the garage overhead light
+# and start a 10-minute timer to turn the lights off.
 
-id = "d30ccaa1-c764-454b-9389-7507bfe0fcbe"
+id       = "d30ccaa1-c764-454b-9389-7507bfe0fcbe"
 name     = "Door Opened - Laundry Room"
 enabled  = true
 priority = 10
