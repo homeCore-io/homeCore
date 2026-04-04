@@ -17,6 +17,8 @@ pub enum Event {
     DeviceStateChanged {
         timestamp: DateTime<Utc>,
         device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
         previous: HashMap<String, serde_json::Value>,
         current: HashMap<String, serde_json::Value>,
         /// Attribute keys whose values changed (added, updated, or removed).
@@ -28,6 +30,8 @@ pub enum Event {
     DeviceAvailabilityChanged {
         timestamp: DateTime<Utc>,
         device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
         available: bool,
     },
     /// An automation rule fired successfully.
@@ -119,6 +123,8 @@ pub enum Event {
     DeviceCommandSent {
         timestamp: DateTime<Utc>,
         device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
         /// The command payload sent to the device.
         command: serde_json::Value,
         /// What initiated this command ("rule", "scene", "api").
@@ -141,6 +147,8 @@ pub enum Event {
     TimerStateChanged {
         timestamp: DateTime<Utc>,
         timer_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timer_name: Option<String>,
         /// New timer state: "running", "paused", "finished", "cancelled", "idle".
         state: String,
         /// Remaining seconds (if applicable).

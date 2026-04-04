@@ -2144,6 +2144,7 @@ mod tests {
         Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.into(),
+            device_name: None,
             previous,
             current,
             changed: vec![attr.into()],

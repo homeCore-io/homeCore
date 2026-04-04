@@ -188,6 +188,7 @@ mod tests {
         Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
+            device_name: None,
             previous: Default::default(),
             current: Default::default(),
             changed: Default::default(),

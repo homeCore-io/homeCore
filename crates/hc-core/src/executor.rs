@@ -122,6 +122,7 @@ async fn publish_device_command(
         let _ = bus.publish(Event::DeviceCommandSent {
             timestamp: chrono::Utc::now(),
             device_id: device_id.to_string(),
+            device_name: None,
             command: payload,
             source: "rule".to_string(),
             source_id: Some(ctx.rule_id.to_string()),

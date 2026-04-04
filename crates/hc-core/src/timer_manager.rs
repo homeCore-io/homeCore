@@ -517,6 +517,7 @@ impl TimerManager {
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
+            device_name: Some(dev.name.clone()),
             previous,
             current,
             changed,
@@ -527,6 +528,7 @@ impl TimerManager {
         let _ = self.pub_bus.publish(Event::TimerStateChanged {
             timestamp: Utc::now(),
             timer_id: device_id.to_string(),
+            timer_name: None,
             state: new_state.to_string(),
             remaining_secs: remaining,
         });
@@ -560,6 +562,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
+        device_name: Some(dev.name.clone()),
         previous,
         current,
         changed,
@@ -568,6 +571,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let _ = bus.publish(Event::TimerStateChanged {
         timestamp: Utc::now(),
         timer_id: device_id.to_string(),
+        timer_name: None,
         state: "finished".to_string(),
         remaining_secs: Some(0),
     });
@@ -600,6 +604,7 @@ async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStor
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
+        device_name: Some(dev.name.clone()),
         previous,
         current,
         changed,

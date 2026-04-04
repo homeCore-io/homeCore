@@ -548,6 +548,7 @@ impl ModeManager {
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: chrono::Utc::now(),
             device_id: mode.id.clone(),
+            device_name: Some(mode.name.clone()),
             previous,
             current,
             changed,

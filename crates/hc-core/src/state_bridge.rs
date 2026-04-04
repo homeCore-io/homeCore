@@ -312,6 +312,7 @@ impl StateBridge {
             let _ = self.pub_bus.publish(Event::DeviceStateChanged {
                 timestamp: Utc::now(),
                 device_id: device_id.to_string(),
+                device_name: Some(device.name.clone()),
                 previous,
                 current,
                 changed,
@@ -504,6 +505,7 @@ impl StateBridge {
             let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
                 timestamp: Utc::now(),
                 device_id: device_id.to_string(),
+                device_name: Some(device.name.clone()),
                 available,
             });
         }
