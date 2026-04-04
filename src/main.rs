@@ -632,7 +632,7 @@ async fn main() -> Result<()> {
     // background file-writer thread stays alive.
     // We also wire in a BroadcastLayer so the log-streaming WebSocket endpoint
     // can replay recent lines and subscribe to live log events.
-    let (_logging_handle, log_tx, log_ring) =
+    let (_logging_handle, log_tx, log_ring, log_level_handle) =
         hc_logging::init_with_broadcast(&config.logging, config.logging.stream.ring_buffer_size)?;
 
     info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
@@ -1055,7 +1055,8 @@ async fn main() -> Result<()> {
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
         &pub_bus_rpc,
-    ));
+    ))
+    .with_log_level_handle(log_level_handle);
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store

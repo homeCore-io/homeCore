@@ -103,6 +103,38 @@ pub async fn health() -> impl IntoResponse {
 
 // ---------- System status ----------
 
+// ---------- Log Level ----------
+
+pub async fn get_log_level(State(s): State<AppState>) -> impl IntoResponse {
+    match &s.log_level_handle {
+        Some(handle) => {
+            let level = handle.current_level();
+            (StatusCode::OK, Json(json!({ "level": level }))).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "dynamic log level not available" }))).into_response(),
+    }
+}
+
+pub async fn set_log_level(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(ref handle) = s.log_level_handle else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "dynamic log level not available" }))).into_response();
+    };
+    let Some(level) = body["level"].as_str() else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing 'level' field" }))).into_response();
+    };
+    match handle.set_level(level) {
+        Ok(()) => {
+            tracing::info!(level, "Log level changed via API");
+            (StatusCode::OK, Json(json!({ "ok": true, "level": level }))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
     let uptime_secs = (chrono::Utc::now() - s.started_at).num_seconds().max(0);
 
@@ -4476,6 +4508,17 @@ pub async fn patch_plugin(
     }
     if let Some(level) = body["log_level"].as_str() {
         rec.log_level = Some(level.to_string());
+        // Send MQTT management command so the plugin changes level immediately
+        // (if it supports the management protocol).
+        if let Some(ref rpc) = s.management_rpc {
+            let id = id.clone();
+            let level = level.to_string();
+            let rpc = rpc.clone();
+            // Fire-and-forget — don't block the API response on plugin response.
+            tokio::spawn(async move {
+                let _ = rpc.set_log_level(&id, &level).await;
+            });
+        }
     }
     (StatusCode::OK, Json(json!(rec.clone()))).into_response()
 }

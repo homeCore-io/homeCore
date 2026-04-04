@@ -154,6 +154,8 @@ pub struct AppState {
     pub plugin_commands: PluginCommandChannels,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
+    /// Handle for runtime log level changes.
+    pub log_level_handle: Option<hc_logging::LogLevelHandle>,
 }
 
 impl AppState {
@@ -358,6 +360,7 @@ impl AppState {
             calendar_expansion_days: 400,
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             management_rpc: None,
+            log_level_handle: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -419,6 +422,11 @@ impl AppState {
 
     pub fn with_management_rpc(mut self, rpc: management_rpc::ManagementRpc) -> Self {
         self.management_rpc = Some(rpc);
+        self
+    }
+
+    pub fn with_log_level_handle(mut self, handle: hc_logging::LogLevelHandle) -> Self {
+        self.log_level_handle = Some(handle);
         self
     }
 }
@@ -628,6 +636,7 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
         // System
         .route("/system/status", get(handlers::system_status))
         .route("/system/backup", post(backup::backup_handler))
+        .route("/system/log-level", get(handlers::get_log_level).put(handlers::set_log_level))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

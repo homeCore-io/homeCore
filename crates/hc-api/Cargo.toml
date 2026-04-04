@@ -23,6 +23,7 @@ hc-scripting = { version = "0.1.0", path = "../hc-scripting" }
 hc-topic-map = { version = "0.1.0", path = "../hc-topic-map" }
 hc-web-admin = { version = "0.1.0", path = "../hc-web-admin" }
 async-trait  = { workspace = true }
+hc-logging   = { version = "0.1.0", path = "../hc-logging" }
 ipnet        = { workspace = true }
 toml         = { workspace = true }
 prometheus   = { workspace = true }

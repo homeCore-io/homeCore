@@ -1345,6 +1345,7 @@ dependencies = [
  "chrono",
  "hc-auth",
  "hc-core",
+ "hc-logging",
  "hc-mqtt-client",
  "hc-scripting",
  "hc-state",
@@ -2839,6 +2840,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "hc-logging",
  "hc-types",
  "rumqttc",
  "serde",

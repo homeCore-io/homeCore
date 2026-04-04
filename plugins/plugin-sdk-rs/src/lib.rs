@@ -124,6 +124,7 @@ impl DevicePublisher {
 pub struct ManagementHandle {
     plugin_id: String,
     config_path: Option<String>,
+    log_level_handle: Option<hc_logging::LogLevelHandle>,
 }
 
 /// Connection configuration for a plugin.
@@ -394,6 +395,7 @@ impl PluginClient {
         interval_secs: u64,
         version: Option<String>,
         config_path: Option<String>,
+        log_level_handle: Option<hc_logging::LogLevelHandle>,
     ) -> Result<ManagementHandle> {
         // Subscribe to management command topic.
         let topic = format!("homecore/plugins/{}/manage/cmd", self.config.plugin_id);
@@ -428,6 +430,7 @@ impl PluginClient {
         Ok(ManagementHandle {
             plugin_id: self.config.plugin_id.clone(),
             config_path,
+            log_level_handle,
         })
     }
 
@@ -607,15 +610,29 @@ fn handle_management_cmd(mgmt: &ManagementHandle, cmd: &Value) -> Value {
         }
         "set_log_level" => {
             let level = cmd["level"].as_str().unwrap_or("info");
-            // Log level changes would need tracing subscriber reload — for now
-            // just acknowledge receipt. Actual runtime log level change requires
-            // tracing-subscriber's reload layer, which is plugin-specific.
-            info!(level, "Management: log level change requested (requires restart)");
-            serde_json::json!({
-                "request_id": request_id,
-                "status": "ok",
-                "note": "log level change acknowledged; restart required to take effect",
-            })
+            if let Some(ref handle) = mgmt.log_level_handle {
+                match handle.set_level(level) {
+                    Ok(()) => {
+                        info!(level, "Management: log level changed dynamically");
+                        serde_json::json!({
+                            "request_id": request_id,
+                            "status": "ok",
+                        })
+                    }
+                    Err(e) => serde_json::json!({
+                        "request_id": request_id,
+                        "status": "error",
+                        "error": e,
+                    }),
+                }
+            } else {
+                info!(level, "Management: log level change requested (no reload handle; requires restart)");
+                serde_json::json!({
+                    "request_id": request_id,
+                    "status": "ok",
+                    "note": "log level change acknowledged; restart required to take effect",
+                })
+            }
         }
         _ => serde_json::json!({
             "request_id": request_id,

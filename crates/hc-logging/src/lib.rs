@@ -57,7 +57,7 @@ impl LoggingConfig {
 
 use anyhow::Result;
 use config::{FileConfig, OutputFormat, StderrConfig, TimeDisplay};
-use filter::build_filter;
+use filter::{build_filter, build_filter_string};
 use syslog_layer::SyslogLayer;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::{prelude::*, Registry};
@@ -104,18 +104,69 @@ pub struct LoggingHandle {
 
 type DynLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>;
 
+/// Type-erased trait for reloading an EnvFilter at runtime.
+trait FilterReloader: Send + Sync {
+    fn reload(&self, filter: tracing_subscriber::EnvFilter) -> Result<(), String>;
+}
+
+impl<S> FilterReloader for tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, S>
+where
+    S: 'static,
+{
+    fn reload(&self, filter: tracing_subscriber::EnvFilter) -> Result<(), String> {
+        tracing_subscriber::reload::Handle::reload(self, filter)
+            .map_err(|e| format!("failed to reload log filter: {e}"))
+    }
+}
+
+/// Handle for changing the global log level at runtime.
+///
+/// Internally wraps a type-erased `tracing_subscriber::reload::Handle` that
+/// controls a top-level `EnvFilter` on the subscriber registry.  All per-layer
+/// filters still apply — this acts as a global minimum-level gate.
+///
+/// Clone-safe (all state is `Arc`-wrapped).
+#[derive(Clone)]
+pub struct LogLevelHandle {
+    inner: std::sync::Arc<dyn FilterReloader>,
+    current: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl LogLevelHandle {
+    /// Change the global log level.
+    ///
+    /// Accepts any valid `EnvFilter` directive string:
+    /// - Simple: `"debug"`, `"info"`, `"warn"`
+    /// - Targeted: `"hc_core=debug,info"`, `"hc_api=trace,warn"`
+    /// - Same syntax as `RUST_LOG`
+    pub fn set_level(&self, directives: &str) -> Result<(), String> {
+        let new_filter: tracing_subscriber::EnvFilter = directives
+            .parse()
+            .map_err(|e| format!("invalid log filter directive: {e}"))?;
+        self.inner.reload(new_filter)?;
+        *self.current.lock().unwrap() = directives.to_string();
+        Ok(())
+    }
+
+    /// Return the current directive string.
+    pub fn current_level(&self) -> String {
+        self.current.lock().unwrap().clone()
+    }
+}
+
 /// Initialize the global `tracing` subscriber from a [`LoggingConfig`],
 /// also wiring in a [`BroadcastLayer`] for the log-streaming WebSocket.
 ///
-/// Returns the logging handle (keep alive for process lifetime) plus the
-/// broadcast sender and ring buffer to pass to the API layer.
+/// Returns the logging handle (keep alive for process lifetime), the
+/// broadcast sender and ring buffer for the API layer, and a
+/// [`LogLevelHandle`] for runtime log level changes.
 pub fn init_with_broadcast(
     config: &LoggingConfig,
     ring_capacity: usize,
-) -> Result<(LoggingHandle, LogSender, LogRing)> {
+) -> Result<(LoggingHandle, LogSender, LogRing, LogLevelHandle)> {
     let (broadcast_layer, tx, ring) = BroadcastLayer::new(ring_capacity);
-    let handle = init_inner(config, Some(broadcast_layer))?;
-    Ok((handle, tx, ring))
+    let (handle, level_handle) = init_inner(config, Some(broadcast_layer))?;
+    Ok((handle, tx, ring, level_handle))
 }
 
 /// Initialize the global `tracing` subscriber from a [`LoggingConfig`].
@@ -123,16 +174,31 @@ pub fn init_with_broadcast(
 /// Call this exactly once, early in `main()`, before spawning any tasks.
 /// If the global subscriber is already set this returns an error.
 pub fn init(config: &LoggingConfig) -> Result<LoggingHandle> {
-    init_inner(config, None)
+    let (handle, _level_handle) = init_inner(config, None)?;
+    Ok(handle)
 }
 
-fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Result<LoggingHandle> {
+fn init_inner(
+    config: &LoggingConfig,
+    broadcast: Option<BroadcastLayer>,
+) -> Result<(LoggingHandle, LogLevelHandle)> {
     let mut layers: Vec<DynLayer> = Vec::new();
     let mut file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
     let mut rules_file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
 
     let timer = HcTimer::from_display(&config.time_display);
     let use_local_time = matches!(config.time_display, TimeDisplay::Local);
+
+    // ── Global reload filter ──────────────────────────────────────────────
+    // A top-level EnvFilter wrapped in a reload::Layer so the log level can
+    // be changed at runtime via the returned LogLevelHandle.  Per-layer
+    // filters still apply on top — this acts as a global minimum-level gate.
+    let initial_directives = build_filter_string(config, None);
+    let global_filter: tracing_subscriber::EnvFilter = initial_directives
+        .parse()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (reload_layer, reload_handle) =
+        tracing_subscriber::reload::Layer::new(global_filter);
 
     // ── stderr ────────────────────────────────────────────────────────────
     if config.stderr.enabled {
@@ -210,15 +276,27 @@ fn init_inner(config: &LoggingConfig, broadcast: Option<BroadcastLayer>) -> Resu
         layers.push(bl.boxed());
     }
 
-    Registry::default()
-        .with(layers)
+    // Compose: Registry → reload filter (global gate) → per-layer outputs.
+    // The reload layer wraps all output layers so that changing the global
+    // filter affects everything (except broadcast, which has no filter).
+    use tracing_subscriber::util::SubscriberInitExt;
+    let subscriber = Registry::default().with(layers).with(reload_layer);
+    subscriber
         .try_init()
         .map_err(|e| anyhow::anyhow!("Failed to install global tracing subscriber: {e}"))?;
 
-    Ok(LoggingHandle {
-        _file_guard: file_guard,
-        _rules_file_guard: rules_file_guard,
-    })
+    let level_handle = LogLevelHandle {
+        inner: std::sync::Arc::new(reload_handle),
+        current: std::sync::Arc::new(std::sync::Mutex::new(initial_directives)),
+    };
+
+    Ok((
+        LoggingHandle {
+            _file_guard: file_guard,
+            _rules_file_guard: rules_file_guard,
+        },
+        level_handle,
+    ))
 }
 
 // ── layer builders ─────────────────────────────────────────────────────────
