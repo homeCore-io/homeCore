@@ -1014,6 +1014,7 @@ pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoRe
         Ok(devices) => {
             let glue: Vec<_> = devices.into_iter()
                 .filter(|d| d.plugin_id == "core.glue" || d.plugin_id == "core.timer" || d.plugin_id == "core.switch")
+                .map(compute_timer_remaining)
                 .collect();
             (StatusCode::OK, Json(json!(glue)))
         }
