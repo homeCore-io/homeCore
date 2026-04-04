@@ -28,8 +28,11 @@ use chrono::Utc;
 use hc_state::StateStore;
 use hc_types::device::DeviceChange;
 use hc_types::event::Event;
+use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 pub const GLUE_PLUGIN_ID: &str = "core.glue";
@@ -118,6 +121,7 @@ pub struct GlueManager {
     internal_bus: EventBus,
     pub_bus: EventBus,
     state: StateStore,
+    glue_path: Option<PathBuf>,
 }
 
 impl GlueManager {
@@ -126,7 +130,13 @@ impl GlueManager {
             internal_bus,
             pub_bus,
             state,
+            glue_path: None,
         }
+    }
+
+    pub fn with_config_path(mut self, path: PathBuf) -> Self {
+        self.glue_path = Some(path);
+        self
     }
 
     /// Drive the glue device event loop. Dispatches commands to type-specific handlers
@@ -137,6 +147,26 @@ impl GlueManager {
         // Schedule tick — check schedule devices every 30 seconds.
         let mut schedule_tick = tokio::time::interval(std::time::Duration::from_secs(30));
         schedule_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Hot-reload watcher for glue.toml.
+        let (reload_tx, mut reload_rx) = mpsc::channel::<()>(4);
+        let _watcher = self.glue_path.as_ref().and_then(|path| {
+            let parent = path.parent().unwrap_or(path).to_path_buf();
+            let tx = reload_tx.clone();
+            let filename = path.file_name().map(|f| f.to_os_string());
+            let mut watcher = notify::recommended_watcher(move |res: notify::Result<NotifyEvent>| {
+                let Ok(event) = res else { return };
+                let relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+                    && filename.as_ref().map(|f| event.paths.iter().any(|p| p.file_name() == Some(f))).unwrap_or(false);
+                if relevant {
+                    let _ = tx.blocking_send(());
+                }
+            }).map_err(|e| warn!(error = %e, "GlueManager: watcher failed")).ok()?;
+            watcher.watch(&parent, RecursiveMode::NonRecursive)
+                .map_err(|e| warn!(error = %e, "GlueManager: watch failed")).ok()?;
+            info!(dir = %parent.display(), "Glue hot-reload watcher active");
+            Some(watcher)
+        });
 
         info!("GlueManager started");
         loop {
@@ -185,6 +215,17 @@ impl GlueManager {
                 }
                 _ = schedule_tick.tick() => {
                     self.tick_schedules().await;
+                }
+                _ = reload_rx.recv() => {
+                    // Debounce: wait 200ms then drain any extra signals.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    while reload_rx.try_recv().is_ok() {}
+                    if let Some(ref path) = self.glue_path {
+                        info!("glue.toml changed — reloading");
+                        if let Err(e) = config::load_glue_config(path, &self.state).await {
+                            warn!(error = %e, "Glue hot-reload failed");
+                        }
+                    }
                 }
             }
         }

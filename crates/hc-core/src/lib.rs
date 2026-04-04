@@ -329,11 +329,14 @@ impl Core {
 
         // Glue manager: unified handler for switches, counters, and all other
         // glue device types. Replaces the old SwitchManager.
-        let glue_mgr = glue::GlueManager::new(
+        let mut glue_mgr = glue::GlueManager::new(
             self.internal_bus.clone(),
             self.pub_bus.clone(),
             self.state.clone(),
         );
+        if let Some(ref path) = self.glue_path {
+            glue_mgr = glue_mgr.with_config_path(path.clone());
+        }
         tokio::spawn(glue_mgr.start());
 
         // Migrate legacy plugin_ids (core.switch → core.glue) on startup.
