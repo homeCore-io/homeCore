@@ -275,7 +275,8 @@ impl GlueManager {
 
 // ── Migration ────────────────────────────────────────────────────────────────
 
-/// Migrate legacy `core.switch` devices to `core.glue` plugin_id.
+/// Migrate legacy `core.switch` devices to `core.glue` plugin_id, and backfill
+/// missing `device_type` for any glue/timer devices.
 /// Called once on startup. Idempotent — skips devices already migrated.
 pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
     let devices = match store.list_devices().await {
@@ -285,16 +286,35 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
 
     let mut migrated = 0u32;
     for mut dev in devices {
-        let old_pid = dev.plugin_id.as_str();
-        let (new_pid, new_dt) = match old_pid {
-            "core.switch" => ("core.glue", Some("switch")),
-            _ => continue,
-        };
+        let mut changed = false;
 
-        dev.plugin_id = new_pid.to_string();
-        if let Some(dt) = new_dt {
-            dev.device_type = Some(dt.to_string());
+        // Migrate legacy plugin_id
+        if dev.plugin_id == "core.switch" {
+            dev.plugin_id = "core.glue".to_string();
+            dev.device_type = Some("switch".to_string());
+            changed = true;
         }
+
+        // Backfill missing device_type from device_id prefix
+        if dev.device_type.is_none()
+            && (dev.plugin_id == "core.glue" || dev.plugin_id == "core.timer")
+        {
+            let prefixes = &[
+                "switch_", "timer_", "counter_", "number_", "select_",
+                "text_", "button_", "datetime_", "group_", "threshold_",
+                "schedule_",
+            ];
+            for prefix in prefixes {
+                if dev.device_id.starts_with(prefix) {
+                    dev.device_type = Some(prefix.trim_end_matches('_').to_string());
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if !changed { continue; }
+
         if let Err(e) = store.upsert_device(&dev).await {
             warn!(device_id = %dev.device_id, error = %e, "Glue migration: failed to update device");
         } else {
@@ -303,6 +323,6 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
     }
 
     if migrated > 0 {
-        info!(migrated, "Glue migration: updated legacy plugin_ids to core.glue");
+        info!(migrated, "Glue migration: updated legacy devices (plugin_id / device_type)");
     }
 }
