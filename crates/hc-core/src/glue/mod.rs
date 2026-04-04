@@ -10,8 +10,13 @@
 //! - Persists state in redb (survives restarts)
 //! - Emits `DeviceStateChanged` events (triggers rules like any other device)
 
+pub mod button;
 pub mod counter;
+pub mod datetime;
+pub mod number;
+pub mod select;
 pub mod switch;
+pub mod text;
 pub mod timer;
 
 use crate::EventBus;
@@ -123,21 +128,24 @@ impl GlueManager {
     /// Drive the glue device event loop. Dispatches commands to type-specific handlers.
     pub async fn start(self) {
         let mut rx = self.internal_bus.subscribe();
-        info!("GlueManager started (timer + switch + counter)");
+        info!("GlueManager started (counter, number, select, text, button, datetime)");
         loop {
             match rx.recv().await {
                 Ok(Event::MqttMessage { topic, payload, .. }) => {
-                    // Timer: timer_*
-                    if let Some(device_id) = parse_glue_cmd_topic(&topic, timer::TIMER_ID_PREFIX) {
-                        timer::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    }
-                    // Switch: switch_*
-                    else if let Some(device_id) = parse_glue_cmd_topic(&topic, switch::SWITCH_ID_PREFIX) {
-                        switch::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    }
-                    // Counter: counter_*
-                    else if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
+                    // Timer: timer_* — handled by TimerManager (not here)
+                    // Switch: switch_* — handled by SwitchManager (not here)
+                    if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
                         counter::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, number::NUMBER_ID_PREFIX) {
+                        number::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, select::SELECT_ID_PREFIX) {
+                        select::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, text::TEXT_ID_PREFIX) {
+                        text::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, button::BUTTON_ID_PREFIX) {
+                        button::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, datetime::DATETIME_ID_PREFIX) {
+                        datetime::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
                     }
                 }
                 Ok(_) => {}
