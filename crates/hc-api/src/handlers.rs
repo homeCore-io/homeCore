@@ -4485,27 +4485,39 @@ pub async fn get_plugin_config(
     _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let map = s.plugins.read().await;
-    let Some(rec) = map.get(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+    let (config_path, managed) = {
+        let map = s.plugins.read().await;
+        let Some(rec) = map.get(&id) else {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+        };
+        (rec.config_path.clone(), rec.managed)
     };
-    let Some(ref path) = rec.config_path else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response();
-    };
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            match content.parse::<toml::Value>() {
+
+    // Local plugin: read config file directly.
+    if let Some(ref path) = config_path {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            return match content.parse::<toml::Value>() {
                 Ok(parsed) => {
                     let json_val = serde_json::to_value(parsed).unwrap_or_default();
                     (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "toml", "config": json_val }))).into_response()
                 }
                 Err(e) => {
-                    // Return raw content if TOML parse fails
                     (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "raw", "raw": content, "parse_error": e.to_string() }))).into_response()
                 }
-            }
+            };
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to read config: {e}") }))).into_response(),
+    }
+
+    // Remote plugin: use MQTT management RPC.
+    if let Some(ref rpc) = s.management_rpc {
+        match rpc.get_config(&id).await {
+            Ok(resp) => (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "remote", "config": resp.get("data").cloned().unwrap_or(resp) }))).into_response(),
+            Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
+        }
+    } else if !managed {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "remote config not available — management RPC not configured" }))).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response()
     }
 }
 
@@ -4515,31 +4527,46 @@ pub async fn put_plugin_config(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let map = s.plugins.read().await;
-    let Some(rec) = map.get(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
-    };
-    let Some(ref path) = rec.config_path else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response();
-    };
-
-    // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
-    let toml_str = if let Some(raw) = body["raw"].as_str() {
-        raw.to_string()
-    } else if let Some(config) = body.get("config") {
-        let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
-            Ok(v) => v,
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid config: {e}") }))).into_response(),
+    let (config_path, managed) = {
+        let map = s.plugins.read().await;
+        let Some(rec) = map.get(&id) else {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
         };
-        toml::to_string_pretty(&toml_val).unwrap_or_default()
-    } else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "provide 'config' (JSON object) or 'raw' (TOML string)" }))).into_response();
+        (rec.config_path.clone(), rec.managed)
     };
 
-    let path = path.clone();
-    match std::fs::write(&path, &toml_str) {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to write config: {e}") }))).into_response(),
+    // Local plugin: write config file directly.
+    if let Some(ref path) = config_path {
+        // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
+        let toml_str = if let Some(raw) = body["raw"].as_str() {
+            raw.to_string()
+        } else if let Some(config) = body.get("config") {
+            let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
+                Ok(v) => v,
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid config: {e}") }))).into_response(),
+            };
+            toml::to_string_pretty(&toml_val).unwrap_or_default()
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "provide 'config' (JSON object) or 'raw' (TOML string)" }))).into_response();
+        };
+
+        return match std::fs::write(path, &toml_str) {
+            Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to write config: {e}") }))).into_response(),
+        };
+    }
+
+    // Remote plugin: use MQTT management RPC.
+    if let Some(ref rpc) = s.management_rpc {
+        let config = body.get("config").cloned().unwrap_or(body.clone());
+        match rpc.set_config(&id, config).await {
+            Ok(_) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
+            Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
+        }
+    } else if !managed {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "remote config not available" }))).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response()
     }
 }
 

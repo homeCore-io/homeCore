@@ -1018,6 +1018,8 @@ async fn main() -> Result<()> {
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
     };
+    let publish_handle_rpc = publish_handle.clone();
+    let pub_bus_rpc = pub_bus.clone();
     let app_state = AppState::new_with_plugins(
         store,
         pub_bus,
@@ -1049,7 +1051,11 @@ async fn main() -> Result<()> {
     } else {
         app_state
     }
-    .with_plugin_commands(plugin_commands);
+    .with_plugin_commands(plugin_commands)
+    .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
+        publish_handle_rpc,
+        &pub_bus_rpc,
+    ));
     let api_host = config.server.host.clone();
     let api_port = config.server.port;
     let drain_timeout_secs = config.shutdown.drain_timeout_secs;

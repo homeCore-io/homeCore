@@ -190,6 +190,42 @@ impl StateBridge {
             }
         }
 
+        // homecore/plugins/{id}/manage/response
+        if parts.len() >= 5
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "manage"
+            && parts[4] == "response"
+        {
+            if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(payload) {
+                let _ = self.pub_bus.publish(Event::Custom {
+                    timestamp: Utc::now(),
+                    event_type: "plugin_management_response".to_string(),
+                    payload: resp,
+                });
+            }
+            return Ok(());
+        }
+
+        // homecore/plugins/{id}/heartbeat
+        if parts.len() >= 4
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "heartbeat"
+        {
+            let plugin_id = parts[2];
+            if let Ok(hb) = serde_json::from_slice::<serde_json::Value>(payload) {
+                let _ = self.pub_bus.publish(Event::PluginHeartbeat {
+                    timestamp: Utc::now(),
+                    plugin_id: plugin_id.to_string(),
+                    version: hb["version"].as_str().map(str::to_string),
+                    uptime_secs: hb["uptime_secs"].as_u64(),
+                    device_count: hb["device_count"].as_u64().map(|n| n as u32),
+                });
+            }
+            return Ok(());
+        }
+
         // homecore/plugins/{id}/register | unregister
         if parts.len() >= 4
             && parts[0] == "homecore"

@@ -155,6 +155,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::SceneActivated { .. } => "scene_activated",
         Event::PluginRegistered { .. } => "plugin_registered",
         Event::PluginOffline { .. } => "plugin_offline",
+        Event::PluginHeartbeat { .. } => "plugin_heartbeat",
         Event::PluginStatusChanged { .. } => "plugin_status_changed",
         Event::DeviceNameChanged { .. } => "device_name_changed",
         Event::Custom { .. } => "custom",

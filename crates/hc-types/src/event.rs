@@ -66,6 +66,17 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
     },
+    /// A plugin sent a heartbeat on MQTT (internal only, not forwarded to WS clients).
+    PluginHeartbeat {
+        timestamp: DateTime<Utc>,
+        plugin_id: String,
+        /// Self-reported plugin version.
+        version: Option<String>,
+        /// Plugin uptime in seconds.
+        uptime_secs: Option<u64>,
+        /// Number of devices managed by this plugin.
+        device_count: Option<u32>,
+    },
     /// A plugin's status changed (started, stopped, offline, etc.).
     PluginStatusChanged {
         timestamp: DateTime<Utc>,
@@ -183,6 +194,7 @@ impl Event {
             | Event::DeviceCommandSent { timestamp, .. }
             | Event::ModeChanged { timestamp, .. }
             | Event::TimerStateChanged { timestamp, .. }
+            | Event::PluginHeartbeat { timestamp, .. }
             | Event::PluginStatusChanged { timestamp, .. } => *timestamp,
         }
     }

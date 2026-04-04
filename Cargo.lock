@@ -2838,11 +2838,13 @@ name = "plugin-sdk-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hc-types",
  "rumqttc",
  "serde",
  "serde_json",
  "tokio",
+ "toml 0.8.23",
  "tracing",
 ]
 

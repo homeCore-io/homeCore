@@ -116,6 +116,16 @@ impl DevicePublisher {
     }
 }
 
+/// Handle returned by [`PluginClient::enable_management`].
+///
+/// Pass this to [`PluginClient::run_managed`] to automatically handle
+/// `get_config`, `set_config`, and `set_log_level` management commands.
+#[derive(Clone)]
+pub struct ManagementHandle {
+    plugin_id: String,
+    config_path: Option<String>,
+}
+
 /// Connection configuration for a plugin.
 #[derive(Debug, Clone)]
 pub struct PluginConfig {
@@ -370,6 +380,57 @@ impl PluginClient {
         }
     }
 
+    /// Enable the management protocol: heartbeat publisher + command listener.
+    ///
+    /// Call this **before** `run()`.  The heartbeat is published every
+    /// `interval_secs` seconds to `homecore/plugins/{id}/heartbeat`.
+    /// Management commands arrive on `homecore/plugins/{id}/manage/cmd` and are
+    /// dispatched inside `run()` via the provided callbacks.
+    ///
+    /// `config_path` is the plugin's config file path — used to implement
+    /// `get_config` and `set_config` commands automatically.
+    pub async fn enable_management(
+        &self,
+        interval_secs: u64,
+        version: Option<String>,
+        config_path: Option<String>,
+    ) -> Result<ManagementHandle> {
+        // Subscribe to management command topic.
+        let topic = format!("homecore/plugins/{}/manage/cmd", self.config.plugin_id);
+        self.client
+            .subscribe(&topic, QoS::AtLeastOnce)
+            .await
+            .context("subscribe management/cmd failed")?;
+
+        // Spawn heartbeat publisher.
+        let hb_client = self.client.clone();
+        let hb_plugin_id = self.config.plugin_id.clone();
+        let hb_version = version.clone();
+        let started_at = std::time::Instant::now();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                let uptime_secs = started_at.elapsed().as_secs();
+                let payload = serde_json::json!({
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "version": hb_version,
+                    "uptime_secs": uptime_secs,
+                });
+                let topic = format!("homecore/plugins/{hb_plugin_id}/heartbeat");
+                let _ = hb_client
+                    .publish(&topic, QoS::AtMostOnce, false, serde_json::to_vec(&payload).unwrap_or_default())
+                    .await;
+            }
+        });
+
+        info!(plugin_id = %self.config.plugin_id, "Management protocol enabled (heartbeat every {interval_secs}s)");
+        Ok(ManagementHandle {
+            plugin_id: self.config.plugin_id.clone(),
+            config_path,
+        })
+    }
+
     /// Subscribe to command messages for a device.
     pub async fn subscribe_commands(&self, device_id: &str) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/cmd");
@@ -389,15 +450,39 @@ impl PluginClient {
     where
         F: Fn(String, Value) + Send + Sync + 'static,
     {
-        info!(plugin_id = %self.config.plugin_id, "Plugin event loop starting");
+        self.run_inner(on_command, None).await
+    }
+
+    /// Like [`run`], but also handles management protocol commands (heartbeat
+    /// responses, config read/write, log level changes).
+    ///
+    /// Pass the [`ManagementHandle`] returned by [`enable_management`].
+    pub async fn run_managed<F>(mut self, on_command: F, mgmt: ManagementHandle) -> Result<()>
+    where
+        F: Fn(String, Value) + Send + Sync + 'static,
+    {
+        self.run_inner(on_command, Some(mgmt)).await
+    }
+
+    async fn run_inner<F>(
+        &mut self,
+        on_command: F,
+        mgmt: Option<ManagementHandle>,
+    ) -> Result<()>
+    where
+        F: Fn(String, Value) + Send + Sync + 'static,
+    {
+        let plugin_id = self.config.plugin_id.clone();
+        info!(plugin_id = %plugin_id, "Plugin event loop starting");
         loop {
             match self.eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => {
                     info!("Plugin connected to broker");
                 }
                 Ok(rumqttc::Event::Incoming(Packet::Publish(p))) => {
+                    let parts: Vec<&str> = p.topic.split('/').collect();
+
                     // homecore/devices/{id}/cmd
-                    let parts: Vec<&str> = p.topic.splitn(4, '/').collect();
                     if parts.len() == 4
                         && parts[0] == "homecore"
                         && parts[1] == "devices"
@@ -408,6 +493,33 @@ impl PluginClient {
                             Ok(cmd) => on_command(device_id, cmd),
                             Err(e) => warn!(topic = %p.topic, error = %e, "Non-JSON cmd payload"),
                         }
+                        continue;
+                    }
+
+                    // homecore/plugins/{id}/manage/cmd
+                    if let Some(ref mgmt) = mgmt {
+                        if parts.len() == 5
+                            && parts[0] == "homecore"
+                            && parts[1] == "plugins"
+                            && parts[3] == "manage"
+                            && parts[4] == "cmd"
+                        {
+                            if let Ok(cmd) = serde_json::from_slice::<Value>(&p.payload) {
+                                let resp = handle_management_cmd(mgmt, &cmd);
+                                let resp_topic = format!(
+                                    "homecore/plugins/{}/manage/response",
+                                    mgmt.plugin_id
+                                );
+                                let _ = self.client
+                                    .publish(
+                                        &resp_topic,
+                                        QoS::AtLeastOnce,
+                                        false,
+                                        serde_json::to_vec(&resp).unwrap_or_default(),
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -417,5 +529,98 @@ impl PluginClient {
                 }
             }
         }
+    }
+}
+
+/// Handle a management command and return a JSON response.
+fn handle_management_cmd(mgmt: &ManagementHandle, cmd: &Value) -> Value {
+    let action = cmd["action"].as_str().unwrap_or("");
+    let request_id = cmd["request_id"].as_str().unwrap_or("").to_string();
+
+    match action {
+        "ping" => serde_json::json!({
+            "request_id": request_id,
+            "status": "ok",
+        }),
+        "get_config" => {
+            if let Some(ref path) = mgmt.config_path {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => serde_json::json!({
+                        "request_id": request_id,
+                        "status": "ok",
+                        "data": content,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "request_id": request_id,
+                        "status": "error",
+                        "error": format!("failed to read config: {e}"),
+                    }),
+                }
+            } else {
+                serde_json::json!({
+                    "request_id": request_id,
+                    "status": "error",
+                    "error": "no config path configured",
+                })
+            }
+        }
+        "set_config" => {
+            if let Some(ref path) = mgmt.config_path {
+                let config_str = if let Some(s) = cmd["config"].as_str() {
+                    s.to_string()
+                } else if let Some(obj) = cmd["config"].as_object() {
+                    // JSON object → TOML
+                    let toml_val: toml::Value = match serde_json::from_value(Value::Object(obj.clone())) {
+                        Ok(v) => v,
+                        Err(e) => return serde_json::json!({
+                            "request_id": request_id,
+                            "status": "error",
+                            "error": format!("invalid config: {e}"),
+                        }),
+                    };
+                    toml::to_string_pretty(&toml_val).unwrap_or_default()
+                } else {
+                    return serde_json::json!({
+                        "request_id": request_id,
+                        "status": "error",
+                        "error": "missing 'config' field",
+                    });
+                };
+                match std::fs::write(path, &config_str) {
+                    Ok(()) => serde_json::json!({
+                        "request_id": request_id,
+                        "status": "ok",
+                    }),
+                    Err(e) => serde_json::json!({
+                        "request_id": request_id,
+                        "status": "error",
+                        "error": format!("failed to write config: {e}"),
+                    }),
+                }
+            } else {
+                serde_json::json!({
+                    "request_id": request_id,
+                    "status": "error",
+                    "error": "no config path configured",
+                })
+            }
+        }
+        "set_log_level" => {
+            let level = cmd["level"].as_str().unwrap_or("info");
+            // Log level changes would need tracing subscriber reload — for now
+            // just acknowledge receipt. Actual runtime log level change requires
+            // tracing-subscriber's reload layer, which is plugin-specific.
+            info!(level, "Management: log level change requested (requires restart)");
+            serde_json::json!({
+                "request_id": request_id,
+                "status": "ok",
+                "note": "log level change acknowledged; restart required to take effect",
+            })
+        }
+        _ => serde_json::json!({
+            "request_id": request_id,
+            "status": "error",
+            "error": format!("unknown action: {action}"),
+        }),
     }
 }

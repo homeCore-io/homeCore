@@ -27,6 +27,7 @@ pub mod group_store;
 pub mod handlers;
 pub mod logs;
 pub mod managed_modes;
+pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
 pub mod rule_file_store;
@@ -151,6 +152,8 @@ pub struct AppState {
     pub calendar_expansion_days: u32,
     /// Per-plugin command channels for start/stop/restart (local plugins only).
     pub plugin_commands: PluginCommandChannels,
+    /// MQTT management RPC for remote plugin config/commands.
+    pub management_rpc: Option<management_rpc::ManagementRpc>,
 }
 
 impl AppState {
@@ -230,9 +233,78 @@ impl AppState {
                                 rec.status = "offline".into();
                             }
                         }
+                        Ok(hc_types::event::Event::PluginHeartbeat {
+                            plugin_id,
+                            timestamp,
+                            version,
+                            uptime_secs,
+                            device_count,
+                        }) => {
+                            let mut map = plugins_clone.write().await;
+                            let rec = map.entry(plugin_id.clone()).or_insert_with(|| PluginRecord {
+                                plugin_id: plugin_id.clone(),
+                                registered_at: timestamp,
+                                status: "active".into(),
+                                enabled: false,
+                                managed: false,
+                                config_path: None,
+                                binary_path: None,
+                                last_heartbeat: None,
+                                last_restart: None,
+                                restart_count: 0,
+                                uptime_started: None,
+                                device_count: 0,
+                                log_level: None,
+                                version: None,
+                                supports_management: false,
+                            });
+                            rec.last_heartbeat = Some(timestamp);
+                            rec.supports_management = true;
+                            if let Some(v) = version { rec.version = Some(v); }
+                            if let Some(u) = uptime_secs {
+                                rec.uptime_started = Some(timestamp - chrono::Duration::seconds(u as i64));
+                            }
+                            if let Some(d) = device_count { rec.device_count = d; }
+                            // If plugin was offline, mark it active again.
+                            if rec.status == "offline" {
+                                rec.status = "active".into();
+                            }
+                        }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
+        // Spawn heartbeat timeout sweep — marks plugins offline if no heartbeat
+        // received within 90 seconds (for plugins that support management).
+        {
+            let plugins_sweep = Arc::clone(&plugins);
+            let bus_sweep = event_bus.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let now = chrono::Utc::now();
+                    let timeout = chrono::Duration::seconds(90);
+                    let mut map = plugins_sweep.write().await;
+                    for rec in map.values_mut() {
+                        if !rec.supports_management { continue; }
+                        if rec.status == "stopped" { continue; }
+                        if let Some(hb) = rec.last_heartbeat {
+                            if now - hb > timeout && rec.status != "offline" {
+                                let prev = rec.status.clone();
+                                rec.status = "offline".into();
+                                let _ = bus_sweep.publish(hc_types::event::Event::PluginStatusChanged {
+                                    timestamp: now,
+                                    plugin_id: rec.plugin_id.clone(),
+                                    status: "offline".into(),
+                                    previous_status: prev,
+                                });
+                            }
+                        }
                     }
                 }
             });
@@ -285,6 +357,7 @@ impl AppState {
             calendar_dir: None,
             calendar_expansion_days: 400,
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
+            management_rpc: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -341,6 +414,11 @@ impl AppState {
 
     pub fn with_plugin_commands(mut self, channels: PluginCommandChannels) -> Self {
         self.plugin_commands = channels;
+        self
+    }
+
+    pub fn with_management_rpc(mut self, rpc: management_rpc::ManagementRpc) -> Self {
+        self.management_rpc = Some(rpc);
         self
     }
 }
