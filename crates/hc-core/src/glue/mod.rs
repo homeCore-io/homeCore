@@ -11,6 +11,7 @@
 //! - Emits `DeviceStateChanged` events (triggers rules like any other device)
 
 pub mod button;
+pub mod config;
 pub mod counter;
 pub mod datetime;
 pub mod group;

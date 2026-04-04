@@ -1,0 +1,42 @@
+# Glue Devices — helper devices for automation logic.
+#
+# Devices declared here are seeded into the state store on startup.
+# If a device already exists (created via API or previous startup),
+# it is skipped — runtime changes are preserved.
+#
+# Supported types: switch, timer, counter, number, select, text,
+#                  button, datetime, group, threshold, schedule
+
+# ── Timers ────────────────────────────────────────────────────────────────────
+
+[[glue]]
+type = "timer"
+id   = "timer_bathroom"
+name = "Bathroom Timer"
+
+[[glue]]
+type = "timer"
+id   = "timer_deck_lights_off"
+name = "Deck Lights Off Timer"
+
+[[glue]]
+type = "timer"
+id   = "timer_garage_close"
+name = "Garage Auto-Close Timer"
+
+[[glue]]
+type = "timer"
+id   = "timer_garage_lights"
+name = "Garage Lights Timer"
+
+# ── Switches ──────────────────────────────────────────────────────────────────
+
+[[glue]]
+type = "switch"
+id   = "switch_any_deck_door_open"
+name = "Any Deck Door Open"
+
+[[glue]]
+type = "switch"
+id   = "switch_auto_garage_door"
+name = "Auto Garage Door"

@@ -752,6 +752,7 @@ async fn main() -> Result<()> {
     let rules = rule_resolver::compile_rules_for_store(&store, rules).await?;
 
     let modes_path = base_dir.join("config").join("modes.toml");
+    let glue_path = base_dir.join("config").join("glue.toml");
 
     // ── Graceful shutdown channel ──────────────────────────────────────────
     //
@@ -777,6 +778,7 @@ async fn main() -> Result<()> {
     )
     .with_location(config.location.latitude, config.location.longitude)
     .with_modes(modes_path.clone())
+    .with_glue(glue_path)
     .with_startup_delay(config.startup.plugin_ready_delay_secs)
     .with_drain_timeout(config.shutdown.drain_timeout_secs)
     .with_catchup_window(config.scheduler.catchup_window_minutes)

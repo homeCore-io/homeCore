@@ -77,6 +77,7 @@ pub struct Core {
     device_types: Option<Arc<DeviceTypeRegistry>>,
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
+    glue_path: Option<std::path::PathBuf>,
     startup_delay_secs: u64,
     /// Minutes back from startup to search for missed time-based triggers.
     /// 0 disables catch-up entirely.  Default: 15.
@@ -112,6 +113,7 @@ impl Core {
             device_types: None,
             notify: None,
             modes_path: None,
+            glue_path: None,
             startup_delay_secs: 10,
             catchup_window_minutes: 15,
             shutdown_rx: None,
@@ -159,6 +161,11 @@ impl Core {
 
     pub fn with_modes(mut self, path: std::path::PathBuf) -> Self {
         self.modes_path = Some(path);
+        self
+    }
+
+    pub fn with_glue(mut self, path: std::path::PathBuf) -> Self {
+        self.glue_path = Some(path);
         self
     }
 
@@ -312,6 +319,13 @@ impl Core {
             self.state.clone(),
         );
         tokio::spawn(timer_mgr.start());
+
+        // Load glue device definitions from config/glue.toml (seed-only).
+        if let Some(glue_path) = self.glue_path.as_ref() {
+            if let Err(e) = glue::config::load_glue_config(glue_path, &self.state).await {
+                warn!(error = %e, "Failed to load glue.toml");
+            }
+        }
 
         // Glue manager: unified handler for switches, counters, and all other
         // glue device types. Replaces the old SwitchManager.
