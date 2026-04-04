@@ -79,9 +79,14 @@ fn load_mode_definitions_response(state: &AppState) -> Result<Vec<ModeDefinition
 
 fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
     if device.device_type.is_none() {
+        // Legacy devices that haven't been migrated yet.
         if device.plugin_id == "core.switch" {
-            device.device_type = Some("virtual_switch".to_string());
+            device.device_type = Some("switch".to_string());
         } else if device.plugin_id == "core.timer" {
+            device.device_type = Some("timer".to_string());
+        } else if device.device_id.starts_with("switch_") {
+            device.device_type = Some("switch".to_string());
+        } else if device.device_id.starts_with("timer_") {
             device.device_type = Some("timer".to_string());
         }
     } else if let Some(device_type) = device.device_type.as_deref() {
@@ -718,7 +723,7 @@ pub async fn create_timer(
     }
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
-    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.timer");
+    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
     dev.device_type = Some("timer".to_string());
     dev.available = true;
     dev.attributes.insert("state".into(), json!("idle"));
@@ -741,7 +746,7 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
         Ok(devices) => {
             let timers: Vec<_> = devices
                 .into_iter()
-                .filter(|d| d.plugin_id == "core.timer")
+                .filter(|d| d.plugin_id == "core.timer" || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("timer")))
                 .map(normalize_native_device_type)
                 .map(compute_timer_remaining)
                 .collect();
@@ -844,7 +849,7 @@ pub async fn create_switch(
     }
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
-    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.switch");
+    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
     dev.device_type = Some("virtual_switch".to_string());
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
@@ -864,7 +869,7 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
         Ok(devices) => {
             let switches: Vec<_> = devices
                 .into_iter()
-                .filter(|d| d.plugin_id == "core.switch")
+                .filter(|d| d.plugin_id == "core.switch" || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("switch")))
                 .map(normalize_native_device_type)
                 .collect();
             (StatusCode::OK, Json(json!(switches)))

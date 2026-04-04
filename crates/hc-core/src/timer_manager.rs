@@ -158,7 +158,10 @@ impl TimerManager {
         };
 
         for dev in devices {
-            if dev.plugin_id != TIMER_PLUGIN_ID {
+            // Accept both legacy core.timer and new core.glue timer devices.
+            let is_timer = dev.plugin_id == TIMER_PLUGIN_ID
+                || (dev.plugin_id == "core.glue" && dev.device_id.starts_with("timer_"));
+            if !is_timer {
                 continue;
             }
             let state_str = dev

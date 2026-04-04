@@ -25,11 +25,11 @@ pub mod timer;
 use crate::EventBus;
 use chrono::Utc;
 use hc_state::StateStore;
-use hc_types::device::{DeviceChange};
+use hc_types::device::DeviceChange;
 use hc_types::event::Event;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub const GLUE_PLUGIN_ID: &str = "core.glue";
 
@@ -144,8 +144,11 @@ impl GlueManager {
                     match event {
                         Ok(Event::MqttMessage { topic, payload, .. }) => {
                             // Command dispatch by device ID prefix.
-                            // Timer/Switch handled by their own managers.
-                            if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
+                            // Timer: handled by TimerManager (complex async countdown tasks).
+                            // Switch: handled here (migrated from SwitchManager).
+                            if let Some(device_id) = parse_glue_cmd_topic(&topic, switch::SWITCH_ID_PREFIX) {
+                                switch::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
                                 counter::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
                             } else if let Some(device_id) = parse_glue_cmd_topic(&topic, number::NUMBER_ID_PREFIX) {
                                 number::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
@@ -225,5 +228,39 @@ impl GlueManager {
                 schedule::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
             }
         }
+    }
+}
+
+// ── Migration ────────────────────────────────────────────────────────────────
+
+/// Migrate legacy `core.switch` devices to `core.glue` plugin_id.
+/// Called once on startup. Idempotent — skips devices already migrated.
+pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
+    let devices = match store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => { warn!(error = %e, "Glue migration: failed to list devices"); return; }
+    };
+
+    let mut migrated = 0u32;
+    for mut dev in devices {
+        let old_pid = dev.plugin_id.as_str();
+        let (new_pid, new_dt) = match old_pid {
+            "core.switch" => ("core.glue", Some("switch")),
+            _ => continue,
+        };
+
+        dev.plugin_id = new_pid.to_string();
+        if let Some(dt) = new_dt {
+            dev.device_type = Some(dt.to_string());
+        }
+        if let Err(e) = store.upsert_device(&dev).await {
+            warn!(device_id = %dev.device_id, error = %e, "Glue migration: failed to update device");
+        } else {
+            migrated += 1;
+        }
+    }
+
+    if migrated > 0 {
+        info!(migrated, "Glue migration: updated legacy plugin_ids to core.glue");
     }
 }
