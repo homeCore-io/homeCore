@@ -885,6 +885,8 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
 
 /// Glue device type prefixes and their default attributes.
 const GLUE_TYPES: &[(&str, &str, &str)] = &[
+    ("switch",   "switch_",   "switch"),
+    ("timer",    "timer_",    "timer"),
     ("counter",  "counter_",  "counter"),
     ("number",   "number_",   "number"),
     ("select",   "select_",   "select"),
@@ -938,6 +940,15 @@ pub async fn create_glue(
 
     // Set type-specific default attributes.
     match body.glue_type.as_str() {
+        "switch" => {
+            dev.attributes.insert("on".into(), json!(false));
+        }
+        "timer" => {
+            dev.attributes.insert("state".into(), json!("idle"));
+            dev.attributes.insert("duration_secs".into(), json!(0_u64));
+            dev.attributes.insert("remaining_secs".into(), json!(0_u64));
+            dev.attributes.insert("repeat".into(), json!(false));
+        }
         "counter" => {
             dev.attributes.insert("count".into(), json!(0));
             dev.attributes.insert("step".into(), body.config.get("step").cloned().unwrap_or(json!(1)));
