@@ -29,7 +29,7 @@ use hc_types::device::DeviceChange;
 use hc_types::event::Event;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub const GLUE_PLUGIN_ID: &str = "core.glue";
 
