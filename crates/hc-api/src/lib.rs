@@ -310,6 +310,12 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
             "/switches",
             get(handlers::list_switches).post(handlers::create_switch),
         )
+        // Glue devices (unified CRUD for all glue device types)
+        .route(
+            "/glue",
+            get(handlers::list_glue).post(handlers::create_glue),
+        )
+        .route("/glue/:id", delete(handlers::delete_glue))
         // Modes (mode devices are also visible via /devices)
         .route(
             "/modes",

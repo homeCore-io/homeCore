@@ -13,10 +13,13 @@
 pub mod button;
 pub mod counter;
 pub mod datetime;
+pub mod group;
 pub mod number;
+pub mod schedule;
 pub mod select;
 pub mod switch;
 pub mod text;
+pub mod threshold;
 pub mod timer;
 
 use crate::EventBus;
@@ -125,34 +128,101 @@ impl GlueManager {
         }
     }
 
-    /// Drive the glue device event loop. Dispatches commands to type-specific handlers.
+    /// Drive the glue device event loop. Dispatches commands to type-specific handlers
+    /// and recalculates reactive devices (groups, thresholds) on state changes.
     pub async fn start(self) {
         let mut rx = self.internal_bus.subscribe();
-        info!("GlueManager started (counter, number, select, text, button, datetime)");
+
+        // Schedule tick — check schedule devices every 30 seconds.
+        let mut schedule_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        schedule_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        info!("GlueManager started");
         loop {
-            match rx.recv().await {
-                Ok(Event::MqttMessage { topic, payload, .. }) => {
-                    // Timer: timer_* — handled by TimerManager (not here)
-                    // Switch: switch_* — handled by SwitchManager (not here)
-                    if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
-                        counter::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, number::NUMBER_ID_PREFIX) {
-                        number::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, select::SELECT_ID_PREFIX) {
-                        select::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, text::TEXT_ID_PREFIX) {
-                        text::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, button::BUTTON_ID_PREFIX) {
-                        button::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
-                    } else if let Some(device_id) = parse_glue_cmd_topic(&topic, datetime::DATETIME_ID_PREFIX) {
-                        datetime::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Ok(Event::MqttMessage { topic, payload, .. }) => {
+                            // Command dispatch by device ID prefix.
+                            // Timer/Switch handled by their own managers.
+                            if let Some(device_id) = parse_glue_cmd_topic(&topic, counter::COUNTER_ID_PREFIX) {
+                                counter::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, number::NUMBER_ID_PREFIX) {
+                                number::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, select::SELECT_ID_PREFIX) {
+                                select::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, text::TEXT_ID_PREFIX) {
+                                text::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, button::BUTTON_ID_PREFIX) {
+                                button::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, datetime::DATETIME_ID_PREFIX) {
+                                datetime::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            } else if let Some(device_id) = parse_glue_cmd_topic(&topic, group::GROUP_ID_PREFIX) {
+                                group::handle_cmd(&self.state, &self.pub_bus, &device_id, &payload).await;
+                            }
+                        }
+                        Ok(Event::DeviceStateChanged { device_id, .. }) => {
+                            // Reactive recalculation: when any device's state changes,
+                            // check if it's a member of a group or source of a threshold.
+                            // Skip if the changed device is itself a group/threshold
+                            // (avoid infinite loops).
+                            if !device_id.starts_with(group::GROUP_ID_PREFIX)
+                                && !device_id.starts_with(threshold::THRESHOLD_ID_PREFIX)
+                            {
+                                self.recalculate_dependents(&device_id).await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("GlueManager lagged by {n} events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("GlueManager lagged by {n} events");
+                _ = schedule_tick.tick() => {
+                    self.tick_schedules().await;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
+
+    /// Recalculate groups and thresholds that depend on a changed device.
+    async fn recalculate_dependents(&self, changed_device_id: &str) {
+        // Scan for group and threshold devices that reference this device.
+        // This is a linear scan — acceptable for small numbers of glue devices.
+        let devices = match self.state.list_devices().await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        for dev in &devices {
+            if dev.device_id.starts_with(group::GROUP_ID_PREFIX) {
+                let is_member = dev.attributes.get("member_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().any(|v| v.as_str() == Some(changed_device_id)))
+                    .unwrap_or(false);
+                if is_member {
+                    group::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
+                }
+            } else if dev.device_id.starts_with(threshold::THRESHOLD_ID_PREFIX) {
+                let is_source = dev.attributes.get("source_device_id")
+                    .and_then(|v| v.as_str()) == Some(changed_device_id);
+                if is_source {
+                    threshold::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
+                }
+            }
+        }
+    }
+
+    /// Tick all schedule devices to update their active state.
+    async fn tick_schedules(&self) {
+        let devices = match self.state.list_devices().await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        for dev in &devices {
+            if dev.device_id.starts_with(schedule::SCHEDULE_ID_PREFIX) {
+                schedule::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
             }
         }
     }

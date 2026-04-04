@@ -876,6 +876,148 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
     }
 }
 
+// ---------- Glue Devices ----------
+
+/// Glue device type prefixes and their default attributes.
+const GLUE_TYPES: &[(&str, &str, &str)] = &[
+    ("counter",  "counter_",  "counter"),
+    ("number",   "number_",   "number"),
+    ("select",   "select_",   "select"),
+    ("text",     "text_",     "text"),
+    ("button",   "button_",   "button"),
+    ("datetime", "datetime_", "datetime"),
+    ("group",    "group_",    "group"),
+    ("threshold","threshold_","threshold"),
+    ("schedule", "schedule_", "schedule"),
+];
+
+#[derive(Debug, Deserialize)]
+pub struct CreateGlueBody {
+    /// Device type: "counter", "number", "select", "text", "button", "datetime", "group", "threshold", "schedule".
+    #[serde(rename = "type")]
+    pub glue_type: String,
+    /// Device ID slug (prefix auto-added if missing).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Type-specific initial attributes (step, min, max, options, members, etc.).
+    #[serde(default)]
+    pub config: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `POST /api/v1/glue` — create a new glue device.
+pub async fn create_glue(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Json(body): Json<CreateGlueBody>,
+) -> impl IntoResponse {
+    let type_info = match GLUE_TYPES.iter().find(|(t, _, _)| *t == body.glue_type) {
+        Some(info) => info,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("unknown glue type: {}", body.glue_type) }))).into_response(),
+    };
+    let (_, prefix, device_type) = type_info;
+
+    let device_id = if body.id.starts_with(prefix) {
+        body.id.clone()
+    } else {
+        format!("{prefix}{}", body.id)
+    };
+
+    if let Ok(Some(_)) = s.store.get_device(&device_id).await {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "device already exists" }))).into_response();
+    }
+
+    let mut dev = hc_types::device::DeviceState::new(&device_id, &body.name, "core.glue");
+    dev.device_type = Some(device_type.to_string());
+    dev.available = true;
+
+    // Set type-specific default attributes.
+    match body.glue_type.as_str() {
+        "counter" => {
+            dev.attributes.insert("count".into(), json!(0));
+            dev.attributes.insert("step".into(), body.config.get("step").cloned().unwrap_or(json!(1)));
+            if let Some(v) = body.config.get("min") { dev.attributes.insert("min".into(), v.clone()); }
+            if let Some(v) = body.config.get("max") { dev.attributes.insert("max".into(), v.clone()); }
+        }
+        "number" => {
+            dev.attributes.insert("value".into(), body.config.get("value").cloned().unwrap_or(json!(0.0)));
+            dev.attributes.insert("min".into(), body.config.get("min").cloned().unwrap_or(json!(0.0)));
+            dev.attributes.insert("max".into(), body.config.get("max").cloned().unwrap_or(json!(100.0)));
+            dev.attributes.insert("step".into(), body.config.get("step").cloned().unwrap_or(json!(1.0)));
+            if let Some(v) = body.config.get("unit") { dev.attributes.insert("unit".into(), v.clone()); }
+        }
+        "select" => {
+            let options = body.config.get("options").cloned().unwrap_or(json!([]));
+            let first = options.as_array().and_then(|a| a.first()).cloned().unwrap_or(json!(""));
+            dev.attributes.insert("selected".into(), first);
+            dev.attributes.insert("options".into(), options);
+        }
+        "text" => {
+            dev.attributes.insert("value".into(), json!(""));
+            if let Some(v) = body.config.get("max_length") { dev.attributes.insert("max_length".into(), v.clone()); }
+        }
+        "button" => {
+            dev.attributes.insert("last_pressed".into(), json!(null));
+        }
+        "datetime" => {
+            dev.attributes.insert("value".into(), json!(""));
+            dev.attributes.insert("has_date".into(), body.config.get("has_date").cloned().unwrap_or(json!(true)));
+            dev.attributes.insert("has_time".into(), body.config.get("has_time").cloned().unwrap_or(json!(true)));
+        }
+        "group" => {
+            dev.attributes.insert("on".into(), json!(false));
+            dev.attributes.insert("member_ids".into(), body.config.get("members").cloned().unwrap_or(json!([])));
+            dev.attributes.insert("attribute".into(), body.config.get("attribute").cloned().unwrap_or(json!("on")));
+            dev.attributes.insert("mode".into(), body.config.get("mode").cloned().unwrap_or(json!("any")));
+            dev.attributes.insert("active_count".into(), json!(0));
+            dev.attributes.insert("member_count".into(), json!(0));
+        }
+        "threshold" => {
+            dev.attributes.insert("above".into(), json!(false));
+            dev.attributes.insert("source_device_id".into(), body.config.get("source_device_id").cloned().unwrap_or(json!("")));
+            dev.attributes.insert("source_attribute".into(), body.config.get("source_attribute").cloned().unwrap_or(json!("value")));
+            dev.attributes.insert("threshold".into(), body.config.get("threshold").cloned().unwrap_or(json!(0.0)));
+            dev.attributes.insert("hysteresis".into(), body.config.get("hysteresis").cloned().unwrap_or(json!(0.0)));
+        }
+        "schedule" => {
+            dev.attributes.insert("active".into(), json!(false));
+            dev.attributes.insert("blocks".into(), body.config.get("blocks").cloned().unwrap_or(json!([])));
+        }
+        _ => {}
+    }
+
+    match s.store.upsert_device(&dev).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `GET /api/v1/glue` — list all glue devices.
+pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    match s.store.list_devices().await {
+        Ok(devices) => {
+            let glue: Vec<_> = devices.into_iter()
+                .filter(|d| d.plugin_id == "core.glue" || d.plugin_id == "core.timer" || d.plugin_id == "core.switch")
+                .collect();
+            (StatusCode::OK, Json(json!(glue)))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
+/// `DELETE /api/v1/glue/:id` — delete a glue device.
+pub async fn delete_glue(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.store.delete_device(&id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({ "deleted": true }))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 // ---------- Modes ----------
 
 /// `GET /api/v1/modes` — list all mode configs + live device state.
