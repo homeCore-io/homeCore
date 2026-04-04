@@ -1,4 +1,4 @@
-mod plugin_launcher;
+mod plugin_manager;
 
 use anyhow::Result;
 use hc_api::{
@@ -19,8 +19,10 @@ use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, Ecosystem
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -701,6 +703,14 @@ async fn main() -> Result<()> {
     let internal_bus = EventBus::new(1024);
     let pub_bus = EventBus::new(1024);
 
+    // Shared plugin registry — populated by config seeding and PluginManager,
+    // consumed by AppState and API handlers.
+    let plugin_registry: Arc<RwLock<HashMap<String, hc_api::PluginRecord>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    // Per-plugin command channels for start/stop/restart from API handlers.
+    let plugin_commands: hc_api::PluginCommandChannels =
+        Arc::new(RwLock::new(HashMap::new()));
+
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
     let rules = {
@@ -855,26 +865,59 @@ async fn main() -> Result<()> {
     // Wait for the internal MQTT client to confirm its homecore/# subscription
     // before spawning plugins.  This ensures that registration messages
     // published by plugins on startup are not missed due to a race condition.
-    {
+    let _plugin_manager = {
         let _ = ready_rx.await;
 
-        let enabled: Vec<_> = config.plugins.iter().filter(|p| p.enabled).collect();
+        // Seed plugin records for ALL configured plugins (enabled and disabled)
+        // so the API can list them before registration messages arrive.
+        {
+            let mut map = plugin_registry.write().await;
+            for p in &config.plugins {
+                map.entry(p.id.clone()).or_insert_with(|| hc_api::PluginRecord {
+                    plugin_id: p.id.clone(),
+                    registered_at: chrono::Utc::now(),
+                    status: if p.enabled { "starting".into() } else { "stopped".into() },
+                    enabled: p.enabled,
+                    managed: true,
+                    config_path: Some(p.config.clone()),
+                    binary_path: Some(p.binary.clone()),
+                    last_heartbeat: None,
+                    last_restart: None,
+                    restart_count: 0,
+                    uptime_started: None,
+                    device_count: 0,
+                    log_level: None,
+                    version: None,
+                    supports_management: false,
+                });
+            }
+        }
 
-        if enabled.is_empty() {
+        if config.plugins.is_empty() {
             info!("No plugins configured");
         } else {
-            info!(count = enabled.len(), "Launching plugins");
-            let processes = enabled
-                .into_iter()
-                .map(|p| plugin_launcher::PluginProcess {
+            let total = config.plugins.len();
+            let enabled = config.plugins.iter().filter(|p| p.enabled).count();
+            info!(total, enabled, "Launching plugins via PluginManager");
+            let processes: Vec<_> = config
+                .plugins
+                .iter()
+                .map(|p| plugin_manager::PluginProcess {
                     id: p.id.clone(),
                     binary: PathBuf::from(&p.binary),
                     config: PathBuf::from(&p.config),
+                    enabled: p.enabled,
                 })
                 .collect();
-            plugin_launcher::spawn_all(processes, shutdown_rx.clone());
+            plugin_manager::spawn_all(
+                processes,
+                plugin_registry.clone(),
+                plugin_commands.clone(),
+                pub_bus.clone(),
+                shutdown_rx.clone(),
+            ).await;
         }
-    }
+    };
 
     // ── 16. Notification service ───────────────────────────────────────────
     if !config.notify.channels.is_empty() {
@@ -975,7 +1018,7 @@ async fn main() -> Result<()> {
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
     };
-    let app_state = AppState::new(
+    let app_state = AppState::new_with_plugins(
         store,
         pub_bus,
         Some(publish_handle),
@@ -985,6 +1028,7 @@ async fn main() -> Result<()> {
         jwt,
         whitelist,
         Some(modes_path),
+        plugin_registry.clone(),
     );
 
     let app_state = if config.logging.stream.enabled {
@@ -1004,7 +1048,8 @@ async fn main() -> Result<()> {
         app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)
     } else {
         app_state
-    };
+    }
+    .with_plugin_commands(plugin_commands);
     let api_host = config.server.host.clone();
     let api_port = config.server.port;
     let drain_timeout_secs = config.shutdown.drain_timeout_secs;

@@ -66,6 +66,13 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
     },
+    /// A plugin's status changed (started, stopped, offline, etc.).
+    PluginStatusChanged {
+        timestamp: DateTime<Utc>,
+        plugin_id: String,
+        status: String,
+        previous_status: String,
+    },
     /// A device's human-readable name was changed at the source (plugin or user).
     DeviceNameChanged {
         timestamp: DateTime<Utc>,
@@ -175,7 +182,8 @@ impl Event {
             | Event::ActionFailed { timestamp, .. }
             | Event::DeviceCommandSent { timestamp, .. }
             | Event::ModeChanged { timestamp, .. }
-            | Event::TimerStateChanged { timestamp, .. } => *timestamp,
+            | Event::TimerStateChanged { timestamp, .. }
+            | Event::PluginStatusChanged { timestamp, .. } => *timestamp,
         }
     }
 }

@@ -41,12 +41,60 @@ use logs::LogStreamState;
 use metrics::MetricsCollector;
 use rule_file_store::RuleFileStore;
 
+/// Runtime command sent to a plugin supervisor task.
+#[derive(Debug)]
+pub enum PluginCommand {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Per-plugin command sender, indexed by plugin_id.
+pub type PluginCommandChannels = Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<PluginCommand>>>>;
+
 /// Registered plugin record stored in-memory.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginRecord {
     pub plugin_id: String,
     pub registered_at: chrono::DateTime<chrono::Utc>,
+    /// "active" | "offline" | "stopped" | "starting"
     pub status: String,
+    /// Whether this plugin is enabled in homecore.toml.
+    #[serde(default)]
+    pub enabled: bool,
+    /// true = locally-launched child process; false = remote (MQTT only).
+    #[serde(default)]
+    pub managed: bool,
+    /// Filesystem path to the plugin's config file (local plugins only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// Filesystem path to the plugin binary (local plugins only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    /// Last heartbeat received from plugin (via MQTT management channel).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+    /// Timestamp of the most recent (re)start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restart: Option<chrono::DateTime<chrono::Utc>>,
+    /// Number of restarts since homecore started.
+    #[serde(default)]
+    pub restart_count: u32,
+    /// When the current run started (for uptime calculation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_started: Option<chrono::DateTime<chrono::Utc>>,
+    /// Number of devices registered by this plugin.
+    #[serde(default)]
+    pub device_count: u32,
+    /// Current log level if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
+    /// Self-reported plugin version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Plugin has responded to the management protocol (heartbeat, etc.).
+    #[serde(default)]
+    pub supports_management: bool,
 }
 
 /// Shared state injected into every handler via axum's `State` extractor.
@@ -101,6 +149,8 @@ pub struct AppState {
     pub calendar_dir: Option<Arc<std::path::PathBuf>>,
     /// RRULE expansion window in days (for re-parse after fetch).
     pub calendar_expansion_days: u32,
+    /// Per-plugin command channels for start/stop/restart (local plugins only).
+    pub plugin_commands: PluginCommandChannels,
 }
 
 impl AppState {
@@ -115,8 +165,33 @@ impl AppState {
         whitelist: Vec<IpNet>,
         modes_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let plugins = Arc::new(RwLock::new(HashMap::new()));
+        Self::new_with_plugins(
+            store,
+            event_bus,
+            publish,
+            source_rules_handle,
+            rules_handle,
+            rule_file_store,
+            jwt,
+            whitelist,
+            modes_path,
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+    }
 
+    /// Create with a pre-populated plugin registry (shared with PluginManager).
+    pub fn new_with_plugins(
+        store: StateStore,
+        event_bus: EventBus,
+        publish: Option<PublishHandle>,
+        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+        rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+        rule_file_store: Option<RuleFileStore>,
+        jwt: JwtService,
+        whitelist: Vec<IpNet>,
+        modes_path: Option<std::path::PathBuf>,
+        plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
+    ) -> Self {
         // Spawn background task to keep plugin registry in sync with bus events.
         {
             let mut rx = event_bus.subscribe();
@@ -129,14 +204,25 @@ impl AppState {
                             timestamp,
                         }) => {
                             let mut map = plugins_clone.write().await;
-                            map.insert(
-                                plugin_id.clone(),
-                                PluginRecord {
-                                    plugin_id,
-                                    registered_at: timestamp,
-                                    status: "active".into(),
-                                },
-                            );
+                            let rec = map.entry(plugin_id.clone()).or_insert_with(|| PluginRecord {
+                                plugin_id: plugin_id.clone(),
+                                registered_at: timestamp,
+                                status: "active".into(),
+                                enabled: false,
+                                managed: false,
+                                config_path: None,
+                                binary_path: None,
+                                last_heartbeat: None,
+                                last_restart: None,
+                                restart_count: 0,
+                                uptime_started: None,
+                                device_count: 0,
+                                log_level: None,
+                                version: None,
+                                supports_management: false,
+                            });
+                            rec.status = "active".into();
+                            rec.registered_at = timestamp;
                         }
                         Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
                             let mut map = plugins_clone.write().await;
@@ -198,6 +284,7 @@ impl AppState {
             calendar: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
+            plugin_commands: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -249,6 +336,11 @@ impl AppState {
         self.calendar = Some(handle);
         self.calendar_dir = Some(Arc::new(dir));
         self.calendar_expansion_days = expansion_days;
+        self
+    }
+
+    pub fn with_plugin_commands(mut self, channels: PluginCommandChannels) -> Self {
+        self.plugin_commands = channels;
         self
     }
 }
@@ -424,7 +516,17 @@ pub fn router(state: AppState, web_admin_enabled: bool) -> Router {
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
-        .route("/plugins/:id", delete(handlers::deregister_plugin))
+        .route(
+            "/plugins/:id",
+            get(handlers::get_plugin).delete(handlers::deregister_plugin).patch(handlers::patch_plugin),
+        )
+        .route("/plugins/:id/start", post(handlers::start_plugin))
+        .route("/plugins/:id/stop", post(handlers::stop_plugin))
+        .route("/plugins/:id/restart", post(handlers::restart_plugin))
+        .route(
+            "/plugins/:id/config",
+            get(handlers::get_plugin_config).put(handlers::put_plugin_config),
+        )
         .route(
             "/plugins/matter/commission",
             post(handlers::matter_commission),

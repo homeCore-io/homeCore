@@ -218,6 +218,7 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::SceneActivated { .. } => "scene_activated",
                         Event::PluginRegistered { .. } => "plugin_registered",
                         Event::PluginOffline { .. } => "plugin_offline",
+                        Event::PluginStatusChanged { .. } => "plugin_status_changed",
                         Event::DeviceNameChanged { .. } => "device_name_changed",
                         Event::MqttMessage { .. } => "mqtt_message",
                         Event::Custom { .. } => "custom",

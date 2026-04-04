@@ -4404,6 +4404,145 @@ pub async fn deregister_plugin(
     }
 }
 
+pub async fn get_plugin(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id) {
+        Some(rec) => (StatusCode::OK, Json(json!(rec))).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response(),
+    }
+}
+
+pub async fn start_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let cmds = s.plugin_commands.read().await;
+    let Some(tx) = cmds.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+    };
+    match tx.send(crate::PluginCommand::Start).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "start" }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+    }
+}
+
+pub async fn stop_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let cmds = s.plugin_commands.read().await;
+    let Some(tx) = cmds.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+    };
+    match tx.send(crate::PluginCommand::Stop).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "stop" }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+    }
+}
+
+pub async fn restart_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let cmds = s.plugin_commands.read().await;
+    let Some(tx) = cmds.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+    };
+    match tx.send(crate::PluginCommand::Restart).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "restart" }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+    }
+}
+
+pub async fn patch_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let mut map = s.plugins.write().await;
+    let Some(rec) = map.get_mut(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+    };
+    if let Some(enabled) = body["enabled"].as_bool() {
+        rec.enabled = enabled;
+    }
+    if let Some(level) = body["log_level"].as_str() {
+        rec.log_level = Some(level.to_string());
+    }
+    (StatusCode::OK, Json(json!(rec.clone()))).into_response()
+}
+
+pub async fn get_plugin_config(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    let Some(rec) = map.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+    };
+    let Some(ref path) = rec.config_path else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            match content.parse::<toml::Value>() {
+                Ok(parsed) => {
+                    let json_val = serde_json::to_value(parsed).unwrap_or_default();
+                    (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "toml", "config": json_val }))).into_response()
+                }
+                Err(e) => {
+                    // Return raw content if TOML parse fails
+                    (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "raw", "raw": content, "parse_error": e.to_string() }))).into_response()
+                }
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to read config: {e}") }))).into_response(),
+    }
+}
+
+pub async fn put_plugin_config(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    let Some(rec) = map.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+    };
+    let Some(ref path) = rec.config_path else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response();
+    };
+
+    // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
+    let toml_str = if let Some(raw) = body["raw"].as_str() {
+        raw.to_string()
+    } else if let Some(config) = body.get("config") {
+        let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid config: {e}") }))).into_response(),
+        };
+        toml::to_string_pretty(&toml_val).unwrap_or_default()
+    } else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "provide 'config' (JSON object) or 'raw' (TOML string)" }))).into_response();
+    };
+
+    let path = path.clone();
+    match std::fs::write(&path, &toml_str) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to write config: {e}") }))).into_response(),
+    }
+}
+
 pub async fn matter_commission(
     State(s): State<AppState>,
     PluginsWrite(claims): PluginsWrite,
