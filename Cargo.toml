@@ -2,6 +2,7 @@
 name    = "homecore"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [workspace]
 resolver = "2"
@@ -18,7 +19,6 @@ members = [
     "crates/hc-scripting",
     "crates/hc-notify",
     "crates/hc-logging",
-    "plugins/plugin-sdk-rs",
     "plugins/examples/virtual-device",
     "plugins/examples/http-poller",
 ]
