@@ -3,7 +3,8 @@
 //! Provides:
 //! - [`PluginClient`] — connects to the broker, handles registration, typed
 //!   publish/subscribe helpers, and a command callback loop.
-//! - [`DeviceRegistration`] — fluent builder for capability schemas.
+//! - [`DevicePublisher`] — cloneable handle for publishing state from spawned tasks.
+//! - [`ManagementHandle`] — enable heartbeat + remote config/log management.
 
 use anyhow::{Context, Result};
 use hc_types::device::{change_from_command_payload, with_state_change_metadata, DeviceChange};
@@ -18,6 +19,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone)]
 pub struct DevicePublisher {
     client: AsyncClient,
+    plugin_id: String,
 }
 
 pub fn change_from_command(command_payload: &Value, fallback_source: &str) -> DeviceChange {
@@ -25,12 +27,19 @@ pub fn change_from_command(command_payload: &Value, fallback_source: &str) -> De
 }
 
 impl DevicePublisher {
+    /// Return the plugin ID this publisher was created with.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
     async fn clear_retained_topic(&self, topic: &str) -> Result<()> {
         self.client
             .publish(topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
             .await
             .with_context(|| format!("clear retained topic failed: {topic}"))
     }
+
+    // ── Full state publishing ────────────────────────────────────────────
 
     /// Publish a full device state to `homecore/devices/{device_id}/state` (retained).
     pub async fn publish_state(&self, device_id: &str, state: &Value) -> Result<()> {
@@ -68,17 +77,63 @@ impl DevicePublisher {
             .await
     }
 
+    // ── Partial state publishing ─────────────────────────────────────────
+
+    /// Publish a partial state update (JSON merge-patch, not retained).
+    pub async fn publish_state_partial(&self, device_id: &str, patch: &Value) -> Result<()> {
+        self.publish_state_partial_with_change(device_id, patch, None)
+            .await
+    }
+
+    /// Publish a partial state update with explicit provenance metadata.
+    pub async fn publish_state_partial_with_change(
+        &self,
+        device_id: &str,
+        patch: &Value,
+        change: Option<&DeviceChange>,
+    ) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/state/partial");
+        let payload = match change {
+            Some(change) => serde_json::to_vec(&with_state_change_metadata(patch.clone(), change))?,
+            None => serde_json::to_vec(patch)?,
+        };
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, false, payload)
+            .await
+            .context("publish_state_partial failed")
+    }
+
+    /// Publish a partial state update caused by an inbound HomeCore command.
+    pub async fn publish_state_partial_for_command(
+        &self,
+        device_id: &str,
+        patch: &Value,
+        command_payload: &Value,
+        fallback_source: &str,
+    ) -> Result<()> {
+        let change = change_from_command(command_payload, fallback_source);
+        self.publish_state_partial_with_change(device_id, patch, Some(&change))
+            .await
+    }
+
+    // ── Availability ─────────────────────────────────────────────────────
+
     /// Publish `"online"` or `"offline"` to the device's availability topic (retained).
-    /// Mirrors [`PluginClient::set_available`] for use from spawned tasks that hold
-    /// only a [`DevicePublisher`] handle.
     pub async fn set_available(&self, device_id: &str, available: bool) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/availability");
         let payload = if available { "online" } else { "offline" };
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())
             .await
-            .context("DevicePublisher::set_available failed")
+            .context("set_available failed")
     }
+
+    /// Alias for [`set_available`] — matches the naming used by most plugins.
+    pub async fn publish_availability(&self, device_id: &str, online: bool) -> Result<()> {
+        self.set_available(device_id, online).await
+    }
+
+    // ── Schema ───────────────────────────────────────────────────────────
 
     /// Publish a device capability schema (retained) so HomeCore stores it and
     /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
@@ -92,8 +147,10 @@ impl DevicePublisher {
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
-            .context("DevicePublisher::register_device_schema failed")
+            .context("register_device_schema failed")
     }
+
+    // ── Unregister ───────────────────────────────────────────────────────
 
     /// Retire a device from HomeCore by clearing retained topics and publishing
     /// a plugin-scoped unregister command.
@@ -112,7 +169,35 @@ impl DevicePublisher {
                 serde_json::to_vec(&serde_json::json!({ "device_id": device_id }))?,
             )
             .await
-            .context("DevicePublisher::unregister_device failed")
+            .context("unregister_device failed")
+    }
+
+    // ── Plugin status ────────────────────────────────────────────────────
+
+    /// Publish plugin status (`"active"`, `"degraded"`, `"offline"`) to
+    /// `homecore/plugins/{id}/status` (retained).
+    pub async fn publish_plugin_status(&self, status: &str) -> Result<()> {
+        let topic = format!("homecore/plugins/{}/status", self.plugin_id);
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, status.as_bytes())
+            .await
+            .context("publish_plugin_status failed")
+    }
+
+    // ── Events ───────────────────────────────────────────────────────────
+
+    /// Publish a structured event to `homecore/events/{event_type}`.
+    pub async fn publish_event(&self, event_type: &str, payload: &Value) -> Result<()> {
+        let topic = format!("homecore/events/{event_type}");
+        self.client
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(payload)?,
+            )
+            .await
+            .context("publish_event failed")
     }
 }
 
@@ -183,6 +268,13 @@ impl PluginClient {
         })
     }
 
+    /// Return the plugin ID.
+    pub fn plugin_id(&self) -> &str {
+        &self.config.plugin_id
+    }
+
+    // ── Full state publishing ────────────────────────────────────────────
+
     /// Publish a full device state update (retained so new subscribers see it).
     pub async fn publish_state(&self, device_id: &str, state: &Value) -> Result<()> {
         self.publish_state_with_change(device_id, state, None).await
@@ -205,6 +297,21 @@ impl PluginClient {
             .await
             .context("publish_state failed")
     }
+
+    /// Publish a full device state caused by an inbound HomeCore command.
+    pub async fn publish_state_for_command(
+        &self,
+        device_id: &str,
+        state: &Value,
+        command_payload: &Value,
+        fallback_source: &str,
+    ) -> Result<()> {
+        let change = change_from_command(command_payload, fallback_source);
+        self.publish_state_with_change(device_id, state, Some(&change))
+            .await
+    }
+
+    // ── Partial state publishing ─────────────────────────────────────────
 
     /// Publish a partial state update (JSON merge-patch, not retained).
     pub async fn publish_state_partial(&self, device_id: &str, patch: &Value) -> Result<()> {
@@ -230,19 +337,6 @@ impl PluginClient {
             .context("publish_state_partial failed")
     }
 
-    /// Publish a full device state caused by an inbound HomeCore command.
-    pub async fn publish_state_for_command(
-        &self,
-        device_id: &str,
-        state: &Value,
-        command_payload: &Value,
-        fallback_source: &str,
-    ) -> Result<()> {
-        let change = change_from_command(command_payload, fallback_source);
-        self.publish_state_with_change(device_id, state, Some(&change))
-            .await
-    }
-
     /// Publish a partial state update caused by an inbound HomeCore command.
     pub async fn publish_state_partial_for_command(
         &self,
@@ -256,7 +350,9 @@ impl PluginClient {
             .await
     }
 
-    /// Publish `"online"` to the device's availability topic.
+    // ── Availability ─────────────────────────────────────────────────────
+
+    /// Publish `"online"` or `"offline"` to the device's availability topic.
     pub async fn set_available(&self, device_id: &str, available: bool) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/availability");
         let payload = if available { "online" } else { "offline" };
@@ -265,6 +361,13 @@ impl PluginClient {
             .await
             .context("set_available failed")
     }
+
+    /// Alias for [`set_available`] — matches the naming used by most plugins.
+    pub async fn publish_availability(&self, device_id: &str, online: bool) -> Result<()> {
+        self.set_available(device_id, online).await
+    }
+
+    // ── Device registration ──────────────────────────────────────────────
 
     /// Register a device with its capability schema.
     pub async fn register_device(
@@ -311,15 +414,37 @@ impl PluginClient {
         device_type: &str,
         area: Option<&str>,
     ) -> Result<()> {
+        self.register_device_full(device_id, name, Some(device_type), area, None)
+            .await
+    }
+
+    /// Register a device with all optional fields: device_type, area, and capabilities.
+    ///
+    /// This is the most flexible registration method. Use it when you need to
+    /// combine a device_type with custom capabilities, or when you need to set
+    /// the area alongside capabilities.
+    pub async fn register_device_full(
+        &self,
+        device_id: &str,
+        name: &str,
+        device_type: Option<&str>,
+        area: Option<&str>,
+        capabilities: Option<Value>,
+    ) -> Result<()> {
         let topic = format!("homecore/plugins/{}/register", self.config.plugin_id);
         let mut payload = serde_json::json!({
             "device_id":   device_id,
             "plugin_id":   self.config.plugin_id,
             "name":        name,
-            "device_type": device_type,
         });
+        if let Some(dt) = device_type {
+            payload["device_type"] = serde_json::Value::String(dt.to_string());
+        }
         if let Some(a) = area {
             payload["area"] = serde_json::Value::String(a.to_string());
+        }
+        if let Some(c) = capabilities {
+            payload["capabilities"] = c;
         }
         self.client
             .publish(
@@ -329,10 +454,12 @@ impl PluginClient {
                 serde_json::to_vec(&payload)?,
             )
             .await
-            .context("register_device_typed failed")?;
-        info!(device_id, device_type, "Device registered (typed)");
+            .context("register_device_full failed")?;
+        info!(device_id, "Device registered");
         Ok(())
     }
+
+    // ── Schema ───────────────────────────────────────────────────────────
 
     /// Publish a device capability schema (retained) so HomeCore stores it and
     /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
@@ -348,6 +475,8 @@ impl PluginClient {
             .await
             .context("register_device_schema failed")
     }
+
+    // ── Unregister ───────────────────────────────────────────────────────
 
     /// Retire a device from HomeCore by clearing retained topics and publishing
     /// a plugin-scoped unregister command.
@@ -371,6 +500,36 @@ impl PluginClient {
         Ok(())
     }
 
+    // ── Plugin status ────────────────────────────────────────────────────
+
+    /// Publish plugin status (`"active"`, `"degraded"`, `"offline"`) to
+    /// `homecore/plugins/{id}/status` (retained).
+    pub async fn publish_plugin_status(&self, status: &str) -> Result<()> {
+        let topic = format!("homecore/plugins/{}/status", self.config.plugin_id);
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, status.as_bytes())
+            .await
+            .context("publish_plugin_status failed")
+    }
+
+    // ── Events ───────────────────────────────────────────────────────────
+
+    /// Publish a structured event to `homecore/events/{event_type}`.
+    pub async fn publish_event(&self, event_type: &str, payload: &Value) -> Result<()> {
+        let topic = format!("homecore/events/{event_type}");
+        self.client
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(payload)?,
+            )
+            .await
+            .context("publish_event failed")
+    }
+
+    // ── Publisher handle ─────────────────────────────────────────────────
+
     /// Return a [`DevicePublisher`] that can publish state concurrently with `run()`.
     ///
     /// Call this **before** `run()` — `run()` consumes `self`, so any handles
@@ -378,8 +537,11 @@ impl PluginClient {
     pub fn device_publisher(&self) -> DevicePublisher {
         DevicePublisher {
             client: self.client.clone(),
+            plugin_id: self.config.plugin_id.clone(),
         }
     }
+
+    // ── Management ───────────────────────────────────────────────────────
 
     /// Enable the management protocol: heartbeat publisher + command listener.
     ///
@@ -434,6 +596,8 @@ impl PluginClient {
         })
     }
 
+    // ── Command subscriptions ────────────────────────────────────────────
+
     /// Subscribe to command messages for a device.
     pub async fn subscribe_commands(&self, device_id: &str) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/cmd");
@@ -444,6 +608,8 @@ impl PluginClient {
         debug!(device_id, "Subscribed to commands");
         Ok(())
     }
+
+    // ── Event loop ───────────────────────────────────────────────────────
 
     /// Drive the MQTT event loop, calling `on_command` whenever a `cmd`
     /// message arrives for any subscribed device.
