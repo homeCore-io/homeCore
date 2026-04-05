@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>HomeCore.PluginSdk</RootNamespace>
+    <AssemblyName>HomeCore.PluginSdk</AssemblyName>
+    <Version>0.1.0</Version>
+    <Authors>homeCore Contributors</Authors>
+    <Description>Plugin SDK for building HomeCore device plugins in .NET</Description>
+    <PackageId>HomeCore.PluginSdk</PackageId>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MQTTnet" Version="4.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.*" />
+  </ItemGroup>
+
+</Project>
