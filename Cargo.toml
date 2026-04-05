@@ -19,8 +19,6 @@ members = [
     "crates/hc-scripting",
     "crates/hc-notify",
     "crates/hc-logging",
-    "plugins/examples/virtual-device",
-    "plugins/examples/http-poller",
 ]
 
 [workspace.dependencies]

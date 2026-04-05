@@ -1656,22 +1656,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-poller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "plugin-sdk-rs",
- "reqwest",
- "rhai",
- "serde",
- "serde_json",
- "tokio",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2833,22 +2817,6 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
-
-[[package]]
-name = "plugin-sdk-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hc-logging",
- "hc-types",
- "rumqttc",
- "serde",
- "serde_json",
- "tokio",
- "toml 0.8.23",
- "tracing",
-]
 
 [[package]]
 name = "portable-atomic"
@@ -4646,18 +4614,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "virtual-device"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "plugin-sdk-rs",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "walkdir"
