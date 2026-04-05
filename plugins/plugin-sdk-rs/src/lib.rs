@@ -199,6 +199,70 @@ impl DevicePublisher {
             .await
             .context("publish_event failed")
     }
+
+    // ── Dynamic registration (for plugins that discover devices at runtime) ─
+
+    /// Register a device with all optional fields via the publisher.
+    ///
+    /// This mirrors [`PluginClient::register_device_full`] but can be called
+    /// from spawned tasks that only hold a `DevicePublisher` handle (after the
+    /// `PluginClient` has been consumed by `run_managed`).
+    pub async fn register_device_full(
+        &self,
+        device_id: &str,
+        name: &str,
+        device_type: Option<&str>,
+        area: Option<&str>,
+        capabilities: Option<Value>,
+    ) -> Result<()> {
+        let topic = format!("homecore/plugins/{}/register", self.plugin_id);
+        let mut payload = serde_json::json!({
+            "device_id": device_id,
+            "plugin_id": self.plugin_id,
+            "name": name,
+        });
+        if let Some(dt) = device_type {
+            payload["device_type"] = Value::String(dt.to_string());
+        }
+        if let Some(a) = area {
+            payload["area"] = Value::String(a.to_string());
+        }
+        if let Some(c) = capabilities {
+            payload["capabilities"] = c;
+        }
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(&payload)?)
+            .await
+            .context("DevicePublisher::register_device_full failed")
+    }
+
+    /// Subscribe to command messages for a device.
+    ///
+    /// This mirrors [`PluginClient::subscribe_commands`] but can be called
+    /// from spawned tasks that only hold a `DevicePublisher` handle.
+    pub async fn subscribe_commands(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/cmd");
+        self.client
+            .subscribe(&topic, QoS::AtLeastOnce)
+            .await
+            .context("DevicePublisher::subscribe_commands failed")
+    }
+
+    /// Create a `DevicePublisher` for use in unit tests.
+    ///
+    /// The underlying MQTT client is connected to `127.0.0.1:1883` and will
+    /// not actually send messages unless a broker is running.
+    pub fn test_instance(plugin_id: &str) -> Self {
+        use rumqttc::MqttOptions;
+        use std::time::Duration;
+        let mut opts = MqttOptions::new(format!("{plugin_id}-test"), "127.0.0.1", 1883);
+        opts.set_keep_alive(Duration::from_secs(30));
+        let (client, _eventloop) = AsyncClient::new(opts, 8);
+        Self {
+            client,
+            plugin_id: plugin_id.to_string(),
+        }
+    }
 }
 
 /// Handle returned by [`PluginClient::enable_management`].
