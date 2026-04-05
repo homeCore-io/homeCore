@@ -1,0 +1,29 @@
+# OH1 Door Closed — Turn Off Outside Lights
+#
+# When the OH1 garage door closes, if the outside-on phantom scene is active,
+# activate the outside-off phantom scene.
+
+id       = ""
+name     = "OH1 Closed — Outside Lights Off"
+enabled  = true
+priority = 10
+
+[trigger]
+type      = "device_state_changed"
+device_id = "yolink_d88b4c01000cf2e5"
+attribute = "open"
+to        = false
+
+[[conditions]]
+type      = "device_state"
+device_id = "lutron_scene_outside_on_phantom"
+attribute = "on"
+op        = "eq"
+value     = true
+
+[[actions]]
+type      = "set_device_state"
+device_id = "lutron_scene_outside_off_phantom"
+
+[actions.state]
+activate = true
