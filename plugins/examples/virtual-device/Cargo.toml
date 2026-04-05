@@ -8,7 +8,7 @@ name = "virtual-device"
 path = "src/main.rs"
 
 [dependencies]
-plugin-sdk-rs = { path = "../../../../sdks/plugin-sdk-rs" }
+plugin-sdk-rs = { path = "../../../../sdks/hc-plugin-sdk-rs" }
 tokio         = { workspace = true }
 anyhow        = { workspace = true }
 tracing       = { workspace = true }
