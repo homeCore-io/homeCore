@@ -133,6 +133,24 @@ pub struct LogLevelHandle {
 }
 
 impl LogLevelHandle {
+    /// Create a `LogLevelHandle` from a `tracing_subscriber::reload::Handle`.
+    ///
+    /// This is the public constructor for plugins that manage their own
+    /// `tracing` subscriber setup but want to integrate with the SDK's
+    /// `set_log_level` management command.
+    ///
+    /// `initial_directives` should be the filter string used when the
+    /// subscriber was created (e.g. `"info"` or `"hc_wled=debug,warn"`).
+    pub fn from_reload_handle<S: 'static>(
+        handle: tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, S>,
+        initial_directives: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner: std::sync::Arc::new(handle),
+            current: std::sync::Arc::new(std::sync::Mutex::new(initial_directives.into())),
+        }
+    }
+
     /// Change the global log level.
     ///
     /// Accepts any valid `EnvFilter` directive string:
