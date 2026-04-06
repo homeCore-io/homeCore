@@ -434,18 +434,26 @@ impl Default for ShutdownConfig {
 /// `[web_admin]` section of homecore.toml.
 #[derive(Deserialize)]
 struct WebAdminSection {
-    /// Enable the internal admin UI mount served by HomeCore.
+    /// Enable the built-in admin UI served by HomeCore.
     ///
-    /// When enabled, HomeCore mounts the first-party admin scaffold at
-    /// `/admin` while preserving the existing external API under `/api/v1`.
-    #[serde(default = "default_true")]
+    /// When enabled, HomeCore serves the pre-built Leptos/WASM admin UI
+    /// as static files and preserves the API under `/api/v1`.
+    /// Requires `dist_path` to point to a valid `trunk build` output directory.
+    #[serde(default)]
     enabled: bool,
+
+    /// Path to the Leptos UI build output directory (trunk build --release).
+    /// Relative paths are resolved against base_dir.
+    /// Required when enabled = true.
+    #[serde(default)]
+    dist_path: Option<String>,
 }
 
 impl Default for WebAdminSection {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
+            enabled: false,
+            dist_path: None,
         }
     }
 }
@@ -1087,6 +1095,20 @@ async fn main() -> Result<()> {
     let drain_timeout_secs = config.shutdown.drain_timeout_secs;
     let api_shutdown_rx = shutdown_rx.clone();
 
+    // Resolve web_admin dist_path relative to base_dir.
+    let web_admin_dist_path = if config.web_admin.enabled {
+        config.web_admin.dist_path.as_ref().map(|p| {
+            let path = std::path::Path::new(p);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base_dir.join(p)
+            }
+        })
+    } else {
+        None
+    };
+
     let mut api_task = tokio::spawn(async move {
         hc_api::serve(
             &api_host,
@@ -1094,7 +1116,7 @@ async fn main() -> Result<()> {
             app_state,
             api_shutdown_rx,
             drain_timeout_secs,
-            config.web_admin.enabled,
+            web_admin_dist_path,
         )
         .await
     });

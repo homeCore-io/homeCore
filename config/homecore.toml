@@ -239,9 +239,11 @@ drain_timeout_secs = 10
 # Internal Web Admin
 # ---------------------------------------------------------------------------
 [web_admin]
-# Mount the first-party admin surface at /admin.
-# Disable this if you want the HomeCore server to expose only the machine API.
-enabled = true
+# Serve the pre-built Leptos/WASM admin UI as static files.
+# Requires dist_path to point to a valid `trunk build --release` output directory.
+# Disabled by default — during development, run `trunk serve` separately.
+enabled = false
+# dist_path = "ui/dist"   # relative to homeCore home dir
 
 # ---------------------------------------------------------------------------
 # Scheduler
