@@ -83,7 +83,7 @@ enabled          = true
 ring_buffer_size = 500
 
 [logging.stderr]
-enabled = true
+enabled = false
 format  = "pretty"
 ansi    = true
 

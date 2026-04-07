@@ -94,6 +94,10 @@ pub struct Core {
     calendar_dir: Option<std::path::PathBuf>,
     /// How many days forward to expand recurring calendar events.  Default: 400.
     calendar_expansion_days: u32,
+    /// Log stream broadcast channel — forwarded to StateBridge so plugin logs
+    /// received over MQTT are injected into `/logs/stream`.
+    log_tx: Option<tokio::sync::broadcast::Sender<hc_types::LogLine>>,
+    log_ring: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>>,
 }
 
 impl Core {
@@ -121,6 +125,8 @@ impl Core {
             rules_dir: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
+            log_tx: None,
+            log_ring: None,
         }
     }
 
@@ -150,6 +156,17 @@ impl Core {
 
     pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
         self.device_types = Some(device_types);
+        self
+    }
+
+    /// Attach the log stream so plugin logs from MQTT appear in `/logs/stream`.
+    pub fn with_log_stream(
+        mut self,
+        tx: tokio::sync::broadcast::Sender<hc_types::LogLine>,
+        ring: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>,
+    ) -> Self {
+        self.log_tx = Some(tx);
+        self.log_ring = Some(ring);
         self
     }
 
@@ -231,6 +248,8 @@ impl Core {
         let bridge_router = self.router.clone();
         let bridge_device_types = self.device_types.clone();
         let bridge_publish = self.publish.clone();
+        let bridge_log_tx = self.log_tx.clone();
+        let bridge_log_ring = self.log_ring.clone();
         tokio::spawn(async move {
             loop {
                 let mut bridge = state_bridge::StateBridge::new(
@@ -246,6 +265,9 @@ impl Core {
                 }
                 if let Some(ph) = bridge_publish.clone() {
                     bridge = bridge.with_publish(ph);
+                }
+                if let (Some(tx), Some(ring)) = (bridge_log_tx.clone(), bridge_log_ring.clone()) {
+                    bridge = bridge.with_log_stream(tx, ring);
                 }
 
                 let handle = tokio::spawn(bridge.run());

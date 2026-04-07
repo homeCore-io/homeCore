@@ -31,9 +31,11 @@ use hc_types::device::{
     DeviceState,
 };
 use hc_types::event::Event;
+use hc_types::LogLine;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 pub struct StateBridge {
@@ -47,6 +49,11 @@ pub struct StateBridge {
     /// Track which plugins have already emitted a PluginRegistered event
     /// this session, so we only emit once per plugin (not once per device).
     registered_plugins: Mutex<HashSet<String>>,
+    /// Broadcast sender for the log stream WebSocket — used to inject plugin
+    /// log lines received over MQTT into the core's log stream.
+    log_tx: Option<broadcast::Sender<LogLine>>,
+    /// Ring buffer backing the log stream history replay.
+    log_ring: Option<Arc<Mutex<VecDeque<LogLine>>>>,
 }
 
 impl StateBridge {
@@ -60,6 +67,8 @@ impl StateBridge {
             device_types: None,
             pending_command_changes: DashMap::new(),
             registered_plugins: Mutex::new(HashSet::new()),
+            log_tx: None,
+            log_ring: None,
         }
     }
 
@@ -75,6 +84,18 @@ impl StateBridge {
 
     pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
         self.device_types = Some(device_types);
+        self
+    }
+
+    /// Attach the log stream broadcast channel so plugin logs received over
+    /// MQTT are injected into the core's `/logs/stream` WebSocket.
+    pub fn with_log_stream(
+        mut self,
+        tx: broadcast::Sender<LogLine>,
+        ring: Arc<Mutex<VecDeque<LogLine>>>,
+    ) -> Self {
+        self.log_tx = Some(tx);
+        self.log_ring = Some(ring);
         self
     }
 
@@ -203,6 +224,29 @@ impl StateBridge {
                     event_type: "plugin_management_response".to_string(),
                     payload: resp,
                 });
+            }
+            return Ok(());
+        }
+
+        // homecore/plugins/{id}/logs — forward plugin logs to the log stream
+        if parts.len() >= 4
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "logs"
+        {
+            if let Ok(line) = serde_json::from_slice::<LogLine>(payload) {
+                if let Some(ref tx) = self.log_tx {
+                    // Push into ring buffer for late subscribers.
+                    if let Some(ref ring) = self.log_ring {
+                        if let Ok(mut r) = ring.lock() {
+                            if r.len() >= r.capacity() {
+                                r.pop_front();
+                            }
+                            r.push_back(line.clone());
+                        }
+                    }
+                    let _ = tx.send(line);
+                }
             }
             return Ok(());
         }

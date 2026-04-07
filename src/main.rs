@@ -803,7 +803,8 @@ async fn main() -> Result<()> {
     .with_rules_dir(rules_dir.clone())
     .with_calendar_dir(calendar_dir.clone())
     .with_calendar_expansion_days(calendar_expansion_days)
-    .with_shutdown(shutdown_rx.clone());
+    .with_shutdown(shutdown_rx.clone())
+    .with_log_stream(log_tx.clone(), log_ring.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
     match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
