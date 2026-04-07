@@ -88,23 +88,25 @@ format  = "pretty"
 ansi    = true
 
 [logging.file]
-enabled     = true
-prefix      = "homecore"
-rotation    = "daily"
-max_size_mb = 100
-compress    = true
-format      = "pretty"
-#format     = "json"
+enabled          = true
+prefix           = "homecore"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
+#format          = "json"
 
 # Dedicated rule/automation log — captures only hc_core at debug level.
 # Clean audit trail: every trigger check, condition result, and action step.
 [logging.rules_file]
-enabled     = true
-prefix      = "rules"
-rotation    = "daily"
-max_size_mb = 100
-compress    = true
-format      = "pretty"
+enabled          = true
+prefix           = "rules"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
 
 [logging.syslog]
 enabled = false

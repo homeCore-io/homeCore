@@ -177,6 +177,9 @@ pub struct FileConfig {
     /// compression runs in a background thread immediately after rotation.
     #[serde(default = "default_compress")]
     pub compress: bool,
+    /// Delete rotated log files older than this many days.  0 = never prune.
+    #[serde(default)]
+    pub prune_after_days: u32,
     /// Output format: "json" (recommended for files) | "compact" | "pretty"
     #[serde(default)]
     pub format: OutputFormat,
@@ -191,6 +194,7 @@ impl Default for FileConfig {
             rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
             compress: default_compress(),
+            prune_after_days: 0,
             format: OutputFormat::Json,
         }
     }
@@ -231,6 +235,9 @@ pub struct RulesFileConfig {
     /// Gzip-compress rotated files (background thread).
     #[serde(default = "default_compress")]
     pub compress: bool,
+    /// Delete rotated log files older than this many days.  0 = never prune.
+    #[serde(default)]
+    pub prune_after_days: u32,
     /// Output format: "pretty" (default, human-readable) | "compact" | "json"
     #[serde(default = "default_rules_format")]
     pub format: OutputFormat,
@@ -249,6 +256,7 @@ impl Default for RulesFileConfig {
             rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
             compress: default_compress(),
+            prune_after_days: 0,
             format: OutputFormat::Pretty,
         }
     }

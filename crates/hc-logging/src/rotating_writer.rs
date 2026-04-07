@@ -51,6 +51,8 @@ pub struct RotatingWriter {
     /// How many size-triggered rotations have happened in `current_period`.
     /// Used to generate unique suffixes (`.1`, `.2`, …).
     period_counter: u32,
+    /// Delete rotated files older than this many days.  `0` = never prune.
+    prune_after_days: u32,
 }
 
 impl RotatingWriter {
@@ -65,12 +67,14 @@ impl RotatingWriter {
         rotation: RotationStrategy,
         max_bytes: u64,
         compress: bool,
+        prune_after_days: u32,
     ) -> io::Result<Self> {
         let current_period = period_str(&rotation);
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self {
+
+        let writer = Self {
             file,
             bytes_written,
             max_bytes,
@@ -80,7 +84,15 @@ impl RotatingWriter {
             prefix,
             compress,
             period_counter: 0,
-        })
+            prune_after_days,
+        };
+
+        // Run an initial prune at startup.
+        if prune_after_days > 0 {
+            prune_old_logs(&writer.dir, &writer.prefix, prune_after_days);
+        }
+
+        Ok(writer)
     }
 
     fn maybe_rotate(&mut self) -> io::Result<()> {
@@ -111,6 +123,10 @@ impl RotatingWriter {
         self.file = open_append(&active)?;
         self.bytes_written = 0;
         self.period_counter += 1;
+
+        if self.prune_after_days > 0 {
+            prune_old_logs(&self.dir, &self.prefix, self.prune_after_days);
+        }
 
         Ok(())
     }
@@ -185,6 +201,42 @@ fn period_str(rotation: &RotationStrategy) -> String {
         RotationStrategy::Daily => now.format("%Y-%m-%d").to_string(),
         RotationStrategy::Weekly => now.format("%Y-W%V").to_string(),
         RotationStrategy::Never => String::new(),
+    }
+}
+
+/// Delete rotated log files for `prefix` in `dir` that are older than
+/// `max_age_days`.  Matches files like `prefix.*.log`, `prefix.*.log.gz`.
+/// The active file (`prefix.log`) is never deleted.
+fn prune_old_logs(dir: &Path, prefix: &str, max_age_days: u32) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(max_age_days) * 86_400);
+
+    let rotated_prefix = format!("{}.", prefix);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        // Must be a rotated file for this prefix (not the active file).
+        if !name.starts_with(&rotated_prefix) {
+            continue;
+        }
+        if !name.ends_with(".log") && !name.ends_with(".log.gz") {
+            continue;
+        }
+
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if modified < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 

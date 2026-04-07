@@ -55,7 +55,10 @@ impl EventLog {
     /// Returns without storing if the event is filtered (e.g. MqttMessage).
     pub fn push(&self, event: &Event) {
         // Skip high-frequency / low-value events.
-        if matches!(event, Event::MqttMessage { .. }) {
+        if matches!(
+            event,
+            Event::MqttMessage { .. } | Event::RuleEvaluationFailed { .. }
+        ) {
             return;
         }
 

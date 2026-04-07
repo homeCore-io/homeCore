@@ -789,17 +789,9 @@ impl RuleEngine {
             };
             self.push_history(rule.id, firing);
 
-            // Emit RuleEvaluationFailed event so the activity stream shows why
-            // a rule didn't fire.
-            let _ = self.pub_bus.publish(Event::RuleEvaluationFailed {
-                timestamp: Utc::now(),
-                rule_id: rule.id.to_string(),
-                rule_name: rule.name.clone(),
-                trigger_type: trigger_type(&rule.trigger).to_string(),
-                failed_condition_index: failed_idx,
-                reason,
-                eval_ms,
-            });
+            // Normal condition mismatches are expected — already logged at
+            // debug level and recorded in per-rule fire history.  No need to
+            // emit a bus event; real failures surface via ActionFailed.
 
             return Ok(false);
         }

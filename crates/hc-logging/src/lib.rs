@@ -258,6 +258,7 @@ fn init_inner(
             rotation: config.rules_file.rotation.clone(),
             max_size_mb: config.rules_file.max_size_mb,
             compress: config.rules_file.compress,
+            prune_after_days: config.rules_file.prune_after_days,
             format: config.rules_file.format.clone(),
         };
         match build_file_layer(&cfg, filter, timer.clone()) {
@@ -363,6 +364,7 @@ fn build_file_layer(
         cfg.rotation.clone(),
         cfg.max_size_mb.saturating_mul(1024 * 1024),
         cfg.compress,
+        cfg.prune_after_days,
     )?;
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
