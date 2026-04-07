@@ -311,9 +311,6 @@ homeCore/                          # container dir (no git)
 │   │   └── hc-notify/             # notification delivery (Pushover, email)
 │   ├── src/                       # homecore binary crate (main.rs)
 │   ├── plugins/
-│   │   ├── plugin-sdk-rs/         # Rust plugin SDK
-│   │   ├── plugin-sdk-py/         # Python plugin SDK
-│   │   ├── plugin-sdk-js/         # Node.js plugin SDK
 │   │   └── examples/
 │   │       ├── virtual-device/    # software-only test device (Rust)
 │   │       └── http-poller/       # generic HTTP polling adapter (Rust)
@@ -324,12 +321,19 @@ homeCore/                          # container dir (no git)
 │   └── docs/
 │       └── devNotes.md            # developer reference (API, rule patterns, device types)
 │
+├── sdks/                          # plugin SDKs (each is its own git repo)
+│   ├── hc-plugin-sdk-rs/          # Rust plugin SDK (primary)
+│   ├── hc-plugin-sdk-py/          # Python plugin SDK
+│   ├── hc-plugin-sdk-js/          # Node.js plugin SDK
+│   └── hc-plugin-sdk-dotnet/      # .NET Core plugin SDK
+│
 ├── plugins/                       # device adapter plugins (each is its own git repo)
 │   ├── hc-yolink/                 # YoLink cloud MQTT bridge
 │   ├── hc-lutron/                 # Lutron RadioRA2 telnet bridge
 │   ├── hc-sonos/                  # Sonos UPnP bridge
 │   ├── hc-hue/                    # Philips Hue bridge
 │   ├── hc-wled/                   # WLED LED controller
+│   ├── hc-isy/                    # ISY/IoX controller bridge (Insteon, Z-Wave)
 │   ├── hc-zwave/                  # Z-Wave JS WebSocket bridge
 │   └── hc-plugin-template/        # starter template for new plugins
 │
@@ -423,6 +427,10 @@ homeCore/                          # container dir (no git)
 - [x] **Telegram notification channel** — `type = "telegram"` in `[[notify.channels]]`; `channel = "all"` fans out to all registered channels
 - [x] **`TimeElapsed` condition** — `type = "time_elapsed"` checks ms since attribute last changed; per-attribute timestamp cache in rule engine; dry-run uses `last_seen` baseline
 - [x] **Rule test detail** — `POST /automations/{id}/test` now returns `actual`, `expected`, `elapsed_ms`, `reason` per condition
+- [x] **Log pruning** — `prune_after_days` config for `[logging.file]` and `[logging.rules_file]`; deletes rotated `.log`/`.log.gz` files older than N days; runs at startup and after each rotation
+- [x] **Plugin MQTT log forwarding** — plugins forward tracing logs to `homecore/plugins/{id}/logs` via `MqttLogLayer`; core StateBridge injects them into the `/logs/stream` WebSocket broadcast; configurable `log_forward_level` per plugin
+- [x] **All plugins on SDK** — all 7 Rust plugins (hc-hue, hc-wled, hc-yolink, hc-lutron, hc-sonos, hc-isy, hc-zwave) use the official plugin-sdk-rs with management protocol, heartbeat, remote config, dynamic log level, and MQTT log forwarding
+- [x] **SDK feature parity** — Rust, Python, Node.js, and .NET SDKs all support: device registration (typed/full/schema), state publishing (full/partial), availability, events, management protocol (heartbeat, config, log level), and log forwarding
 - [ ] WASM plugin sandbox (`wasmtime`) — only needed for untrusted third-party plugins
 - [ ] HA clustering (`openraft`) — premature; single-node is sufficient for home use
 
