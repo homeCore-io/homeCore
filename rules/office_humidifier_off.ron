@@ -1,0 +1,41 @@
+Rule(
+    id: "e1000001-0002-0002-0002-000000000002",
+    name: "Office Humidifier Off",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "yolink_d88b4c01000d458f",
+        attribute: Some("humidity_pct"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "yolink_d88b4c01000d458f",
+            attribute: "humidity_pct",
+            op: Gte,
+            value: 35.0,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c0100044441",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "yolink_d88b4c0100044441",
+                state: {
+                    "on": false,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

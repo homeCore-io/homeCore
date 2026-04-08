@@ -1,0 +1,49 @@
+Rule(
+    id: "57d7da0a-6cf7-41de-8bad-9477de8cd971",
+    name: "Keypad lutron_72 Btn3 - Living Room On",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "lutron_72",
+        attribute: Some("button_3"),
+        to: Some("press"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "hue_001788fffe6841b3_light_019f9c7b_e17d_4bf0_86c6_30610690fd62",
+            attribute: "on",
+            op: Eq,
+            value: false,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "hue_001788fffe6841b3_light_019f9c7b_e17d_4bf0_86c6_30610690fd62",
+                state: {
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_72",
+                state: {
+                    "set_led": {
+                        "button": 3,
+                        "state": 1,
+                    },
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

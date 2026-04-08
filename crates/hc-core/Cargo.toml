@@ -21,6 +21,7 @@ hc-topic-map = { version = "0.1.0", path = "../hc-topic-map" }
 hc-notify    = { version = "0.1.0", path = "../hc-notify" }
 notify       = { workspace = true }
 toml         = { workspace = true }
+ron          = { workspace = true }
 serde        = { workspace = true }
 cron         = { workspace = true }
 icalendar    = { workspace = true }

@@ -41,6 +41,7 @@ tracing-appender   = "0.2"
 ipnet              = { version = "2", features = ["serde"] }
 jsonschema        = "0.18"
 toml              = "0.8"
+ron               = "0.8"
 utoipa            = { version = "4", features = ["axum_extras"] }
 argon2            = { version = "0.5", features = ["password-hash"] }
 async-trait       = "0.1"

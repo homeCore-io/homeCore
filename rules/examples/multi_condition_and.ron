@@ -1,0 +1,46 @@
+Rule(
+    id: "a1b2c3d4-0013-0013-0013-000000000013",
+    name: "Multi-Condition AND — Night Motion Security Light",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "motion_sensor_hallway",
+        attribute: Some("motion"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "motion_sensor_hallway",
+            attribute: "motion",
+            op: Eq,
+            value: true,
+        ),
+        TimeWindow(
+            start: "22:00:00",
+            end: "06:00:00",
+        ),
+        DeviceState(
+            device_id: "sensor.presence_home",
+            attribute: "occupied",
+            op: Eq,
+            value: false,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "light.hallway_security",
+                state: {
+                    "brightness": 60,
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

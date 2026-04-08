@@ -1,0 +1,55 @@
+Rule(
+    id: "a1b2c3d4-0014-0014-0014-000000000014",
+    name: "Multi-Action OR — Good Morning Scene",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "motion_sensor_bedroom",
+    ),
+    conditions: [
+        ScriptExpression(
+            script: "  let motion = device_state(\"motion_sensor_bedroom\")[\"motion\"];\n  let lamp   = device_state(\"light.bedside\")[\"on\"];\n  motion == true || lamp == true\n",
+        ),
+        TimeWindow(
+            start: "05:30:00",
+            end: "09:00:00",
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "light.kitchen_main",
+                state: {
+                    "brightness": 180,
+                    "color_temp": 2800,
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "switch.coffee_maker",
+                state: {
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: Notify(
+                channel: "pushover",
+                message: "Good morning! Kitchen lights and coffee are on.",
+                title: None,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

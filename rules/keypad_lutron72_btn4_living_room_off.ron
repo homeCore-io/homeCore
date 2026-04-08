@@ -1,0 +1,49 @@
+Rule(
+    id: "478aa7db-f162-4f79-a492-36e2d407ed0f",
+    name: "Keypad lutron_72 Btn4 - Living Room Off",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "lutron_72",
+        attribute: Some("button_4"),
+        to: Some("press"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "hue_001788fffe6841b3_light_51b2e6bc_3197_4206_a0f0_c6838d3e1158",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "hue_001788fffe6841b3_light_51b2e6bc_3197_4206_a0f0_c6838d3e1158",
+                state: {
+                    "on": false,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_72",
+                state: {
+                    "set_led": {
+                        "button": 4,
+                        "state": 0,
+                    },
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

@@ -1,0 +1,36 @@
+Rule(
+    id: "e044c01c-11b8-4b11-bba1-01e4532bcbac",
+    name: "OH1 Closed — Outside Lights Off",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "yolink_d88b4c01000cf2e5",
+        attribute: Some("open"),
+        to: Some(false),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "lutron_scene_outside_on_phantom",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_scene_outside_off_phantom",
+                state: {
+                    "activate": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

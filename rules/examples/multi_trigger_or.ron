@@ -1,0 +1,35 @@
+Rule(
+    id: "a1b2c3d4-0010-0010-0010-000000000010",
+    name: "Multi-Trigger OR — Front Motion (rule 1 of 2)",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "motion_sensor_front",
+        attribute: Some("motion"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "motion_sensor_front",
+            attribute: "motion",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "switch.porch_light",
+                state: {
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

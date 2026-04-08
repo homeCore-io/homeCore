@@ -1,14 +1,16 @@
 //! Write-through file store for automation rules.
 //!
 //! When the REST API creates, updates, or deletes a rule, `RuleFileStore`
-//! writes (or removes) the corresponding `.toml` file in the rules directory.
+//! writes (or removes) the corresponding `.ron` file in the rules directory.
 //! The `hc_core::rule_loader::RuleWatcher` detects the change and reloads the
 //! live rule set — no manual signalling required.
+//!
+//! Legacy `.toml` files are still found/deleted but new writes always use RON.
 //!
 //! # File naming
 //!
 //! Filenames are derived from the rule's `name` field via [`slugify`]:
-//! `"Morning Lights"` → `morning_lights.toml`.
+//! `"Morning Lights"` → `morning_lights.ron`.
 //!
 //! # Import note
 //!
@@ -22,7 +24,15 @@ use hc_types::rule::{Action, Condition, Rule, Trigger};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// Provides create / update / delete operations on rule TOML files.
+/// Recognised rule file extensions (RON preferred, TOML legacy).
+fn is_rule_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("ron") | Some("toml")
+    )
+}
+
+/// Provides create / update / delete operations on rule files.
 #[derive(Clone)]
 pub struct RuleFileStore {
     pub dir: PathBuf,
@@ -33,12 +43,12 @@ impl RuleFileStore {
         Self { dir: dir.into() }
     }
 
-    /// Serialize `rule` and write it to the appropriate `.toml` file.
+    /// Serialize `rule` and write it to the appropriate `.ron` file.
     ///
     /// If a file already exists in the rules directory whose `id` matches
     /// `rule.id`, that file is overwritten in-place (preserving the original
-    /// filename).  Otherwise a new file is created at `{dir}/{slug}.toml`
-    /// where `slug` is derived from `rule.name`.
+    /// filename and extension).  Otherwise a new file is created at
+    /// `{dir}/{slug}.ron` where `slug` is derived from `rule.name`.
     ///
     /// Creates the directory if it does not exist.  Returns the path written.
     pub fn write_rule(&self, rule: &Rule) -> Result<PathBuf> {
@@ -51,11 +61,11 @@ impl RuleFileStore {
             Some(existing) => existing,
             None => {
                 let slug = slugify(&rule.name);
-                self.dir.join(format!("{slug}.toml"))
+                self.dir.join(format!("{slug}.ron"))
             }
         };
 
-        let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
+        let content = serialize_rule(rule, &path)?;
 
         std::fs::write(&path, content)
             .with_context(|| format!("writing rule file {}", path.display()))?;
@@ -79,7 +89,8 @@ impl RuleFileStore {
     }
 
     /// Scan the rules directory and return the path of the file whose `id`
-    /// field matches `id`.  Returns `None` if not found.
+    /// field matches `id`.  Checks both `.ron` and `.toml` files.
+    /// Returns `None` if not found.
     pub fn find_file(&self, id: Uuid) -> Result<Option<PathBuf>> {
         if !self.dir.exists() {
             return Ok(None);
@@ -89,13 +100,13 @@ impl RuleFileStore {
             .with_context(|| format!("scanning {}", self.dir.display()))?
         {
             let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            if !is_rule_file(&path) {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
                 // Fast pre-filter: skip files that don't contain the UUID string.
                 if content.contains(&id_str) {
-                    if let Ok(rule) = toml::from_str::<Rule>(&content) {
+                    if let Some(rule) = parse_rule_file(&path, &content) {
                         if rule.id == id {
                             return Ok(Some(path));
                         }
@@ -112,15 +123,17 @@ impl RuleFileStore {
     /// Finds the current file on disk by rule ID.  If the file's path no
     /// longer matches the slug of `rule.name` (i.e. the rule was renamed or
     /// the original file had a custom name), the old file is deleted after the
-    /// new one is written.
+    /// new one is written.  New files always use `.ron` extension.
     pub fn write_rule_renamed(&self, rule: &Rule, old_name: &str) -> Result<PathBuf> {
         // Find the existing file (by ID) before writing the new one.
         let existing_path = self.find_file(rule.id)?;
 
         let new_slug = slugify(&rule.name);
-        let new_path = self.dir.join(format!("{new_slug}.toml"));
+        let new_path = self.dir.join(format!("{new_slug}.ron"));
 
-        let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
+        let cfg = ron::ser::PrettyConfig::default().struct_names(true);
+        let content =
+            ron::ser::to_string_pretty(rule, cfg).context("serializing rule to RON")?;
 
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating rules directory {}", self.dir.display()))?;
@@ -129,7 +142,7 @@ impl RuleFileStore {
             .with_context(|| format!("writing rule file {}", new_path.display()))?;
 
         // Delete the old file if it exists at a different path than where we
-        // just wrote (covers slug-mismatch as well as renamed files).
+        // just wrote (covers slug-mismatch, renamed files, and .toml→.ron migration).
         if let Some(old) = existing_path {
             if old != new_path && old.exists() {
                 std::fs::remove_file(&old)
@@ -139,11 +152,14 @@ impl RuleFileStore {
             // No existing file found by ID — fall back to deleting by old slug.
             let old_slug = slugify(old_name);
             if old_slug != new_slug {
-                let old_path = self.dir.join(format!("{old_slug}.toml"));
-                if old_path.exists() {
-                    std::fs::remove_file(&old_path).with_context(|| {
-                        format!("removing old rule file {}", old_path.display())
-                    })?;
+                // Check both extensions.
+                for ext in ["ron", "toml"] {
+                    let old_path = self.dir.join(format!("{old_slug}.{ext}"));
+                    if old_path.exists() {
+                        std::fs::remove_file(&old_path).with_context(|| {
+                            format!("removing old rule file {}", old_path.display())
+                        })?;
+                    }
                 }
             }
         }
@@ -180,7 +196,27 @@ pub fn slugify(name: &str) -> String {
 
 /// Resolve the path of a rule file given its name, without reading the file.
 pub fn rule_path(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("{}.toml", slugify(name)))
+    dir.join(format!("{}.ron", slugify(name)))
+}
+
+/// Parse a rule file based on its extension.
+fn parse_rule_file(path: &Path, content: &str) -> Option<Rule> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ron") => ron::from_str(content).ok(),
+        Some("toml") => toml::from_str(content).ok(),
+        _ => None,
+    }
+}
+
+/// Serialize a rule to a string based on the target file extension.
+fn serialize_rule(rule: &Rule, path: &Path) -> Result<String> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => toml::to_string_pretty(rule).context("serializing rule to TOML"),
+        _ => {
+            let cfg = ron::ser::PrettyConfig::default().struct_names(true);
+            ron::ser::to_string_pretty(rule, cfg).context("serializing rule to RON")
+        }
+    }
 }
 
 // ── Device-deletion cascading ─────────────────────────────────────────────────
@@ -206,13 +242,13 @@ pub fn nullify_device_refs(
         .with_context(|| format!("scanning rules directory {}", dir.display()))?
     {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+        if !is_rule_file(&path) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(mut rule) = toml::from_str::<Rule>(&content) else {
+        let Some(mut rule) = parse_rule_file(&path, &content) else {
             continue;
         };
 
@@ -221,7 +257,7 @@ pub fn nullify_device_refs(
             rule.enabled = false;
             rule.error = Some(format!("references deleted device: {device_id}"));
 
-            let updated = toml::to_string_pretty(&rule)
+            let updated = serialize_rule(&rule, &path)
                 .with_context(|| format!("serialising rule {}", rule.name))?;
             std::fs::write(&path, updated)
                 .with_context(|| format!("writing {}", path.display()))?;

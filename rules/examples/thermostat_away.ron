@@ -1,0 +1,44 @@
+Rule(
+    id: "a1b2c3d4-0004-0004-0004-000000000004",
+    name: "Thermostat Away Mode",
+    enabled: false,
+    priority: 5,
+    tags: [],
+    trigger: WebhookReceived(
+        path: "presence/away",
+    ),
+    conditions: [
+        ScriptExpression(
+            script: "  let mode = state(\"climate.main_thermostat\", \"mode\");\n  mode != \"away\"\n",
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: CallService(
+                url: "http://thermostat.local/api/mode",
+                method: "POST",
+                body: {
+                    "mode": "away",
+                    "temperature": 62,
+                },
+                timeout_ms: Some(5000),
+                retries: Some(2),
+                response_event: None,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: FireEvent(
+                event_type: "home_mode_changed",
+                payload: {
+                    "mode": "away",
+                },
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

@@ -1,0 +1,65 @@
+Rule(
+    id: "4ad53081-5c15-465b-8d31-5ec97b289d12",
+    name: "All Deck Doors Closed — Start Lights Timer",
+    enabled: true,
+    priority: 20,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "yolink_d88b4c01000e813f",
+        device_ids: [
+            "yolink_d88b4c01000e8304",
+            "yolink_d88b4c01000e82eb",
+            "yolink_d88b4c0200142eb8",
+        ],
+        attribute: Some("open"),
+        to: Some(false),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "yolink_d88b4c01000e813f",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c01000e8304",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c01000e82eb",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c0200142eb8",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        ModeIs(
+            mode_id: "mode_night",
+            on: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "timer_deck_lights_off",
+                state: {
+                    "command": "start",
+                    "duration_secs": 300,
+                    "label": "Deck lights off",
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

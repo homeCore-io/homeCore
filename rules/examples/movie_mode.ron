@@ -1,0 +1,45 @@
+Rule(
+    id: "a1b2c3d4-0005-0005-0005-000000000005",
+    name: "Movie Mode",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: ManualTrigger,
+    conditions: [],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: Parallel(
+                actions: [
+                    SetDeviceState(
+                        device_id: "light.living_room",
+                        state: {
+                            "brightness": 30,
+                            "color_temp": 2700,
+                            "on": true,
+                        },
+                        track_event_value: false,
+                    ),
+                    SetDeviceState(
+                        device_id: "switch.tv_backlight",
+                        state: {
+                            "on": true,
+                        },
+                        track_event_value: false,
+                    ),
+                    SetDeviceState(
+                        device_id: "light.hallway",
+                        state: {
+                            "on": false,
+                        },
+                        track_event_value: false,
+                    ),
+                ],
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

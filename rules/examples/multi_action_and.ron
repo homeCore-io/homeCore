@@ -1,0 +1,74 @@
+Rule(
+    id: "a1b2c3d4-0015-0015-0015-000000000015",
+    name: "Multi-Action AND — Away Mode Lockdown",
+    enabled: false,
+    priority: 20,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "sensor.presence_home",
+        attribute: Some("occupied"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "sensor.presence_home",
+            attribute: "occupied",
+            op: Eq,
+            value: false,
+        ),
+        TimeWindow(
+            start: "08:00:00",
+            end: "23:00:00",
+        ),
+        DeviceState(
+            device_id: "switch.security_mode",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lock.front_door",
+                state: {
+                    "locked": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "light.all_zones",
+                state: {
+                    "on": false,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "thermostat.main",
+                state: {
+                    "mode": "away",
+                    "target_temp": 65,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: Notify(
+                channel: "pushover",
+                message: "Away mode activated: door locked, lights off, thermostat set to 65°.",
+                title: Some("Home Secured"),
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

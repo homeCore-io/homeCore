@@ -1,0 +1,29 @@
+Rule(
+    id: "ea75205d-22fe-4e5b-a1c0-65eb24ce54a6",
+    name: "Deck Lights Off - Timer Finished",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "timer_deck_lights_off",
+        attribute: Some("state"),
+        to: Some("finished"),
+    ),
+    conditions: [],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_scene_deck_off_phantom",
+                state: {
+                    "activate": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

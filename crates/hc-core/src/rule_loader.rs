@@ -2,18 +2,20 @@
 //!
 //! # Directory layout
 //!
-//! Each automation rule lives in its own TOML file under the configured rules
+//! Each automation rule lives in its own RON file under the configured rules
 //! directory (default: `{base_dir}/rules/`).  The filename stem is the rule's
 //! slug; the `name` field inside the file provides a human-readable display
 //! name (defaults to the slug if omitted).
 //!
+//! Legacy `.toml` files are still loaded for backwards compatibility but new
+//! rules are always written as `.ron`.
+//!
 //! # Hot reload
 //!
 //! `RuleWatcher` uses the `notify` crate to monitor the directory.  Any
-//! `.toml` create / modify / delete event triggers a debounced reload (200 ms).
-//! All files are re-parsed and validated before the live rule set is atomically
-//! replaced.  If validation fails the existing rules remain unchanged and an
-//! error is logged — the running system is never affected by a bad file.
+//! `.ron` or `.toml` create / modify / delete event triggers a debounced
+//! reload (200 ms).  All files are re-parsed and validated before the live
+//! rule set is atomically replaced.
 
 use anyhow::{Context, Result};
 use hc_state::StateStore;
@@ -26,36 +28,17 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-/// Regex-free check: does the file's `id` field contain an empty string?
-/// Matches `id = ""` with any surrounding whitespace.
-fn has_empty_id(content: &str) -> bool {
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with("id") {
-            let after_key = t["id".len()..].trim_start();
-            if let Some(after_eq) = after_key.strip_prefix('=') {
-                return after_eq.trim() == r#""""#;
-            }
-        }
-    }
-    false
-}
-
-/// Returns `true` if the file has no `id = ...` key at all (top-level only).
-fn is_missing_id(content: &str) -> bool {
-    !content.lines().any(|line| {
-        let t = line.trim();
-        if !t.starts_with("id") {
-            return false;
-        }
-        let after_key = t["id".len()..].trim_start();
-        after_key.starts_with('=')
-    })
+/// Recognised rule file extensions.
+fn is_rule_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("ron") | Some("toml")
+    )
 }
 
 // ── Public load function ─────────────────────────────────────────────────────
 
-/// Parse every `*.toml` file in `dir` into a `Vec<Rule>`.
+/// Parse every `*.ron` and `*.toml` file in `dir` into a `Vec<Rule>`.
 ///
 /// Never returns `Err` due to individual file parse failures or duplicate IDs.
 /// Instead, broken files produce a disabled stub rule with `error` set so the
@@ -74,7 +57,7 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
 
     for entry in entries {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+        if !is_rule_file(&path) {
             continue;
         }
         match load_file(&path) {
@@ -148,34 +131,53 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
     }
 }
 
-/// Parse a single rule TOML file.
+/// Parse a single rule file (RON or legacy TOML, detected by extension).
 ///
-/// If the file contains `id = ""` or has no `id` key at all, a fresh UUID v4
-/// is generated, written back into the file, and used for this rule.  This
-/// lets authors create rule files without having to generate a UUID manually.
+/// For RON files: if the rule has a nil UUID (all zeros), a fresh UUID v4 is
+/// generated and the file is rewritten with the new ID.
+///
+/// For TOML files (legacy): the old `id = ""` / missing-id logic still works.
 pub fn load_file(path: &Path) -> Result<Rule> {
-    let mut content =
+    let content =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
-    if has_empty_id(&content) {
-        let new_id = uuid::Uuid::new_v4();
-        let updated = replace_empty_id(&content, &new_id.to_string());
-        std::fs::write(path, &updated)
-            .with_context(|| format!("writing generated id back to {}", path.display()))?;
-        info!(file = %path.display(), id = %new_id, "Generated missing rule ID and wrote to file");
-        content = updated;
-    } else if is_missing_id(&content) {
-        let new_id = uuid::Uuid::new_v4();
-        // Prepend the id line so the rest of the file is untouched.
-        let updated = format!("id = \"{new_id}\"\n{content}");
-        std::fs::write(path, &updated)
-            .with_context(|| format!("writing generated id back to {}", path.display()))?;
-        info!(file = %path.display(), id = %new_id, "Added missing rule ID and wrote to file");
-        content = updated;
-    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    let mut rule: Rule =
-        toml::from_str(&content).with_context(|| format!("parsing TOML in {}", path.display()))?;
+    let mut rule: Rule = match ext {
+        "ron" => {
+            ron::from_str(&content).with_context(|| format!("parsing RON in {}", path.display()))?
+        }
+        "toml" => toml::from_str(&content)
+            .with_context(|| format!("parsing TOML in {}", path.display()))?,
+        _ => anyhow::bail!("unsupported rule file extension: {ext}"),
+    };
+
+    // Auto-generate UUID if nil (RON) or missing/empty (TOML).
+    if rule.id.is_nil() {
+        let new_id = uuid::Uuid::new_v4();
+        rule.id = new_id;
+        // Rewrite the file with the generated ID.
+        if ext == "ron" {
+            let cfg = ron::ser::PrettyConfig::default().struct_names(true);
+            let updated =
+                ron::ser::to_string_pretty(&rule, cfg).context("serializing rule to RON")?;
+            std::fs::write(path, &updated)
+                .with_context(|| format!("writing generated id back to {}", path.display()))?;
+        } else {
+            // Legacy TOML rewrite
+            let updated = if has_empty_id(&content) {
+                replace_empty_id(&content, &new_id.to_string())
+            } else if is_missing_id(&content) {
+                format!("id = \"{new_id}\"\n{content}")
+            } else {
+                // ID was present but parsed as nil — rewrite whole file
+                toml::to_string_pretty(&rule).context("serializing rule to TOML")?
+            };
+            std::fs::write(path, &updated)
+                .with_context(|| format!("writing generated id back to {}", path.display()))?;
+        }
+        info!(file = %path.display(), id = %new_id, "Generated missing rule ID and wrote to file");
+    }
 
     // Derive display name from filename if the `name` field is empty.
     if rule.name.is_empty() {
@@ -185,6 +187,34 @@ pub fn load_file(path: &Path) -> Result<Rule> {
     }
 
     Ok(rule)
+}
+
+// ── Legacy TOML ID helpers ──────────────────────────────────────────────────
+
+/// Regex-free check: does the file's `id` field contain an empty string?
+fn has_empty_id(content: &str) -> bool {
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("id") {
+            let after_key = t["id".len()..].trim_start();
+            if let Some(after_eq) = after_key.strip_prefix('=') {
+                return after_eq.trim() == r#""""#;
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` if the file has no `id = ...` key at all (top-level only).
+fn is_missing_id(content: &str) -> bool {
+    !content.lines().any(|line| {
+        let t = line.trim();
+        if !t.starts_with("id") {
+            return false;
+        }
+        let after_key = t["id".len()..].trim_start();
+        after_key.starts_with('=')
+    })
 }
 
 /// Replace `id = ""` (any whitespace variant) with `id = "{new_id}"` in content.
@@ -212,19 +242,18 @@ fn replace_empty_id(content: &str, new_id: &str) -> String {
     result
 }
 
-/// Write a single rule back to its TOML file in `dir`.
+/// Write a single rule to a RON file in `dir`.
 ///
-/// The file is named after the rule's `name` field (slugified).  Used by
-/// startup validation (e.g. cron expression checking) to persist a disabled
-/// rule with its `error` field set.
+/// The file is named after the rule's `name` field (slugified).
 pub fn write_rule(dir: &Path, rule: &Rule) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating rules directory {}", dir.display()))?;
 
     let slug = slugify(&rule.name);
-    let path = dir.join(format!("{slug}.toml"));
+    let path = dir.join(format!("{slug}.ron"));
 
-    let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
+    let cfg = ron::ser::PrettyConfig::default().struct_names(true);
+    let content = ron::ser::to_string_pretty(rule, cfg).context("serializing rule to RON")?;
 
     std::fs::write(&path, &content)
         .with_context(|| format!("writing rule file {}", path.display()))?;
@@ -233,7 +262,6 @@ pub fn write_rule(dir: &Path, rule: &Rule) -> Result<PathBuf> {
 }
 
 /// Convert a display name to a filesystem-safe slug.
-/// (Duplicated from hc-api's RuleFileStore to keep hc-core self-contained.)
 fn slugify(name: &str) -> String {
     let raw: String = name
         .chars()
@@ -255,9 +283,6 @@ fn slugify(name: &str) -> String {
 
 /// Watches a rules directory for filesystem changes and hot-reloads the live
 /// rule set atomically.
-///
-/// Keep the returned value alive for the duration of the process (typically
-/// until the end of `main`).  Dropping it stops the watcher.
 pub struct RuleWatcher {
     _watcher: RecommendedWatcher,
 }
@@ -265,7 +290,7 @@ pub struct RuleWatcher {
 impl RuleWatcher {
     /// Start watching `dir`.
     ///
-    /// On any `.toml` create / modify / delete event the watcher:
+    /// On any `.ron` or `.toml` create / modify / delete event the watcher:
     /// 1. Debounces 200 ms to coalesce rapid edits.
     /// 2. Calls `load_all` on a blocking thread.
     /// 3. Validates the full set (parse + duplicate ID check).
@@ -284,10 +309,7 @@ impl RuleWatcher {
             let is_relevant = matches!(
                 event.kind,
                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-            ) && event
-                .paths
-                .iter()
-                .any(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"));
+            ) && event.paths.iter().any(|p| is_rule_file(p));
             if is_relevant {
                 let _ = tx.blocking_send(());
             }

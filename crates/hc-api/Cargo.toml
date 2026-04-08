@@ -27,6 +27,7 @@ async-trait  = { workspace = true }
 hc-logging   = { version = "0.1.0", path = "../hc-logging" }
 ipnet        = { workspace = true }
 toml         = { workspace = true }
+ron          = { workspace = true }
 prometheus   = { workspace = true }
 zip          = { version = "2", default-features = false, features = ["deflate"] }
 

@@ -1,0 +1,46 @@
+Rule(
+    id: "543e3818-13f8-466b-9f7a-8552204a4818",
+    name: "Any Deck Door Opened",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "switch_any_deck_door_open",
+        attribute: Some("on"),
+        to: Some(true),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "mode_night",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "timer_deck_lights_off",
+                state: {
+                    "command": "cancel",
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_scene_deck_on_phantom",
+                state: {
+                    "activate": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

@@ -1,0 +1,54 @@
+Rule(
+    id: "25b4af30-4131-4b04-8991-54ee5c8bbbcc",
+    name: "Door Closed - Living Room",
+    enabled: false,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "yolink_d88b4c01000e8304",
+        attribute: Some("open"),
+        to: Some(false),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "yolink_d88b4c01000e813f",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c01000e8304",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c01000e82eb",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c0200142eb8",
+            attribute: "open",
+            op: Eq,
+            value: false,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "switch_any_deck_door_open",
+                state: {
+                    "on": false,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

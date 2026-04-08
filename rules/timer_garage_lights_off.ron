@@ -1,0 +1,29 @@
+Rule(
+    id: "0063f5b3-bfb0-4b15-ae21-1cd00f8f8105",
+    name: "Garage Lights Off - Timer Finished",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "timer_garage_lights",
+        attribute: Some("state"),
+        to: Some("finished"),
+    ),
+    conditions: [],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_54",
+                state: {
+                    "on": false,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

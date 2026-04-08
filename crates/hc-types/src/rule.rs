@@ -1,7 +1,8 @@
 //! Automation rule types: triggers, conditions, and actions.
 //!
 //! Rules are pure data — created and modified through the REST API, stored as
-//! JSON/TOML, and evaluated at runtime without any Rust recompilation.
+//! RON files on disk, and evaluated at runtime without any Rust recompilation.
+//! The REST API exchanges rules as JSON (externally-tagged serde enums).
 
 use crate::device::DeviceChangeKind;
 use chrono::{NaiveTime, Weekday};
@@ -22,7 +23,6 @@ use uuid::Uuid;
 /// run_mode = "parallel" # default — concurrent firings
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunMode {
     /// No limit — concurrent firings run in parallel (default).
     #[default]
@@ -134,7 +134,6 @@ fn is_parallel(m: &RunMode) -> bool {
 
 /// What causes a rule to be evaluated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Trigger {
     DeviceStateChanged {
         /// Primary device ID (used when `device_ids` is empty).
@@ -322,9 +321,14 @@ pub enum Trigger {
     },
 }
 
+impl Default for Trigger {
+    fn default() -> Self {
+        Trigger::ManualTrigger
+    }
+}
+
 /// Button event types for `Trigger::ButtonEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ButtonEventType {
     Pushed,
     Held,
@@ -334,7 +338,6 @@ pub enum ButtonEventType {
 
 /// Threshold direction operators for `Trigger::NumericThreshold`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ThresholdOp {
     /// Attribute value is currently above the threshold (fires on every change while true).
     Above,
@@ -348,7 +351,6 @@ pub enum ThresholdOp {
 
 /// Time unit for `Trigger::Periodic`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum PeriodicUnit {
     Minutes,
     Hours,
@@ -358,7 +360,6 @@ pub enum PeriodicUnit {
 
 /// Solar event types for time-based triggers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SunEventType {
     Sunrise,
     Sunset,
@@ -369,7 +370,6 @@ pub enum SunEventType {
 
 /// A side-effect-free predicate evaluated before actions are executed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Condition {
     DeviceState {
         #[serde(alias = "device")]
@@ -464,7 +464,6 @@ pub enum Condition {
 
 /// Comparison operators for `Condition::DeviceState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -484,7 +483,6 @@ pub struct ConditionalBranch {
 
 /// Variable operation for `SetVariable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum VariableOp {
     /// Replace with the given value (default).
     Set,
@@ -498,7 +496,6 @@ pub enum VariableOp {
 
 /// Command for `Action::SetMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ModeCommand {
     On,
     Off,
@@ -507,7 +504,6 @@ pub enum ModeCommand {
 
 /// Log level for `LogMessage` action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum LogLevel {
     Trace,
     Debug,
@@ -525,28 +521,15 @@ fn default_true() -> bool {
 /// When `enabled` is `false` the executor skips the action and records a
 /// `Skipped` trace entry.  Defaults to `true` so existing rule files that
 /// omit the field continue to work unchanged.
-///
-/// TOML representation (the `type` field and action-specific fields are
-/// flattened to the same level as `enabled`):
-///
-/// ```toml
-/// [[actions]]
-/// type      = "set_device_state"
-/// device_id = "light_1"
-/// state     = { on = true }
-/// enabled   = false           # optional — default true
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleAction {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(flatten)]
     pub action: Action,
 }
 
 /// A single step in a rule's action sequence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     SetDeviceState {
         #[serde(alias = "device")]
@@ -999,17 +982,18 @@ pub struct Scene {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Condition, Trigger};
+    use super::{Action, Condition, Rule, RuleAction, Trigger};
     use serde_json::json;
 
     #[test]
-    fn parses_device_aliases_in_trigger() {
+    fn json_externally_tagged_trigger() {
         let trigger: Trigger = serde_json::from_value(json!({
-            "type": "device_state_changed",
-            "device": "living_room.floor_lamp",
-            "devices": ["bedroom.floor_lamp"],
-            "attribute": "on",
-            "to": true
+            "DeviceStateChanged": {
+                "device_id": "living_room.floor_lamp",
+                "device_ids": ["bedroom.floor_lamp"],
+                "attribute": "on",
+                "to": true
+            }
         }))
         .unwrap();
 
@@ -1027,13 +1011,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_device_aliases_in_condition_and_actions() {
+    fn json_externally_tagged_condition_and_actions() {
         let condition: Condition = serde_json::from_value(json!({
-            "type": "device_state",
-            "device": "living_room.floor_lamp",
-            "attribute": "on",
-            "op": "eq",
-            "value": true
+            "DeviceState": {
+                "device_id": "living_room.floor_lamp",
+                "attribute": "on",
+                "op": "Eq",
+                "value": true
+            }
         }))
         .unwrap();
         match condition {
@@ -1044,9 +1029,10 @@ mod tests {
         }
 
         let action: Action = serde_json::from_value(json!({
-            "type": "set_device_state",
-            "device": "living_room.floor_lamp",
-            "state": { "on": true }
+            "SetDeviceState": {
+                "device_id": "living_room.floor_lamp",
+                "state": { "on": true }
+            }
         }))
         .unwrap();
         match action {
@@ -1055,21 +1041,79 @@ mod tests {
             }
             _ => panic!("unexpected action variant"),
         }
+    }
 
-        let capture: Action = serde_json::from_value(json!({
-            "type": "capture_device_state",
-            "key": "before_scene",
-            "devices": ["living_room.floor_lamp", "hall.floor_lamp"]
-        }))
-        .unwrap();
-        match capture {
-            Action::CaptureDeviceState { device_ids, .. } => {
-                assert_eq!(
-                    device_ids,
-                    vec!["living_room.floor_lamp", "hall.floor_lamp"]
-                );
-            }
-            _ => panic!("unexpected action variant"),
-        }
+    #[test]
+    fn ron_round_trip() {
+        let rule = Rule {
+            id: uuid::Uuid::nil(),
+            name: "Test Rule".to_string(),
+            enabled: true,
+            priority: 10,
+            tags: vec![],
+            trigger: Trigger::DeviceStateChanged {
+                device_id: "light_1".to_string(),
+                device_ids: vec![],
+                attribute: Some("on".to_string()),
+                to: Some(json!(true)),
+                from: None,
+                not_from: None,
+                not_to: None,
+                for_duration_secs: None,
+                change_kind: None,
+                change_source: None,
+            },
+            conditions: vec![Condition::ModeIs {
+                mode_id: "mode_night".to_string(),
+                on: true,
+            }],
+            actions: vec![RuleAction {
+                enabled: true,
+                action: Action::SetDeviceState {
+                    device_id: "light_1".to_string(),
+                    state: json!({"on": true}),
+                    track_event_value: false,
+                },
+            }],
+            error: None,
+            cooldown_secs: None,
+            log_events: false,
+            log_triggers: false,
+            log_actions: false,
+            required_expression: None,
+            cancel_on_false: false,
+            trigger_condition: None,
+            variables: Default::default(),
+            trigger_label: None,
+            run_mode: Default::default(),
+        };
+
+        let ron_str =
+            ron::ser::to_string_pretty(&rule, ron::ser::PrettyConfig::default()).unwrap();
+        let parsed: Rule = ron::from_str(&ron_str).unwrap();
+        assert_eq!(parsed.name, "Test Rule");
+        assert_eq!(parsed.priority, 10);
+        assert!(parsed.enabled);
+        assert_eq!(parsed.actions.len(), 1);
+        assert!(parsed.actions[0].enabled);
+    }
+
+    #[test]
+    fn rule_action_named_field() {
+        // RuleAction now uses a named `action` field, not flatten
+        let ra = RuleAction {
+            enabled: false,
+            action: Action::Delay {
+                duration_secs: 5,
+                cancelable: false,
+                cancel_key: None,
+            },
+        };
+        let json = serde_json::to_value(&ra).unwrap();
+        assert_eq!(json["enabled"], false);
+        assert!(json["action"]["Delay"].is_object());
+
+        let parsed: RuleAction = serde_json::from_value(json).unwrap();
+        assert!(!parsed.enabled);
     }
 }

@@ -1,0 +1,38 @@
+Rule(
+    id: "a1b2c3d4-0003-0003-0003-000000000003",
+    name: "Sunset Outdoor Lights",
+    enabled: false,
+    priority: 15,
+    tags: [],
+    trigger: SunEvent(
+        event: Sunset,
+        offset_minutes: -15,
+    ),
+    conditions: [],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "light.front_porch",
+                state: {
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "light.back_deck",
+                state: {
+                    "on": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)

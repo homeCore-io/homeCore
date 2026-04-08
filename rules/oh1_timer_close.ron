@@ -1,0 +1,46 @@
+Rule(
+    id: "8b49464c-2d17-4150-a10f-c6918ac669c0",
+    name: "OH1 Timer Close (Day)",
+    enabled: true,
+    priority: 10,
+    tags: [],
+    trigger: DeviceStateChanged(
+        device_id: "timer_garage_close",
+        attribute: Some("state"),
+        to: Some("finished"),
+    ),
+    conditions: [
+        ModeIs(
+            mode_id: "mode_night",
+            on: false,
+        ),
+        DeviceState(
+            device_id: "switch_auto_garage_door",
+            attribute: "on",
+            op: Eq,
+            value: true,
+        ),
+        DeviceState(
+            device_id: "yolink_d88b4c01000cf2e5",
+            attribute: "open",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_scene_oh1_door_phantom",
+                state: {
+                    "activate": true,
+                },
+                track_event_value: false,
+            ),
+        ),
+    ],
+    log_events: false,
+    log_triggers: false,
+    log_actions: false,
+    cancel_on_false: false,
+)
