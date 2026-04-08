@@ -1,30 +1,44 @@
 # HomeCore Automation Rules Guide
 
-Rules are TOML files stored in the `rules/` directory. Each file is one rule.
-The filename (minus `.toml`) is the rule's slug. Changes are hot-reloaded —
-no restart required. Parse errors leave the running rules intact.
+Rules are RON (Rusty Object Notation) files stored in the `rules/` directory.
+Each `.ron` file is one rule. The filename stem is the rule's slug. Changes
+are hot-reloaded — no restart required. Parse errors leave the running rules
+intact. Legacy `.toml` files are still loaded for backwards compatibility.
 
 ## Rule File Structure
 
-```toml
-id       = "a0000000-0000-0000-0000-000000000001"   # UUID, must be unique
-name     = "Human readable name"
-enabled  = true
-priority = 10                                         # higher fires first
-
-[trigger]
-# ... one trigger ...
-
-[[conditions]]
-# ... zero or more conditions (all must pass — AND logic) ...
-
-[[actions]]
-# ... one or more actions (run in sequence) ...
+```ron
+Rule(
+    id: "a0000000-0000-0000-0000-000000000001",   // UUID, must be unique
+    name: "Human readable name",
+    enabled: true,
+    priority: 10,                                    // higher fires first
+    trigger: DeviceStateChanged(                     // one trigger
+        device_id: "yolink_abc123",
+        attribute: Some("on"),
+    ),
+    conditions: [                                    // zero or more (AND logic)
+        ModeIs(mode_id: "mode_night", on: true),
+    ],
+    actions: [                                       // one or more (sequential)
+        RuleAction(
+            enabled: true,
+            action: SetDeviceState(
+                device_id: "lutron_54",
+                state: { "on": true },
+            ),
+        ),
+    ],
+)
 ```
 
-Set `id = ""` and the engine will generate a UUID on first load and write it
-back into the file automatically. Or generate one manually:
-`python3 -c "import uuid; print(uuid.uuid4())"`
+Set `id` to all zeros (`"00000000-0000-0000-0000-000000000000"`) and the
+engine will generate a UUID on first load and write it back into the file
+automatically.
+
+> **Note:** The examples below still use TOML syntax for reference. The
+> actual file format on disk is RON. The REST API uses JSON with
+> externally-tagged enums (e.g. `{"DeviceStateChanged": {...}}`).
 
 ---
 

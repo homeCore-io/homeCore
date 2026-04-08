@@ -13,7 +13,7 @@
 - MQTT as the universal device communication fabric (not a plugin — core infrastructure)
 - Embedded MQTT broker (`rumqttd`) ships with the binary, zero external dependencies for basic installs
 - API-first: every operation available over REST/WebSocket — no UI baked in
-- Event-driven rule engine: triggers → conditions → actions, all stored as JSON/TOML
+- Event-driven rule engine: triggers → conditions → actions, stored as RON files on disk
 - Plugin/adapter model: any language can integrate devices via MQTT or REST SDK
 - Sandboxed scripting via Rhai (and optionally WASM) for custom logic
 
@@ -110,7 +110,7 @@ allow_sub = ["homecore/#"]
 
 ## Rule engine data model
 
-Rules are stored as JSON/TOML. They are created, read, and modified entirely through the REST API — no Rust recompilation needed to add automations.
+Rules are stored as RON files on disk and exchanged as JSON over the REST API — no Rust recompilation needed to add automations.
 
 ```rust
 struct Rule {
@@ -314,7 +314,7 @@ homeCore/                          # container dir (no git)
 │   │   └── examples/
 │   │       ├── virtual-device/    # software-only test device (Rust)
 │   │       └── http-poller/       # generic HTTP polling adapter (Rust)
-│   ├── rules/                     # live automation rules (TOML, hot-reloaded)
+│   ├── rules/                     # live automation rules (RON, hot-reloaded)
 │   │   └── examples/              # documented rule patterns (OR/AND, multi-trigger…)
 │   ├── tests/
 │   │   └── integration_test.rs    # end-to-end: virtual device → rule → command
@@ -394,7 +394,7 @@ homeCore/                          # container dir (no git)
 - [x] Action sequences: `Delay`, `Parallel`, `RepeatUntil`, `Conditional`
 - [x] Rule dry-run / test mode (`POST /automations/{id}/test`)
 - [x] Rule import/export JSON (`/automations/import`, `/automations/export`)
-- [x] Rules stored as TOML files, hot-reloaded on filesystem change
+- [x] Rules stored as RON files, hot-reloaded on filesystem change (legacy TOML still loadable)
 - [x] Auto-generated UUIDs: `id = ""` in rule file → UUID written back on first load
 - [x] Verbose rule engine logging: per-trigger, per-condition, per-action with timing
 
@@ -440,7 +440,7 @@ homeCore/                          # container dir (no git)
 
 1. **MQTT is the device communication fabric** — never route device state through REST-only paths; MQTT is always the source of truth for device state.
 2. **Core is side-effect free in conditions** — rule conditions must only read state, never call external services. This makes them safe to evaluate speculatively and test with dry-run.
-3. **Rules are data, not code** — stored as JSON/TOML, created/modified via API. No recompile to add automations.
+3. **Rules are data, not code** — stored as RON files, created/modified via API. No recompile to add automations.
 4. **Plugin isolation via MQTT ACL** — a plugin's broker credentials restrict it to its own device topics. Isolation is enforced at the transport layer.
 5. **API-first** — every operation the system can perform is available via REST or WebSocket. The future web UI is just another API consumer.
 6. **No cloud dependency** — solar events computed locally from lat/lon config. All automation logic runs offline.

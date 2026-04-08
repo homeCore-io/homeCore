@@ -4364,7 +4364,7 @@ pub async fn export_automations(
 }
 
 /// `POST /api/v1/automations/import`
-/// Accepts a JSON array of rules; assigns fresh UUIDs and writes each as a TOML file.
+/// Accepts a JSON array of rules; assigns fresh UUIDs and writes each as a RON file.
 pub async fn import_automations(
     State(s): State<AppState>,
     _: AutomationsWrite,
@@ -5041,7 +5041,7 @@ pub async fn bulk_patch_automations(
         }
     }
 
-    // Persist each changed rule to its TOML file.
+    // Persist each changed rule to its RON file.
     if let Some(fs) = &s.rule_file_store {
         for rule in &updated {
             if let Err(e) = fs.write_rule(rule) {
