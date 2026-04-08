@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+# Enable for wasm32 targets — adds js-based RNG for uuid and wasmbind for chrono.
+wasm = ["uuid/js", "chrono/wasmbind"]
+
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
