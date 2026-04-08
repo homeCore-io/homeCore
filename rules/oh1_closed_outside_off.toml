@@ -3,7 +3,7 @@
 # When the OH1 garage door closes, if the outside-on phantom scene is active,
 # activate the outside-off phantom scene.
 
-id       = ""
+id = "e044c01c-11b8-4b11-bba1-01e4532bcbac"
 name     = "OH1 Closed — Outside Lights Off"
 enabled  = true
 priority = 10
