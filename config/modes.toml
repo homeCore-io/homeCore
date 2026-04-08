@@ -3,19 +3,15 @@
 # Edit directly or use POST /api/v1/modes.
 
 [[modes]]
-id   = "mode_night"
+id = "mode_night"
 name = "Night Mode"
 kind = "solar"
-on_event  = "sunset"    # solar event that turns night mode ON
-off_event = "sunrise"   # solar event that turns night mode OFF
-# on_offset_minutes  = 0    # negative = before event, positive = after
-# off_offset_minutes = 0
+on_event = "Sunset"
+off_event = "Sunrise"
 
 [[modes]]
-id   = "mode_day"
+id = "mode_day"
 name = "Day Mode"
 kind = "solar"
-on_event  = "sunrise"   # solar event that turns day mode ON
-off_event = "sunset"    # solar event that turns day mode OFF
-# on_offset_minutes  = 0    # negative = before event, positive = after
-# off_offset_minutes = 0
+on_event = "Sunrise"
+off_event = "Sunset"
