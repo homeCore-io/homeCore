@@ -301,6 +301,7 @@ impl RuleWatcher {
         store: StateStore,
         source_handle: Arc<RwLock<Vec<Rule>>>,
         handle: Arc<RwLock<Vec<Rule>>>,
+        on_reload: Option<Arc<dyn Fn(&[Rule]) + Send + Sync>>,
     ) -> Result<Self> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
 
@@ -338,6 +339,7 @@ impl RuleWatcher {
                 match tokio::task::spawn_blocking(move || load_all(&dir2)).await {
                     Ok(Ok(new_rules)) => {
                         *source_handle.write().await = new_rules.clone();
+                        let rules_for_purge = new_rules.clone();
                         let compiled = match crate::rule_resolver::compile_rules_for_store(
                             &store, new_rules,
                         )
@@ -351,6 +353,10 @@ impl RuleWatcher {
                         };
                         let count = compiled.len();
                         *handle.write().await = compiled;
+                        // Purge stale rule state (DashMap entries for deleted rule IDs).
+                        if let Some(ref cb) = on_reload {
+                            cb(&rules_for_purge);
+                        }
                         info!(count, "Rules hot-reloaded successfully");
                     }
                     Ok(Err(e)) => {

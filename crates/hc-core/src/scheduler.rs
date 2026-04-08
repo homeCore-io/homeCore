@@ -39,7 +39,7 @@ pub struct Scheduler {
     /// Set to 0 to disable catch-up entirely.
     catchup_window_minutes: u32,
     /// Tracks when each Periodic rule last fired so we can compare elapsed time.
-    last_periodic_fire: Arc<DashMap<Uuid, Instant>>,
+    pub(crate) last_periodic_fire: Arc<DashMap<Uuid, Instant>>,
     /// Optional calendar store for `CalendarEvent` triggers.
     calendar: Option<CalendarHandle>,
 }

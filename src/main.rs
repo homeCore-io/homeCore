@@ -940,7 +940,7 @@ async fn main() -> Result<()> {
         core = core.with_notify(svc);
     }
 
-    let (rules_handle, fire_history, calendar_handle) = core.start(rules).await?;
+    let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
 
     // ── Hot-reload watcher for rule TOML files ─────────────────────────────
     // Must be kept alive for the duration of the process.
@@ -949,6 +949,7 @@ async fn main() -> Result<()> {
         store.clone(),
         std::sync::Arc::clone(&source_rules_handle),
         std::sync::Arc::clone(&rules_handle),
+        Some(purge_fn),
     )?;
 
     // ── 17. JWT service ────────────────────────────────────────────────────

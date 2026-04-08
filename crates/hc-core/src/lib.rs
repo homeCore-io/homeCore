@@ -238,6 +238,7 @@ impl Core {
         std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>,
         FireHistoryHandle,
         Option<CalendarHandle>,
+        Arc<dyn Fn(&[Rule]) + Send + Sync>,
     )> {
         info!("HomeCore kernel starting");
 
@@ -332,6 +333,7 @@ impl Core {
 
         let rules_handle = engine.rules_handle();
         let fire_history = engine.fire_history_handle();
+        let engine_purge = engine.purge_callback();
         tokio::spawn(engine.run(shutdown_rx.clone()));
 
         // Timer manager: countdown timer devices (complex async logic stays here).
@@ -449,8 +451,17 @@ impl Core {
         if let Some(ref cal) = calendar_handle {
             sched = sched.with_calendar(Arc::clone(cal));
         }
+        let sched_periodic = Arc::clone(&sched.last_periodic_fire);
         tokio::spawn(sched.run(shutdown_rx.clone()));
 
-        Ok((rules_handle, fire_history, calendar_handle))
+        // Combined purge callback: cleans engine DashMaps + scheduler periodic map.
+        let purge_fn: Arc<dyn Fn(&[Rule]) + Send + Sync> = Arc::new(move |rules: &[Rule]| {
+            engine_purge(rules);
+            let live_ids: std::collections::HashSet<uuid::Uuid> =
+                rules.iter().map(|r| r.id).collect();
+            sched_periodic.retain(|id, _| live_ids.contains(id));
+        });
+
+        Ok((rules_handle, fire_history, calendar_handle, purge_fn))
     }
 }

@@ -221,6 +221,41 @@ impl RuleEngine {
         Arc::clone(&self.in_flight)
     }
 
+    /// Returns a closure that purges state for rule IDs no longer in the live set.
+    /// Pass this to `RuleWatcher` as the post-reload callback.
+    pub fn purge_callback(&self) -> impl Fn(&[Rule]) + Send + Sync + 'static {
+        let cooldown_map = Arc::clone(&self.cooldown_map);
+        let pause_state = Arc::clone(&self.pause_state);
+        let rule_vars = Arc::clone(&self.rule_vars);
+        let priv_bools = Arc::clone(&self.priv_bools);
+        let capture_store = Arc::clone(&self.capture_store);
+        let rule_in_flight = Arc::clone(&self.rule_in_flight);
+        let fire_history = Arc::clone(&self.fire_history);
+
+        move |live_rules: &[Rule]| {
+            let live_ids: std::collections::HashSet<Uuid> =
+                live_rules.iter().map(|r| r.id).collect();
+
+            let before = cooldown_map.len() + pause_state.len() + rule_in_flight.len()
+                + fire_history.len();
+
+            cooldown_map.retain(|id, _| live_ids.contains(id));
+            pause_state.retain(|id, _| live_ids.contains(id));
+            rule_in_flight.retain(|id, _| live_ids.contains(id));
+            fire_history.retain(|id, _| live_ids.contains(id));
+            rule_vars.retain(|(id, _), _| live_ids.contains(id));
+            priv_bools.retain(|(id, _), _| live_ids.contains(id));
+            capture_store.retain(|(id, _), _| live_ids.contains(id));
+
+            let after = cooldown_map.len() + pause_state.len() + rule_in_flight.len()
+                + fire_history.len();
+            let purged = before.saturating_sub(after);
+            if purged > 0 {
+                tracing::debug!(purged, "Purged stale rule state entries after hot-reload");
+            }
+        }
+    }
+
     /// Drive the rule engine until the bus is dropped or `shutdown` fires.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         // Pre-populate device cache from current state store.
