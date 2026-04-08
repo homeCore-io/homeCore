@@ -43,7 +43,7 @@ fn default_max_queue() -> usize {
 }
 
 /// A complete automation rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: Uuid,
     pub name: String,
@@ -133,7 +133,7 @@ fn is_parallel(m: &RunMode) -> bool {
 }
 
 /// What causes a rule to be evaluated.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Trigger {
     DeviceStateChanged {
         /// Primary device ID (used when `device_ids` is empty).
@@ -369,7 +369,7 @@ pub enum SunEventType {
 }
 
 /// A side-effect-free predicate evaluated before actions are executed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     DeviceState {
         #[serde(alias = "device")]
@@ -474,7 +474,7 @@ pub enum CompareOp {
 }
 
 /// A branch in a multi-arm `Conditional` action (`ELSE-IF`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConditionalBranch {
     /// Rhai boolean expression for this branch.
     pub condition: String,
@@ -521,7 +521,7 @@ fn default_true() -> bool {
 /// When `enabled` is `false` the executor skips the action and records a
 /// `Skipped` trace entry.  Defaults to `true` so existing rule files that
 /// omit the field continue to work unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuleAction {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -529,7 +529,7 @@ pub struct RuleAction {
 }
 
 /// A single step in a rule's action sequence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     SetDeviceState {
         #[serde(alias = "device")]
@@ -948,7 +948,7 @@ pub struct TriggerContext {
 }
 
 /// A mode → state mapping entry for `Action::SetDeviceStatePerMode`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeStateEntry {
     /// Device ID of the mode (e.g. `"mode_night"`).
     pub mode: String,
@@ -957,7 +957,7 @@ pub struct ModeStateEntry {
 }
 
 /// A mode → delay mapping entry for `Action::DelayPerMode`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeDelayEntry {
     pub mode: String,
     /// Seconds to delay when this mode is active.  `0` skips the delay entirely.
@@ -965,7 +965,7 @@ pub struct ModeDelayEntry {
 }
 
 /// A mode → scene mapping entry for `Action::ActivateScenePerMode`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeSceneEntry {
     pub mode: String,
     pub scene_id: Uuid,
