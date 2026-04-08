@@ -139,7 +139,7 @@ async fn handle_socket(
     let device_filter = query.device_id.clone();
     let client_id = query.client_id.clone();
 
-    info!(
+    debug!(
         ip = %remote_ip,
         user = %claims.sub,
         client_id = client_id.as_deref().unwrap_or("-"),
