@@ -55,7 +55,10 @@ impl EventLog {
     /// Returns without storing if the event is filtered (e.g. MqttMessage).
     pub fn push(&self, event: &Event) {
         // Skip high-frequency / low-value events.
-        if matches!(event, Event::MqttMessage { .. }) {
+        if matches!(
+            event,
+            Event::MqttMessage { .. } | Event::RuleEvaluationFailed { .. }
+        ) {
             return;
         }
 
@@ -73,7 +76,12 @@ impl EventLog {
         if g.entries.len() == g.capacity {
             g.entries.pop_front();
         }
-        g.entries.push_back(LogEntry { seq, event_type, device_id, event: json });
+        g.entries.push_back(LogEntry {
+            seq,
+            event_type,
+            device_id,
+            event: json,
+        });
     }
 
     /// Query the log.  Results are newest-first.
@@ -82,7 +90,10 @@ impl EventLog {
         let limit = filter.limit.unwrap_or(50).min(1_000) as usize;
 
         let type_filter: Option<Vec<&str>> = filter.event_type.as_deref().map(|s| {
-            s.split(',').map(str::trim).filter(|t| !t.is_empty()).collect()
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect()
         });
 
         g.entries
@@ -128,9 +139,11 @@ pub struct EventLogQuery {
 /// Extract the device_id from events that carry one.
 pub fn event_device_id(event: &Event) -> Option<&str> {
     match event {
-        Event::DeviceStateChanged { device_id, .. } => Some(device_id),
-        Event::DeviceAvailabilityChanged { device_id, .. } => Some(device_id),
-        Event::DeviceNameChanged { device_id, .. } => Some(device_id),
+        Event::DeviceStateChanged { device_id, .. }
+        | Event::DeviceAvailabilityChanged { device_id, .. }
+        | Event::DeviceNameChanged { device_id, .. }
+        | Event::DeviceCommandSent { device_id, .. } => Some(device_id),
+        Event::TimerStateChanged { timer_id, .. } => Some(timer_id),
         _ => None,
     }
 }
@@ -145,9 +158,16 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::SceneActivated { .. } => "scene_activated",
         Event::PluginRegistered { .. } => "plugin_registered",
         Event::PluginOffline { .. } => "plugin_offline",
+        Event::PluginHeartbeat { .. } => "plugin_heartbeat",
+        Event::PluginStatusChanged { .. } => "plugin_status_changed",
         Event::DeviceNameChanged { .. } => "device_name_changed",
         Event::Custom { .. } => "custom",
         Event::SystemAlert { .. } => "system_alert",
+        Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
+        Event::ActionFailed { .. } => "action_failed",
+        Event::DeviceCommandSent { .. } => "device_command_sent",
+        Event::ModeChanged { .. } => "mode_changed",
+        Event::TimerStateChanged { .. } => "timer_state_changed",
     }
 }
 
@@ -155,6 +175,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hc_types::device::DeviceChange;
 
     fn rule_fired(rule_id: &str) -> Event {
         Event::RuleFired {
@@ -163,6 +184,8 @@ mod tests {
             rule_name: "test rule".to_string(),
             trigger_type: "ManualTrigger".to_string(),
             action_count: 0,
+            elapsed_ms: None,
+            correlation_id: None,
         }
     }
 
@@ -170,9 +193,11 @@ mod tests {
         Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
+            device_name: None,
             previous: Default::default(),
             current: Default::default(),
             changed: Default::default(),
+            change: DeviceChange::unknown(),
         }
     }
 
@@ -253,7 +278,10 @@ mod tests {
         for i in 0..20u64 {
             log.push(&rule_fired(&i.to_string()));
         }
-        let results = log.query(&EventLogQuery { limit: Some(5), ..Default::default() });
+        let results = log.query(&EventLogQuery {
+            limit: Some(5),
+            ..Default::default()
+        });
         assert_eq!(results.len(), 5);
         // Should be the 5 most recent
         assert_eq!(results[0].seq, 20);
@@ -266,7 +294,10 @@ mod tests {
             log.push(&rule_fired(&i.to_string()));
         }
         // Requesting more than 1000 should be capped
-        let results = log.query(&EventLogQuery { limit: Some(9999), ..Default::default() });
+        let results = log.query(&EventLogQuery {
+            limit: Some(9999),
+            ..Default::default()
+        });
         assert_eq!(results.len(), 1000);
     }
 

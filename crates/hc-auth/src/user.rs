@@ -21,22 +21,36 @@ impl Role {
     pub fn scopes(&self) -> Vec<String> {
         match self {
             Role::Admin => vec![
-                "devices:read".into(), "devices:write".into(),
-                "automations:read".into(), "automations:write".into(),
-                "scenes:read".into(), "scenes:write".into(),
-                "areas:read".into(), "areas:write".into(),
-                "users:read".into(), "users:write".into(),
-                "plugins:read".into(), "plugins:write".into(),
+                "devices:read".into(),
+                "devices:write".into(),
+                "automations:read".into(),
+                "automations:write".into(),
+                "dashboards:read".into(),
+                "dashboards:write".into(),
+                "scenes:read".into(),
+                "scenes:write".into(),
+                "areas:read".into(),
+                "areas:write".into(),
+                "users:read".into(),
+                "users:write".into(),
+                "plugins:read".into(),
+                "plugins:write".into(),
             ],
             Role::User => vec![
-                "devices:read".into(), "devices:write".into(),
-                "automations:read".into(), "automations:write".into(),
-                "scenes:read".into(), "scenes:write".into(),
+                "devices:read".into(),
+                "devices:write".into(),
+                "automations:read".into(),
+                "automations:write".into(),
+                "dashboards:read".into(),
+                "dashboards:write".into(),
+                "scenes:read".into(),
+                "scenes:write".into(),
                 "areas:read".into(),
             ],
             Role::ReadOnly => vec![
                 "devices:read".into(),
                 "automations:read".into(),
+                "dashboards:read".into(),
                 "scenes:read".into(),
                 "areas:read".into(),
             ],
@@ -66,6 +80,11 @@ pub struct UserInfo {
 
 impl From<&User> for UserInfo {
     fn from(u: &User) -> Self {
-        Self { id: u.id, username: u.username.clone(), role: u.role, created_at: u.created_at }
+        Self {
+            id: u.id,
+            username: u.username.clone(),
+            role: u.role,
+            created_at: u.created_at,
+        }
     }
 }

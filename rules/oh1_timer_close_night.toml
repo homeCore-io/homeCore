@@ -1,9 +1,9 @@
-# Garage OH1 - Timer Close
+# Garage OH1 — Timer Close (night)
 #
-# When the auto-close timer fires: if the auto-close virtual switch is on
-# and the door is still open, activate the scene to close the door.
+# When the auto-close timer fires at night: if the auto-close virtual switch
+# is on and the door is still open, close it and turn off the outside lights.
 
-id = "20e9331a-8e2f-4144-8490-955f4ddbd4cf"
+id       = "20e9331a-8e2f-4144-8490-955f4ddbd4cf"
 name     = "OH1 Timer Close - Night"
 enabled  = true
 priority = 10
@@ -15,11 +15,9 @@ attribute = "state"
 to        = "finished"
 
 [[conditions]]
-type      = "device_state"
-device_id = "mode_night"
-attribute = "on"
-op        = "eq"
-value     = true
+type    = "mode_is"
+mode_id = "mode_night"
+on      = true
 
 [[conditions]]
 type      = "device_state"

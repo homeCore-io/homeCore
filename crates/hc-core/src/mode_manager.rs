@@ -8,10 +8,10 @@
 //! - `solar`  — turned on/off automatically by sunrise/sunset (+ configurable offsets)
 //! - `manual` — purely user/rule controlled; the manager only creates the device
 //!
-//! # `mode_night`
+//! # Built-in solar modes
 //!
-//! Built-in solar mode.  Always present — written to `modes.toml` on first
-//! startup if missing, and rejected by the DELETE API.
+//! `mode_night` and `mode_day` are always present — written to `modes.toml` on
+//! first startup if missing, and rejected by the DELETE API.
 //!
 //! # Hot-reload
 //!
@@ -30,6 +30,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use hc_types::device::{extract_change_from_command_payload, DeviceChange};
 use hc_types::event::Event;
 use hc_types::rule::SunEventType;
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -47,6 +48,7 @@ use hc_state::StateStore;
 // ── Constants ──────────────────────────────────────────────────────────────
 
 pub const MODE_PLUGIN_ID: &str = "core.mode";
+pub const MODE_DAY_ID: &str = "mode_day";
 pub const MODE_NIGHT_ID: &str = "mode_night";
 
 // ── Config types ───────────────────────────────────────────────────────────
@@ -61,7 +63,7 @@ pub enum ModeKind {
 impl ModeKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Solar  => "solar",
+            Self::Solar => "solar",
             Self::Manual => "manual",
         }
     }
@@ -69,7 +71,7 @@ impl ModeKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeConfig {
-    pub id:   String,
+    pub id: String,
     pub name: String,
     pub kind: ModeKind,
 
@@ -84,7 +86,9 @@ pub struct ModeConfig {
     pub off_offset_minutes: i32,
 }
 
-fn is_zero(v: &i32) -> bool { *v == 0 }
+fn is_zero(v: &i32) -> bool {
+    *v == 0
+}
 
 // Internal wrapper for TOML array-of-tables serialisation.
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,12 +101,24 @@ struct ModesFile {
 
 fn default_mode_night() -> ModeConfig {
     ModeConfig {
-        id:   MODE_NIGHT_ID.to_string(),
+        id: MODE_NIGHT_ID.to_string(),
         name: "Night Mode".to_string(),
         kind: ModeKind::Solar,
-        on_event:           Some(SunEventType::Sunset),
-        off_event:          Some(SunEventType::Sunrise),
-        on_offset_minutes:  0,
+        on_event: Some(SunEventType::Sunset),
+        off_event: Some(SunEventType::Sunrise),
+        on_offset_minutes: 0,
+        off_offset_minutes: 0,
+    }
+}
+
+fn default_mode_day() -> ModeConfig {
+    ModeConfig {
+        id: MODE_DAY_ID.to_string(),
+        name: "Day Mode".to_string(),
+        kind: ModeKind::Solar,
+        on_event: Some(SunEventType::Sunrise),
+        off_event: Some(SunEventType::Sunset),
+        on_offset_minutes: 0,
         off_offset_minutes: 0,
     }
 }
@@ -112,10 +128,10 @@ pub fn load_modes(path: &Path) -> Result<Vec<ModeConfig>> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let file: ModesFile = toml::from_str(&content)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file: ModesFile =
+        toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
     Ok(file.modes)
 }
 
@@ -125,13 +141,15 @@ pub fn write_modes(path: &Path, modes: &[ModeConfig]) -> Result<()> {
 # HomeCore mode definitions.\n\
 # This file is managed automatically — API-created modes are appended here.\n\
 # Edit directly or use POST /api/v1/modes.\n\n";
-    let body = toml::to_string(&ModesFile { modes: modes.to_vec() })
-        .context("serialising modes to TOML")?;
+    let body = toml::to_string(&ModesFile {
+        modes: modes.to_vec(),
+    })
+    .context("serialising modes to TOML")?;
     std::fs::write(path, format!("{header}{body}"))
         .with_context(|| format!("writing {}", path.display()))
 }
 
-/// Ensure `modes.toml` exists and contains a `mode_night` entry.
+/// Ensure `modes.toml` exists and contains the built-in solar modes.
 /// Idempotent — safe to call on every startup.
 pub fn ensure_default_modes(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -139,10 +157,18 @@ pub fn ensure_default_modes(path: &Path) -> Result<()> {
             .with_context(|| format!("creating config dir {}", parent.display()))?;
     }
     let mut modes = load_modes(path).unwrap_or_default();
+    let mut changed = false;
+    if !modes.iter().any(|m| m.id == MODE_DAY_ID) {
+        modes.insert(0, default_mode_day());
+        changed = true;
+    }
     if !modes.iter().any(|m| m.id == MODE_NIGHT_ID) {
         modes.insert(0, default_mode_night());
+        changed = true;
+    }
+    if changed {
         write_modes(path, &modes)?;
-        info!(path = %path.display(), "Wrote default mode_night to modes.toml");
+        info!(path = %path.display(), "Ensured built-in solar modes in modes.toml");
     }
     Ok(())
 }
@@ -183,9 +209,9 @@ fn solar_mode_is_on(
     on_off: i32,
     off_off: i32,
 ) -> Option<bool> {
-    let on_t  = solar_event_time(lat, lon, today, on_ev,  on_off)?;
+    let on_t = solar_event_time(lat, lon, today, on_ev, on_off)?;
     let off_t = solar_event_time(lat, lon, today, off_ev, off_off)?;
-    let now   = Local::now().time();
+    let now = Local::now().time();
     // Overnight window (sunset → sunrise): on_t is later in the day than off_t.
     Some(if on_t > off_t {
         now >= on_t || now < off_t
@@ -207,13 +233,17 @@ fn next_solar_transition(
     let mut candidates: Vec<(chrono::DateTime<Local>, String, bool)> = Vec::new();
 
     for mode in modes {
-        if mode.kind != ModeKind::Solar { continue; }
-        let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else { continue };
+        if mode.kind != ModeKind::Solar {
+            continue;
+        }
+        let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else {
+            continue;
+        };
 
         for days_ahead in 0i64..=1 {
             let date = now.date_naive() + chrono::Duration::days(days_ahead);
             for (ev, offset, new_on) in [
-                (on_ev,  mode.on_offset_minutes,  true),
+                (on_ev, mode.on_offset_minutes, true),
                 (off_ev, mode.off_offset_minutes, false),
             ] {
                 if let Some(t) = solar_event_time(lat, lon, date, ev, offset) {
@@ -259,24 +289,31 @@ impl ModeWatcher {
 // ── ModeManager ────────────────────────────────────────────────────────────
 
 pub struct ModeManager {
-    bus:       EventBus,
-    pub_bus:   EventBus,
-    state:     StateStore,
-    location:  LocationConfig,
+    bus: EventBus,
+    pub_bus: EventBus,
+    state: StateStore,
+    location: LocationConfig,
     modes_path: PathBuf,
     startup_delay_secs: u64,
 }
 
 impl ModeManager {
     pub fn new(
-        bus:       EventBus,
-        pub_bus:   EventBus,
-        state:     StateStore,
-        location:  LocationConfig,
+        bus: EventBus,
+        pub_bus: EventBus,
+        state: StateStore,
+        location: LocationConfig,
         modes_path: PathBuf,
         startup_delay_secs: u64,
     ) -> Self {
-        Self { bus, pub_bus, state, location, modes_path, startup_delay_secs }
+        Self {
+            bus,
+            pub_bus,
+            state,
+            location,
+            modes_path,
+            startup_delay_secs,
+        }
     }
 
     pub async fn start(self) {
@@ -297,7 +334,10 @@ impl ModeManager {
         // state (e.g. "mode_night on → turn on wled_deck") are published before
         // the plugin has subscribed to its cmd topic and are silently dropped.
         if self.startup_delay_secs > 0 {
-            info!(secs = self.startup_delay_secs, "ModeManager: waiting for plugins to initialise");
+            info!(
+                secs = self.startup_delay_secs,
+                "ModeManager: waiting for plugins to initialise"
+            );
             tokio::time::sleep(Duration::from_secs(self.startup_delay_secs)).await;
         }
 
@@ -368,7 +408,8 @@ impl ModeManager {
         modes: &[ModeConfig],
     ) -> (Duration, Option<(chrono::DateTime<Local>, String, bool)>) {
         let next = next_solar_transition(modes, self.location.latitude, self.location.longitude);
-        let duration = next.as_ref()
+        let duration = next
+            .as_ref()
             .and_then(|(dt, _, _)| (*dt - Local::now()).to_std().ok())
             .unwrap_or(Duration::from_secs(3600));
         (duration, next)
@@ -377,23 +418,31 @@ impl ModeManager {
     /// Determine and write the correct on/off state for every mode right now.
     async fn apply_initial_states(&self, modes: &[ModeConfig]) {
         let today = Local::now().date_naive();
-        let lat   = self.location.latitude;
-        let lon   = self.location.longitude;
+        let lat = self.location.latitude;
+        let lon = self.location.longitude;
 
         for mode in modes {
             match mode.kind {
                 ModeKind::Solar => {
-                    let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else { continue };
+                    let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else {
+                        continue;
+                    };
                     let on = solar_mode_is_on(
-                        lat, lon, today, on_ev, off_ev,
-                        mode.on_offset_minutes, mode.off_offset_minutes,
-                    ).unwrap_or(false);
-                    self.write_mode_state(mode, on).await;
+                        lat,
+                        lon,
+                        today,
+                        on_ev,
+                        off_ev,
+                        mode.on_offset_minutes,
+                        mode.off_offset_minutes,
+                    )
+                    .unwrap_or(false);
+                    self.write_mode_state(mode, on, None).await;
                 }
                 ModeKind::Manual => {
                     // Only initialise if device doesn't exist yet.
                     if let Ok(None) = self.state.get_device(&mode.id).await {
-                        self.write_mode_state(mode, false).await;
+                        self.write_mode_state(mode, false, None).await;
                     }
                 }
             }
@@ -403,15 +452,15 @@ impl ModeManager {
     async fn flip_mode(&self, mode_id: &str, new_on: bool, modes: &[ModeConfig]) {
         if let Some(mode) = modes.iter().find(|m| m.id == mode_id) {
             info!(mode_id, on = new_on, "ModeManager: solar transition");
-            self.write_mode_state(mode, new_on).await;
+            self.write_mode_state(mode, new_on, None).await;
         }
     }
 
     /// Persist the device state for a mode and publish `DeviceStateChanged`.
-    async fn write_mode_state(&self, mode: &ModeConfig, on: bool) {
+    async fn write_mode_state(&self, mode: &ModeConfig, on: bool, change: Option<DeviceChange>) {
         let today = Local::now().date_naive();
-        let lat   = self.location.latitude;
-        let lon   = self.location.longitude;
+        let lat = self.location.latitude;
+        let lon = self.location.longitude;
 
         let mut dev = match self.state.get_device(&mode.id).await {
             Ok(Some(d)) => d,
@@ -419,35 +468,51 @@ impl ModeManager {
         };
 
         let previous = dev.attributes.clone();
-        dev.attributes.insert("on".into(),   json!(on));
-        dev.attributes.insert("kind".into(), json!(mode.kind.as_str()));
+        dev.attributes.insert("on".into(), json!(on));
+        dev.attributes
+            .insert("kind".into(), json!(mode.kind.as_str()));
 
         if mode.kind == ModeKind::Solar {
-            dev.attributes.insert("on_offset_minutes".into(),  json!(mode.on_offset_minutes));
-            dev.attributes.insert("off_offset_minutes".into(), json!(mode.off_offset_minutes));
+            dev.attributes
+                .insert("on_offset_minutes".into(), json!(mode.on_offset_minutes));
+            dev.attributes
+                .insert("off_offset_minutes".into(), json!(mode.off_offset_minutes));
 
             if let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) {
                 // Base times (no offset) — for human reference in TUI.
                 if let Some(t) = solar_event_time(lat, lon, today, off_ev, 0) {
-                    let key = if off_ev == SunEventType::Sunrise { "sunrise_today" } else { "sunset_today" };
+                    let key = if off_ev == SunEventType::Sunrise {
+                        "sunrise_today"
+                    } else {
+                        "sunset_today"
+                    };
                     dev.attributes.insert(key.into(), json!(fmt_time(t)));
                 }
                 if let Some(t) = solar_event_time(lat, lon, today, on_ev, 0) {
-                    let key = if on_ev == SunEventType::Sunset { "sunset_today" } else { "sunrise_today" };
+                    let key = if on_ev == SunEventType::Sunset {
+                        "sunset_today"
+                    } else {
+                        "sunrise_today"
+                    };
                     dev.attributes.insert(key.into(), json!(fmt_time(t)));
                 }
                 // Effective times (with offset applied) — what the scheduler actually uses.
-                if let Some(t) = solar_event_time(lat, lon, today, on_ev,  mode.on_offset_minutes) {
-                    dev.attributes.insert("effective_on".into(),  json!(fmt_time(t)));
+                if let Some(t) = solar_event_time(lat, lon, today, on_ev, mode.on_offset_minutes) {
+                    dev.attributes
+                        .insert("effective_on".into(), json!(fmt_time(t)));
                 }
-                if let Some(t) = solar_event_time(lat, lon, today, off_ev, mode.off_offset_minutes) {
-                    dev.attributes.insert("effective_off".into(), json!(fmt_time(t)));
+                if let Some(t) = solar_event_time(lat, lon, today, off_ev, mode.off_offset_minutes)
+                {
+                    dev.attributes
+                        .insert("effective_off".into(), json!(fmt_time(t)));
                 }
             }
         }
 
         dev.last_seen = chrono::Utc::now();
         dev.available = true;
+        let change = change.unwrap_or_else(|| DeviceChange::homecore("mode_manager"));
+        dev.last_change = Some(change.clone());
 
         if let Err(e) = self.state.upsert_device(&dev).await {
             warn!(device_id = %mode.id, error = %e, "ModeManager: failed to persist device state");
@@ -455,14 +520,24 @@ impl ModeManager {
         }
 
         let current = dev.attributes;
-        let changed: Vec<String> = current.keys()
+        let changed: Vec<String> = current
+            .keys()
             .filter(|k| previous.get(*k) != current.get(*k))
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
 
-        // Fire mode_changed custom event so Trigger::ModeChanged rules can react.
+        // Fire mode_changed events so Trigger::ModeChanged rules can react.
         if changed.contains(&"on".to_string()) {
+            // First-class event for activity stream and filtering.
+            let _ = self.pub_bus.publish(Event::ModeChanged {
+                timestamp: chrono::Utc::now(),
+                mode_id: mode.id.clone(),
+                mode_name: mode.name.clone(),
+                on,
+            });
+            // Keep the Custom event for backward compatibility with existing
+            // Trigger::ModeChanged rules that match on event_type == "mode_changed".
             let _ = self.pub_bus.publish(Event::Custom {
                 timestamp: chrono::Utc::now(),
                 event_type: "mode_changed".to_string(),
@@ -473,9 +548,11 @@ impl ModeManager {
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: chrono::Utc::now(),
             device_id: mode.id.clone(),
+            device_name: Some(mode.name.clone()),
             previous,
             current,
             changed,
+            change,
         });
     }
 
@@ -492,22 +569,29 @@ impl ModeManager {
         cmd: &serde_json::Value,
         modes: &mut Vec<ModeConfig>,
     ) {
-        let Some(mode_idx) = modes.iter().position(|m| m.id == mode_id) else { return };
+        let Some(mode_idx) = modes.iter().position(|m| m.id == mode_id) else {
+            return;
+        };
         let mode = &modes[mode_idx];
 
         // ── Manual mode: on / off / toggle ────────────────────────────────
         if mode.kind == ModeKind::Manual {
             // Determine desired new state.
-            let current_on = self.state.get_device(mode_id).await.ok().flatten()
+            let current_on = self
+                .state
+                .get_device(mode_id)
+                .await
+                .ok()
+                .flatten()
                 .and_then(|d| d.attributes.get("on").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
 
             let new_on = if let Some(command) = cmd.get("command").and_then(|v| v.as_str()) {
                 match command {
-                    "on"     => Some(true),
-                    "off"    => Some(false),
+                    "on" => Some(true),
+                    "off" => Some(false),
                     "toggle" => Some(!current_on),
-                    _        => None,
+                    _ => None,
                 }
             } else if let Some(b) = cmd.get("on").and_then(|v| v.as_bool()) {
                 Some(b)
@@ -518,7 +602,8 @@ impl ModeManager {
             if let Some(on) = new_on {
                 info!(mode_id, on, "ModeManager: manual mode command");
                 let mode_cfg = modes[mode_idx].clone();
-                self.write_mode_state(&mode_cfg, on).await;
+                let change = extract_change_from_command_payload(cmd).unwrap_or_default();
+                self.write_mode_state(&mode_cfg, on, Some(change)).await;
             }
             return;
         }
@@ -536,8 +621,12 @@ impl ModeManager {
         }
 
         if changed {
-            info!(mode_id, on_off = mode.on_offset_minutes, off_off = mode.off_offset_minutes,
-                "ModeManager: offset updated");
+            info!(
+                mode_id,
+                on_off = mode.on_offset_minutes,
+                off_off = mode.off_offset_minutes,
+                "ModeManager: offset updated"
+            );
             // Write back to modes.toml — watcher will reload and reschedule.
             if let Err(e) = write_modes(&self.modes_path, modes) {
                 warn!(error = %e, "ModeManager: failed to write updated offsets to modes.toml");
@@ -560,32 +649,47 @@ impl ModeManager {
 
         // New or changed modes → recompute and apply state.
         let today = Local::now().date_naive();
-        let lat   = self.location.latitude;
-        let lon   = self.location.longitude;
+        let lat = self.location.latitude;
+        let lon = self.location.longitude;
 
         for new_mode in new {
-            let existed  = old.iter().any(|m| m.id == new_mode.id);
-            let changed  = old.iter().any(|m| m.id == new_mode.id && m != new_mode);
+            let existed = old.iter().any(|m| m.id == new_mode.id);
+            let changed = old.iter().any(|m| m.id == new_mode.id && m != new_mode);
             if !existed || changed {
                 let on = match new_mode.kind {
                     ModeKind::Solar => {
-                        if let (Some(on_ev), Some(off_ev)) = (new_mode.on_event, new_mode.off_event) {
-                            solar_mode_is_on(lat, lon, today, on_ev, off_ev,
-                                new_mode.on_offset_minutes, new_mode.off_offset_minutes)
-                                .unwrap_or(false)
-                        } else { false }
+                        if let (Some(on_ev), Some(off_ev)) = (new_mode.on_event, new_mode.off_event)
+                        {
+                            solar_mode_is_on(
+                                lat,
+                                lon,
+                                today,
+                                on_ev,
+                                off_ev,
+                                new_mode.on_offset_minutes,
+                                new_mode.off_offset_minutes,
+                            )
+                            .unwrap_or(false)
+                        } else {
+                            false
+                        }
                     }
                     ModeKind::Manual => {
                         // For a new manual mode start off; preserve existing state if just config changed.
                         if existed {
-                            self.state.get_device(&new_mode.id).await
-                                .ok().flatten()
+                            self.state
+                                .get_device(&new_mode.id)
+                                .await
+                                .ok()
+                                .flatten()
                                 .and_then(|d| d.attributes.get("on").and_then(|v| v.as_bool()))
                                 .unwrap_or(false)
-                        } else { false }
+                        } else {
+                            false
+                        }
                     }
                 };
-                self.write_mode_state(new_mode, on).await;
+                self.write_mode_state(new_mode, on, None).await;
             }
         }
     }
@@ -596,8 +700,12 @@ impl ModeManager {
 fn parse_mode_cmd_topic(topic: &str) -> Option<&str> {
     // homecore/devices/mode_{id}/cmd
     let rest = topic.strip_prefix("homecore/devices/")?;
-    let id   = rest.strip_suffix("/cmd")?;
-    if id.starts_with("mode_") { Some(id) } else { None }
+    let id = rest.strip_suffix("/cmd")?;
+    if id.starts_with("mode_") {
+        Some(id)
+    } else {
+        None
+    }
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────

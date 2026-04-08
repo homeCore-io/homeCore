@@ -21,7 +21,16 @@ start = "06:00:00"
 end   = "12:00:00"
 
 [[actions]]
-type    = "call_service"
-url     = "http://10.0.10.200:5005/Bathroom/favorite/1"
-method  = "GET"
-retries = 2
+type      = "set_device_state"
+device_id = "sonos_bathroom"
+state     = { action = "set_volume", volume = 10 }
+
+[[actions]]
+type      = "set_device_state"
+device_id = "sonos_bathroom"
+state     = { action = "set_shuffle", shuffle = true }
+
+[[actions]]
+type      = "set_device_state"
+device_id = "sonos_bathroom"
+state     = { action = "play_favorite", favorite = "Relaxing Classical Piano Music" }

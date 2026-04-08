@@ -68,7 +68,9 @@ pub struct CalendarEntry {
 }
 
 impl CalendarEntry {
-    pub fn event_count(&self) -> usize { self.events.len() }
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
 
     pub fn upcoming_count(&self) -> usize {
         let now = Utc::now();
@@ -172,11 +174,13 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
             continue;
         }
 
-        let uid = component.find_prop("UID")
+        let uid = component
+            .find_prop("UID")
             .map(|p| p.val.as_str().to_owned())
             .unwrap_or_default();
 
-        let summary = component.find_prop("SUMMARY")
+        let summary = component
+            .find_prop("SUMMARY")
             .map(|p| p.val.as_str().to_owned())
             .unwrap_or_else(|| "(no title)".to_owned());
 
@@ -191,7 +195,7 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
             p.key.as_str().eq_ignore_ascii_case("VALUE")
                 && match &p.val {
                     Some(v) => v.as_str().eq_ignore_ascii_case("DATE"),
-                    None    => false,
+                    None => false,
                 }
         }) || dtstart_val.len() == 8; // bare YYYYMMDD implies date-only
 
@@ -216,7 +220,8 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
         };
 
         // Collect RRULE value (may appear as RRULE property or not at all).
-        let rrule_val: Option<String> = component.find_prop("RRULE")
+        let rrule_val: Option<String> = component
+            .find_prop("RRULE")
             .map(|p| p.val.as_str().to_owned());
 
         if let Some(rrule) = rrule_val {
@@ -232,7 +237,12 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
         } else {
             // Non-recurring: include only if within the expansion window.
             if start_dt >= now && start_dt <= window_end {
-                events.push(CalEvent { uid, summary, start: start_dt, is_all_day });
+                events.push(CalEvent {
+                    uid,
+                    summary,
+                    start: start_dt,
+                    is_all_day,
+                });
             }
         }
     }
@@ -273,8 +283,7 @@ fn expand_rrule(
     if !is_yearly {
         debug!(
             summary,
-            rrule,
-            "Non-YEARLY RRULE not fully expanded; including base occurrence only"
+            rrule, "Non-YEARLY RRULE not fully expanded; including base occurrence only"
         );
         if dtstart >= *now && dtstart <= *window_end {
             out.push(dtstart);
@@ -309,7 +318,9 @@ fn expand_rrule(
     let year_cap = base.year() + 20;
 
     loop {
-        if year > year_cap { break; }
+        if year > year_cap {
+            break;
+        }
 
         let candidate_date = match base.with_year(year) {
             Some(d) => d,
@@ -322,9 +333,13 @@ fn expand_rrule(
 
         let candidate = NaiveDateTime::new(candidate_date, time).and_utc();
 
-        if candidate > effective_end { break; }
+        if candidate > effective_end {
+            break;
+        }
         if let Some(max) = count_limit {
-            if fired >= max { break; }
+            if fired >= max {
+                break;
+            }
         }
 
         if candidate >= *now {
@@ -388,7 +403,13 @@ pub async fn fetch_and_save(
     // Sanitise: keep only alphanumerics, hyphens, underscores.
     let cal_name: String = cal_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let client = reqwest::Client::builder()
@@ -396,14 +417,19 @@ pub async fn fetch_and_save(
         .user_agent("HomeCore/1.0 (ical-fetcher)")
         .build()?;
 
-    let resp = client.get(url).send().await
+    let resp = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| anyhow!("HTTP request failed for {}: {}", url, e))?;
 
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP {} fetching {}", resp.status(), url));
     }
 
-    let content = resp.text().await
+    let content = resp
+        .text()
+        .await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
     if !content.contains("BEGIN:VCALENDAR") {

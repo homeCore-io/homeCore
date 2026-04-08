@@ -88,7 +88,9 @@ pub struct NotificationService {
 
 impl NotificationService {
     pub fn new() -> Self {
-        Self { channels: HashMap::new() }
+        Self {
+            channels: HashMap::new(),
+        }
     }
 
     /// Register any [`NotifyChannel`] implementation under a name.
@@ -106,17 +108,15 @@ impl NotificationService {
         for cfg in configs {
             let name = cfg.name;
             match cfg.provider {
-                ProviderConfig::Email(ec) => {
-                    match EmailChannel::new(&ec) {
-                        Ok(ch) => {
-                            info!(channel = %name, "Registered email notification channel");
-                            svc.register(name, ch);
-                        }
-                        Err(e) => {
-                            warn!(channel = %name, error = %e, "Email channel init failed — skipping");
-                        }
+                ProviderConfig::Email(ec) => match EmailChannel::new(&ec) {
+                    Ok(ch) => {
+                        info!(channel = %name, "Registered email notification channel");
+                        svc.register(name, ch);
                     }
-                }
+                    Err(e) => {
+                        warn!(channel = %name, error = %e, "Email channel init failed — skipping");
+                    }
+                },
                 ProviderConfig::Pushover(pc) => {
                     info!(channel = %name, "Registered Pushover notification channel");
                     svc.register(name, PushoverChannel::new(pc));

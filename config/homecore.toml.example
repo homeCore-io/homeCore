@@ -173,9 +173,10 @@ ansi    = true       # set false when piping to systemd journal / Docker logs
 [logging.file]
 enabled  = true
 # dir    = "logs"          # relative to base_dir (default)
-prefix   = "homecore"      # log files named homecore.YYYY-MM-DD
-rotation = "daily"         # daily | hourly | never
-format   = "json"          # json recommended for files (structured, parseable)
+prefix           = "homecore"  # log files named homecore.YYYY-MM-DD
+rotation         = "daily"     # daily | hourly | never
+prune_after_days = 5           # delete rotated logs older than N days (0 = never prune)
+format           = "json"      # json recommended for files (structured, parseable)
 
 # Dedicated rule/automation log (disabled by default).
 # When enabled, writes ONLY hc_core (engine/executor/scheduler) debug logs to a
@@ -185,6 +186,7 @@ format   = "json"          # json recommended for files (structured, parseable)
 # dir      = "logs"       # defaults to same dir as [logging.file]
 # prefix   = "rules"      # files named rules.YYYY-MM-DD
 # rotation = "daily"
+# prune_after_days = 5    # delete rotated logs older than N days (0 = never)
 # format   = "pretty"     # "json" recommended for log aggregators
 
 # Remote syslog output (disabled by default)

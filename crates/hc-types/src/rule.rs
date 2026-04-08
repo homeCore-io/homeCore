@@ -3,6 +3,7 @@
 //! Rules are pure data — created and modified through the REST API, stored as
 //! JSON/TOML, and evaluated at runtime without any Rust recompilation.
 
+use crate::device::DeviceChangeKind;
 use chrono::{NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -37,7 +38,9 @@ pub enum RunMode {
     },
 }
 
-fn default_max_queue() -> usize { 10 }
+fn default_max_queue() -> usize {
+    10
+}
 
 /// A complete automation rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +128,9 @@ pub struct Rule {
     pub run_mode: RunMode,
 }
 
-fn is_parallel(m: &RunMode) -> bool { *m == RunMode::Parallel }
+fn is_parallel(m: &RunMode) -> bool {
+    *m == RunMode::Parallel
+}
 
 /// What causes a rule to be evaluated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,10 +138,11 @@ fn is_parallel(m: &RunMode) -> bool { *m == RunMode::Parallel }
 pub enum Trigger {
     DeviceStateChanged {
         /// Primary device ID (used when `device_ids` is empty).
+        #[serde(alias = "device")]
         device_id: String,
         /// Additional device IDs — trigger fires if *any* of these devices
         /// changes.  When non-empty, `device_id` is also included in the set.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "devices")]
         device_ids: Vec<String>,
         /// When `None`, any attribute change fires the trigger.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +163,12 @@ pub enum Trigger {
         /// many seconds (sticky / "and stays" trigger).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         for_duration_secs: Option<u64>,
+        /// Optional filter for the origin class of the triggering change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change_kind: Option<DeviceChangeKind>,
+        /// Optional exact-match filter for the specific change source label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change_source: Option<String>,
     },
     MqttMessage {
         topic_pattern: String,
@@ -201,6 +213,7 @@ pub enum Trigger {
     },
     /// Fires when a device's availability (online/offline) changes.
     DeviceAvailabilityChanged {
+        #[serde(alias = "device")]
         device_id: String,
         #[serde(default)]
         to: Option<bool>,
@@ -215,6 +228,7 @@ pub enum Trigger {
     /// after the event type (`"pushed"`, `"held"`, `"double_tapped"`, or
     /// `"released"`) carrying the button number as its value.
     ButtonEvent {
+        #[serde(alias = "device")]
         device_id: String,
         /// If `None`, fires for any button number.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +241,7 @@ pub enum Trigger {
     /// crossing edge (e.g. when temperature goes from ≤80 to >80), not on
     /// every change.
     NumericThreshold {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         op: ThresholdOp,
@@ -357,6 +372,7 @@ pub enum SunEventType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Condition {
     DeviceState {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         op: CompareOp,
@@ -372,9 +388,23 @@ pub enum Condition {
     },
     /// True when a device attribute has not changed for at least `duration_secs` seconds.
     TimeElapsed {
+        #[serde(alias = "device")]
         device_id: String,
         attribute: String,
         duration_secs: u64,
+    },
+    /// Passes when the device's last change provenance matches the supplied filters.
+    DeviceLastChange {
+        #[serde(alias = "device")]
+        device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<DeviceChangeKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_name: Option<String>,
     },
     /// Inverts the result of the wrapped condition.
     Not {
@@ -486,7 +516,9 @@ pub enum LogLevel {
     Error,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// A wrapper that pairs an `Action` with a per-action enable flag.
 ///
@@ -517,6 +549,7 @@ pub struct RuleAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     SetDeviceState {
+        #[serde(alias = "device")]
         device_id: String,
         state: JsonValue,
         /// When `true`, use the trigger event's value instead of `state`.
@@ -547,9 +580,7 @@ pub enum Action {
         payload: JsonValue,
     },
     /// A Rhai script executed in the sandboxed runtime.
-    RunScript {
-        script: String,
-    },
+    RunScript { script: String },
     Notify {
         channel: String,
         message: String,
@@ -571,9 +602,7 @@ pub enum Action {
         cancel_key: Option<String>,
     },
     /// A group of actions executed concurrently via `tokio::join!`.
-    Parallel {
-        actions: Vec<Action>,
-    },
+    Parallel { actions: Vec<Action> },
     /// Repeat `actions` until `condition` (Rhai expression → bool) is true.
     /// The condition is checked *after* each iteration (post-condition loop —
     /// body always runs at least once).
@@ -619,9 +648,7 @@ pub enum Action {
     /// pending delays or lower-priority rules.
     ExitRule,
     /// Inline comment / documentation that is logged when action logging is enabled.
-    Comment {
-        text: String,
-    },
+    Comment { text: String },
     /// Pause the action sequence until a matching event arrives on the bus,
     /// with an optional timeout.
     WaitForEvent {
@@ -629,7 +656,7 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_type: Option<String>,
         /// Device ID whose state-changed event to wait for.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", alias = "device")]
         device_id: Option<String>,
         /// Optional attribute filter for device-state events.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -663,18 +690,12 @@ pub enum Action {
     },
     /// Directly run the actions of another rule (bypassing its trigger and
     /// required expression).  Equivalent to Hubitat's "Run Rule Actions".
-    RunRuleActions {
-        rule_id: Uuid,
-    },
+    RunRuleActions { rule_id: Uuid },
     /// Pause another rule (prevent its actions from running on trigger events
     /// while paused).
-    PauseRule {
-        rule_id: Uuid,
-    },
+    PauseRule { rule_id: Uuid },
     /// Resume a previously paused rule.
-    ResumeRule {
-        rule_id: Uuid,
-    },
+    ResumeRule { rule_id: Uuid },
     /// Cancel pending cancellable delays.
     ///
     /// If `key` is `Some`, only cancels the delay with that key.
@@ -693,10 +714,7 @@ pub enum Action {
     /// Set this rule's Private Boolean to `value`.
     ///
     /// Other rules can read this boolean via `Condition::PrivateBooleanIs`.
-    SetPrivateBoolean {
-        name: String,
-        value: bool,
-    },
+    SetPrivateBoolean { name: String, value: bool },
     /// Write a message to the structured log at the given level.
     LogMessage {
         message: String,
@@ -727,6 +745,7 @@ pub enum Action {
     /// on         = true
     /// ```
     SetDeviceStatePerMode {
+        #[serde(alias = "device")]
         device_id: String,
         modes: Vec<ModeStateEntry>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,6 +810,7 @@ pub enum Action {
         /// Rule-local name for this snapshot.
         key: String,
         /// Device IDs to capture.
+        #[serde(alias = "devices")]
         device_ids: Vec<String>,
     },
     /// Publish the device states previously saved by `CaptureDeviceState`.
@@ -800,9 +820,7 @@ pub enum Action {
     /// type = "restore_device_state"
     /// key  = "pre_movie"
     /// ```
-    RestoreDeviceState {
-        key: String,
-    },
+    RestoreDeviceState { key: String },
     /// Delay for a duration that depends on the currently active mode.
     ///
     /// The first matching mode entry wins; if no mode matches and `default_secs`
@@ -886,6 +904,7 @@ pub enum Action {
     /// brightness = 255
     /// ```
     FadeDevice {
+        #[serde(alias = "device")]
         device_id: String,
         /// Target state.  Numeric fields are interpolated; non-numeric fields
         /// are applied as-is on every step.
@@ -921,15 +940,25 @@ pub enum Action {
 /// Injected into Rhai scripts as `trigger_device()`, `trigger_value()`, etc.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TriggerContext {
-    pub device_id:  Option<String>,
-    pub attribute:  Option<String>,
-    pub value:      Option<JsonValue>,
+    pub device_id: Option<String>,
+    pub attribute: Option<String>,
+    pub value: Option<JsonValue>,
     pub prev_value: Option<JsonValue>,
     pub event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<DeviceChangeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_actor_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     /// Auxiliary context data — for webhook triggers this holds the query
     /// parameter map (`trigger_extra()` in Rhai scripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra:      Option<JsonValue>,
+    pub extra: Option<JsonValue>,
     /// User-defined label from `rule.trigger_label` (accessible as `trigger_label()` in Rhai).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_label: Option<String>,
@@ -966,4 +995,81 @@ pub struct Scene {
     pub name: String,
     /// Map of device_id → desired attribute values.
     pub states: std::collections::HashMap<String, JsonValue>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, Condition, Trigger};
+    use serde_json::json;
+
+    #[test]
+    fn parses_device_aliases_in_trigger() {
+        let trigger: Trigger = serde_json::from_value(json!({
+            "type": "device_state_changed",
+            "device": "living_room.floor_lamp",
+            "devices": ["bedroom.floor_lamp"],
+            "attribute": "on",
+            "to": true
+        }))
+        .unwrap();
+
+        match trigger {
+            Trigger::DeviceStateChanged {
+                device_id,
+                device_ids,
+                ..
+            } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+                assert_eq!(device_ids, vec!["bedroom.floor_lamp"]);
+            }
+            _ => panic!("unexpected trigger variant"),
+        }
+    }
+
+    #[test]
+    fn parses_device_aliases_in_condition_and_actions() {
+        let condition: Condition = serde_json::from_value(json!({
+            "type": "device_state",
+            "device": "living_room.floor_lamp",
+            "attribute": "on",
+            "op": "eq",
+            "value": true
+        }))
+        .unwrap();
+        match condition {
+            Condition::DeviceState { device_id, .. } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+            }
+            _ => panic!("unexpected condition variant"),
+        }
+
+        let action: Action = serde_json::from_value(json!({
+            "type": "set_device_state",
+            "device": "living_room.floor_lamp",
+            "state": { "on": true }
+        }))
+        .unwrap();
+        match action {
+            Action::SetDeviceState { device_id, .. } => {
+                assert_eq!(device_id, "living_room.floor_lamp");
+            }
+            _ => panic!("unexpected action variant"),
+        }
+
+        let capture: Action = serde_json::from_value(json!({
+            "type": "capture_device_state",
+            "key": "before_scene",
+            "devices": ["living_room.floor_lamp", "hall.floor_lamp"]
+        }))
+        .unwrap();
+        match capture {
+            Action::CaptureDeviceState { device_ids, .. } => {
+                assert_eq!(
+                    device_ids,
+                    vec!["living_room.floor_lamp", "hall.floor_lamp"]
+                );
+            }
+            _ => panic!("unexpected action variant"),
+        }
+    }
 }

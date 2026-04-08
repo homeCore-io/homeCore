@@ -18,15 +18,18 @@ pub fn load_profile_str(src: &str) -> Result<EcosystemProfile> {
 /// `device-types.toml` is skipped (handled separately).
 /// Files that cannot be parsed are logged and skipped without aborting.
 pub fn load_profiles_from_dir(dir: &str) -> Result<Vec<EcosystemProfile>> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("Cannot read profiles directory: {dir}"))?;
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("Cannot read profiles directory: {dir}"))?;
 
     let mut profiles = Vec::new();
 
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(e) => { warn!(error = %e, "Skipping unreadable dir entry"); continue; }
+            Err(e) => {
+                warn!(error = %e, "Skipping unreadable dir entry");
+                continue;
+            }
         };
 
         let path = entry.path();

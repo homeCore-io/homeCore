@@ -69,7 +69,11 @@ impl NotifyChannel for TelegramChannel {
         let body = SendMessage {
             chat_id: &self.cfg.chat_id,
             text: &text,
-            parse_mode: if self.cfg.markdown { Some("MarkdownV2") } else { None },
+            parse_mode: if self.cfg.markdown {
+                Some("MarkdownV2")
+            } else {
+                None
+            },
         };
 
         let resp = self

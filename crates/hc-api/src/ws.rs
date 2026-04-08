@@ -21,18 +21,18 @@
 //!                 never reach the public bus and are not available here.
 //! - `device_id` — only forward events for this device
 
+use crate::auth_middleware::whitelist_claims;
+use crate::event_log::{event_device_id, event_type_name};
+use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use crate::auth_middleware::whitelist_claims;
-use crate::AppState;
-use crate::event_log::{event_device_id, event_type_name};
 use hc_auth::Claims;
 use serde::Deserialize;
 use serde_json::json;
@@ -48,6 +48,8 @@ pub struct EventStreamQuery {
     pub event_types: Option<String>,
     /// If set, only events with a matching device_id are forwarded.
     pub device_id: Option<String>,
+    /// Optional client fingerprint to correlate reconnect storms.
+    pub client_id: Option<String>,
 }
 
 pub async fn ws_events_handler(
@@ -55,6 +57,7 @@ pub async fn ws_events_handler(
     Query(query): Query<EventStreamQuery>,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     // Validate before accepting the upgrade.
     let claims = match authenticate_ws(&query, &state, addr.ip()) {
@@ -62,7 +65,12 @@ pub async fn ws_events_handler(
         Err(resp) => return resp,
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, query, claims))
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query, claims, addr.ip(), user_agent))
 }
 
 /// Authenticate a WebSocket upgrade request.
@@ -77,7 +85,10 @@ fn authenticate_ws(
 ) -> Result<Claims, Response> {
     // Canonicalize IPv4-mapped IPv6 to match whitelist entries.
     let ip = match remote_ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
         v4 => v4,
     };
 
@@ -113,17 +124,26 @@ async fn handle_socket(
     state: AppState,
     query: EventStreamQuery,
     claims: Claims,
+    remote_ip: IpAddr,
+    user_agent: Option<String>,
 ) {
     let mut rx = state.event_bus.subscribe();
 
     // Pre-parse type filter once.
     let type_filter: Option<Vec<String>> = query.event_types.as_deref().map(|s| {
-        s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
     });
     let device_filter = query.device_id.clone();
+    let client_id = query.client_id.clone();
 
     info!(
+        ip = %remote_ip,
         user = %claims.sub,
+        client_id = client_id.as_deref().unwrap_or("-"),
+        user_agent = user_agent.as_deref().unwrap_or("-"),
         types = ?type_filter,
         device = ?device_filter,
         "WebSocket client connected to event stream"
@@ -134,7 +154,10 @@ async fn handle_socket(
             Ok(event) => {
                 // Apply device_id filter.
                 if let Some(ref wanted_device) = device_filter {
-                    if !event_device_id(&event).map(|d| d == wanted_device).unwrap_or(false) {
+                    if !event_device_id(&event)
+                        .map(|d| d == wanted_device)
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                 }
@@ -154,7 +177,13 @@ async fn handle_socket(
                     }
                 };
                 if socket.send(Message::Text(json.into())).await.is_err() {
-                    debug!(user = %claims.sub, "WebSocket client disconnected");
+                    debug!(
+                        ip = %remote_ip,
+                        user = %claims.sub,
+                        client_id = client_id.as_deref().unwrap_or("-"),
+                        user_agent = user_agent.as_deref().unwrap_or("-"),
+                        "WebSocket client disconnected"
+                    );
                     break;
                 }
             }
@@ -165,14 +194,20 @@ async fn handle_socket(
         }
     }
 
-    info!(user = %claims.sub, "WebSocket client disconnected");
+    info!(
+        ip = %remote_ip,
+        user = %claims.sub,
+        client_id = client_id.as_deref().unwrap_or("-"),
+        user_agent = user_agent.as_deref().unwrap_or("-"),
+        "WebSocket client disconnected"
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hc_auth::{JwtService, Claims, user::Role};
-    use jsonwebtoken::{encode, Header, Algorithm, EncodingKey};
+    use hc_auth::{user::Role, Claims, JwtService};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
     fn svc() -> JwtService {
         JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24)

@@ -5,6 +5,7 @@
 //! Every other crate in the workspace depends on this one; it intentionally
 //! has no internal (HomeCore) dependencies.
 
+pub mod dashboard;
 pub mod device;
 pub mod event;
 pub mod log_line;

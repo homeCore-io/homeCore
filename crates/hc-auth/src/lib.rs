@@ -6,6 +6,6 @@ pub mod password;
 pub mod user;
 
 pub use jwt::{Claims, JwtService};
-pub use mqtt_creds::{MqttCredential, MqttCredStore};
+pub use mqtt_creds::{MqttCredStore, MqttCredential};
 pub use password::{hash_password, verify_password};
 pub use user::{Role, User, UserInfo};

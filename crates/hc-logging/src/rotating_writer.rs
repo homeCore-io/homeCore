@@ -35,22 +35,24 @@ use crate::config::RotationStrategy;
 /// Implements `std::io::Write`; pass to `tracing_appender::non_blocking` for
 /// async, non-blocking log dispatch.
 pub struct RotatingWriter {
-    file:           File,
+    file: File,
     /// Bytes written to the current active file.
-    bytes_written:  u64,
+    bytes_written: u64,
     /// Rotate when `bytes_written >= max_bytes`.  `0` = no size limit.
-    max_bytes:      u64,
-    rotation:       RotationStrategy,
+    max_bytes: u64,
+    rotation: RotationStrategy,
     /// The period string that was current when `file` was opened.
     /// Used to detect when the period rolls over.  Empty for `Never`.
     current_period: String,
-    dir:            PathBuf,
-    prefix:         String,
+    dir: PathBuf,
+    prefix: String,
     /// When `true`, spawn a background thread to gzip each rotated file.
-    compress:       bool,
+    compress: bool,
     /// How many size-triggered rotations have happened in `current_period`.
     /// Used to generate unique suffixes (`.1`, `.2`, …).
     period_counter: u32,
+    /// Delete rotated files older than this many days.  `0` = never prune.
+    prune_after_days: u32,
 }
 
 impl RotatingWriter {
@@ -60,23 +62,43 @@ impl RotatingWriter {
     /// size is used as the initial `bytes_written` so that a file already near
     /// the size limit will rotate promptly.
     pub fn new(
-        dir:       PathBuf,
-        prefix:    String,
-        rotation:  RotationStrategy,
+        dir: PathBuf,
+        prefix: String,
+        rotation: RotationStrategy,
         max_bytes: u64,
-        compress:  bool,
+        compress: bool,
+        prune_after_days: u32,
     ) -> io::Result<Self> {
         let current_period = period_str(&rotation);
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { file, bytes_written, max_bytes, rotation, current_period, dir, prefix, compress, period_counter: 0 })
+
+        let writer = Self {
+            file,
+            bytes_written,
+            max_bytes,
+            rotation,
+            current_period,
+            dir,
+            prefix,
+            compress,
+            period_counter: 0,
+            prune_after_days,
+        };
+
+        // Run an initial prune at startup.
+        if prune_after_days > 0 {
+            prune_old_logs(&writer.dir, &writer.prefix, prune_after_days);
+        }
+
+        Ok(writer)
     }
 
     fn maybe_rotate(&mut self) -> io::Result<()> {
         let new_period = period_str(&self.rotation);
         let period_changed = !new_period.is_empty() && new_period != self.current_period;
-        let size_exceeded  = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
+        let size_exceeded = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
 
         if !period_changed && !size_exceeded {
             return Ok(());
@@ -90,7 +112,7 @@ impl RotatingWriter {
         }
 
         let rotated = self.next_rotated_path();
-        let active  = active_path(&self.dir, &self.prefix);
+        let active = active_path(&self.dir, &self.prefix);
 
         std::fs::rename(&active, &rotated)?;
 
@@ -98,9 +120,13 @@ impl RotatingWriter {
             compress_in_background(rotated);
         }
 
-        self.file          = open_append(&active)?;
+        self.file = open_append(&active)?;
         self.bytes_written = 0;
         self.period_counter += 1;
+
+        if self.prune_after_days > 0 {
+            prune_old_logs(&self.dir, &self.prefix, self.prune_after_days);
+        }
 
         Ok(())
     }
@@ -123,10 +149,16 @@ impl RotatingWriter {
         }
 
         // Find the first unused numeric suffix.
-        let start = if self.period_counter == 0 { 1 } else { self.period_counter };
+        let start = if self.period_counter == 0 {
+            1
+        } else {
+            self.period_counter
+        };
         let mut n = start;
         loop {
-            let candidate = self.dir.join(format!("{}.{}.{}.log", self.prefix, period, n));
+            let candidate = self
+                .dir
+                .join(format!("{}.{}.{}.log", self.prefix, period, n));
             if !candidate.exists() {
                 return candidate;
             }
@@ -165,10 +197,46 @@ fn open_append(path: &Path) -> io::Result<File> {
 fn period_str(rotation: &RotationStrategy) -> String {
     let now = chrono::Local::now();
     match rotation {
-        RotationStrategy::Hourly  => now.format("%Y-%m-%d_%H").to_string(),
-        RotationStrategy::Daily   => now.format("%Y-%m-%d").to_string(),
-        RotationStrategy::Weekly  => now.format("%Y-W%V").to_string(),
-        RotationStrategy::Never   => String::new(),
+        RotationStrategy::Hourly => now.format("%Y-%m-%d_%H").to_string(),
+        RotationStrategy::Daily => now.format("%Y-%m-%d").to_string(),
+        RotationStrategy::Weekly => now.format("%Y-W%V").to_string(),
+        RotationStrategy::Never => String::new(),
+    }
+}
+
+/// Delete rotated log files for `prefix` in `dir` that are older than
+/// `max_age_days`.  Matches files like `prefix.*.log`, `prefix.*.log.gz`.
+/// The active file (`prefix.log`) is never deleted.
+fn prune_old_logs(dir: &Path, prefix: &str, max_age_days: u32) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(max_age_days) * 86_400);
+
+    let rotated_prefix = format!("{}.", prefix);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        // Must be a rotated file for this prefix (not the active file).
+        if !name.starts_with(&rotated_prefix) {
+            continue;
+        }
+        if !name.ends_with(".log") && !name.ends_with(".log.gz") {
+            continue;
+        }
+
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if modified < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -181,8 +249,8 @@ fn compress_in_background(src: PathBuf) {
 
         let result: io::Result<()> = (|| {
             use flate2::{write::GzEncoder, Compression};
-            let mut input   = File::open(&src)?;
-            let output      = File::create(&gz_path)?;
+            let mut input = File::open(&src)?;
+            let output = File::create(&gz_path)?;
             let mut encoder = GzEncoder::new(output, Compression::default());
             io::copy(&mut input, &mut encoder)?;
             encoder.finish()?;

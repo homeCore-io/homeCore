@@ -1,9 +1,9 @@
-# Garage OH1 - Door Opens
+# Garage OH1 — Door Opens (night)
 #
-# When the OH1 garage door opens: turn on the overhead light and activate the
-# outside-on scene simultaneously, then start a 10-minute close timer.
+# When the OH1 garage door opens at night: turn on the overhead light,
+# activate the outside-on scene, and start a 10-minute close timer.
 
-id = "507341a0-ad84-4fa7-9705-5f06b0b4f7db"
+id       = "507341a0-ad84-4fa7-9705-5f06b0b4f7db"
 name     = "OH1 Opened - Night"
 enabled  = true
 priority = 10
@@ -15,11 +15,9 @@ attribute = "open"
 to        = true
 
 [[conditions]]
-type      = "device_state"
-device_id = "mode_night"
-attribute = "on"
-op	  = "eq"
-value     = true
+type    = "mode_is"
+mode_id = "mode_night"
+on      = true
 
 [[actions]]
 type = "parallel"

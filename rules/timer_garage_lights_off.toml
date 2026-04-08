@@ -1,4 +1,9 @@
-id = "0063f5b3-bfb0-4b15-ae21-1cd00f8f8105"
+# Garage Lights Off — Timer Finished
+#
+# When the garage lights timer finishes: turn off the garage
+# overhead light.
+
+id       = "0063f5b3-bfb0-4b15-ae21-1cd00f8f8105"
 name     = "Garage Lights Off - Timer Finished"
 enabled  = true
 priority = 10
@@ -10,6 +15,6 @@ attribute = "state"
 to        = "finished"
 
 [[actions]]
-type = "set_device_state"
+type      = "set_device_state"
 device_id = "lutron_54"
-state = { on = false }
+state     = { on = false }

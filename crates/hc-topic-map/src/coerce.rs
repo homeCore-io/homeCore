@@ -31,8 +31,8 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
         "01_to_bool" => Ok(Value::Bool(match &value {
             Value::String(s) => s == "1",
             Value::Number(n) => n.as_i64() == Some(1),
-            Value::Bool(b)   => *b,
-            _                => return Err(anyhow!("01_to_bool: cannot coerce {value}")),
+            Value::Bool(b) => *b,
+            _ => return Err(anyhow!("01_to_bool: cannot coerce {value}")),
         })),
         "bool_to_01" => {
             let b = as_bool(&value, name)?;
@@ -49,7 +49,9 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
         "open_close_to_bool" => {
             let s = as_str(&value, name)?;
             // "open" = not closed = contact false; "close"/"closed" = contact true
-            Ok(Value::Bool(s.eq_ignore_ascii_case("close") || s.eq_ignore_ascii_case("closed")))
+            Ok(Value::Bool(
+                s.eq_ignore_ascii_case("close") || s.eq_ignore_ascii_case("closed"),
+            ))
         }
 
         // --- Numeric conversions ---
@@ -59,7 +61,8 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
         "scalar_int" => {
             match &value {
                 Value::Number(n) => {
-                    let i = n.as_i64()
+                    let i = n
+                        .as_i64()
                         .unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64);
                     Ok(Value::Number(i.into()))
                 }
@@ -68,11 +71,15 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
                     if let Ok(i) = s.parse::<i64>() {
                         Ok(Value::Number(i.into()))
                     } else {
-                        let f: f64 = s.parse().map_err(|_| anyhow!("scalar_int: cannot parse {s:?} as integer"))?;
+                        let f: f64 = s
+                            .parse()
+                            .map_err(|_| anyhow!("scalar_int: cannot parse {s:?} as integer"))?;
                         Ok(Value::Number((f as i64).into()))
                     }
                 }
-                _ => Err(anyhow!("scalar_int: expected string or number, got {value}")),
+                _ => Err(anyhow!(
+                    "scalar_int: expected string or number, got {value}"
+                )),
             }
         }
 
@@ -127,10 +134,16 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
 pub fn coerce_scalar_auto(value: Value) -> Value {
     match &value {
         Value::String(s) => {
-            if s.eq_ignore_ascii_case("true")  { return Value::Bool(true);  }
-            if s.eq_ignore_ascii_case("false") { return Value::Bool(false); }
-            if let Ok(i) = s.parse::<i64>()   { return Value::Number(i.into()); }
-            if let Ok(f) = s.parse::<f64>()   {
+            if s.eq_ignore_ascii_case("true") {
+                return Value::Bool(true);
+            }
+            if s.eq_ignore_ascii_case("false") {
+                return Value::Bool(false);
+            }
+            if let Ok(i) = s.parse::<i64>() {
+                return Value::Number(i.into());
+            }
+            if let Ok(f) = s.parse::<f64>() {
                 if let Some(n) = serde_json::Number::from_f64(f) {
                     return Value::Number(n);
                 }
@@ -146,17 +159,23 @@ pub fn coerce_scalar_auto(value: Value) -> Value {
 // ---------------------------------------------------------------------------
 
 fn as_str<'a>(v: &'a Value, coercion: &str) -> Result<&'a str> {
-    v.as_str().ok_or_else(|| anyhow!("{coercion}: expected string, got {v}"))
+    v.as_str()
+        .ok_or_else(|| anyhow!("{coercion}: expected string, got {v}"))
 }
 
 fn as_bool(v: &Value, coercion: &str) -> Result<bool> {
-    v.as_bool().ok_or_else(|| anyhow!("{coercion}: expected bool, got {v}"))
+    v.as_bool()
+        .ok_or_else(|| anyhow!("{coercion}: expected bool, got {v}"))
 }
 
 fn as_f64(v: &Value, coercion: &str) -> Result<f64> {
-    if let Some(n) = v.as_f64() { return Ok(n); }
+    if let Some(n) = v.as_f64() {
+        return Ok(n);
+    }
     if let Some(s) = v.as_str() {
-        if let Ok(f) = s.parse::<f64>() { return Ok(f); }
+        if let Ok(f) = s.parse::<f64>() {
+            return Ok(f);
+        }
     }
     Err(anyhow!("{coercion}: expected number, got {v}"))
 }
@@ -213,7 +232,7 @@ mod tests {
 
     #[test]
     fn scalar_auto_bool() {
-        assert_eq!(coerce_scalar_auto(json!("true")),  json!(true));
+        assert_eq!(coerce_scalar_auto(json!("true")), json!(true));
         assert_eq!(coerce_scalar_auto(json!("false")), json!(false));
     }
 
@@ -242,7 +261,10 @@ mod tests {
     #[test]
     fn mired_to_kelvin() {
         // 370 mired ≈ 2703 K
-        let k = apply("mired_to_kelvin", json!(370)).unwrap().as_i64().unwrap();
+        let k = apply("mired_to_kelvin", json!(370))
+            .unwrap()
+            .as_i64()
+            .unwrap();
         assert!((k - 2703).abs() <= 1);
     }
 

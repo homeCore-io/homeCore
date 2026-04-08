@@ -2,6 +2,7 @@
 name    = "hc-api"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 axum       = { workspace = true }
@@ -20,7 +21,10 @@ hc-auth = { version = "0.1.0", path = "../hc-auth" }
 chrono = { workspace = true, features = ["serde"] }
 hc-mqtt-client = { version = "0.1.0", path = "../hc-mqtt-client" }
 hc-scripting = { version = "0.1.0", path = "../hc-scripting" }
+hc-topic-map = { version = "0.1.0", path = "../hc-topic-map" }
+hc-web-admin = { version = "0.1.0", path = "../hc-web-admin" }
 async-trait  = { workspace = true }
+hc-logging   = { version = "0.1.0", path = "../hc-logging" }
 ipnet        = { workspace = true }
 toml         = { workspace = true }
 prometheus   = { workspace = true }

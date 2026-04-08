@@ -23,23 +23,20 @@ pub enum InboundResult {
     /// A state update — write to `homecore/devices/{device_id}/state[/partial]`.
     State {
         device_id: String,
-        payload:   Value,
+        payload: Value,
         /// True → publish to `.../state/partial` (merge-patch).
         /// False → publish to `.../state` (full replace).
         partial: bool,
     },
     /// An availability update — set `device.available`.
-    Availability {
-        device_id: String,
-        available: bool,
-    },
+    Availability { device_id: String, available: bool },
 }
 
 /// What the router produces for an outbound HomeCore cmd.
 #[derive(Debug)]
 pub struct OutboundResult {
     pub target_topic: String,
-    pub payload:      Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,20 +44,20 @@ pub struct OutboundResult {
 // ---------------------------------------------------------------------------
 
 struct CompiledState {
-    segments:       Vec<Segment>,
+    segments: Vec<Segment>,
     profile_prefix: String,
-    config:         StateTopicConfig,
+    config: StateTopicConfig,
 }
 
 struct CompiledAvailability {
     segments: Vec<Segment>,
     profile_prefix: String,
-    config:   AvailabilityTopicConfig,
+    config: AvailabilityTopicConfig,
 }
 
 struct CompiledCmd {
     segments: Vec<Segment>,
-    config:   CmdTopicConfig,
+    config: CmdTopicConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,42 +65,42 @@ struct CompiledCmd {
 // ---------------------------------------------------------------------------
 
 pub struct EcosystemRouter {
-    state_entries:        Vec<CompiledState>,
+    state_entries: Vec<CompiledState>,
     availability_entries: Vec<CompiledAvailability>,
-    cmd_entries:          Vec<CompiledCmd>,
-    rhai_engine:          Engine,
-    rhai_ast:             Option<AST>,
+    cmd_entries: Vec<CompiledCmd>,
+    rhai_engine: Engine,
+    rhai_ast: Option<AST>,
 }
 
 impl EcosystemRouter {
     /// Build a router from a list of parsed ecosystem profiles.
     /// `rhai_source` may contain custom transform functions.
     pub fn new(profiles: Vec<EcosystemProfile>, rhai_source: Option<&str>) -> Result<Self> {
-        let mut state_entries        = Vec::new();
+        let mut state_entries = Vec::new();
         let mut availability_entries = Vec::new();
-        let mut cmd_entries          = Vec::new();
+        let mut cmd_entries = Vec::new();
 
         for profile in profiles {
             let prefix = profile.prefix.clone();
 
             for sc in profile.state_topics {
                 state_entries.push(CompiledState {
-                    segments:       parse_pattern(&sc.pattern),
+                    segments: parse_pattern(&sc.pattern),
                     profile_prefix: prefix.clone(),
-                    config:         sc,
+                    config: sc,
                 });
             }
             for ac in profile.availability_topics {
                 availability_entries.push(CompiledAvailability {
-                    segments:       parse_pattern(&ac.pattern),
+                    segments: parse_pattern(&ac.pattern),
                     profile_prefix: prefix.clone(),
-                    config:         ac,
+                    config: ac,
                 });
             }
             for cc in profile.cmd_topics {
                 cmd_entries.push(CompiledCmd {
                     segments: parse_pattern(&cc.source),
-                    config:   cc,
+                    config: cc,
                 });
             }
         }
@@ -147,7 +144,9 @@ impl EcosystemRouter {
         // Try availability topics.
         for entry in &self.availability_entries {
             if let Some(vars) = match_segments(&entry.segments, topic) {
-                if let Some(result) = self.apply_availability(&entry.config, &entry.profile_prefix, &vars, payload)? {
+                if let Some(result) =
+                    self.apply_availability(&entry.config, &entry.profile_prefix, &vars, payload)?
+                {
                     debug!(%topic, "Availability topic matched");
                     return Ok(Some(result));
                 }
@@ -201,9 +200,9 @@ impl EcosystemRouter {
             if !config.value_map.is_empty() {
                 let key = match &json_value {
                     Value::String(s) => s.clone(),
-                    Value::Bool(b)   => b.to_string(),
+                    Value::Bool(b) => b.to_string(),
                     Value::Number(n) => n.to_string(),
-                    _                => json_value.to_string(),
+                    _ => json_value.to_string(),
                 };
                 if let Some(mapped) = config.value_map.get(&key) {
                     json_value = mapped.clone();
@@ -214,7 +213,7 @@ impl EcosystemRouter {
             return Ok(InboundResult::State {
                 device_id,
                 payload: Value::Object(obj),
-                partial: true,    // scalar topics are always partial updates
+                partial: true, // scalar topics are always partial updates
             });
         }
 
@@ -227,7 +226,11 @@ impl EcosystemRouter {
         //   - field_map topics without explicit partial default to full replace
         let partial = config.partial.unwrap_or(config.attribute.is_some());
 
-        Ok(InboundResult::State { device_id, payload: mapped, partial })
+        Ok(InboundResult::State {
+            device_id,
+            payload: mapped,
+            partial,
+        })
     }
 
     fn apply_availability(
@@ -237,13 +240,14 @@ impl EcosystemRouter {
         vars: &HashMap<String, String>,
         raw_payload: &[u8],
     ) -> Result<Option<InboundResult>> {
-        let device_var = vars.get("device")
+        let device_var = vars
+            .get("device")
             .or_else(|| vars.get("nodeId"))
             .or_else(|| vars.values().next());
 
         let device_id = match device_var {
             Some(d) => format!("{}{}", prefix, sanitize_id(d)),
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         let raw_str = std::str::from_utf8(raw_payload)
@@ -252,9 +256,7 @@ impl EcosystemRouter {
             .to_string();
 
         let available = match config.payload.as_deref() {
-            Some("raw_bool") => {
-                raw_str.eq_ignore_ascii_case("true") || raw_str == "1"
-            }
+            Some("raw_bool") => raw_str.eq_ignore_ascii_case("true") || raw_str == "1",
             _ => {
                 // Try json_field extraction first.
                 let lookup_key = if let Some(field) = &config.json_field {
@@ -275,7 +277,10 @@ impl EcosystemRouter {
             }
         };
 
-        Ok(Some(InboundResult::Availability { device_id, available }))
+        Ok(Some(InboundResult::Availability {
+            device_id,
+            available,
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -285,7 +290,11 @@ impl EcosystemRouter {
     /// Route an outbound HomeCore cmd. Returns `None` if no profile matches,
     /// or `Some(vec)` with one result per native publish (alias_reverse may
     /// produce one publish per attribute in the cmd payload).
-    pub fn route_outbound(&self, topic: &str, payload: &[u8]) -> Result<Option<Vec<OutboundResult>>> {
+    pub fn route_outbound(
+        &self,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<Option<Vec<OutboundResult>>> {
         for entry in &self.cmd_entries {
             if let Some(vars) = match_segments(&entry.segments, topic) {
                 let results = self.apply_cmd(entry, &vars, payload)?;
@@ -315,7 +324,10 @@ impl EcosystemRouter {
         // Apply optional Rhai transform on the full payload.
         if let Some(fn_name) = &config.transform {
             let out = self.run_rhai(fn_name, raw_payload)?;
-            return Ok(vec![OutboundResult { target_topic, payload: out }]);
+            return Ok(vec![OutboundResult {
+                target_topic,
+                payload: out,
+            }]);
         }
 
         // Parse HomeCore cmd payload as JSON.
@@ -324,7 +336,8 @@ impl EcosystemRouter {
 
         // For Shelly Gen2 RPC commands.
         if let Some(method) = &config.rpc_method {
-            let out_payload = build_rpc_payload(method, config.rpc_id, &cmd_value, &config.field_map)?;
+            let out_payload =
+                build_rpc_payload(method, config.rpc_id, &cmd_value, &config.field_map)?;
             return Ok(vec![OutboundResult {
                 target_topic,
                 payload: serde_json::to_vec(&out_payload)?,
@@ -339,7 +352,10 @@ impl EcosystemRouter {
             } else {
                 attr_val
             };
-            return Ok(vec![OutboundResult { target_topic, payload: value_to_bytes(&coerced) }]);
+            return Ok(vec![OutboundResult {
+                target_topic,
+                payload: value_to_bytes(&coerced),
+            }]);
         }
 
         // Full JSON object: rename and coerce.
@@ -355,12 +371,15 @@ impl EcosystemRouter {
     // -----------------------------------------------------------------------
 
     fn run_rhai(&self, fn_name: &str, payload: &[u8]) -> Result<Vec<u8>> {
-        let ast = self.rhai_ast.as_ref()
+        let ast = self
+            .rhai_ast
+            .as_ref()
             .ok_or_else(|| anyhow!("Rhai transform '{fn_name}' called but no script loaded"))?;
         let payload_str = std::str::from_utf8(payload)
             .map_err(|_| anyhow!("Non-UTF-8 payload for Rhai transform '{fn_name}'"))?
             .to_string();
-        let result: rhai::Dynamic = self.rhai_engine
+        let result: rhai::Dynamic = self
+            .rhai_engine
             .call_fn(&mut Scope::new(), ast, fn_name, (payload_str,))
             .map_err(|e| anyhow!("Rhai '{fn_name}': {e}"))?;
         Ok(result.to_string().into_bytes())
@@ -381,7 +400,7 @@ fn apply_field_map(
 ) -> Result<Value> {
     let obj = match payload.as_object() {
         Some(o) => o,
-        None    => return Ok(payload.clone()),
+        None => return Ok(payload.clone()),
     };
 
     let mut result = Map::new();
@@ -396,11 +415,10 @@ fn apply_field_map(
         for (src_key, dst_key) in field_map {
             if let Some(raw_val) = extract_path(payload, src_key) {
                 let coerced = if let Some(coercion) = coerce_map.get(dst_key) {
-                    coerce::apply(coercion, raw_val)
-                        .unwrap_or_else(|e| {
-                            warn!(coercion, error = %e, "Coercion failed; using raw value");
-                            payload.clone()
-                        })
+                    coerce::apply(coercion, raw_val).unwrap_or_else(|e| {
+                        warn!(coercion, error = %e, "Coercion failed; using raw value");
+                        payload.clone()
+                    })
                 } else {
                     raw_val
                 };
@@ -421,20 +439,22 @@ fn apply_field_map_cmd(
 ) -> Result<Value> {
     let obj = match payload.as_object() {
         Some(o) => o,
-        None    => return Ok(payload.clone()),
+        None => return Ok(payload.clone()),
     };
 
     let mut result = Map::new();
 
     for (hc_key, v) in obj {
         // Rename to ecosystem key if a mapping exists.
-        let eco_key = field_map.get(hc_key).cloned().unwrap_or_else(|| hc_key.clone());
+        let eco_key = field_map
+            .get(hc_key)
+            .cloned()
+            .unwrap_or_else(|| hc_key.clone());
         let coerced = if let Some(coercion) = coerce_map.get(&eco_key) {
-            coerce::apply(coercion, v.clone())
-                .unwrap_or_else(|e| {
-                    warn!(coercion, error = %e, "Cmd coercion failed; using raw value");
-                    v.clone()
-                })
+            coerce::apply(coercion, v.clone()).unwrap_or_else(|e| {
+                warn!(coercion, error = %e, "Cmd coercion failed; using raw value");
+                v.clone()
+            })
         } else {
             v.clone()
         };
@@ -465,7 +485,10 @@ fn build_rpc_payload(
     let mut params: Map<String, Value> = Map::new();
     if let Some(obj) = cmd.as_object() {
         for (hc_key, v) in obj {
-            let eco_key = field_map.get(hc_key).cloned().unwrap_or_else(|| hc_key.clone());
+            let eco_key = field_map
+                .get(hc_key)
+                .cloned()
+                .unwrap_or_else(|| hc_key.clone());
             params.insert(eco_key, v.clone());
         }
     }
@@ -484,14 +507,14 @@ fn build_rpc_payload(
 fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
         Value::String(s) => s.as_bytes().to_vec(),
-        other            => other.to_string().into_bytes(),
+        other => other.to_string().into_bytes(),
     }
 }
 
 /// Helper to extract device_id from an InboundResult for logging.
 fn result_device_id(r: &InboundResult) -> &str {
     match r {
-        InboundResult::State { device_id, .. }        => device_id,
+        InboundResult::State { device_id, .. } => device_id,
         InboundResult::Availability { device_id, .. } => device_id,
     }
 }
@@ -507,7 +530,8 @@ fn resolve_device_id(
         sanitize_id(&render_template(tmpl, vars))
     } else {
         // Default: prefix + first capture variable (prefer "device" then "nodeId").
-        let var_val = vars.get("device")
+        let var_val = vars
+            .get("device")
             .or_else(|| vars.get("nodeId"))
             .or_else(|| vars.values().next())
             .map(|s| s.as_str())
@@ -590,11 +614,16 @@ attribute = "on"
     fn z2m_state_on() {
         let router = make_router(Z2M_PROFILE);
         let payload = br#"{"state":"ON","brightness":128}"#;
-        let result = router.route_inbound("zigbee2mqtt/living_room_light", payload).unwrap().unwrap();
+        let result = router
+            .route_inbound("zigbee2mqtt/living_room_light", payload)
+            .unwrap()
+            .unwrap();
         match result {
-            InboundResult::State { device_id, payload, .. } => {
+            InboundResult::State {
+                device_id, payload, ..
+            } => {
                 assert_eq!(device_id, "zigbee_living_room_light");
-                assert_eq!(payload["on"],         true);
+                assert_eq!(payload["on"], true);
                 assert_eq!(payload["brightness"], 128);
             }
             _ => panic!("Expected State"),
@@ -605,7 +634,10 @@ attribute = "on"
     fn z2m_state_off() {
         let router = make_router(Z2M_PROFILE);
         let payload = br#"{"state":"OFF"}"#;
-        let result = router.route_inbound("zigbee2mqtt/bedroom_switch", payload).unwrap().unwrap();
+        let result = router
+            .route_inbound("zigbee2mqtt/bedroom_switch", payload)
+            .unwrap()
+            .unwrap();
         match result {
             InboundResult::State { payload, .. } => {
                 assert_eq!(payload["on"], false);
@@ -619,12 +651,18 @@ attribute = "on"
     #[test]
     fn z2m_availability_online() {
         let router = make_router(Z2M_PROFILE);
-        let result = router.route_inbound(
-            "zigbee2mqtt/living_room_light/availability",
-            br#"{"state":"online"}"#,
-        ).unwrap().unwrap();
+        let result = router
+            .route_inbound(
+                "zigbee2mqtt/living_room_light/availability",
+                br#"{"state":"online"}"#,
+            )
+            .unwrap()
+            .unwrap();
         match result {
-            InboundResult::Availability { device_id, available } => {
+            InboundResult::Availability {
+                device_id,
+                available,
+            } => {
                 assert_eq!(device_id, "zigbee_living_room_light");
                 assert!(available);
             }
@@ -635,10 +673,13 @@ attribute = "on"
     #[test]
     fn z2m_availability_offline() {
         let router = make_router(Z2M_PROFILE);
-        let result = router.route_inbound(
-            "zigbee2mqtt/living_room_light/availability",
-            br#"{"state":"offline"}"#,
-        ).unwrap().unwrap();
+        let result = router
+            .route_inbound(
+                "zigbee2mqtt/living_room_light/availability",
+                br#"{"state":"offline"}"#,
+            )
+            .unwrap()
+            .unwrap();
         match result {
             InboundResult::Availability { available, .. } => assert!(!available),
             _ => panic!("Expected Availability"),
@@ -650,10 +691,13 @@ attribute = "on"
     #[test]
     fn z2m_cmd_on() {
         let router = make_router(Z2M_PROFILE);
-        let results = router.route_outbound(
-            "homecore/devices/zigbee_living_room_light/cmd",
-            br#"{"on":true}"#,
-        ).unwrap().unwrap();
+        let results = router
+            .route_outbound(
+                "homecore/devices/zigbee_living_room_light/cmd",
+                br#"{"on":true}"#,
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].target_topic, "zigbee2mqtt/living_room_light/set");
         let body: Value = serde_json::from_slice(&results[0].payload).unwrap();
@@ -663,10 +707,13 @@ attribute = "on"
     #[test]
     fn z2m_cmd_off() {
         let router = make_router(Z2M_PROFILE);
-        let results = router.route_outbound(
-            "homecore/devices/zigbee_living_room_light/cmd",
-            br#"{"on":false}"#,
-        ).unwrap().unwrap();
+        let results = router
+            .route_outbound(
+                "homecore/devices/zigbee_living_room_light/cmd",
+                br#"{"on":false}"#,
+            )
+            .unwrap()
+            .unwrap();
         let body: Value = serde_json::from_slice(&results[0].payload).unwrap();
         assert_eq!(body["state"], "OFF");
     }
@@ -676,9 +723,17 @@ attribute = "on"
     #[test]
     fn shelly_scalar_on() {
         let router = make_router(SHELLY_PROFILE);
-        let result = router.route_inbound("shellies/myplug/relay/0", b"1").unwrap().unwrap();
+        let result = router
+            .route_inbound("shellies/myplug/relay/0", b"1")
+            .unwrap()
+            .unwrap();
         match result {
-            InboundResult::State { device_id, payload, partial, .. } => {
+            InboundResult::State {
+                device_id,
+                payload,
+                partial,
+                ..
+            } => {
                 assert_eq!(device_id, "shelly_myplug");
                 assert_eq!(payload["on"], true);
                 assert!(partial);
@@ -690,7 +745,10 @@ attribute = "on"
     #[test]
     fn shelly_scalar_off() {
         let router = make_router(SHELLY_PROFILE);
-        let result = router.route_inbound("shellies/myplug/relay/0", b"0").unwrap().unwrap();
+        let result = router
+            .route_inbound("shellies/myplug/relay/0", b"0")
+            .unwrap()
+            .unwrap();
         match result {
             InboundResult::State { payload, .. } => assert_eq!(payload["on"], false),
             _ => panic!("Expected State"),
@@ -702,7 +760,10 @@ attribute = "on"
     #[test]
     fn shelly_availability_raw_bool() {
         let router = make_router(SHELLY_PROFILE);
-        let result = router.route_inbound("shellies/myplug/online", b"true").unwrap().unwrap();
+        let result = router
+            .route_inbound("shellies/myplug/online", b"true")
+            .unwrap()
+            .unwrap();
         match result {
             InboundResult::Availability { available, .. } => assert!(available),
             _ => panic!("Expected Availability"),
@@ -714,10 +775,10 @@ attribute = "on"
     #[test]
     fn shelly_cmd_on() {
         let router = make_router(SHELLY_PROFILE);
-        let results = router.route_outbound(
-            "homecore/devices/shelly_myplug/cmd",
-            br#"{"on":true}"#,
-        ).unwrap().unwrap();
+        let results = router
+            .route_outbound("homecore/devices/shelly_myplug/cmd", br#"{"on":true}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].target_topic, "shellies/myplug/relay/0/command");
         assert_eq!(results[0].payload, b"1");
@@ -726,10 +787,10 @@ attribute = "on"
     #[test]
     fn shelly_cmd_off() {
         let router = make_router(SHELLY_PROFILE);
-        let results = router.route_outbound(
-            "homecore/devices/shelly_myplug/cmd",
-            br#"{"on":false}"#,
-        ).unwrap().unwrap();
+        let results = router
+            .route_outbound("homecore/devices/shelly_myplug/cmd", br#"{"on":false}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(results[0].payload, b"0");
     }
 
@@ -738,7 +799,13 @@ attribute = "on"
     #[test]
     fn no_match_returns_none() {
         let router = make_router(Z2M_PROFILE);
-        assert!(router.route_inbound("unknown/topic/here", b"{}").unwrap().is_none());
-        assert!(router.route_outbound("homecore/devices/unknown/cmd", b"{}").unwrap().is_none());
+        assert!(router
+            .route_inbound("unknown/topic/here", b"{}")
+            .unwrap()
+            .is_none());
+        assert!(router
+            .route_outbound("homecore/devices/unknown/cmd", b"{}")
+            .unwrap()
+            .is_none());
     }
 }

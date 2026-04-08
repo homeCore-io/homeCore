@@ -25,7 +25,9 @@
 //! an external broker (Mosquitto, EMQX) pointed at via `external_url`.
 
 use anyhow::{Context, Result};
-use rumqttd::{Broker as RumqttdBroker, Config, ConnectionSettings, RouterConfig, ServerSettings, TlsConfig};
+use rumqttd::{
+    Broker as RumqttdBroker, Config, ConnectionSettings, RouterConfig, ServerSettings, TlsConfig,
+};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tracing::{info, warn};
@@ -106,14 +108,13 @@ impl Broker {
         let auth: Option<HashMap<String, String>> = if self.config.clients.is_empty() {
             None
         } else {
-            let map: HashMap<String, String> = self.config.clients
+            let map: HashMap<String, String> = self
+                .config
+                .clients
                 .iter()
                 .map(|c| (c.client_id.clone(), c.password.clone()))
                 .collect();
-            info!(
-                clients = map.len(),
-                "Broker authentication enabled"
-            );
+            info!(clients = map.len(), "Broker authentication enabled");
             Some(map)
         };
 
@@ -150,7 +151,10 @@ impl Broker {
                 connections: connection_settings.clone(),
             };
             v5_servers.insert("tcp-v5".to_string(), tcp_v5);
-            info!(port = v5_port, "MQTT v5 listener enabled (for Gen2/Gen3 devices)");
+            info!(
+                port = v5_port,
+                "MQTT v5 listener enabled (for Gen2/Gen3 devices)"
+            );
         }
 
         // Optional TLS listener (v3.1.1).
@@ -188,7 +192,11 @@ impl Broker {
             id: 0,
             router,
             v4: Some(v4_servers),
-            v5: if v5_servers.is_empty() { None } else { Some(v5_servers) },
+            v5: if v5_servers.is_empty() {
+                None
+            } else {
+                Some(v5_servers)
+            },
             ws: None,
             cluster: None,
             console: None,

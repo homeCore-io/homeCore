@@ -23,10 +23,7 @@ pub struct LoginBody {
 
 /// `POST /api/v1/auth/login`
 /// Returns a signed JWT on success.
-pub async fn login(
-    State(s): State<AppState>,
-    Json(body): Json<LoginBody>,
-) -> impl IntoResponse {
+pub async fn login(State(s): State<AppState>, Json(body): Json<LoginBody>) -> impl IntoResponse {
     // Fetch user record.
     let user = match s.store.get_user_by_username(&body.username).await {
         Ok(Some(u)) => u,
@@ -40,9 +37,19 @@ pub async fn login(
                 )
             })
             .await;
-            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" }))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid credentials" })),
+            )
+                .into_response();
         }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     // Verify password on a blocking thread (Argon2id is CPU-intensive).
@@ -53,20 +60,32 @@ pub async fn login(
         .unwrap_or(false);
 
     if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid credentials" })),
+        )
+            .into_response();
     }
 
     match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
-            (StatusCode::OK, Json(json!({
-                "token": token,
-                "token_type": "Bearer",
-                "expires_in": expires_in,
-                "user": UserInfo::from(&user),
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "token": token,
+                    "token_type": "Bearer",
+                    "expires_in": expires_in,
+                    "user": UserInfo::from(&user),
+                })),
+            )
+                .into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -74,14 +93,23 @@ pub async fn login(
 
 /// `GET /api/v1/auth/me`
 /// Returns the authenticated user's profile.
-pub async fn me(
-    State(s): State<AppState>,
-    AuthUser(claims): AuthUser,
-) -> impl IntoResponse {
-    match s.store.get_user_by_id(Uuid::parse_str(&claims.uid).unwrap_or_default()).await {
+pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
+    match s
+        .store
+        .get_user_by_id(Uuid::parse_str(&claims.uid).unwrap_or_default())
+        .await
+    {
         Ok(Some(user)) => (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "user not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "user not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -101,18 +129,40 @@ pub async fn change_password(
     Json(body): Json<ChangePasswordBody>,
 ) -> impl IntoResponse {
     if body.new_password.len() < 8 {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "password must be at least 8 characters" }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "password must be at least 8 characters" })),
+        )
+            .into_response();
     }
 
     let uid = match Uuid::parse_str(&claims.uid) {
         Ok(id) => id,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid user id in token" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid user id in token" })),
+            )
+                .into_response()
+        }
     };
 
     let mut user = match s.store.get_user_by_id(uid).await {
         Ok(Some(u)) => u,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "user not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "user not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     // Verify current password.
@@ -122,21 +172,41 @@ pub async fn change_password(
         .await
         .unwrap_or(false);
     if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "current password is incorrect" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "current password is incorrect" })),
+        )
+            .into_response();
     }
 
     // Hash new password.
     let new_pass = body.new_password.clone();
     let new_hash = match tokio::task::spawn_blocking(move || hash_password(&new_pass)).await {
         Ok(Ok(h)) => h,
-        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     user.password_hash = new_hash;
     match s.store.update_user(&user).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -156,24 +226,56 @@ pub async fn create_user(
     Json(body): Json<CreateUserBody>,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin role required" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
     }
     if body.password.len() < 8 {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "password must be at least 8 characters" }))).into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "password must be at least 8 characters" })),
+        )
+            .into_response();
     }
 
     // Check username uniqueness.
     match s.store.get_user_by_username(&body.username).await {
-        Ok(Some(_)) => return (StatusCode::CONFLICT, Json(json!({ "error": "username already exists" }))).into_response(),
+        Ok(Some(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "username already exists" })),
+            )
+                .into_response()
+        }
         Ok(None) => {}
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     }
 
     let password = body.password.clone();
     let hash = match tokio::task::spawn_blocking(move || hash_password(&password)).await {
         Ok(Ok(h)) => h,
-        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     let user = User {
@@ -185,7 +287,11 @@ pub async fn create_user(
     };
     match s.store.create_user(&user).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(UserInfo::from(&user)))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -195,14 +301,22 @@ pub async fn list_users(
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin role required" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
     }
     match s.store.list_users().await {
         Ok(users) => {
             let infos: Vec<UserInfo> = users.iter().map(UserInfo::from).collect();
             (StatusCode::OK, Json(json!(infos))).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -213,16 +327,32 @@ pub async fn delete_user(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin role required" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
     }
     // Prevent self-deletion.
     if claims.uid == id.to_string() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "cannot delete your own account" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot delete your own account" })),
+        )
+            .into_response();
     }
     match s.store.delete_user(id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "user not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "user not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -239,16 +369,36 @@ pub async fn set_user_role(
     Json(body): Json<SetRoleBody>,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "admin role required" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
     }
     let mut user = match s.store.get_user_by_id(id).await {
         Ok(Some(u)) => u,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({ "error": "user not found" }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "user not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
     user.role = body.role;
     match s.store.update_user(&user).await {
         Ok(_) => (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

@@ -185,6 +185,7 @@ prefix       = "homecore"      # active file: homecore.log; rotated: homecore.YY
 rotation     = "daily"         # daily | hourly | weekly | never
 max_size_mb  = 100             # rotate when file exceeds this size (0 = time-only rotation)
 compress     = true            # gzip rotated files in a background thread
+prune_after_days = 5           # delete rotated logs older than N days (0 = never prune)
 format       = "json"          # json recommended for files (structured, parseable)
 
 # Dedicated rule/automation log (disabled by default).
@@ -197,6 +198,7 @@ format       = "json"          # json recommended for files (structured, parseab
 # rotation    = "daily"
 # max_size_mb = 100
 # compress    = true
+# prune_after_days = 5       # delete rotated logs older than N days (0 = never)
 # format      = "pretty"     # "json" recommended for log aggregators
 
 # Remote syslog output (disabled by default)
@@ -234,6 +236,16 @@ plugin_ready_delay_secs = 10
 # ---------------------------------------------------------------------------
 [shutdown]
 drain_timeout_secs = 10
+
+# ---------------------------------------------------------------------------
+# Internal Web Admin
+# ---------------------------------------------------------------------------
+[web_admin]
+# Serve the pre-built Leptos/WASM admin UI as static files.
+# Requires dist_path to point to a valid `trunk build --release` output directory.
+# Disabled by default — during development, run `trunk serve` separately.
+enabled = false
+# dist_path = "ui/dist"   # relative to homeCore home dir
 
 # ---------------------------------------------------------------------------
 # Scheduler

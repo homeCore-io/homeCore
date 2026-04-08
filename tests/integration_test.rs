@@ -30,7 +30,12 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
     let port = free_port();
 
     // 1. Embedded broker.
-    Broker::new(BrokerConfig { host: "127.0.0.1".into(), port, ..Default::default() }).spawn()?;
+    Broker::new(BrokerConfig {
+        host: "127.0.0.1".into(),
+        port,
+        ..Default::default()
+    })
+    .spawn()?;
 
     // 2. State store (temp files unique to this port).
     let state_db = format!("/tmp/hc-test-{port}.redb");
@@ -56,13 +61,18 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
             not_from: None,
             not_to: None,
             for_duration_secs: None,
+            change_kind: None,
+            change_source: None,
         },
         conditions: vec![],
-        actions: vec![RuleAction { enabled: true, action: Action::PublishMqtt {
-            topic: "homecore/devices/test_light/cmd".into(),
-            payload: r#"{"action":"toggle_confirmed"}"#.into(),
-            retain: false,
-        }}],
+        actions: vec![RuleAction {
+            enabled: true,
+            action: Action::PublishMqtt {
+                topic: "homecore/devices/test_light/cmd".into(),
+                payload: r#"{"action":"toggle_confirmed"}"#.into(),
+                retain: false,
+            },
+        }],
         error: None,
         cooldown_secs: None,
         log_events: false,
@@ -95,14 +105,18 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
         tokio::spawn(async move {
             loop {
                 match mqtt_rx.recv().await {
-                    Ok(ev) => { let _ = bus_clone.publish(ev); }
+                    Ok(ev) => {
+                        let _ = bus_clone.publish(ev);
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
     }
-    tokio::spawn(async move { let _ = mqtt_client.run().await; });
+    tokio::spawn(async move {
+        let _ = mqtt_client.run().await;
+    });
 
     // 5. Core: state bridge + rule engine.
     let rules = store.list_rules().await?;
@@ -119,7 +133,9 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
     let (virt_client, mut virt_eventloop) = AsyncClient::new(opts, 64);
     tokio::spawn(async move {
         loop {
-            if virt_eventloop.poll().await.is_err() { break; }
+            if virt_eventloop.poll().await.is_err() {
+                break;
+            }
         }
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -163,8 +179,14 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
     let _ = std::fs::remove_file(&state_db);
     let _ = std::fs::remove_file(&history_db);
 
-    assert!(saw_state_changed, "DeviceStateChanged event never arrived on bus");
-    assert!(saw_rule_fired, "RuleFired event never arrived — rule did not fire");
+    assert!(
+        saw_state_changed,
+        "DeviceStateChanged event never arrived on bus"
+    );
+    assert!(
+        saw_rule_fired,
+        "RuleFired event never arrived — rule did not fire"
+    );
     assert!(result.is_ok(), "Timed out waiting for events");
 
     Ok(())

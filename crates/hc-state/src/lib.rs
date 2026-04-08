@@ -47,18 +47,21 @@ impl StateStore {
         let (devices, rules, history, schemas, users) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create state DB directory: {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create state DB directory: {}", parent.display())
+                })?;
             }
             if let Some(parent) = std::path::Path::new(&history_path).parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create history DB directory: {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create history DB directory: {}",
+                        parent.display()
+                    )
+                })?;
             }
 
             // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
-            let db = Arc::new(
-                Database::create(&state_path).context("failed to open state DB")?,
-            );
+            let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
             let devices = DeviceStore::new(Arc::clone(&db))?;
             let rules = RuleStore::new(Arc::clone(&db))?;
             let history = HistoryStore::open(&history_path)?;
@@ -124,11 +127,15 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.get(&id)).await?
     }
 
-    pub async fn list_device_schemas(
-        &self,
-    ) -> Result<Vec<(String, hc_types::DeviceSchema)>> {
+    pub async fn list_device_schemas(&self) -> Result<Vec<(String, hc_types::DeviceSchema)>> {
         let store = Arc::clone(&self.schemas);
         tokio::task::spawn_blocking(move || store.list()).await?
+    }
+
+    pub async fn delete_device_schema(&self, device_id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.schemas);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.delete(&id)).await?
     }
 
     // --- Rules ---
@@ -226,10 +233,8 @@ impl StateStore {
         let store = Arc::clone(&self.history);
         let did = device_id.to_string();
         let attr = attribute.map(str::to_string);
-        tokio::task::spawn_blocking(move || {
-            store.query(&did, from, to, attr.as_deref(), limit)
-        })
-        .await?
+        tokio::task::spawn_blocking(move || store.query(&did, from, to, attr.as_deref(), limit))
+            .await?
     }
 
     // --- Rule fire history ---

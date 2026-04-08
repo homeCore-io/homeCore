@@ -50,6 +50,7 @@
 
 use chrono::Utc;
 use hc_state::StateStore;
+use hc_types::device::{extract_change_from_command_payload, DeviceChange};
 use hc_types::event::Event;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -104,9 +105,9 @@ struct TimerHandle {
 // ---------------------------------------------------------------------------
 
 pub struct TimerManager {
-    bus:     EventBus,
+    bus: EventBus,
     pub_bus: EventBus,
-    state:   StateStore,
+    state: StateStore,
     handles: Arc<RwLock<HashMap<String, TimerHandle>>>,
 }
 
@@ -157,7 +158,10 @@ impl TimerManager {
         };
 
         for dev in devices {
-            if dev.plugin_id != TIMER_PLUGIN_ID {
+            // Accept both legacy core.timer and new core.glue timer devices.
+            let is_timer = dev.plugin_id == TIMER_PLUGIN_ID
+                || (dev.plugin_id == "core.glue" && dev.device_id.starts_with("timer_"));
+            if !is_timer {
                 continue;
             }
             let state_str = dev
@@ -180,8 +184,7 @@ impl TimerManager {
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&Utc));
                     let remaining_secs = if let Some(started) = started_at {
-                        let elapsed =
-                            (Utc::now() - started).num_seconds().max(0) as u64;
+                        let elapsed = (Utc::now() - started).num_seconds().max(0) as u64;
                         duration_secs.saturating_sub(elapsed)
                     } else {
                         duration_secs
@@ -198,14 +201,25 @@ impl TimerManager {
                             remaining_secs,
                             "TimerManager: reconstructing running timer"
                         );
-                        self.spawn_timer_task(&dev.device_id, remaining_secs, duration_secs, repeat)
-                            .await;
+                        self.spawn_timer_task(
+                            &dev.device_id,
+                            remaining_secs,
+                            duration_secs,
+                            repeat,
+                        )
+                        .await;
                     } else {
                         info!(
                             device_id = %dev.device_id,
                             "TimerManager: timer elapsed while stopped — firing now"
                         );
-                        self.set_state(&dev.device_id, "finished", None).await;
+                        self.set_state(
+                            &dev.device_id,
+                            "finished",
+                            None,
+                            DeviceChange::homecore("timer_manager"),
+                        )
+                        .await;
                     }
                 }
                 "paused" => {
@@ -224,7 +238,15 @@ impl TimerManager {
     // -----------------------------------------------------------------------
 
     async fn handle_cmd(&self, device_id: &str, payload: &[u8]) {
-        let cmd: TimerCommand = match serde_json::from_slice(payload) {
+        let value: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(%device_id, error = %e, "Timer: invalid command payload");
+                return;
+            }
+        };
+        let change = extract_change_from_command_payload(&value).unwrap_or_default();
+        let cmd: TimerCommand = match serde_json::from_value(value) {
             Ok(c) => c,
             Err(e) => {
                 warn!(%device_id, error = %e, "Timer: invalid command payload");
@@ -234,7 +256,11 @@ impl TimerManager {
         debug!(%device_id, ?cmd, "Timer command received");
 
         match cmd {
-            TimerCommand::Start { duration_secs, label, repeat } => {
+            TimerCommand::Start {
+                duration_secs,
+                label,
+                repeat,
+            } => {
                 self.cancel_task(device_id).await;
                 let repeat = repeat.unwrap_or(false);
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
@@ -244,7 +270,8 @@ impl TimerManager {
                 if let Some(lbl) = label {
                     extra.insert("label", serde_json::json!(lbl));
                 }
-                self.set_state(device_id, "running", Some(extra)).await;
+                self.set_state(device_id, "running", Some(extra), change.clone())
+                    .await;
                 self.spawn_timer_task(device_id, duration_secs, duration_secs, repeat)
                     .await;
             }
@@ -260,7 +287,8 @@ impl TimerManager {
                 self.cancel_task(device_id).await;
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
                 extra.insert("remaining_secs", serde_json::json!(remaining_secs));
-                self.set_state(device_id, "paused", Some(extra)).await;
+                self.set_state(device_id, "paused", Some(extra), change.clone())
+                    .await;
             }
 
             TimerCommand::Resume => {
@@ -297,17 +325,20 @@ impl TimerManager {
                     .unwrap_or(false);
 
                 if remaining_secs > 0 {
-                    self.set_state(device_id, "running", None).await;
+                    self.set_state(device_id, "running", None, change.clone())
+                        .await;
                     self.spawn_timer_task(device_id, remaining_secs, duration_secs, repeat)
                         .await;
                 } else {
-                    self.set_state(device_id, "finished", None).await;
+                    self.set_state(device_id, "finished", None, change.clone())
+                        .await;
                 }
             }
 
             TimerCommand::Cancel => {
                 self.cancel_task(device_id).await;
-                self.set_state(device_id, "cancelled", None).await;
+                self.set_state(device_id, "cancelled", None, change.clone())
+                    .await;
             }
 
             TimerCommand::Restart => {
@@ -346,7 +377,8 @@ impl TimerManager {
                 self.cancel_task(device_id).await;
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
                 extra.insert("remaining_secs", serde_json::json!(duration_secs));
-                self.set_state(device_id, "running", Some(extra)).await;
+                self.set_state(device_id, "running", Some(extra), change)
+                    .await;
                 self.spawn_timer_task(device_id, duration_secs, duration_secs, repeat)
                     .await;
             }
@@ -396,8 +428,15 @@ impl TimerManager {
             }
         });
 
-        let handle = TimerHandle { duration_secs, ctrl_tx, _join: join };
-        self.handles.write().await.insert(device_id.to_string(), handle);
+        let handle = TimerHandle {
+            duration_secs,
+            ctrl_tx,
+            _join: join,
+        };
+        self.handles
+            .write()
+            .await
+            .insert(device_id.to_string(), handle);
     }
 
     async fn cancel_task(&self, device_id: &str) {
@@ -441,13 +480,15 @@ impl TimerManager {
         device_id: &str,
         new_state: &str,
         extra: Option<HashMap<&str, serde_json::Value>>,
+        change: DeviceChange,
     ) {
         let Ok(Some(mut dev)) = self.state.get_device(device_id).await else {
             warn!(%device_id, "Timer: device not found in state store");
             return;
         };
         let previous = dev.attributes.clone();
-        dev.attributes.insert("state".into(), serde_json::json!(new_state));
+        dev.attributes
+            .insert("state".into(), serde_json::json!(new_state));
         if new_state == "running" {
             dev.attributes.insert(
                 "started_at".into(),
@@ -460,22 +501,39 @@ impl TimerManager {
             }
         }
         dev.last_seen = Utc::now();
+        dev.last_change = Some(change.clone());
         if let Err(e) = self.state.upsert_device(&dev).await {
             warn!(%device_id, error = %e, "Timer: failed to persist state");
             return;
         }
         let current = dev.attributes;
-        let changed: Vec<String> = current.keys()
+        let changed: Vec<String> = current
+            .keys()
             .filter(|k| previous.get(*k) != current.get(*k))
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
+        let remaining = current
+            .get("remaining_secs")
+            .and_then(|v| v.as_u64());
+
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
+            device_name: Some(dev.name.clone()),
             previous,
             current,
             changed,
+            change,
+        });
+
+        // Emit a dedicated timer event for the activity stream.
+        let _ = self.pub_bus.publish(Event::TimerStateChanged {
+            timestamp: Utc::now(),
+            timer_id: device_id.to_string(),
+            timer_name: None,
+            state: new_state.to_string(),
+            remaining_secs: remaining,
         });
     }
 }
@@ -485,14 +543,21 @@ impl TimerManager {
 // ---------------------------------------------------------------------------
 
 async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
-    let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
+    let Ok(Some(mut dev)) = state.get_device(device_id).await else {
+        return;
+    };
     let previous = dev.attributes.clone();
-    dev.attributes.insert("state".into(), serde_json::json!("finished"));
-    dev.attributes.insert("remaining_secs".into(), serde_json::json!(0_u64));
+    dev.attributes
+        .insert("state".into(), serde_json::json!("finished"));
+    dev.attributes
+        .insert("remaining_secs".into(), serde_json::json!(0_u64));
     dev.last_seen = Utc::now();
+    let change = DeviceChange::homecore("timer_manager");
+    dev.last_change = Some(change.clone());
     let _ = state.upsert_device(&dev).await;
     let current = dev.attributes;
-    let changed: Vec<String> = current.keys()
+    let changed: Vec<String> = current
+        .keys()
         .filter(|k| previous.get(*k) != current.get(*k))
         .chain(previous.keys().filter(|k| !current.contains_key(*k)))
         .cloned()
@@ -500,30 +565,41 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
+        device_name: Some(dev.name.clone()),
         previous,
         current,
         changed,
+        change,
+    });
+    let _ = bus.publish(Event::TimerStateChanged {
+        timestamp: Utc::now(),
+        timer_id: device_id.to_string(),
+        timer_name: None,
+        state: "finished".to_string(),
+        remaining_secs: Some(0),
     });
 }
 
-async fn reset_for_repeat(
-    device_id: &str,
-    duration_secs: u64,
-    state: &StateStore,
-    bus: &EventBus,
-) {
-    let Ok(Some(mut dev)) = state.get_device(device_id).await else { return };
+async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStore, bus: &EventBus) {
+    let Ok(Some(mut dev)) = state.get_device(device_id).await else {
+        return;
+    };
     let previous = dev.attributes.clone();
-    dev.attributes.insert("state".into(), serde_json::json!("running"));
+    dev.attributes
+        .insert("state".into(), serde_json::json!("running"));
     dev.attributes.insert(
         "started_at".into(),
         serde_json::json!(Utc::now().to_rfc3339()),
     );
-    dev.attributes.insert("remaining_secs".into(), serde_json::json!(duration_secs));
+    dev.attributes
+        .insert("remaining_secs".into(), serde_json::json!(duration_secs));
     dev.last_seen = Utc::now();
+    let change = DeviceChange::homecore("timer_manager");
+    dev.last_change = Some(change.clone());
     let _ = state.upsert_device(&dev).await;
     let current = dev.attributes;
-    let changed: Vec<String> = current.keys()
+    let changed: Vec<String> = current
+        .keys()
         .filter(|k| previous.get(*k) != current.get(*k))
         .chain(previous.keys().filter(|k| !current.contains_key(*k)))
         .cloned()
@@ -531,9 +607,11 @@ async fn reset_for_repeat(
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
+        device_name: Some(dev.name.clone()),
         previous,
         current,
         changed,
+        change,
     });
 }
 

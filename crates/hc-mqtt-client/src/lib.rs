@@ -89,11 +89,7 @@ impl MqttClient {
     pub fn new(config: MqttClientConfig) -> (Self, broadcast::Receiver<Event>) {
         let (tx, rx) = broadcast::channel(1024);
 
-        let mut opts = MqttOptions::new(
-            &config.client_id,
-            &config.broker_host,
-            config.broker_port,
-        );
+        let mut opts = MqttOptions::new(&config.client_id, &config.broker_host, config.broker_port);
         opts.set_keep_alive(std::time::Duration::from_secs(30));
         opts.set_clean_session(true);
 
@@ -102,7 +98,17 @@ impl MqttClient {
         }
 
         let (client, eventloop) = AsyncClient::new(opts, 256);
-        (Self { config, tx, client, eventloop, extra_subscriptions: Vec::new(), ready_tx: None }, rx)
+        (
+            Self {
+                config,
+                tx,
+                client,
+                eventloop,
+                extra_subscriptions: Vec::new(),
+                ready_tx: None,
+            },
+            rx,
+        )
     }
 
     /// Register a one-shot sender that will be signalled once the first
@@ -120,7 +126,9 @@ impl MqttClient {
 
     /// Returns a publish handle that can be cloned and shared freely.
     pub fn publish_handle(&self) -> PublishHandle {
-        PublishHandle { client: self.client.clone() }
+        PublishHandle {
+            client: self.client.clone(),
+        }
     }
 
     /// Connect, subscribe to `homecore/#`, and drive the event loop.

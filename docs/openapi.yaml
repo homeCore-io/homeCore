@@ -227,6 +227,17 @@ paths:
       tags: [devices]
       security:
         - bearerAuth: []
+      parameters:
+        - in: query
+          name: device_type
+          schema:
+            type: string
+          description: Optional device type filter, for example `media_player`
+        - in: query
+          name: include_schema
+          schema:
+            type: boolean
+          description: Include resolved device schema objects inline
       responses:
         "200":
           description: Array of device state objects
@@ -249,6 +260,52 @@ paths:
       responses:
         "200":
           description: Device state and schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateDevice
+      summary: Update device metadata
+      description: |
+        Updates metadata fields such as `name`, `area`, `canonical_name`, and `status_icon`.
+
+        `canonical_name` is the stable, rule-facing identifier used by HomeCore
+        for readable automations. It must be unique across the hub after
+        normalization.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                area:
+                  type: string
+                  nullable: true
+                canonical_name:
+                  type: string
+                  nullable: true
+                status_icon:
+                  type: string
+                  nullable: true
+            example:
+              name: Floor Lamp
+              area: living_room
+              canonical_name: living_room.floor_lamp
+              status_icon: lightbulb
+      responses:
+        "200":
+          description: Updated device state
           content:
             application/json:
               schema:
@@ -355,6 +412,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Area"
+
+  /areas/{id}:
+    patch:
+      operationId: patchArea
+      summary: Rename an area
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaCreate"
+      responses:
+        "200":
+          description: Updated area
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteArea
+      summary: Delete an area and clear it from member devices
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      responses:
+        "204":
+          description: Area deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /areas/{id}/devices:
     put:
@@ -574,6 +669,242 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   # ---------------------------------------------------------------------------
+  # Dashboards
+  # ---------------------------------------------------------------------------
+  /dashboards:
+    get:
+      operationId: listDashboards
+      summary: List dashboards visible to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of dashboards with caller-specific default flag
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DashboardResponse"
+    post:
+      operationId: createDashboard
+      summary: Create a dashboard owned by the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "201":
+          description: Created dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+
+  /dashboards/templates:
+    get:
+      operationId: listDashboardTemplates
+      summary: List built-in dashboard templates available to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of reusable dashboard template definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DashboardDefinition"
+
+  /dashboards/templates/{id}:
+    post:
+      operationId: createDashboardFromTemplate
+      summary: Create a private dashboard from a built-in template
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Created dashboard cloned from the template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/import:
+    post:
+      operationId: importDashboard
+      summary: Import a dashboard definition as a new private dashboard owned by the caller
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "201":
+          description: Imported dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+
+  /dashboards/{id}:
+    get:
+      operationId: getDashboard
+      summary: Get one dashboard if it is visible to the authenticated user
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateDashboard
+      summary: Replace a dashboard definition
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardDefinition"
+      responses:
+        "200":
+          description: Updated dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteDashboard
+      summary: Delete a dashboard owned by the authenticated user (or by any user if Admin)
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/export:
+    get:
+      operationId: exportDashboard
+      summary: Export a visible dashboard definition for backup or transfer
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/duplicate:
+    post:
+      operationId: duplicateDashboard
+      summary: Duplicate a visible dashboard into a new private dashboard owned by the caller
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Duplicated dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /dashboards/{id}/default:
+    post:
+      operationId: setDefaultDashboard
+      summary: Set the caller's default dashboard preference
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard with caller-specific `is_default=true`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
   # Scenes
   # ---------------------------------------------------------------------------
   /scenes:
@@ -612,6 +943,61 @@ paths:
               schema:
                 $ref: "#/components/schemas/Scene"
 
+  /scenes/{id}:
+    get:
+      operationId: getScene
+      summary: Get a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      responses:
+        "200":
+          description: Scene
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scene"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateScene
+      summary: Replace a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SceneCreate"
+      responses:
+        "200":
+          description: Updated scene
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scene"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteScene
+      summary: Delete a scene
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SceneId"
+      responses:
+        "204":
+          description: Scene deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /scenes/{id}/activate:
     post:
       operationId: activateScene
@@ -622,8 +1008,17 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SceneId"
       responses:
-        "202":
-          description: Scene activation accepted
+        "200":
+          description: Scene activated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activated]
+                properties:
+                  activated:
+                    type: string
+                    description: Name of the activated scene
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1063,6 +1458,185 @@ components:
         role:
           $ref: "#/components/schemas/Role"
 
+    # ---- Dashboards ----
+
+    DashboardVisibility:
+      type: string
+      enum: [private, shared, public]
+
+    DashboardBreakpoint:
+      type: string
+      enum: [mobile, tablet, desktop, tv]
+
+    DashboardRefreshPolicy:
+      type: string
+      enum: [live, poll, manual, passive]
+
+    DashboardWidgetType:
+      type: string
+      enum:
+        - device_grid
+        - device_list
+        - device_tile
+        - stat_summary
+        - mode_chips
+        - scene_row
+        - event_feed
+        - history_chart
+        - media_player
+        - camera_video
+        - web_embed
+        - markdown
+        - dashboard_link
+
+    DashboardWidgetPlacement:
+      type: object
+      required: [widget_id, x, y, w, h]
+      properties:
+        widget_id:
+          type: string
+        x:
+          type: integer
+        y:
+          type: integer
+        w:
+          type: integer
+        h:
+          type: integer
+        section_id:
+          type: string
+          nullable: true
+
+    DashboardLayout:
+      type: object
+      required: [breakpoint, columns, row_height, gap, placements]
+      properties:
+        breakpoint:
+          $ref: "#/components/schemas/DashboardBreakpoint"
+        columns:
+          type: integer
+        row_height:
+          type: number
+        gap:
+          type: number
+        placements:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardWidgetPlacement"
+
+    DashboardWidget:
+      type: object
+      required: [id, type, title, refresh_policy, config]
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/DashboardWidgetType"
+        title:
+          type: string
+        subtitle:
+          type: string
+          nullable: true
+        refresh_policy:
+          $ref: "#/components/schemas/DashboardRefreshPolicy"
+        config:
+          type: object
+          additionalProperties: true
+          description: |
+            Type-specific widget configuration validated by the server.
+
+            Initial server-enforced shapes:
+            - `device_grid`, `device_list`, `device_tile`, `media_player`:
+              `selection_mode` (`manual|area|query`), optional `device_ids`, `area_name`,
+              `query`, `limit`, `show_offline`
+            - `stat_summary`: `metrics` string array
+            - `event_feed`: optional `limit`, `types`, `device_ids`, `area_name`,
+              `group_by` (`none|type|device|area`)
+            - `camera_video`: `source_type`, `url`, optional `refresh_secs`
+            - `web_embed`: `url`, optional `sandbox_profile`
+            - `markdown`: `markdown`
+            - `history_chart`: `device_id`, `attribute`, optional `limit`,
+              optional `timeframe_hours`
+            - `dashboard_link`: optional `dashboard_ids`
+            - `mode_chips`, `scene_row`: object, currently no required fields
+
+    DashboardDefinition:
+      type: object
+      required:
+        [id, name, owner_user_id, visibility, tags, icon, created_at, updated_at, sections, layouts, widgets]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        owner_user_id:
+          type: string
+          description: Server-owned user identifier; non-admin create/update requests cannot take ownership of another user's dashboard
+        visibility:
+          $ref: "#/components/schemas/DashboardVisibility"
+        tags:
+          type: array
+          items:
+            type: string
+        icon:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardSection"
+        layouts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardLayout"
+        widgets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardWidget"
+
+    DashboardResponse:
+      allOf:
+        - $ref: "#/components/schemas/DashboardDefinition"
+        - type: object
+          properties:
+            is_default:
+              type: boolean
+              description: Derived per authenticated user; not a shared dashboard property
+
+    DashboardSection:
+      type: object
+      required: [id, breakpoint, title, order, y, layout_policy, min_h, hidden]
+      properties:
+        id:
+          type: string
+        breakpoint:
+          $ref: "#/components/schemas/DashboardBreakpoint"
+        title:
+          type: string
+        order:
+          type: integer
+        y:
+          type: integer
+        layout_policy:
+          $ref: "#/components/schemas/DashboardSectionLayoutPolicy"
+        min_h:
+          type: integer
+          minimum: 1
+        hidden:
+          type: boolean
+
+    DashboardSectionLayoutPolicy:
+      type: string
+      enum: [grid, stack, row]
+
     # ---- Devices ----
 
     DeviceState:
@@ -1071,10 +1645,22 @@ components:
       properties:
         device_id:
           type: string
+          description: Plugin-owned internal identifier used for MQTT topics and execution
+        canonical_name:
+          type: string
+          nullable: true
+          description: Stable, HomeCore-managed identifier intended for rule authoring and logs
+        status_icon:
+          type: string
+          nullable: true
+          description: Optional UI-facing status icon override for device surfaces
         name:
           type: string
         plugin_id:
           type: string
+        device_type:
+          type: string
+          nullable: true
         area:
           type: string
           nullable: true
@@ -1116,6 +1702,7 @@ components:
           format: uuid
         name:
           type: string
+          description: Normalized internal area name in snake_case, e.g. `living_room`.
         device_ids:
           type: array
           items:
@@ -1127,6 +1714,7 @@ components:
       properties:
         name:
           type: string
+          description: Human or machine area name. HomeCore normalizes this to snake_case internally.
 
     # ---- Automations ----
 
@@ -1186,19 +1774,38 @@ components:
 
         | `type` | Additional fields |
         |---|---|
-        | `DeviceStateChanged` | `device_id` (string), `attribute` (string, optional) |
+        | `DeviceStateChanged` | `device` or `device_id` (string), `devices` or `device_ids` (array, optional), `attribute` (string, optional) |
         | `MqttMessage` | `topic_pattern` (string, supports `+` and `#`) |
         | `TimeOfDay` | `time` (HH:MM string), `days` (array of weekday names) |
         | `SunEvent` | `event` (`"Sunrise"` or `"Sunset"`), `offset_minutes` (integer) |
         | `WebhookReceived` | `path` (string) |
         | `ManualTrigger` | no additional fields |
+
+        For device-based triggers, prefer `device` / `devices` in authored
+        rules. These can be:
+
+        - a `canonical_name` such as `living_room.floor_lamp`
+        - a unique display name such as `Kitchen Speaker`
+        - a raw `device_id` for advanced/manual cases
       required: [type]
       properties:
         type:
           type: string
           enum: [DeviceStateChanged, MqttMessage, TimeOfDay, SunEvent, WebhookReceived, ManualTrigger]
+        device:
+          type: string
+        devices:
+          type: array
+          items:
+            type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
+        device_ids:
+          type: array
+          items:
+            type: string
+          description: Backward-compatible alias for `devices`
         attribute:
           type: string
         topic_pattern:
@@ -1222,7 +1829,8 @@ components:
         DeviceStateChanged:
           value:
             type: DeviceStateChanged
-            device_id: light.virtual_01
+            device: living_room.floor_lamp
+            devices: [hall.floor_lamp]
             attribute: on
         WebhookReceived:
           value:
@@ -1241,7 +1849,7 @@ components:
 
         | `type` | Additional fields |
         |---|---|
-        | `DeviceState` | `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
+        | `DeviceState` | `device` or `device_id`, `attribute`, `op` (`Eq` `Ne` `Gt` `Gte` `Lt` `Lte`), `value` |
         | `TimeWindow` | `start` (HH:MM), `end` (HH:MM) |
         | `ScriptExpression` | `script` (Rhai expression returning bool) |
       required: [type]
@@ -1249,8 +1857,11 @@ components:
         type:
           type: string
           enum: [DeviceState, TimeWindow, ScriptExpression]
+        device:
+          type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
         attribute:
           type: string
         op:
@@ -1271,7 +1882,7 @@ components:
 
         | `type` | Key fields |
         |---|---|
-        | `SetDeviceState` | `device_id`, `state` (object) |
+        | `SetDeviceState` | `device` or `device_id`, `state` (object) |
         | `PublishMqtt` | `topic`, `payload` (string), `retain` (bool) |
         | `CallService` | `url`, `method`, `body` |
         | `FireEvent` | `event_type`, `payload` (object) |
@@ -1280,13 +1891,20 @@ components:
         | `Delay` | `duration_ms` (integer) |
         | `Parallel` | `actions` (array — run concurrently) |
         | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
+
+        For device-targeting actions, prefer `device` in authored rules so the
+        automation remains readable and stable across plugin-specific ID
+        changes.
       required: [type]
       properties:
         type:
           type: string
           enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil]
+        device:
+          type: string
         device_id:
           type: string
+          description: Backward-compatible alias for `device`
         state:
           type: object
           additionalProperties: true

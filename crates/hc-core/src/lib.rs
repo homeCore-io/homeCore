@@ -2,19 +2,22 @@
 
 use anyhow::Result;
 use hc_notify::NotificationService;
-use hc_topic_map::EcosystemRouter;
+use hc_topic_map::{DeviceTypeRegistry, EcosystemRouter};
 use hc_types::event::Event;
 use hc_types::rule::{Rule, Trigger};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub mod calendar_store;
+pub mod device_naming;
 pub mod engine;
 pub mod executor;
+pub mod glue;
 pub mod mode_manager;
 pub mod rule_loader;
+pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
 pub mod switch_manager;
@@ -56,20 +59,25 @@ pub struct LocationConfig {
 impl Default for LocationConfig {
     fn default() -> Self {
         // Default: Washington D.C.
-        Self { latitude: 38.9072, longitude: -77.0369 }
+        Self {
+            latitude: 38.9072,
+            longitude: -77.0369,
+        }
     }
 }
 
 /// Top-level core runtime.
 pub struct Core {
     internal_bus: EventBus,
-    pub_bus:      EventBus,
+    pub_bus: EventBus,
     state: hc_state::StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     location: LocationConfig,
-    router: Option<EcosystemRouter>,
+    router: Option<Arc<EcosystemRouter>>,
+    device_types: Option<Arc<DeviceTypeRegistry>>,
     notify: Option<Arc<NotificationService>>,
     modes_path: Option<std::path::PathBuf>,
+    glue_path: Option<std::path::PathBuf>,
     startup_delay_secs: u64,
     /// Minutes back from startup to search for missed time-based triggers.
     /// 0 disables catch-up entirely.  Default: 15.
@@ -86,12 +94,16 @@ pub struct Core {
     calendar_dir: Option<std::path::PathBuf>,
     /// How many days forward to expand recurring calendar events.  Default: 400.
     calendar_expansion_days: u32,
+    /// Log stream broadcast channel — forwarded to StateBridge so plugin logs
+    /// received over MQTT are injected into `/logs/stream`.
+    log_tx: Option<tokio::sync::broadcast::Sender<hc_types::LogLine>>,
+    log_ring: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>>,
 }
 
 impl Core {
     pub fn new(
         internal_bus: EventBus,
-        pub_bus:      EventBus,
+        pub_bus: EventBus,
         state: hc_state::StateStore,
         publish: Option<hc_mqtt_client::PublishHandle>,
     ) -> Self {
@@ -102,8 +114,10 @@ impl Core {
             publish,
             location: LocationConfig::default(),
             router: None,
+            device_types: None,
             notify: None,
             modes_path: None,
+            glue_path: None,
             startup_delay_secs: 10,
             catchup_window_minutes: 15,
             shutdown_rx: None,
@@ -111,6 +125,8 @@ impl Core {
             rules_dir: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
+            log_tx: None,
+            log_ring: None,
         }
     }
 
@@ -125,13 +141,32 @@ impl Core {
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
-        self.location = LocationConfig { latitude: lat, longitude: lon };
+        self.location = LocationConfig {
+            latitude: lat,
+            longitude: lon,
+        };
         self
     }
 
     /// Attach an ecosystem router for profile-driven topic translation.
     pub fn with_router(mut self, router: EcosystemRouter) -> Self {
-        self.router = Some(router);
+        self.router = Some(Arc::new(router));
+        self
+    }
+
+    pub fn with_device_types(mut self, device_types: Arc<DeviceTypeRegistry>) -> Self {
+        self.device_types = Some(device_types);
+        self
+    }
+
+    /// Attach the log stream so plugin logs from MQTT appear in `/logs/stream`.
+    pub fn with_log_stream(
+        mut self,
+        tx: tokio::sync::broadcast::Sender<hc_types::LogLine>,
+        ring: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>,
+    ) -> Self {
+        self.log_tx = Some(tx);
+        self.log_ring = Some(ring);
         self
     }
 
@@ -143,6 +178,11 @@ impl Core {
 
     pub fn with_modes(mut self, path: std::path::PathBuf) -> Self {
         self.modes_path = Some(path);
+        self
+    }
+
+    pub fn with_glue(mut self, path: std::path::PathBuf) -> Self {
+        self.glue_path = Some(path);
         self
     }
 
@@ -194,18 +234,51 @@ impl Core {
     pub async fn start(
         self,
         rules: Vec<Rule>,
-    ) -> Result<(std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>, FireHistoryHandle, Option<CalendarHandle>)> {
+    ) -> Result<(
+        std::sync::Arc<tokio::sync::RwLock<Vec<Rule>>>,
+        FireHistoryHandle,
+        Option<CalendarHandle>,
+    )> {
         info!("HomeCore kernel starting");
 
         // State bridge: internal bus MqttMessage → DeviceStateChanged on public bus.
-        let mut bridge = state_bridge::StateBridge::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
-        if let Some(router) = self.router {
-            bridge = bridge.with_router(router);
-        }
-        if let Some(ph) = self.publish.clone() {
-            bridge = bridge.with_publish(ph);
-        }
-        tokio::spawn(bridge.run());
+        let bridge_bus = self.internal_bus.clone();
+        let bridge_pub_bus = self.pub_bus.clone();
+        let bridge_state = self.state.clone();
+        let bridge_router = self.router.clone();
+        let bridge_device_types = self.device_types.clone();
+        let bridge_publish = self.publish.clone();
+        let bridge_log_tx = self.log_tx.clone();
+        let bridge_log_ring = self.log_ring.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut bridge = state_bridge::StateBridge::new(
+                    bridge_bus.clone(),
+                    bridge_pub_bus.clone(),
+                    bridge_state.clone(),
+                );
+                if let Some(router) = bridge_router.clone() {
+                    bridge = bridge.with_router(router);
+                }
+                if let Some(device_types) = bridge_device_types.clone() {
+                    bridge = bridge.with_device_types(device_types);
+                }
+                if let Some(ph) = bridge_publish.clone() {
+                    bridge = bridge.with_publish(ph);
+                }
+                if let (Some(tx), Some(ring)) = (bridge_log_tx.clone(), bridge_log_ring.clone()) {
+                    bridge = bridge.with_log_stream(tx, ring);
+                }
+
+                let handle = tokio::spawn(bridge.run());
+                match handle.await {
+                    Ok(()) => warn!("State bridge task exited; restarting"),
+                    Err(e) => error!(error = %e, "State bridge task panicked; restarting"),
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
 
         // If no external shutdown was provided, create a never-firing watch so
         // the engine and scheduler signatures remain uniform.
@@ -246,22 +319,55 @@ impl Core {
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.
-        match self.state.load_recent_rule_firings(engine::HISTORY_RING_SIZE).await {
+        match self
+            .state
+            .load_recent_rule_firings(engine::HISTORY_RING_SIZE)
+            .await
+        {
             Ok(records) => engine.populate_fire_history(records),
-            Err(e) => warn!(error = %e, "could not load rule fire history from DB — starting empty"),
+            Err(e) => {
+                warn!(error = %e, "could not load rule fire history from DB — starting empty")
+            }
         }
 
         let rules_handle = engine.rules_handle();
         let fire_history = engine.fire_history_handle();
         tokio::spawn(engine.run(shutdown_rx.clone()));
 
-        // Timer manager: virtual countdown timer devices.
-        let timer_mgr = timer_manager::TimerManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
+        // Timer manager: countdown timer devices (complex async logic stays here).
+        let timer_mgr = timer_manager::TimerManager::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
         tokio::spawn(timer_mgr.start());
 
-        // Switch manager: virtual on/off helper switches.
-        let switch_mgr = switch_manager::SwitchManager::new(self.internal_bus.clone(), self.pub_bus.clone(), self.state.clone());
-        tokio::spawn(switch_mgr.start());
+        // Load glue device definitions from config/glue.toml (seed-only).
+        if let Some(glue_path) = self.glue_path.as_ref() {
+            if let Err(e) = glue::config::load_glue_config(glue_path, &self.state).await {
+                warn!(error = %e, "Failed to load glue.toml");
+            }
+        }
+
+        // Glue manager: unified handler for switches, counters, and all other
+        // glue device types. Replaces the old SwitchManager.
+        let mut glue_mgr = glue::GlueManager::new(
+            self.internal_bus.clone(),
+            self.pub_bus.clone(),
+            self.state.clone(),
+        );
+        if let Some(ref path) = self.glue_path {
+            glue_mgr = glue_mgr.with_config_path(path.clone());
+        }
+        tokio::spawn(glue_mgr.start());
+
+        // Migrate legacy plugin_ids (core.switch → core.glue) on startup.
+        {
+            let store = self.state.clone();
+            tokio::spawn(async move {
+                glue::migrate_legacy_plugin_ids(&store).await;
+            });
+        }
 
         // Mode manager: solar + manual named boolean modes.
         if let Some(modes_path) = self.modes_path.clone() {
@@ -285,7 +391,9 @@ impl Core {
 
             let initial = match tokio::task::spawn_blocking(move || {
                 calendar_store::load_dir(&dir, expansion_days)
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(entries)) => {
                     info!(
                         count          = entries.len(),
@@ -319,7 +427,11 @@ impl Core {
             }
 
             // Auto-refresh task for URL-sourced calendars.
-            calendar_store::spawn_auto_refresh(cal_dir.clone(), Arc::clone(&handle), expansion_days);
+            calendar_store::spawn_auto_refresh(
+                cal_dir.clone(),
+                Arc::clone(&handle),
+                expansion_days,
+            );
 
             Some(handle)
         } else {

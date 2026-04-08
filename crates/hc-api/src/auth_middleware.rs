@@ -17,8 +17,9 @@
 //! ```
 //!
 //! Available guards: [`DevicesRead`], [`DevicesWrite`], [`AutomationsRead`],
-//! [`AutomationsWrite`], [`ScenesRead`], [`ScenesWrite`], [`AreasRead`],
-//! [`AreasWrite`], [`PluginsRead`], [`PluginsWrite`].
+//! [`AutomationsWrite`], [`DashboardsRead`], [`DashboardsWrite`],
+//! [`ScenesRead`], [`ScenesWrite`], [`AreasRead`], [`AreasWrite`],
+//! [`PluginsRead`], [`PluginsWrite`].
 
 use async_trait::async_trait;
 use axum::{
@@ -198,16 +199,18 @@ macro_rules! scope_extractor {
     };
 }
 
-scope_extractor!(DevicesRead,       "devices:read");
-scope_extractor!(DevicesWrite,      "devices:write");
-scope_extractor!(AutomationsRead,   "automations:read");
-scope_extractor!(AutomationsWrite,  "automations:write");
-scope_extractor!(ScenesRead,        "scenes:read");
-scope_extractor!(ScenesWrite,       "scenes:write");
-scope_extractor!(AreasRead,         "areas:read");
-scope_extractor!(AreasWrite,        "areas:write");
-scope_extractor!(PluginsRead,       "plugins:read");
-scope_extractor!(PluginsWrite,      "plugins:write");
+scope_extractor!(DevicesRead, "devices:read");
+scope_extractor!(DevicesWrite, "devices:write");
+scope_extractor!(AutomationsRead, "automations:read");
+scope_extractor!(AutomationsWrite, "automations:write");
+scope_extractor!(DashboardsRead, "dashboards:read");
+scope_extractor!(DashboardsWrite, "dashboards:write");
+scope_extractor!(ScenesRead, "scenes:read");
+scope_extractor!(ScenesWrite, "scenes:write");
+scope_extractor!(AreasRead, "areas:read");
+scope_extractor!(AreasWrite, "areas:write");
+scope_extractor!(PluginsRead, "plugins:read");
+scope_extractor!(PluginsWrite, "plugins:write");
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -222,8 +225,8 @@ mod tests {
         routing::get,
         Router,
     };
-    use hc_auth::JwtService;
     use hc_auth::user::Role;
+    use hc_auth::JwtService;
     use tower::ServiceExt; // for `oneshot`
 
     /// Minimal router that requires `DevicesRead` — used for all scope tests.
@@ -242,10 +245,13 @@ mod tests {
                         .and_then(|v| v.to_str().ok());
                     let token = match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
                         Some(t) => t.to_string(),
-                        None => return (
-                            StatusCode::UNAUTHORIZED,
-                            axum::Json(serde_json::json!({ "error": "missing auth" })),
-                        ).into_response(),
+                        None => {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                axum::Json(serde_json::json!({ "error": "missing auth" })),
+                            )
+                                .into_response()
+                        }
                     };
                     match j.validate(&token) {
                         Ok(claims) => {
@@ -255,7 +261,8 @@ mod tests {
                         Err(_) => (
                             StatusCode::UNAUTHORIZED,
                             axum::Json(serde_json::json!({ "error": "invalid token" })),
-                        ).into_response(),
+                        )
+                            .into_response(),
                     }
                 },
             ))

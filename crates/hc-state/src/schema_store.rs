@@ -56,4 +56,15 @@ impl SchemaStore {
         }
         Ok(results)
     }
+
+    pub fn delete(&self, device_id: &str) -> Result<bool> {
+        let write_txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = write_txn.open_table(DEVICE_SCHEMAS)?;
+            let removed = table.remove(device_id)?.is_some();
+            removed
+        };
+        write_txn.commit()?;
+        Ok(removed)
+    }
 }

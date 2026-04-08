@@ -69,7 +69,7 @@ whitelist = [
 # Logging  — pretty stderr only in dev; file logging off to reduce noise
 # ---------------------------------------------------------------------------
 [logging]
-level = "info"
+level = "debug"
 time_display = "local"   # "local" (default) | "utc"
 
 [logging.targets]
@@ -83,28 +83,30 @@ enabled          = true
 ring_buffer_size = 500
 
 [logging.stderr]
-enabled = true
+enabled = false
 format  = "pretty"
 ansi    = true
 
 [logging.file]
-enabled     = true
-prefix      = "homecore"
-rotation    = "daily"
-max_size_mb = 100
-compress    = true
-format      = "pretty"
-#format     = "json"
+enabled          = true
+prefix           = "homecore"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
+#format          = "json"
 
 # Dedicated rule/automation log — captures only hc_core at debug level.
 # Clean audit trail: every trigger check, condition result, and action step.
 [logging.rules_file]
-enabled     = true
-prefix      = "rules"
-rotation    = "daily"
-max_size_mb = 100
-compress    = true
-format      = "pretty"
+enabled          = true
+prefix           = "rules"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
 
 [logging.syslog]
 enabled = false
@@ -123,6 +125,9 @@ plugin_ready_delay_secs = 10
 
 [shutdown]
 drain_timeout_secs = 10
+
+[web_admin]
+enabled = true
 
 [scheduler]
 catchup_window_minutes = 15

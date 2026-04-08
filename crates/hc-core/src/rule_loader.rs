@@ -16,6 +16,7 @@
 //! error is logged — the running system is never affected by a bad file.
 
 use anyhow::{Context, Result};
+use hc_state::StateStore;
 use hc_types::rule::{Rule, RuleAction};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
@@ -44,7 +45,9 @@ fn has_empty_id(content: &str) -> bool {
 fn is_missing_id(content: &str) -> bool {
     !content.lines().any(|line| {
         let t = line.trim();
-        if !t.starts_with("id") { return false; }
+        if !t.starts_with("id") {
+            return false;
+        }
         let after_key = t["id".len()..].trim_start();
         after_key.starts_with('=')
     })
@@ -87,10 +90,13 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
     let mut seen: HashSet<uuid::Uuid> = HashSet::new();
     for rule in rules.iter_mut() {
         if !seen.insert(rule.id) {
-            let msg = format!("duplicate rule ID {} — rule disabled until ID is fixed", rule.id);
+            let msg = format!(
+                "duplicate rule ID {} — rule disabled until ID is fixed",
+                rule.id
+            );
             warn!(rule_name = %rule.name, rule_id = %rule.id, "Duplicate rule ID found");
             rule.enabled = false;
-            rule.error   = Some(msg);
+            rule.error = Some(msg);
             // Assign a fresh ID so the stub doesn't conflict in the set.
             rule.id = uuid::Uuid::new_v4();
         }
@@ -120,25 +126,25 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         .to_string();
 
     Rule {
-        id:                   stub_id,
-        name:                 format!("{name} [BROKEN]"),
-        enabled:              false,
-        priority:             0,
-        tags:                 Vec::new(),
-        trigger:              Trigger::ManualTrigger,
-        conditions:           Vec::<Condition>::new(),
-        actions:              Vec::<RuleAction>::new(),
-        error:                Some(format!("parse error: {err}")),
-        cooldown_secs:        None,
-        log_events:           false,
-        log_triggers:         false,
-        log_actions:          false,
-        required_expression:  None,
-        cancel_on_false:      false,
-        trigger_condition:    None,
-        variables:            std::collections::HashMap::new(),
-        trigger_label:        None,
-        run_mode:             hc_types::rule::RunMode::Parallel,
+        id: stub_id,
+        name: format!("{name} [BROKEN]"),
+        enabled: false,
+        priority: 0,
+        tags: Vec::new(),
+        trigger: Trigger::ManualTrigger,
+        conditions: Vec::<Condition>::new(),
+        actions: Vec::<RuleAction>::new(),
+        error: Some(format!("parse error: {err}")),
+        cooldown_secs: None,
+        log_events: false,
+        log_triggers: false,
+        log_actions: false,
+        required_expression: None,
+        cancel_on_false: false,
+        trigger_condition: None,
+        variables: std::collections::HashMap::new(),
+        trigger_label: None,
+        run_mode: hc_types::rule::RunMode::Parallel,
     }
 }
 
@@ -148,8 +154,8 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
 /// is generated, written back into the file, and used for this rule.  This
 /// lets authors create rule files without having to generate a UUID manually.
 pub fn load_file(path: &Path) -> Result<Rule> {
-    let mut content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let mut content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     if has_empty_id(&content) {
         let new_id = uuid::Uuid::new_v4();
@@ -168,8 +174,8 @@ pub fn load_file(path: &Path) -> Result<Rule> {
         content = updated;
     }
 
-    let mut rule: Rule = toml::from_str(&content)
-        .with_context(|| format!("parsing TOML in {}", path.display()))?;
+    let mut rule: Rule =
+        toml::from_str(&content).with_context(|| format!("parsing TOML in {}", path.display()))?;
 
     // Derive display name from filename if the `name` field is empty.
     if rule.name.is_empty() {
@@ -218,8 +224,7 @@ pub fn write_rule(dir: &Path, rule: &Rule) -> Result<PathBuf> {
     let slug = slugify(&rule.name);
     let path = dir.join(format!("{slug}.toml"));
 
-    let content = toml::to_string_pretty(rule)
-        .context("serializing rule to TOML")?;
+    let content = toml::to_string_pretty(rule).context("serializing rule to TOML")?;
 
     std::fs::write(&path, &content)
         .with_context(|| format!("writing rule file {}", path.display()))?;
@@ -232,7 +237,13 @@ pub fn write_rule(dir: &Path, rule: &Rule) -> Result<PathBuf> {
 fn slugify(name: &str) -> String {
     let raw: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     raw.split('_')
         .filter(|s| !s.is_empty())
@@ -260,7 +271,12 @@ impl RuleWatcher {
     /// 3. Validates the full set (parse + duplicate ID check).
     /// 4. On success: atomically swaps `handle` and logs at INFO.
     /// 5. On failure: logs a warning and leaves `handle` unchanged.
-    pub fn start(dir: PathBuf, handle: Arc<RwLock<Vec<Rule>>>) -> Result<Self> {
+    pub fn start(
+        dir: PathBuf,
+        store: StateStore,
+        source_handle: Arc<RwLock<Vec<Rule>>>,
+        handle: Arc<RwLock<Vec<Rule>>>,
+    ) -> Result<Self> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
 
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
@@ -268,9 +284,10 @@ impl RuleWatcher {
             let is_relevant = matches!(
                 event.kind,
                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-            ) && event.paths.iter().any(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("toml")
-            });
+            ) && event
+                .paths
+                .iter()
+                .any(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"));
             if is_relevant {
                 let _ = tx.blocking_send(());
             }
@@ -298,8 +315,20 @@ impl RuleWatcher {
                 let dir2 = dir_clone.clone();
                 match tokio::task::spawn_blocking(move || load_all(&dir2)).await {
                     Ok(Ok(new_rules)) => {
-                        let count = new_rules.len();
-                        *handle.write().await = new_rules;
+                        *source_handle.write().await = new_rules.clone();
+                        let compiled = match crate::rule_resolver::compile_rules_for_store(
+                            &store, new_rules,
+                        )
+                        .await
+                        {
+                            Ok(rules) => rules,
+                            Err(e) => {
+                                warn!(error = %e, "Rule reload compilation failed — existing rules unchanged");
+                                continue;
+                            }
+                        };
+                        let count = compiled.len();
+                        *handle.write().await = compiled;
                         info!(count, "Rules hot-reloaded successfully");
                     }
                     Ok(Err(e)) => {

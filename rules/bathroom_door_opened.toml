@@ -16,9 +16,9 @@ attribute = "open"
 to        = true
 
 [[actions]]
-type   = "call_service"
-url    = "http://10.0.10.200:5005/Bathroom/stop"
-method = "GET"
+type      = "set_device_state"
+device_id = "sonos_bathroom"
+state     = { action = "stop"}
 
 [[actions]]
 type      = "set_device_state"

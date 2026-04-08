@@ -2,6 +2,27 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::LoggingConfig;
 
+/// Build the filter directive string from config (without parsing).
+/// Used to seed the reload handle's initial value.
+pub fn build_filter_string(config: &LoggingConfig, level_override: Option<&str>) -> String {
+    let base = level_override.unwrap_or(&config.level);
+    let mut parts = vec![base.to_string()];
+    for (target, level) in &config.targets {
+        parts.push(format!("{target}={level}"));
+    }
+    if level_override.is_none() {
+        if let Ok(rust_log) = std::env::var("RUST_LOG") {
+            for part in rust_log.split(',') {
+                let part = part.trim();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+            }
+        }
+    }
+    parts.join(",")
+}
+
 /// Build an `EnvFilter` from the `[logging]` config section.
 ///
 /// Precedence (lowest → highest):

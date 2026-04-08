@@ -1,9 +1,9 @@
 //! JWT issuance and validation (HS256).
 
+use crate::user::Role;
 use anyhow::{anyhow, Context, Result};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use crate::user::Role;
 
 /// Claims embedded in a HomeCore JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]

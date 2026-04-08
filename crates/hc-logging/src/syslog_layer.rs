@@ -45,12 +45,12 @@ impl Transport {
 // ── layer ──────────────────────────────────────────────────────────────────
 
 pub struct SyslogLayer {
-    transport:      Transport,
-    facility:       u8,
-    app_name:       String,
-    protocol:       SyslogProtocol,
-    hostname:       String,
-    pid:            u32,
+    transport: Transport,
+    facility: u8,
+    app_name: String,
+    protocol: SyslogProtocol,
+    hostname: String,
+    pid: u32,
     use_local_time: bool,
 }
 
@@ -77,7 +77,7 @@ impl SyslogLayer {
             app_name: config.app_name.clone(),
             protocol: config.protocol.clone(),
             hostname: read_hostname(),
-            pid:      std::process::id(),
+            pid: std::process::id(),
             use_local_time,
         })
     }
@@ -85,8 +85,8 @@ impl SyslogLayer {
     fn severity(level: &Level) -> u8 {
         match *level {
             Level::ERROR => 3, // ERR
-            Level::WARN  => 4, // WARNING
-            Level::INFO  => 6, // INFO
+            Level::WARN => 4,  // WARNING
+            Level::INFO => 6,  // INFO
             Level::DEBUG => 7, // DEBUG
             Level::TRACE => 7, // DEBUG (syslog has no TRACE)
         }
@@ -106,9 +106,9 @@ impl SyslogLayer {
         };
         format!(
             "<{pri}>{ts} {host} {app}[{pid}]: [{target}] {message}",
-            host    = self.hostname,
-            app     = self.app_name,
-            pid     = self.pid,
+            host = self.hostname,
+            app = self.app_name,
+            pid = self.pid,
         )
     }
 
@@ -124,8 +124,8 @@ impl SyslogLayer {
         format!(
             "<{pri}>1 {ts} {host} {app} {pid} - - [{target}] {message}",
             host = self.hostname,
-            app  = self.app_name,
-            pid  = self.pid,
+            app = self.app_name,
+            pid = self.pid,
         )
     }
 }
@@ -135,9 +135,9 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let meta    = event.metadata();
-        let level   = meta.level();
-        let target  = meta.target();
+        let meta = event.metadata();
+        let level = meta.level();
+        let target = meta.target();
 
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
@@ -157,7 +157,7 @@ where
 #[derive(Default)]
 struct FieldVisitor {
     message: String,
-    extras:  Vec<String>,
+    extras: Vec<String>,
 }
 
 impl tracing::field::Visit for FieldVisitor {
@@ -210,7 +210,5 @@ fn read_hostname() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into())
-        })
+        .unwrap_or_else(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into()))
 }

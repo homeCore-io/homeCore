@@ -33,7 +33,6 @@ pub struct MetricsCollector {
     pub(crate) registry: Registry,
 
     // ── Counters (incremented by background bus listener) ────────────────────
-
     /// Total automation rule fire events since process start.
     pub rule_fires_total: IntCounter,
     /// Total `DeviceStateChanged` events since process start.
@@ -44,7 +43,6 @@ pub struct MetricsCollector {
     pub events_total: IntCounterVec,
 
     // ── Gauges (refreshed on every /metrics scrape) ──────────────────────────
-
     /// Current number of registered devices (including virtual).
     pub devices_total: IntGauge,
     /// Current total number of automation rules (enabled + disabled).
@@ -220,10 +218,17 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::SceneActivated { .. } => "scene_activated",
                         Event::PluginRegistered { .. } => "plugin_registered",
                         Event::PluginOffline { .. } => "plugin_offline",
+                        Event::PluginHeartbeat { .. } => "plugin_heartbeat",
+                        Event::PluginStatusChanged { .. } => "plugin_status_changed",
                         Event::DeviceNameChanged { .. } => "device_name_changed",
                         Event::MqttMessage { .. } => "mqtt_message",
                         Event::Custom { .. } => "custom",
                         Event::SystemAlert { .. } => "system_alert",
+                        Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
+                        Event::ActionFailed { .. } => "action_failed",
+                        Event::DeviceCommandSent { .. } => "device_command_sent",
+                        Event::ModeChanged { .. } => "mode_changed",
+                        Event::TimerStateChanged { .. } => "timer_state_changed",
                     };
                     metrics.events_total.with_label_values(&[label]).inc();
 

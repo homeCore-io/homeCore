@@ -51,7 +51,9 @@ impl MqttCredStore {
         let Some(cred) = self.entries.iter().find(|c| c.client_id == client_id) else {
             return false;
         };
-        cred.allow_sub.iter().any(|pat| topic_matches(pat, topic_filter))
+        cred.allow_sub
+            .iter()
+            .any(|pat| topic_matches(pat, topic_filter))
     }
 }
 
