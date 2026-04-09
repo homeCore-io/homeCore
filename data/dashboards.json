@@ -13,382 +13,123 @@
       ],
       "icon": "home",
       "created_at": "2026-03-31T12:58:07.956138270Z",
-      "updated_at": "2026-03-31T18:38:27.775343236Z",
-      "sections": [
-        {
-          "id": "mobile-overview",
-          "breakpoint": "mobile",
-          "title": "Overview",
-          "order": 0,
-          "y": 0,
-          "layout_policy": "grid",
-          "min_h": 4,
-          "hidden": false
-        },
-        {
-          "id": "mobile-devices",
-          "breakpoint": "mobile",
-          "title": "Devices",
-          "order": 1,
-          "y": 4,
-          "layout_policy": "grid",
-          "min_h": 6,
-          "hidden": false
-        },
-        {
-          "id": "mobile-activity",
-          "breakpoint": "mobile",
-          "title": "Activity",
-          "order": 2,
-          "y": 10,
-          "layout_policy": "grid",
-          "min_h": 3,
-          "hidden": false
-        },
-        {
-          "id": "tablet-overview",
-          "breakpoint": "tablet",
-          "title": "Overview",
-          "order": 0,
-          "y": 0,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        },
-        {
-          "id": "tablet-devices",
-          "breakpoint": "tablet",
-          "title": "Devices",
-          "order": 1,
-          "y": 2,
-          "layout_policy": "grid",
-          "min_h": 3,
-          "hidden": false
-        },
-        {
-          "id": "tablet-activity",
-          "breakpoint": "tablet",
-          "title": "Activity",
-          "order": 2,
-          "y": 5,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        },
-        {
-          "id": "desktop-overview",
-          "breakpoint": "desktop",
-          "title": "Overview",
-          "order": 0,
-          "y": 0,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        },
-        {
-          "id": "desktop-devices",
-          "breakpoint": "desktop",
-          "title": "Devices",
-          "order": 1,
-          "y": 2,
-          "layout_policy": "grid",
-          "min_h": 3,
-          "hidden": false
-        },
-        {
-          "id": "desktop-activity",
-          "breakpoint": "desktop",
-          "title": "Activity",
-          "order": 2,
-          "y": 5,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        },
-        {
-          "id": "tv-overview",
-          "breakpoint": "tv",
-          "title": "Overview",
-          "order": 0,
-          "y": 0,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        },
-        {
-          "id": "tv-devices",
-          "breakpoint": "tv",
-          "title": "Devices",
-          "order": 1,
-          "y": 2,
-          "layout_policy": "grid",
-          "min_h": 3,
-          "hidden": false
-        },
-        {
-          "id": "tv-activity",
-          "breakpoint": "tv",
-          "title": "Activity",
-          "order": 2,
-          "y": 5,
-          "layout_policy": "grid",
-          "min_h": 2,
-          "hidden": false
-        }
-      ],
+      "updated_at": "2026-04-09T20:44:44.942832363Z",
+      "sections": [],
       "layouts": [
         {
           "breakpoint": "mobile",
           "columns": 1,
           "row_height": 150.0,
           "gap": 12.0,
-          "placements": [
-            {
-              "widget_id": "intro",
-              "x": 0,
-              "y": 0,
-              "w": 1,
-              "h": 2,
-              "section_id": "mobile-overview"
-            },
-            {
-              "widget_id": "summary",
-              "x": 0,
-              "y": 2,
-              "w": 1,
-              "h": 2,
-              "section_id": "mobile-overview"
-            },
-            {
-              "widget_id": "list",
-              "x": 0,
-              "y": 4,
-              "w": 1,
-              "h": 3,
-              "section_id": "mobile-devices"
-            },
-            {
-              "widget_id": "grid",
-              "x": 0,
-              "y": 7,
-              "w": 1,
-              "h": 3,
-              "section_id": "mobile-devices"
-            },
-            {
-              "widget_id": "events",
-              "x": 0,
-              "y": 10,
-              "w": 1,
-              "h": 3,
-              "section_id": "mobile-activity"
-            }
-          ]
+          "placements": []
         },
         {
           "breakpoint": "tablet",
           "columns": 12,
           "row_height": 150.0,
           "gap": 12.0,
-          "placements": [
-            {
-              "widget_id": "intro",
-              "x": 0,
-              "y": 0,
-              "w": 8,
-              "h": 2,
-              "section_id": "tablet-overview"
-            },
-            {
-              "widget_id": "summary",
-              "x": 8,
-              "y": 0,
-              "w": 4,
-              "h": 2,
-              "section_id": "tablet-overview"
-            },
-            {
-              "widget_id": "list",
-              "x": 0,
-              "y": 2,
-              "w": 5,
-              "h": 3,
-              "section_id": "tablet-devices"
-            },
-            {
-              "widget_id": "grid",
-              "x": 5,
-              "y": 2,
-              "w": 7,
-              "h": 3,
-              "section_id": "tablet-devices"
-            },
-            {
-              "widget_id": "events",
-              "x": 0,
-              "y": 5,
-              "w": 12,
-              "h": 2,
-              "section_id": "tablet-activity"
-            }
-          ]
+          "placements": []
         },
         {
           "breakpoint": "desktop",
           "columns": 12,
           "row_height": 150.0,
           "gap": 12.0,
-          "placements": [
-            {
-              "widget_id": "intro",
-              "x": 0,
-              "y": 0,
-              "w": 8,
-              "h": 2,
-              "section_id": "desktop-overview"
-            },
-            {
-              "widget_id": "summary",
-              "x": 8,
-              "y": 0,
-              "w": 4,
-              "h": 2,
-              "section_id": "desktop-overview"
-            },
-            {
-              "widget_id": "list",
-              "x": 0,
-              "y": 2,
-              "w": 5,
-              "h": 3,
-              "section_id": "desktop-devices"
-            },
-            {
-              "widget_id": "grid",
-              "x": 5,
-              "y": 2,
-              "w": 7,
-              "h": 3,
-              "section_id": "desktop-devices"
-            },
-            {
-              "widget_id": "events",
-              "x": 0,
-              "y": 5,
-              "w": 12,
-              "h": 2,
-              "section_id": "desktop-activity"
-            }
-          ]
+          "placements": []
         },
         {
           "breakpoint": "tv",
           "columns": 12,
           "row_height": 180.0,
           "gap": 16.0,
-          "placements": [
-            {
-              "widget_id": "intro",
-              "x": 0,
-              "y": 0,
-              "w": 8,
-              "h": 2,
-              "section_id": "tv-overview"
-            },
-            {
-              "widget_id": "summary",
-              "x": 8,
-              "y": 0,
-              "w": 4,
-              "h": 2,
-              "section_id": "tv-overview"
-            },
-            {
-              "widget_id": "list",
-              "x": 0,
-              "y": 2,
-              "w": 5,
-              "h": 3,
-              "section_id": "tv-devices"
-            },
-            {
-              "widget_id": "grid",
-              "x": 5,
-              "y": 2,
-              "w": 7,
-              "h": 3,
-              "section_id": "tv-devices"
-            },
-            {
-              "widget_id": "events",
-              "x": 0,
-              "y": 5,
-              "w": 12,
-              "h": 2,
-              "section_id": "tv-activity"
-            }
-          ]
+          "placements": []
         }
       ],
       "widgets": [
         {
-          "id": "intro",
-          "type": "markdown",
-          "title": "Dashboard Workbench",
-          "subtitle": "Starter sample with the newer card treatments",
-          "refresh_policy": "manual",
+          "id": "w_07e6fa81d01847a1ac2a35a2f7347b4c",
+          "type": "stat_summary",
+          "title": "Lights On",
+          "refresh_policy": "live",
           "config": {
-            "markdown": "Use this dashboard as a clean composer sandbox. It includes a summary card, a compact device list, a richer device grid, and a recent events feed."
+            "attribute": "on",
+            "card_size": "small",
+            "counter_type": "device_filter",
+            "device_type": "dimmer",
+            "display_style": "badge",
+            "icon": "lightbulb",
+            "link_url": "/devices",
+            "metrics": [
+              "custom"
+            ],
+            "value": true
           }
         },
         {
-          "id": "summary",
+          "id": "w_a9e474e8d242414d87635f404160602f",
           "type": "stat_summary",
-          "title": "Home Summary",
-          "subtitle": "Quick system counts",
+          "title": "Sensors",
           "refresh_policy": "live",
           "config": {
+            "attributes": [],
+            "card_size": "large",
+            "chip_mode": true,
+            "device_ids": [
+              "switch_any_deck_door_open"
+            ],
             "metrics": [
-              "devices",
-              "on",
-              "offline"
+              "custom"
             ]
           }
         },
         {
-          "id": "list",
-          "type": "device_list",
-          "title": "Device List",
-          "subtitle": "Compact device inventory",
+          "id": "w_557710a1548c4381a2e29d89301806d0",
+          "type": "stat_summary",
+          "title": "Sensors",
           "refresh_policy": "live",
           "config": {
-            "limit": 8,
-            "query": "",
-            "selection_mode": "query",
-            "show_offline": true
+            "attributes": [],
+            "card_size": "large",
+            "chip_mode": true,
+            "device_ids": [
+              "hue_001788fffe6841b3_light_42efbca0_c9ca_4c6f_bfe4_3a72b3eb9972"
+            ],
+            "metrics": [
+              "custom"
+            ]
           }
         },
         {
-          "id": "grid",
-          "type": "device_grid",
-          "title": "Device Grid",
-          "subtitle": "Richer tile sample",
+          "id": "w_95102cf1deba4003b55c7b48eff37e22",
+          "type": "stat_summary",
+          "title": "Open Doors",
           "refresh_policy": "live",
           "config": {
-            "limit": 6,
-            "query": "",
-            "selection_mode": "query",
-            "show_offline": true
+            "attribute": "contact",
+            "card_size": "small",
+            "counter_type": "device_filter",
+            "device_type": "contact_sensor",
+            "icon": "door_front",
+            "link_url": "/devices",
+            "metrics": [
+              "custom"
+            ],
+            "value": "open"
           }
         },
         {
-          "id": "events",
-          "type": "event_feed",
-          "title": "Recent Events",
-          "subtitle": "Activity sample",
+          "id": "w_c62309f318e043acb4c1a5ca566f60eb",
+          "type": "stat_summary",
+          "title": "Offline Devices",
           "refresh_policy": "live",
           "config": {
-            "limit": 6
+            "card_size": "small",
+            "counter_type": "availability",
+            "icon": "wifi_off",
+            "link_url": "/devices",
+            "metrics": [
+              "custom"
+            ]
           }
         }
       ]

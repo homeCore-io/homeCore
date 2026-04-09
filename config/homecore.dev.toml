@@ -150,6 +150,12 @@ config  = "../plugins/hc-lutron/config/config.toml"
 enabled = true
 
 [[plugins]]
+id      = "plugin.caseta"
+binary  = "../plugins/hc-caseta/target/debug/hc-caseta"
+config  = "../plugins/hc-caseta/config/config.toml"
+enabled = true
+
+[[plugins]]
 id      = "plugin.sonos"
 binary  = "../plugins/hc-sonos/target/debug/hc-sonos"
 config  = "../plugins/hc-sonos/config/config.toml"
@@ -184,6 +190,12 @@ id      = "plugin.matter"
 binary  = "../plugins/hc-matter/target/debug/hc-matter"
 config  = "../plugins/hc-matter/config/config.toml"
 enabled = false
+
+[[plugins]]
+id      = "plugin.ecowitt"
+binary  = "../plugins/hc-ecowitt/target/debug/hc-ecowitt"
+config  = "../plugins/hc-ecowitt/config/config.toml"
+enabled = true
 
 # ---------------------------------------------------------------------------
 # Notifications

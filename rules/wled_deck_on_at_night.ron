@@ -4,10 +4,9 @@ Rule(
     enabled: true,
     priority: 10,
     tags: [],
-    trigger: DeviceStateChanged(
-        device_id: "mode_night",
-        attribute: Some("on"),
-        to: Some(true),
+    trigger: SunEvent(
+        event: Sunset,
+        offset_minutes: 0,
     ),
     conditions: [],
     actions: [
