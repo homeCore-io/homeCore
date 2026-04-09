@@ -48,6 +48,10 @@ pub struct CalEvent {
     pub summary: String,
     /// Absolute UTC start time of this occurrence.
     pub start: DateTime<Utc>,
+    /// Absolute UTC end time of this occurrence.
+    /// For all-day events without DTEND, defaults to start + 24h.
+    /// For timed events without DTEND or DURATION, defaults to start (zero-duration).
+    pub end: DateTime<Utc>,
     /// `true` when the original DTSTART had no time component (VALUE=DATE).
     pub is_all_day: bool,
 }
@@ -219,6 +223,42 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
             }
         };
 
+        // ── Compute event duration (DTEND or DURATION) ────────────────────
+        let event_duration = if let Some(dtend_prop) = component.find_prop("DTEND") {
+            let dtend_val = dtend_prop.val.as_str();
+            let end_is_date = dtend_prop.params.iter().any(|p| {
+                p.key.as_str().eq_ignore_ascii_case("VALUE")
+                    && match &p.val {
+                        Some(v) => v.as_str().eq_ignore_ascii_case("DATE"),
+                        None => false,
+                    }
+            }) || dtend_val.len() == 8;
+            if end_is_date {
+                NaiveDate::parse_from_str(dtend_val, "%Y%m%d")
+                    .ok()
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+                    .map(|ndt| ndt.and_utc() - start_dt)
+            } else {
+                let s = dtend_val.trim_end_matches('Z');
+                NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S")
+                    .ok()
+                    .map(|ndt| ndt.and_utc() - start_dt)
+            }
+        } else if let Some(dur_prop) = component.find_prop("DURATION") {
+            parse_ics_duration(dur_prop.val.as_str())
+        } else {
+            None
+        };
+
+        // Default: all-day → 24h, timed → zero-duration.
+        let duration = event_duration.unwrap_or_else(|| {
+            if is_all_day {
+                chrono::Duration::hours(24)
+            } else {
+                chrono::Duration::zero()
+            }
+        });
+
         // Collect RRULE value (may appear as RRULE property or not at all).
         let rrule_val: Option<String> = component
             .find_prop("RRULE")
@@ -231,6 +271,7 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
                     uid: uid.clone(),
                     summary: summary.clone(),
                     start: occ,
+                    end: occ + duration,
                     is_all_day,
                 });
             }
@@ -241,6 +282,7 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
                     uid,
                     summary,
                     start: start_dt,
+                    end: start_dt + duration,
                     is_all_day,
                 });
             }
@@ -351,6 +393,54 @@ fn expand_rrule(
     }
 
     out
+}
+
+/// Parse an RFC 5545 DURATION value (e.g. `PT1H30M`, `P1D`, `P1DT2H`).
+fn parse_ics_duration(s: &str) -> Option<chrono::Duration> {
+    let s = s.trim();
+    if !s.starts_with('P') {
+        return None;
+    }
+    let s = &s[1..]; // strip leading 'P'
+    let mut days: i64 = 0;
+    let mut hours: i64 = 0;
+    let mut minutes: i64 = 0;
+    let mut seconds: i64 = 0;
+    let mut in_time = false;
+    let mut num_buf = String::new();
+    for ch in s.chars() {
+        match ch {
+            'T' => in_time = true,
+            '0'..='9' => num_buf.push(ch),
+            'D' if !in_time => {
+                days = num_buf.parse().unwrap_or(0);
+                num_buf.clear();
+            }
+            'W' if !in_time => {
+                days = num_buf.parse::<i64>().unwrap_or(0) * 7;
+                num_buf.clear();
+            }
+            'H' if in_time => {
+                hours = num_buf.parse().unwrap_or(0);
+                num_buf.clear();
+            }
+            'M' if in_time => {
+                minutes = num_buf.parse().unwrap_or(0);
+                num_buf.clear();
+            }
+            'S' if in_time => {
+                seconds = num_buf.parse().unwrap_or(0);
+                num_buf.clear();
+            }
+            _ => {}
+        }
+    }
+    Some(
+        chrono::Duration::days(days)
+            + chrono::Duration::hours(hours)
+            + chrono::Duration::minutes(minutes)
+            + chrono::Duration::seconds(seconds),
+    )
 }
 
 /// Parse an iCal date/datetime string to `DateTime<Utc>`.

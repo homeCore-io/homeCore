@@ -631,6 +631,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // Calendars
         .route("/calendars", get(handlers::list_calendars))
         .route("/calendars/fetch", post(handlers::fetch_calendar))
+        .route("/calendars/upload", post(handlers::upload_calendar))
         .route("/calendars/:id", delete(handlers::delete_calendar))
         .route("/calendars/:id/events", get(handlers::list_calendar_events))
         // System

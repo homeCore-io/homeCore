@@ -307,6 +307,10 @@ impl Core {
             }
         }
 
+        // Pre-create a shared calendar handle so the engine can reference it
+        // even before calendar files are loaded.  Populated later.
+        let early_calendar_handle: CalendarHandle = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
         // Rule engine: subscribes to both buses; publishes to public bus.
         let engine = engine::RuleEngine::new(
             self.internal_bus.clone(),
@@ -316,7 +320,8 @@ impl Core {
             self.publish.clone(),
             self.notify.clone(),
         )
-        .with_drain_timeout(self.drain_timeout_secs);
+        .with_drain_timeout(self.drain_timeout_secs)
+        .with_calendars(Arc::clone(&early_calendar_handle));
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.
@@ -415,7 +420,9 @@ impl Core {
                 }
             };
 
-            let handle: CalendarHandle = Arc::new(tokio::sync::RwLock::new(initial));
+            // Populate the pre-created handle (shared with the engine).
+            *early_calendar_handle.write().await = initial;
+            let handle = Arc::clone(&early_calendar_handle);
 
             // Hot-reload watcher (keep alive in the process).
             match calendar_store::watch(cal_dir.clone(), Arc::clone(&handle), expansion_days) {

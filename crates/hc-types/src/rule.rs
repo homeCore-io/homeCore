@@ -460,6 +460,23 @@ pub enum Condition {
         /// Expected on/off state.
         on: bool,
     },
+    /// Passes when a calendar event is currently active (start ≤ now < end).
+    ///
+    /// ```toml
+    /// [[conditions]]
+    /// type           = "calendar_active"
+    /// calendar_id    = "us_holidays"   # optional — stem of .ics filename
+    /// title_contains = "Holiday"       # optional — case-insensitive substring
+    /// ```
+    CalendarActive {
+        /// Stem of the `.ics` filename to match.  `None` matches any calendar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calendar_id: Option<String>,
+        /// Case-insensitive substring match against the event summary/title.
+        /// `None` matches any event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title_contains: Option<String>,
+    },
 }
 
 /// Comparison operators for `Condition::DeviceState`.

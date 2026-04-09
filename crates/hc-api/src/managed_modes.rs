@@ -50,7 +50,8 @@ fn collect_condition_refs(condition: &Condition, refs: &mut ConditionRefs) {
         }
         Condition::TimeWindow { .. }
         | Condition::ScriptExpression { .. }
-        | Condition::PrivateBooleanIs { .. } => {}
+        | Condition::PrivateBooleanIs { .. }
+        | Condition::CalendarActive { .. } => {}
     }
 }
 

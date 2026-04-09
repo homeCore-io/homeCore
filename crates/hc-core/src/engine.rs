@@ -23,6 +23,7 @@
 //! - Per-rule logging levels (`log_events`, `log_triggers`, `log_actions`)
 //! - Pause state check before action dispatch
 
+use crate::calendar_store::CalendarHandle;
 use crate::executor::{execute_actions, ActionTrace, ExecutorContext};
 use crate::EventBus;
 use anyhow::Result;
@@ -158,6 +159,8 @@ pub struct RuleEngine {
     rule_in_flight: Arc<DashMap<Uuid, Arc<AtomicUsize>>>,
     /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
+    /// Shared calendar store for `Condition::CalendarActive`.
+    calendars: Option<CalendarHandle>,
 }
 
 impl RuleEngine {
@@ -197,7 +200,14 @@ impl RuleEngine {
             hub_vars: Arc::new(DashMap::new()),
             rule_in_flight: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
+            calendars: None,
         }
+    }
+
+    /// Attach a calendar handle for `Condition::CalendarActive` evaluation.
+    pub fn with_calendars(mut self, handle: CalendarHandle) -> Self {
+        self.calendars = Some(handle);
+        self
     }
 
     /// Override the graceful shutdown drain timeout (default: 10 s).
@@ -1473,6 +1483,77 @@ impl RuleEngine {
                             format!("{}.last_change matched requested provenance", device)
                         } else {
                             format!("{}.last_change did not match requested provenance", device)
+                        },
+                    },
+                ))
+            }
+
+            Condition::CalendarActive {
+                calendar_id,
+                title_contains,
+            } => {
+                let Some(ref cal_handle) = self.calendars else {
+                    return Ok((
+                        false,
+                        ConditionTrace {
+                            condition_type: "calendar_active".into(),
+                            passed: false,
+                            actual: None,
+                            expected: None,
+                            reason: "no calendar store configured".into(),
+                        },
+                    ));
+                };
+                let now = Utc::now();
+                let entries = cal_handle.read().await;
+                let mut matched_summary: Option<String> = None;
+
+                'outer: for entry in entries.iter() {
+                    if let Some(ref cid) = calendar_id {
+                        if entry.id != *cid {
+                            continue;
+                        }
+                    }
+                    for ev in &entry.events {
+                        if ev.start > now {
+                            // Events are sorted by start; no later ones can be active.
+                            break;
+                        }
+                        if ev.end <= now {
+                            continue;
+                        }
+                        // Event is active: start <= now < end
+                        if let Some(ref substr) = title_contains {
+                            if !ev.summary.to_lowercase().contains(&substr.to_lowercase()) {
+                                continue;
+                            }
+                        }
+                        matched_summary = Some(ev.summary.clone());
+                        break 'outer;
+                    }
+                }
+
+                let result = matched_summary.is_some();
+                debug!(
+                    rule_name = %rule.name, cond = %cond_label,
+                    calendar_id = ?calendar_id, title_contains = ?title_contains,
+                    matched = ?matched_summary, result,
+                    "rule.condition: CalendarActive"
+                );
+                Ok((
+                    result,
+                    ConditionTrace {
+                        condition_type: "calendar_active".into(),
+                        passed: result,
+                        actual: matched_summary.map(|s| JsonValue::String(s)),
+                        expected: Some(serde_json::json!({
+                            "calendar_id": calendar_id,
+                            "title_contains": title_contains,
+                        })),
+                        reason: if result {
+                            "calendar event currently active".into()
+                        } else {
+                            "no matching calendar event active right now".into()
                         },
                     },
                 ))

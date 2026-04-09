@@ -4311,6 +4311,17 @@ async fn eval_condition_dry_detail(
                 },
             }
         }
+        Condition::CalendarActive { .. } => {
+            // Dry-run cannot access live calendar state.
+            ConditionDetail {
+                condition: cond_json,
+                passed: false,
+                actual: None,
+                expected: None,
+                elapsed_ms: None,
+                reason: Some("calendar state not available in dry-run".into()),
+            }
+        }
     }
 }
 
@@ -5708,6 +5719,103 @@ pub async fn fetch_calendar(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/calendars/upload`
+///
+/// Upload an ICS file directly as text.  Saves it to the calendar directory
+/// and reloads the live store.
+///
+/// Body: `{ "content": "BEGIN:VCALENDAR...", "name": "my_cal" }`
+/// (`name` is optional; derived from content if omitted.)
+#[derive(serde::Deserialize)]
+pub struct UploadCalendarBody {
+    pub content: String,
+    pub name: Option<String>,
+}
+
+pub async fn upload_calendar(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Json(body): Json<UploadCalendarBody>,
+) -> impl IntoResponse {
+    let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "calendar store not configured" })),
+        )
+            .into_response();
+    };
+
+    if !body.content.contains("BEGIN:VCALENDAR") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "content does not appear to be a valid ICS file (missing BEGIN:VCALENDAR)" })),
+        )
+            .into_response();
+    }
+
+    let cal_name = body
+        .name
+        .as_deref()
+        .unwrap_or("uploaded_calendar")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+
+    let ics_path = cal_dir.as_ref().join(format!("{cal_name}.ics"));
+    if let Err(e) = std::fs::write(&ics_path, &body.content) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to write ICS file: {e}") })),
+        )
+            .into_response();
+    }
+
+    // Write meta sidecar (no source URL since this was uploaded).
+    let meta = hc_core::calendar_store::CalendarMeta {
+        source_url: None,
+        fetched_at: None,
+        refresh_hours: None,
+    };
+    let meta_path = cal_dir.as_ref().join(format!("{cal_name}.meta.json"));
+    let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
+
+    // The file watcher will auto-reload, but also upsert into live handle immediately.
+    let expansion_days = s.calendar_expansion_days;
+    let dir = cal_dir.as_ref().clone();
+    match tokio::task::spawn_blocking(move || {
+        hc_core::calendar_store::load_dir(&dir, expansion_days)
+    })
+    .await
+    {
+        Ok(Ok(entries)) => {
+            let event_count = entries
+                .iter()
+                .find(|e| e.id == cal_name)
+                .map(|e| e.events.len())
+                .unwrap_or(0);
+            *cal_handle.write().await = entries;
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "calendar_id": cal_name,
+                    "event_count": event_count,
+                })),
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("calendar reload failed: {e}") })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("calendar reload task failed: {e}") })),
         )
             .into_response(),
     }
