@@ -390,6 +390,18 @@ pub async fn update_device(
                         .filter(|value| !value.is_empty())
                 };
             }
+            if let Some(ui_hint) = body.get("ui_hint") {
+                if ui_hint.is_null() {
+                    device.ui_hint = None;
+                } else if let Some(value) = ui_hint.as_str() {
+                    let trimmed = value.trim();
+                    device.ui_hint = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                }
+            }
             if let Some(canonical_name) = body.get("canonical_name") {
                 if canonical_name.is_null() {
                     device.canonical_name = None;

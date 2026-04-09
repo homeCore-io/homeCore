@@ -282,6 +282,12 @@ pub struct DeviceState {
     /// `None` for devices registered before this field was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_type: Option<String>,
+    /// User-set UI presentation hint that overrides automatic device type
+    /// classification.  For example, a switch that controls a light can be
+    /// hinted as `"light"`, or a contact sensor can be hinted as `"door"`,
+    /// `"window"`, `"garage"`, or `"gate"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_hint: Option<String>,
     /// Whether the device is currently reachable.
     pub available: bool,
     /// All reported attributes and their current values.
@@ -308,6 +314,7 @@ impl DeviceState {
             plugin_id: plugin_id.into(),
             area: None,
             device_type: None,
+            ui_hint: None,
             available: false,
             attributes: HashMap::new(),
             last_seen: Utc::now(),
