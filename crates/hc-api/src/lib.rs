@@ -637,6 +637,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // System
         .route("/system/status", get(handlers::system_status))
         .route("/system/backup", post(backup::backup_handler))
+        .route("/system/restore", post(backup::restore_handler))
         .route("/system/log-level", get(handlers::get_log_level).put(handlers::set_log_level))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
