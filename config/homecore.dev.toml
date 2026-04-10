@@ -140,61 +140,61 @@ catchup_window_minutes = 15
 [[plugins]]
 id      = "plugin.yolink"
 binary  = "../plugins/hc-yolink/target/debug/hc-yolink"
-config  = "../plugins/hc-yolink/config/config.toml"
+config  = "../plugins/hc-yolink/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.lutron"
 binary  = "../plugins/hc-lutron/target/debug/hc-lutron"
-config  = "../plugins/hc-lutron/config/config.toml"
+config  = "../plugins/hc-lutron/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.caseta"
 binary  = "../plugins/hc-caseta/target/debug/hc-caseta"
-config  = "../plugins/hc-caseta/config/config.toml"
+config  = "../plugins/hc-caseta/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.sonos"
 binary  = "../plugins/hc-sonos/target/debug/hc-sonos"
-config  = "../plugins/hc-sonos/config/config.toml"
+config  = "../plugins/hc-sonos/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.zwave"
 binary  = "../plugins/hc-zwave/target/debug/hc-zwave"
-config  = "../plugins/hc-zwave/config/config.toml"
+config  = "../plugins/hc-zwave/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.hue"
 binary  = "../plugins/hc-hue/target/debug/hc-hue"
-config  = "../plugins/hc-hue/config/config.toml"
+config  = "../plugins/hc-hue/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.wled"
 binary  = "../plugins/hc-wled/target/debug/hc-wled"
-config  = "../plugins/hc-wled/config/config.toml"
+config  = "../plugins/hc-wled/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.isy"
 binary  = "../plugins/hc-isy/target/debug/hc-isy"
-config  = "../plugins/hc-isy/config/config.toml"
+config  = "../plugins/hc-isy/config/config.dev.toml"
 enabled = false
 
 [[plugins]]
 id      = "plugin.matter"
 binary  = "../plugins/hc-matter/target/debug/hc-matter"
-config  = "../plugins/hc-matter/config/config.toml"
+config  = "../plugins/hc-matter/config/config.dev.toml"
 enabled = false
 
 [[plugins]]
 id      = "plugin.ecowitt"
 binary  = "../plugins/hc-ecowitt/target/debug/hc-ecowitt"
-config  = "../plugins/hc-ecowitt/config/config.toml"
+config  = "../plugins/hc-ecowitt/config/config.dev.toml"
 enabled = true
 
 # ---------------------------------------------------------------------------
