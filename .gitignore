@@ -6,6 +6,9 @@ target/
 let
 core/data/
 
+# Ignore rules
+rules/
+
 # Ignore plugins
 plugins/hc-yolink/
 plugins/hc-lutron/
