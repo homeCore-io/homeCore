@@ -9,6 +9,7 @@ core/data/
 # Ignore rules
 rules/
 
+config/homecore.dev.toml.example
 # Ignore plugins
 plugins/hc-yolink/
 plugins/hc-lutron/
