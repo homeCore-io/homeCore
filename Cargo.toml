@@ -1,8 +1,10 @@
 [package]
-name    = "homecore"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+name        = "homecore"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Home automation platform — MQTT-native, API-first, fully local"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [workspace]
 resolver = "2"
