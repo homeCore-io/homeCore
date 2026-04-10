@@ -56,8 +56,16 @@ pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str,
         }
     };
 
-    let current = dev.attributes.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let step = dev.attributes.get("step").and_then(|v| v.as_i64()).unwrap_or(1);
+    let current = dev
+        .attributes
+        .get("count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let step = dev
+        .attributes
+        .get("step")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
     let min = dev.attributes.get("min").and_then(|v| v.as_i64());
     let max = dev.attributes.get("max").and_then(|v| v.as_i64());
 
@@ -80,12 +88,13 @@ pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str,
         }
         "reset" => min.unwrap_or(0),
         "set" => {
-            let v = value
-                .get("value")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let v = value.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
             let v = if let Some(mn) = min { v.max(mn) } else { v };
-            if let Some(mx) = max { v.min(mx) } else { v }
+            if let Some(mx) = max {
+                v.min(mx)
+            } else {
+                v
+            }
         }
         _ => {
             warn!(%device_id, %cmd, "Counter: unknown command");

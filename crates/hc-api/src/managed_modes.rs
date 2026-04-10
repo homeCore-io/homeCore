@@ -206,7 +206,10 @@ pub fn validate_definition(
     }
 
     let mut definitions = existing_definitions.to_vec();
-    if let Some(pos) = definitions.iter().position(|def| def.mode_id == candidate.mode_id) {
+    if let Some(pos) = definitions
+        .iter()
+        .position(|def| def.mode_id == candidate.mode_id)
+    {
         definitions[pos] = candidate.clone();
     } else {
         definitions.push(candidate.clone());
@@ -442,9 +445,8 @@ mod tests {
         };
 
         let rules = build_managed_rules(&mode, &definition).expect("managed rules");
-        assert!(rules.iter().any(|rule| matches!(
-            rule.trigger,
-            Trigger::DeviceStateChanged { .. }
-        )));
+        assert!(rules
+            .iter()
+            .any(|rule| matches!(rule.trigger, Trigger::DeviceStateChanged { .. })));
     }
 }

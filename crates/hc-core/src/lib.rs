@@ -97,7 +97,8 @@ pub struct Core {
     /// Log stream broadcast channel — forwarded to StateBridge so plugin logs
     /// received over MQTT are injected into `/logs/stream`.
     log_tx: Option<tokio::sync::broadcast::Sender<hc_types::LogLine>>,
-    log_ring: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>>,
+    log_ring:
+        Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>>,
 }
 
 impl Core {

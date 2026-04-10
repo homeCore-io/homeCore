@@ -42,13 +42,13 @@ impl ManagementRpc {
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(Event::Custom { payload, event_type, .. })
-                            if event_type == "plugin_management_response" =>
-                        {
-                            let request_id = payload["request_id"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
+                        Ok(Event::Custom {
+                            payload,
+                            event_type,
+                            ..
+                        }) if event_type == "plugin_management_response" => {
+                            let request_id =
+                                payload["request_id"].as_str().unwrap_or("").to_string();
                             if request_id.is_empty() {
                                 continue;
                             }

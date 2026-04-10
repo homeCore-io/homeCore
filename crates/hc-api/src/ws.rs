@@ -23,7 +23,6 @@
 
 use crate::auth_middleware::whitelist_claims;
 use crate::event_log::{event_device_id, event_type_name};
-use hc_types::event::Event;
 use crate::AppState;
 use axum::{
     extract::{
@@ -35,6 +34,7 @@ use axum::{
     Json,
 };
 use hc_auth::Claims;
+use hc_types::event::Event;
 use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr};

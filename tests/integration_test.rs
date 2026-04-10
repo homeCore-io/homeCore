@@ -123,7 +123,12 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
     // 5. Core: state bridge + rule engine.
     let rules = store.list_rules().await?;
     assert_eq!(rules.len(), 1, "rule should be in store");
-    let core = Core::new(bus.clone(), bus.clone(), store.clone(), Some(publish_handle.clone()));
+    let core = Core::new(
+        bus.clone(),
+        bus.clone(),
+        store.clone(),
+        Some(publish_handle.clone()),
+    );
     core.start(rules).await?;
 
     // Wait for the MQTT client to connect and subscribe.

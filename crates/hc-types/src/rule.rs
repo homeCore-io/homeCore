@@ -133,7 +133,7 @@ fn is_parallel(m: &RunMode) -> bool {
 }
 
 /// What causes a rule to be evaluated.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Trigger {
     DeviceStateChanged {
         /// Primary device ID (used when `device_ids` is empty).
@@ -196,6 +196,7 @@ pub enum Trigger {
     WebhookReceived {
         path: String,
     },
+    #[default]
     ManualTrigger,
     /// Fires when a `FireEvent` action emits the matching `event_type` on the
     /// internal event bus.
@@ -319,12 +320,6 @@ pub enum Trigger {
         #[serde(default)]
         offset_minutes: i32,
     },
-}
-
-impl Default for Trigger {
-    fn default() -> Self {
-        Trigger::ManualTrigger
-    }
 }
 
 /// Button event types for `Trigger::ButtonEvent`.
@@ -1105,8 +1100,7 @@ mod tests {
             run_mode: Default::default(),
         };
 
-        let ron_str =
-            ron::ser::to_string_pretty(&rule, ron::ser::PrettyConfig::default()).unwrap();
+        let ron_str = ron::ser::to_string_pretty(&rule, ron::ser::PrettyConfig::default()).unwrap();
         let parsed: Rule = ron::from_str(&ron_str).unwrap();
         assert_eq!(parsed.name, "Test Rule");
         assert_eq!(parsed.priority, 10);

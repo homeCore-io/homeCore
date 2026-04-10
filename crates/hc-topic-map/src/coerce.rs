@@ -227,7 +227,9 @@ mod tests {
 
     #[test]
     fn scalar_float() {
-        assert_eq!(apply("scalar_float", json!("3.14")).unwrap(), json!(3.14));
+        #[allow(clippy::approx_constant)]
+        let expected = json!(3.14);
+        assert_eq!(apply("scalar_float", json!("3.14")).unwrap(), expected);
     }
 
     #[test]

@@ -137,8 +137,8 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
 
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: GlueConfig = toml::from_str(&text)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let config: GlueConfig =
+        toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
 
     let mut created = 0u32;
     let mut skipped = 0u32;
@@ -146,10 +146,17 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
     for entry in &config.glue {
         // Ensure ID has the correct prefix.
         let prefix = match entry.glue_type.as_str() {
-            "switch" => "switch_", "timer" => "timer_", "counter" => "counter_",
-            "number" => "number_", "select" => "select_", "text" => "text_",
-            "button" => "button_", "datetime" => "datetime_", "group" => "group_",
-            "threshold" => "threshold_", "schedule" => "schedule_",
+            "switch" => "switch_",
+            "timer" => "timer_",
+            "counter" => "counter_",
+            "number" => "number_",
+            "select" => "select_",
+            "text" => "text_",
+            "button" => "button_",
+            "datetime" => "datetime_",
+            "group" => "group_",
+            "threshold" => "threshold_",
+            "schedule" => "schedule_",
             _ => {
                 warn!(id = %entry.id, r#type = %entry.glue_type, "glue.toml: unknown type, skipping");
                 continue;
@@ -184,16 +191,27 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
             }
             "counter" => {
                 dev.attributes.insert("count".into(), json!(0));
-                dev.attributes.insert("step".into(), json!(entry.step.unwrap_or(1)));
-                if let Some(v) = entry.min { dev.attributes.insert("min".into(), json!(v)); }
-                if let Some(v) = entry.max { dev.attributes.insert("max".into(), json!(v)); }
+                dev.attributes
+                    .insert("step".into(), json!(entry.step.unwrap_or(1)));
+                if let Some(v) = entry.min {
+                    dev.attributes.insert("min".into(), json!(v));
+                }
+                if let Some(v) = entry.max {
+                    dev.attributes.insert("max".into(), json!(v));
+                }
             }
             "number" => {
-                dev.attributes.insert("value".into(), json!(entry.value.unwrap_or(0.0)));
-                dev.attributes.insert("min".into(), json!(entry.number_min.unwrap_or(0.0)));
-                dev.attributes.insert("max".into(), json!(entry.number_max.unwrap_or(100.0)));
-                dev.attributes.insert("step".into(), json!(entry.number_step.unwrap_or(1.0)));
-                if let Some(ref u) = entry.unit { dev.attributes.insert("unit".into(), json!(u)); }
+                dev.attributes
+                    .insert("value".into(), json!(entry.value.unwrap_or(0.0)));
+                dev.attributes
+                    .insert("min".into(), json!(entry.number_min.unwrap_or(0.0)));
+                dev.attributes
+                    .insert("max".into(), json!(entry.number_max.unwrap_or(100.0)));
+                dev.attributes
+                    .insert("step".into(), json!(entry.number_step.unwrap_or(1.0)));
+                if let Some(ref u) = entry.unit {
+                    dev.attributes.insert("unit".into(), json!(u));
+                }
             }
             "select" => {
                 let opts = entry.options.clone().unwrap_or_default();
@@ -203,34 +221,55 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
             }
             "text" => {
                 dev.attributes.insert("value".into(), json!(""));
-                if let Some(ml) = entry.max_length { dev.attributes.insert("max_length".into(), json!(ml)); }
+                if let Some(ml) = entry.max_length {
+                    dev.attributes.insert("max_length".into(), json!(ml));
+                }
             }
             "button" => {
                 dev.attributes.insert("last_pressed".into(), json!(null));
             }
             "datetime" => {
                 dev.attributes.insert("value".into(), json!(""));
-                dev.attributes.insert("has_date".into(), json!(entry.has_date.unwrap_or(true)));
-                dev.attributes.insert("has_time".into(), json!(entry.has_time.unwrap_or(true)));
+                dev.attributes
+                    .insert("has_date".into(), json!(entry.has_date.unwrap_or(true)));
+                dev.attributes
+                    .insert("has_time".into(), json!(entry.has_time.unwrap_or(true)));
             }
             "group" => {
                 dev.attributes.insert("on".into(), json!(false));
-                dev.attributes.insert("member_ids".into(), json!(entry.members.clone().unwrap_or_default()));
-                dev.attributes.insert("attribute".into(), json!(entry.attribute.as_deref().unwrap_or("on")));
-                dev.attributes.insert("mode".into(), json!(entry.mode.as_deref().unwrap_or("any")));
+                dev.attributes.insert(
+                    "member_ids".into(),
+                    json!(entry.members.clone().unwrap_or_default()),
+                );
+                dev.attributes.insert(
+                    "attribute".into(),
+                    json!(entry.attribute.as_deref().unwrap_or("on")),
+                );
+                dev.attributes
+                    .insert("mode".into(), json!(entry.mode.as_deref().unwrap_or("any")));
                 dev.attributes.insert("active_count".into(), json!(0));
                 dev.attributes.insert("member_count".into(), json!(0));
             }
             "threshold" => {
                 dev.attributes.insert("above".into(), json!(false));
-                dev.attributes.insert("source_device_id".into(), json!(entry.source_device_id.as_deref().unwrap_or("")));
-                dev.attributes.insert("source_attribute".into(), json!(entry.source_attribute.as_deref().unwrap_or("value")));
-                dev.attributes.insert("threshold".into(), json!(entry.threshold.unwrap_or(0.0)));
-                dev.attributes.insert("hysteresis".into(), json!(entry.hysteresis.unwrap_or(0.0)));
+                dev.attributes.insert(
+                    "source_device_id".into(),
+                    json!(entry.source_device_id.as_deref().unwrap_or("")),
+                );
+                dev.attributes.insert(
+                    "source_attribute".into(),
+                    json!(entry.source_attribute.as_deref().unwrap_or("value")),
+                );
+                dev.attributes
+                    .insert("threshold".into(), json!(entry.threshold.unwrap_or(0.0)));
+                dev.attributes
+                    .insert("hysteresis".into(), json!(entry.hysteresis.unwrap_or(0.0)));
             }
             "schedule" => {
                 dev.attributes.insert("active".into(), json!(false));
-                let blocks_json: serde_json::Value = entry.blocks.as_ref()
+                let blocks_json: serde_json::Value = entry
+                    .blocks
+                    .as_ref()
                     .map(|b| serde_json::to_value(b).unwrap_or(json!([])))
                     .unwrap_or(json!([]));
                 dev.attributes.insert("blocks".into(), blocks_json);
@@ -243,7 +282,9 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
                 info!(device_id = %device_id, name = %entry.name, r#type = %entry.glue_type, "Glue device created from config");
                 created += 1;
             }
-            Err(e) => warn!(device_id = %device_id, error = %e, "Failed to create glue device from config"),
+            Err(e) => {
+                warn!(device_id = %device_id, error = %e, "Failed to create glue device from config")
+            }
         }
     }
 

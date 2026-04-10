@@ -40,7 +40,10 @@ fn is_truthy(v: &serde_json::Value) -> bool {
         serde_json::Value::Bool(b) => *b,
         serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
         serde_json::Value::String(s) => {
-            matches!(s.as_str(), "true" | "on" | "open" | "online" | "active" | "running" | "locked")
+            matches!(
+                s.as_str(),
+                "true" | "on" | "open" | "online" | "active" | "running" | "locked"
+            )
         }
         _ => false,
     }
@@ -51,19 +54,32 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
     let dev = match state.get_device(device_id).await {
         Ok(Some(d)) => d,
         Ok(None) => return,
-        Err(e) => { warn!(%device_id, error = %e, "Group: read failed"); return; }
+        Err(e) => {
+            warn!(%device_id, error = %e, "Group: read failed");
+            return;
+        }
     };
 
-    let member_ids: Vec<String> = dev.attributes.get("member_ids")
+    let member_ids: Vec<String> = dev
+        .attributes
+        .get("member_ids")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let attribute = dev.attributes.get("attribute")
+    let attribute = dev
+        .attributes
+        .get("attribute")
         .and_then(|v| v.as_str())
         .unwrap_or("on");
 
-    let mode = dev.attributes.get("mode")
+    let mode = dev
+        .attributes
+        .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("any");
 
@@ -91,13 +107,15 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
         attrs.insert("on".into(), json!(new_on));
         attrs.insert("active_count".into(), json!(active_count));
         attrs.insert("member_count".into(), json!(member_count));
-    }).await;
+    })
+    .await;
 }
 
 /// Check if a device_id is a member of a group device.
 pub async fn is_member(state: &StateStore, group_device_id: &str, member_device_id: &str) -> bool {
     if let Ok(Some(dev)) = state.get_device(group_device_id).await {
-        dev.attributes.get("member_ids")
+        dev.attributes
+            .get("member_ids")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().any(|v| v.as_str() == Some(member_device_id)))
             .unwrap_or(false)
@@ -110,9 +128,15 @@ pub async fn is_member(state: &StateStore, group_device_id: &str, member_device_
 pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str, payload: &[u8]) {
     let value: serde_json::Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
-        Err(_) => { warn!(%device_id, "Group: invalid JSON"); return; }
+        Err(_) => {
+            warn!(%device_id, "Group: invalid JSON");
+            return;
+        }
     };
-    let cmd = value.get("command").and_then(|v| v.as_str()).unwrap_or("recalculate");
+    let cmd = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("recalculate");
     debug!(%device_id, %cmd, "Group command");
     recalculate(state, pub_bus, device_id).await;
 }

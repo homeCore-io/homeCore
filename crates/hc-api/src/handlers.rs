@@ -67,7 +67,9 @@ fn managed_rule_response(mode_id: &str, rule_id: Uuid) -> axum::response::Respon
         .into_response()
 }
 
-fn load_mode_definitions_response(state: &AppState) -> Result<Vec<ModeDefinition>, axum::response::Response> {
+fn load_mode_definitions_response(
+    state: &AppState,
+) -> Result<Vec<ModeDefinition>, axum::response::Response> {
     load_mode_definitions(state).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -111,7 +113,11 @@ pub async fn get_log_level(State(s): State<AppState>) -> impl IntoResponse {
             let level = handle.current_level();
             (StatusCode::OK, Json(json!({ "level": level }))).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "dynamic log level not available" }))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "dynamic log level not available" })),
+        )
+            .into_response(),
     }
 }
 
@@ -121,10 +127,18 @@ pub async fn set_log_level(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Some(ref handle) = s.log_level_handle else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "dynamic log level not available" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "dynamic log level not available" })),
+        )
+            .into_response();
     };
     let Some(level) = body["level"].as_str() else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing 'level' field" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing 'level' field" })),
+        )
+            .into_response();
     };
     match handle.set_level(level) {
         Ok(()) => {
@@ -790,7 +804,10 @@ pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl Into
         Ok(devices) => {
             let timers: Vec<_> = devices
                 .into_iter()
-                .filter(|d| d.plugin_id == "core.timer" || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("timer")))
+                .filter(|d| {
+                    d.plugin_id == "core.timer"
+                        || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("timer"))
+                })
                 .map(normalize_native_device_type)
                 .map(compute_timer_remaining)
                 .collect();
@@ -913,7 +930,11 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
         Ok(devices) => {
             let switches: Vec<_> = devices
                 .into_iter()
-                .filter(|d| d.plugin_id == "core.switch" || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("switch")))
+                .filter(|d| {
+                    d.plugin_id == "core.switch"
+                        || (d.plugin_id == "core.glue"
+                            && d.device_type.as_deref() == Some("switch"))
+                })
                 .map(normalize_native_device_type)
                 .collect();
             (StatusCode::OK, Json(json!(switches)))
@@ -929,16 +950,16 @@ pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl In
 
 /// Glue device type prefixes and their default attributes.
 const GLUE_TYPES: &[(&str, &str, &str)] = &[
-    ("switch",   "switch_",   "switch"),
-    ("timer",    "timer_",    "timer"),
-    ("counter",  "counter_",  "counter"),
-    ("number",   "number_",   "number"),
-    ("select",   "select_",   "select"),
-    ("text",     "text_",     "text"),
-    ("button",   "button_",   "button"),
+    ("switch", "switch_", "switch"),
+    ("timer", "timer_", "timer"),
+    ("counter", "counter_", "counter"),
+    ("number", "number_", "number"),
+    ("select", "select_", "select"),
+    ("text", "text_", "text"),
+    ("button", "button_", "button"),
     ("datetime", "datetime_", "datetime"),
-    ("group",    "group_",    "group"),
-    ("threshold","threshold_","threshold"),
+    ("group", "group_", "group"),
+    ("threshold", "threshold_", "threshold"),
     ("schedule", "schedule_", "schedule"),
 ];
 
@@ -964,7 +985,13 @@ pub async fn create_glue(
 ) -> impl IntoResponse {
     let type_info = match GLUE_TYPES.iter().find(|(t, _, _)| *t == body.glue_type) {
         Some(info) => info,
-        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("unknown glue type: {}", body.glue_type) }))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("unknown glue type: {}", body.glue_type) })),
+            )
+                .into_response()
+        }
     };
     let (_, prefix, device_type) = type_info;
 
@@ -975,7 +1002,11 @@ pub async fn create_glue(
     };
 
     if let Ok(Some(_)) = s.store.get_device(&device_id).await {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "device already exists" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "device already exists" })),
+        )
+            .into_response();
     }
 
     let mut dev = hc_types::device::DeviceState::new(&device_id, &body.name, "core.glue");
@@ -995,60 +1026,127 @@ pub async fn create_glue(
         }
         "counter" => {
             dev.attributes.insert("count".into(), json!(0));
-            dev.attributes.insert("step".into(), body.config.get("step").cloned().unwrap_or(json!(1)));
-            if let Some(v) = body.config.get("min") { dev.attributes.insert("min".into(), v.clone()); }
-            if let Some(v) = body.config.get("max") { dev.attributes.insert("max".into(), v.clone()); }
+            dev.attributes.insert(
+                "step".into(),
+                body.config.get("step").cloned().unwrap_or(json!(1)),
+            );
+            if let Some(v) = body.config.get("min") {
+                dev.attributes.insert("min".into(), v.clone());
+            }
+            if let Some(v) = body.config.get("max") {
+                dev.attributes.insert("max".into(), v.clone());
+            }
         }
         "number" => {
-            dev.attributes.insert("value".into(), body.config.get("value").cloned().unwrap_or(json!(0.0)));
-            dev.attributes.insert("min".into(), body.config.get("min").cloned().unwrap_or(json!(0.0)));
-            dev.attributes.insert("max".into(), body.config.get("max").cloned().unwrap_or(json!(100.0)));
-            dev.attributes.insert("step".into(), body.config.get("step").cloned().unwrap_or(json!(1.0)));
-            if let Some(v) = body.config.get("unit") { dev.attributes.insert("unit".into(), v.clone()); }
+            dev.attributes.insert(
+                "value".into(),
+                body.config.get("value").cloned().unwrap_or(json!(0.0)),
+            );
+            dev.attributes.insert(
+                "min".into(),
+                body.config.get("min").cloned().unwrap_or(json!(0.0)),
+            );
+            dev.attributes.insert(
+                "max".into(),
+                body.config.get("max").cloned().unwrap_or(json!(100.0)),
+            );
+            dev.attributes.insert(
+                "step".into(),
+                body.config.get("step").cloned().unwrap_or(json!(1.0)),
+            );
+            if let Some(v) = body.config.get("unit") {
+                dev.attributes.insert("unit".into(), v.clone());
+            }
         }
         "select" => {
             let options = body.config.get("options").cloned().unwrap_or(json!([]));
-            let first = options.as_array().and_then(|a| a.first()).cloned().unwrap_or(json!(""));
+            let first = options
+                .as_array()
+                .and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(json!(""));
             dev.attributes.insert("selected".into(), first);
             dev.attributes.insert("options".into(), options);
         }
         "text" => {
             dev.attributes.insert("value".into(), json!(""));
-            if let Some(v) = body.config.get("max_length") { dev.attributes.insert("max_length".into(), v.clone()); }
+            if let Some(v) = body.config.get("max_length") {
+                dev.attributes.insert("max_length".into(), v.clone());
+            }
         }
         "button" => {
             dev.attributes.insert("last_pressed".into(), json!(null));
         }
         "datetime" => {
             dev.attributes.insert("value".into(), json!(""));
-            dev.attributes.insert("has_date".into(), body.config.get("has_date").cloned().unwrap_or(json!(true)));
-            dev.attributes.insert("has_time".into(), body.config.get("has_time").cloned().unwrap_or(json!(true)));
+            dev.attributes.insert(
+                "has_date".into(),
+                body.config.get("has_date").cloned().unwrap_or(json!(true)),
+            );
+            dev.attributes.insert(
+                "has_time".into(),
+                body.config.get("has_time").cloned().unwrap_or(json!(true)),
+            );
         }
         "group" => {
             dev.attributes.insert("on".into(), json!(false));
-            dev.attributes.insert("member_ids".into(), body.config.get("members").cloned().unwrap_or(json!([])));
-            dev.attributes.insert("attribute".into(), body.config.get("attribute").cloned().unwrap_or(json!("on")));
-            dev.attributes.insert("mode".into(), body.config.get("mode").cloned().unwrap_or(json!("any")));
+            dev.attributes.insert(
+                "member_ids".into(),
+                body.config.get("members").cloned().unwrap_or(json!([])),
+            );
+            dev.attributes.insert(
+                "attribute".into(),
+                body.config.get("attribute").cloned().unwrap_or(json!("on")),
+            );
+            dev.attributes.insert(
+                "mode".into(),
+                body.config.get("mode").cloned().unwrap_or(json!("any")),
+            );
             dev.attributes.insert("active_count".into(), json!(0));
             dev.attributes.insert("member_count".into(), json!(0));
         }
         "threshold" => {
             dev.attributes.insert("above".into(), json!(false));
-            dev.attributes.insert("source_device_id".into(), body.config.get("source_device_id").cloned().unwrap_or(json!("")));
-            dev.attributes.insert("source_attribute".into(), body.config.get("source_attribute").cloned().unwrap_or(json!("value")));
-            dev.attributes.insert("threshold".into(), body.config.get("threshold").cloned().unwrap_or(json!(0.0)));
-            dev.attributes.insert("hysteresis".into(), body.config.get("hysteresis").cloned().unwrap_or(json!(0.0)));
+            dev.attributes.insert(
+                "source_device_id".into(),
+                body.config
+                    .get("source_device_id")
+                    .cloned()
+                    .unwrap_or(json!("")),
+            );
+            dev.attributes.insert(
+                "source_attribute".into(),
+                body.config
+                    .get("source_attribute")
+                    .cloned()
+                    .unwrap_or(json!("value")),
+            );
+            dev.attributes.insert(
+                "threshold".into(),
+                body.config.get("threshold").cloned().unwrap_or(json!(0.0)),
+            );
+            dev.attributes.insert(
+                "hysteresis".into(),
+                body.config.get("hysteresis").cloned().unwrap_or(json!(0.0)),
+            );
         }
         "schedule" => {
             dev.attributes.insert("active".into(), json!(false));
-            dev.attributes.insert("blocks".into(), body.config.get("blocks").cloned().unwrap_or(json!([])));
+            dev.attributes.insert(
+                "blocks".into(),
+                body.config.get("blocks").cloned().unwrap_or(json!([])),
+            );
         }
         _ => {}
     }
 
     match s.store.upsert_device(&dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1056,13 +1154,21 @@ pub async fn create_glue(
 pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
     match s.store.list_devices().await {
         Ok(devices) => {
-            let glue: Vec<_> = devices.into_iter()
-                .filter(|d| d.plugin_id == "core.glue" || d.plugin_id == "core.timer" || d.plugin_id == "core.switch")
+            let glue: Vec<_> = devices
+                .into_iter()
+                .filter(|d| {
+                    d.plugin_id == "core.glue"
+                        || d.plugin_id == "core.timer"
+                        || d.plugin_id == "core.switch"
+                })
                 .map(compute_timer_remaining)
                 .collect();
             (StatusCode::OK, Json(json!(glue)))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -1074,8 +1180,16 @@ pub async fn delete_glue(
 ) -> impl IntoResponse {
     match s.store.delete_device(&id).await {
         Ok(true) => (StatusCode::OK, Json(json!({ "deleted": true }))).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "device not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "device not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1226,7 +1340,9 @@ pub async fn create_mode(
     if body.criteria_definition.is_some() && !claims.has_scope("automations:write") {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({ "error": "scope 'automations:write' required for criteria-driven modes" })),
+            Json(
+                json!({ "error": "scope 'automations:write' required for criteria-driven modes" }),
+            ),
         )
             .into_response();
     }
@@ -1241,11 +1357,13 @@ pub async fn create_mode(
     };
     match hc_core::mode_manager::append_mode(&path, cfg.clone()) {
         Ok(_) => {}
-        Err(e) => return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     }
 
     if let Some(criteria) = body.criteria_definition {
@@ -1271,7 +1389,10 @@ pub async fn create_mode(
             generated_rule_ids: Vec::new(),
         };
         let mode_ids = match hc_core::mode_manager::load_modes(&path) {
-            Ok(modes) => modes.into_iter().map(|mode| mode.id).collect::<HashSet<_>>(),
+            Ok(modes) => modes
+                .into_iter()
+                .map(|mode| mode.id)
+                .collect::<HashSet<_>>(),
             Err(e) => {
                 let _ = hc_core::mode_manager::remove_mode(&path, &cfg.id);
                 return (
@@ -1338,7 +1459,10 @@ pub async fn get_mode_definition(
         Ok(definitions) => definitions,
         Err(resp) => return resp,
     };
-    match definitions.into_iter().find(|definition| definition.mode_id == id) {
+    match definitions
+        .into_iter()
+        .find(|definition| definition.mode_id == id)
+    {
         Some(definition) => (StatusCode::OK, Json(json!(definition))).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -1404,7 +1528,10 @@ pub async fn put_mode_definition(
         },
         generated_rule_ids: previous_rule_ids.clone(),
     };
-    let mode_ids = modes.into_iter().map(|mode| mode.id).collect::<HashSet<_>>();
+    let mode_ids = modes
+        .into_iter()
+        .map(|mode| mode.id)
+        .collect::<HashSet<_>>();
     if let Err(e) = validate_definition(&mode, &mode_ids, &definitions, &definition) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1467,7 +1594,10 @@ pub async fn delete_mode_definition(
         Ok(definitions) => definitions,
         Err(resp) => return resp,
     };
-    let Some(pos) = definitions.iter().position(|definition| definition.mode_id == id) else {
+    let Some(pos) = definitions
+        .iter()
+        .position(|definition| definition.mode_id == id)
+    else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "mode definition not found" })),
@@ -1516,7 +1646,10 @@ pub async fn delete_mode(
         Ok(definitions) => definitions,
         Err(resp) => return resp,
     };
-    if let Some(pos) = definitions.iter().position(|definition| definition.mode_id == id) {
+    if let Some(pos) = definitions
+        .iter()
+        .position(|definition| definition.mode_id == id)
+    {
         let definition = definitions.remove(pos);
         if let Err(e) = remove_managed_rules(&s, &definition.generated_rule_ids).await {
             return (
@@ -4467,7 +4600,11 @@ pub async fn get_plugin(
     let map = s.plugins.read().await;
     match map.get(&id) {
         Some(rec) => (StatusCode::OK, Json(json!(rec))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -4478,11 +4615,23 @@ pub async fn start_plugin(
 ) -> impl IntoResponse {
     let cmds = s.plugin_commands.read().await;
     let Some(tx) = cmds.get(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found or not managed locally" })),
+        )
+            .into_response();
     };
     match tx.send(crate::PluginCommand::Start).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "start" }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "action": "start" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "plugin supervisor not responding" })),
+        )
+            .into_response(),
     }
 }
 
@@ -4493,11 +4642,23 @@ pub async fn stop_plugin(
 ) -> impl IntoResponse {
     let cmds = s.plugin_commands.read().await;
     let Some(tx) = cmds.get(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found or not managed locally" })),
+        )
+            .into_response();
     };
     match tx.send(crate::PluginCommand::Stop).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "stop" }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "action": "stop" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "plugin supervisor not responding" })),
+        )
+            .into_response(),
     }
 }
 
@@ -4508,11 +4669,23 @@ pub async fn restart_plugin(
 ) -> impl IntoResponse {
     let cmds = s.plugin_commands.read().await;
     let Some(tx) = cmds.get(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found or not managed locally" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found or not managed locally" })),
+        )
+            .into_response();
     };
     match tx.send(crate::PluginCommand::Restart).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "action": "restart" }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "plugin supervisor not responding" }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "action": "restart" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "plugin supervisor not responding" })),
+        )
+            .into_response(),
     }
 }
 
@@ -4524,7 +4697,11 @@ pub async fn patch_plugin(
 ) -> impl IntoResponse {
     let mut map = s.plugins.write().await;
     let Some(rec) = map.get_mut(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "plugin not found" })),
+        )
+            .into_response();
     };
     if let Some(enabled) = body["enabled"].as_bool() {
         rec.enabled = enabled;
@@ -4554,7 +4731,11 @@ pub async fn get_plugin_config(
     let (config_path, managed) = {
         let map = s.plugins.read().await;
         let Some(rec) = map.get(&id) else {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not found" })),
+            )
+                .into_response();
         };
         (rec.config_path.clone(), rec.managed)
     };
@@ -4578,9 +4759,17 @@ pub async fn get_plugin_config(
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
         }
     } else if !managed {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "remote config not available — management RPC not configured" }))).into_response()
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "remote config not available — management RPC not configured" })),
+        )
+            .into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config path for this plugin" })),
+        )
+            .into_response()
     }
 }
 
@@ -4593,7 +4782,11 @@ pub async fn put_plugin_config(
     let (config_path, managed) = {
         let map = s.plugins.read().await;
         let Some(rec) = map.get(&id) else {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "plugin not found" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not found" })),
+            )
+                .into_response();
         };
         (rec.config_path.clone(), rec.managed)
     };
@@ -4606,16 +4799,32 @@ pub async fn put_plugin_config(
         } else if let Some(config) = body.get("config") {
             let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
                 Ok(v) => v,
-                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid config: {e}") }))).into_response(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": format!("invalid config: {e}") })),
+                    )
+                        .into_response()
+                }
             };
             toml::to_string_pretty(&toml_val).unwrap_or_default()
         } else {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "provide 'config' (JSON object) or 'raw' (TOML string)" }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "provide 'config' (JSON object) or 'raw' (TOML string)" })),
+            )
+                .into_response();
         };
 
         return match std::fs::write(path, &toml_str) {
-            Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("failed to write config: {e}") }))).into_response(),
+            Ok(()) => {
+                (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to write config: {e}") })),
+            )
+                .into_response(),
         };
     }
 
@@ -4627,9 +4836,17 @@ pub async fn put_plugin_config(
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
         }
     } else if !managed {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "remote config not available" }))).into_response()
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "remote config not available" })),
+        )
+            .into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(json!({ "error": "no config path for this plugin" }))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config path for this plugin" })),
+        )
+            .into_response()
     }
 }
 
@@ -5775,7 +5992,13 @@ pub async fn upload_calendar(
         .as_deref()
         .unwrap_or("uploaded_calendar")
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
 
     let ics_path = cal_dir.as_ref().join(format!("{cal_name}.ics"));
@@ -5794,7 +6017,10 @@ pub async fn upload_calendar(
         refresh_hours: None,
     };
     let meta_path = cal_dir.as_ref().join(format!("{cal_name}.meta.json"));
-    let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
+    let _ = std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
 
     // The file watcher will auto-reload, but also upsert into live handle immediately.
     let expansion_days = s.calendar_expansion_days;

@@ -229,10 +229,7 @@ impl StateBridge {
         }
 
         // homecore/plugins/{id}/logs — forward plugin logs to the log stream
-        if parts.len() >= 4
-            && parts[0] == "homecore"
-            && parts[1] == "plugins"
-            && parts[3] == "logs"
+        if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "plugins" && parts[3] == "logs"
         {
             if let Ok(line) = serde_json::from_slice::<LogLine>(payload) {
                 if let Some(ref tx) = self.log_tx {

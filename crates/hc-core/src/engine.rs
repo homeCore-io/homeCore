@@ -246,8 +246,8 @@ impl RuleEngine {
             let live_ids: std::collections::HashSet<Uuid> =
                 live_rules.iter().map(|r| r.id).collect();
 
-            let before = cooldown_map.len() + pause_state.len() + rule_in_flight.len()
-                + fire_history.len();
+            let before =
+                cooldown_map.len() + pause_state.len() + rule_in_flight.len() + fire_history.len();
 
             cooldown_map.retain(|id, _| live_ids.contains(id));
             pause_state.retain(|id, _| live_ids.contains(id));
@@ -257,8 +257,8 @@ impl RuleEngine {
             priv_bools.retain(|(id, _), _| live_ids.contains(id));
             capture_store.retain(|(id, _), _| live_ids.contains(id));
 
-            let after = cooldown_map.len() + pause_state.len() + rule_in_flight.len()
-                + fire_history.len();
+            let after =
+                cooldown_map.len() + pause_state.len() + rule_in_flight.len() + fire_history.len();
             let purged = before.saturating_sub(after);
             if purged > 0 {
                 tracing::debug!(purged, "Purged stale rule state entries after hot-reload");

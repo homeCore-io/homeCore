@@ -102,7 +102,8 @@ async fn supervise(
         }
     }
 
-    // Main supervisor loop.
+    // Main supervisor loop — exits via break/return, not by mutating `running`.
+    #[allow(clippy::while_immutable_condition)]
     while running {
         if shutdown_requested(&shutdown) {
             info!(plugin_id = %entry.id, "Plugin supervisor stopping for shutdown");
@@ -301,10 +302,7 @@ async fn set_status(
     });
 }
 
-async fn record_restart(
-    plugins: &Arc<RwLock<HashMap<String, PluginRecord>>>,
-    plugin_id: &str,
-) {
+async fn record_restart(plugins: &Arc<RwLock<HashMap<String, PluginRecord>>>, plugin_id: &str) {
     let mut map = plugins.write().await;
     if let Some(rec) = map.get_mut(plugin_id) {
         rec.restart_count += 1;

@@ -1,9 +1,9 @@
 //! Glue device: virtual on/off switch.
 
 use super::apply_state_update;
+use crate::EventBus;
 use hc_state::StateStore;
 use hc_types::device::extract_change_from_command_payload;
-use crate::EventBus;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, warn};
@@ -21,17 +21,27 @@ enum SwitchCommand {
 pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str, payload: &[u8]) {
     let value = match serde_json::from_slice::<serde_json::Value>(payload) {
         Ok(v) => v,
-        Err(_) => { warn!(%device_id, "Switch: invalid JSON"); return; }
+        Err(_) => {
+            warn!(%device_id, "Switch: invalid JSON");
+            return;
+        }
     };
     let change = extract_change_from_command_payload(&value).unwrap_or_default();
 
     // Accept both {"command":"on"} and {"on":true} forms.
     let cmd: SwitchCommand = if let Some(on) = value.get("on").and_then(|b| b.as_bool()) {
-        if on { SwitchCommand::On } else { SwitchCommand::Off }
+        if on {
+            SwitchCommand::On
+        } else {
+            SwitchCommand::Off
+        }
     } else {
         match serde_json::from_value(value) {
             Ok(c) => c,
-            Err(e) => { warn!(%device_id, error = %e, "Switch: invalid command"); return; }
+            Err(e) => {
+                warn!(%device_id, error = %e, "Switch: invalid command");
+                return;
+            }
         }
     };
     debug!(%device_id, ?cmd, "Switch command");

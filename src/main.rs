@@ -18,8 +18,8 @@ use hc_state::StateStore;
 use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, EcosystemRouter};
 use ipnet::IpNet;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -716,8 +716,7 @@ async fn main() -> Result<()> {
     let plugin_registry: Arc<RwLock<HashMap<String, hc_api::PluginRecord>>> =
         Arc::new(RwLock::new(HashMap::new()));
     // Per-plugin command channels for start/stop/restart from API handlers.
-    let plugin_commands: hc_api::PluginCommandChannels =
-        Arc::new(RwLock::new(HashMap::new()));
+    let plugin_commands: hc_api::PluginCommandChannels = Arc::new(RwLock::new(HashMap::new()));
 
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
@@ -882,23 +881,28 @@ async fn main() -> Result<()> {
         {
             let mut map = plugin_registry.write().await;
             for p in &config.plugins {
-                map.entry(p.id.clone()).or_insert_with(|| hc_api::PluginRecord {
-                    plugin_id: p.id.clone(),
-                    registered_at: chrono::Utc::now(),
-                    status: if p.enabled { "starting".into() } else { "stopped".into() },
-                    enabled: p.enabled,
-                    managed: true,
-                    config_path: Some(p.config.clone()),
-                    binary_path: Some(p.binary.clone()),
-                    last_heartbeat: None,
-                    last_restart: None,
-                    restart_count: 0,
-                    uptime_started: None,
-                    device_count: 0,
-                    log_level: None,
-                    version: None,
-                    supports_management: false,
-                });
+                map.entry(p.id.clone())
+                    .or_insert_with(|| hc_api::PluginRecord {
+                        plugin_id: p.id.clone(),
+                        registered_at: chrono::Utc::now(),
+                        status: if p.enabled {
+                            "starting".into()
+                        } else {
+                            "stopped".into()
+                        },
+                        enabled: p.enabled,
+                        managed: true,
+                        config_path: Some(p.config.clone()),
+                        binary_path: Some(p.binary.clone()),
+                        last_heartbeat: None,
+                        last_restart: None,
+                        restart_count: 0,
+                        uptime_started: None,
+                        device_count: 0,
+                        log_level: None,
+                        version: None,
+                        supports_management: false,
+                    });
             }
         }
 
@@ -924,7 +928,8 @@ async fn main() -> Result<()> {
                 plugin_commands.clone(),
                 pub_bus.clone(),
                 shutdown_rx.clone(),
-            ).await;
+            )
+            .await;
         }
     };
 
@@ -1078,10 +1083,8 @@ async fn main() -> Result<()> {
             // Small delay to let any in-flight registrations settle.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Ok(devices) = store.list_devices().await {
-                let active_plugins: std::collections::HashSet<String> = devices
-                    .iter()
-                    .map(|d| d.plugin_id.clone())
-                    .collect();
+                let active_plugins: std::collections::HashSet<String> =
+                    devices.iter().map(|d| d.plugin_id.clone()).collect();
                 let mut map = reg.write().await;
                 for rec in map.values_mut() {
                     if rec.status == "starting" && active_plugins.contains(&rec.plugin_id) {

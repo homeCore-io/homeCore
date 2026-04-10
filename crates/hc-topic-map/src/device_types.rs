@@ -74,6 +74,7 @@ impl DeviceTypeRegistry {
     }
 
     /// Parse and resolve from TOML source text.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(toml_src: &str) -> Result<Self> {
         let file: DeviceTypesFile =
             toml::from_str(toml_src).context("Failed to parse device-types.toml")?;

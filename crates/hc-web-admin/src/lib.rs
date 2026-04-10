@@ -21,7 +21,5 @@ use tracing::info;
 pub fn router(dist_path: PathBuf) -> Router {
     let index = dist_path.join("index.html");
     info!(path = %dist_path.display(), "Serving admin UI from static files");
-    Router::new().fallback_service(
-        ServeDir::new(&dist_path).fallback(ServeFile::new(index)),
-    )
+    Router::new().fallback_service(ServeDir::new(&dist_path).fallback(ServeFile::new(index)))
 }

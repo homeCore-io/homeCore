@@ -51,7 +51,8 @@ pub enum PluginCommand {
 }
 
 /// Per-plugin command sender, indexed by plugin_id.
-pub type PluginCommandChannels = Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<PluginCommand>>>>;
+pub type PluginCommandChannels =
+    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<PluginCommand>>>>;
 
 /// Registered plugin record stored in-memory.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -209,23 +210,25 @@ impl AppState {
                             timestamp,
                         }) => {
                             let mut map = plugins_clone.write().await;
-                            let rec = map.entry(plugin_id.clone()).or_insert_with(|| PluginRecord {
-                                plugin_id: plugin_id.clone(),
-                                registered_at: timestamp,
-                                status: "active".into(),
-                                enabled: false,
-                                managed: false,
-                                config_path: None,
-                                binary_path: None,
-                                last_heartbeat: None,
-                                last_restart: None,
-                                restart_count: 0,
-                                uptime_started: None,
-                                device_count: 0,
-                                log_level: None,
-                                version: None,
-                                supports_management: false,
-                            });
+                            let rec =
+                                map.entry(plugin_id.clone())
+                                    .or_insert_with(|| PluginRecord {
+                                        plugin_id: plugin_id.clone(),
+                                        registered_at: timestamp,
+                                        status: "active".into(),
+                                        enabled: false,
+                                        managed: false,
+                                        config_path: None,
+                                        binary_path: None,
+                                        last_heartbeat: None,
+                                        last_restart: None,
+                                        restart_count: 0,
+                                        uptime_started: None,
+                                        device_count: 0,
+                                        log_level: None,
+                                        version: None,
+                                        supports_management: false,
+                                    });
                             rec.status = "active".into();
                             rec.registered_at = timestamp;
                         }
@@ -243,30 +246,37 @@ impl AppState {
                             device_count,
                         }) => {
                             let mut map = plugins_clone.write().await;
-                            let rec = map.entry(plugin_id.clone()).or_insert_with(|| PluginRecord {
-                                plugin_id: plugin_id.clone(),
-                                registered_at: timestamp,
-                                status: "active".into(),
-                                enabled: false,
-                                managed: false,
-                                config_path: None,
-                                binary_path: None,
-                                last_heartbeat: None,
-                                last_restart: None,
-                                restart_count: 0,
-                                uptime_started: None,
-                                device_count: 0,
-                                log_level: None,
-                                version: None,
-                                supports_management: false,
-                            });
+                            let rec =
+                                map.entry(plugin_id.clone())
+                                    .or_insert_with(|| PluginRecord {
+                                        plugin_id: plugin_id.clone(),
+                                        registered_at: timestamp,
+                                        status: "active".into(),
+                                        enabled: false,
+                                        managed: false,
+                                        config_path: None,
+                                        binary_path: None,
+                                        last_heartbeat: None,
+                                        last_restart: None,
+                                        restart_count: 0,
+                                        uptime_started: None,
+                                        device_count: 0,
+                                        log_level: None,
+                                        version: None,
+                                        supports_management: false,
+                                    });
                             rec.last_heartbeat = Some(timestamp);
                             rec.supports_management = true;
-                            if let Some(v) = version { rec.version = Some(v); }
-                            if let Some(u) = uptime_secs {
-                                rec.uptime_started = Some(timestamp - chrono::Duration::seconds(u as i64));
+                            if let Some(v) = version {
+                                rec.version = Some(v);
                             }
-                            if let Some(d) = device_count { rec.device_count = d; }
+                            if let Some(u) = uptime_secs {
+                                rec.uptime_started =
+                                    Some(timestamp - chrono::Duration::seconds(u as i64));
+                            }
+                            if let Some(d) = device_count {
+                                rec.device_count = d;
+                            }
                             // If plugin was offline, mark it active again.
                             if rec.status == "offline" {
                                 rec.status = "active".into();
@@ -293,18 +303,24 @@ impl AppState {
                     let timeout = chrono::Duration::seconds(90);
                     let mut map = plugins_sweep.write().await;
                     for rec in map.values_mut() {
-                        if !rec.supports_management { continue; }
-                        if rec.status == "stopped" { continue; }
+                        if !rec.supports_management {
+                            continue;
+                        }
+                        if rec.status == "stopped" {
+                            continue;
+                        }
                         if let Some(hb) = rec.last_heartbeat {
                             if now - hb > timeout && rec.status != "offline" {
                                 let prev = rec.status.clone();
                                 rec.status = "offline".into();
-                                let _ = bus_sweep.publish(hc_types::event::Event::PluginStatusChanged {
-                                    timestamp: now,
-                                    plugin_id: rec.plugin_id.clone(),
-                                    status: "offline".into(),
-                                    previous_status: prev,
-                                });
+                                let _ = bus_sweep.publish(
+                                    hc_types::event::Event::PluginStatusChanged {
+                                        timestamp: now,
+                                        plugin_id: rec.plugin_id.clone(),
+                                        status: "offline".into(),
+                                        previous_status: prev,
+                                    },
+                                );
                             }
                         }
                     }
@@ -604,7 +620,9 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/plugins", get(handlers::list_plugins))
         .route(
             "/plugins/:id",
-            get(handlers::get_plugin).delete(handlers::deregister_plugin).patch(handlers::patch_plugin),
+            get(handlers::get_plugin)
+                .delete(handlers::deregister_plugin)
+                .patch(handlers::patch_plugin),
         )
         .route("/plugins/:id/start", post(handlers::start_plugin))
         .route("/plugins/:id/stop", post(handlers::stop_plugin))
@@ -638,7 +656,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/system/status", get(handlers::system_status))
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/restore", post(backup::restore_handler))
-        .route("/system/log-level", get(handlers::get_log_level).put(handlers::set_log_level))
+        .route(
+            "/system/log-level",
+            get(handlers::get_log_level).put(handlers::set_log_level),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

@@ -215,8 +215,7 @@ fn init_inner(
     let global_filter: tracing_subscriber::EnvFilter = initial_directives
         .parse()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let (reload_layer, reload_handle) =
-        tracing_subscriber::reload::Layer::new(global_filter);
+    let (reload_layer, reload_handle) = tracing_subscriber::reload::Layer::new(global_filter);
 
     // ── stderr ────────────────────────────────────────────────────────────
     if config.stderr.enabled {

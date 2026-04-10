@@ -29,11 +29,17 @@ pub const BUTTON_ID_PREFIX: &str = "button_";
 pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str, payload: &[u8]) {
     let value: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
-        Err(_) => { warn!(%device_id, "Button: invalid JSON"); return; }
+        Err(_) => {
+            warn!(%device_id, "Button: invalid JSON");
+            return;
+        }
     };
     let change = extract_change_from_command_payload(&value).unwrap_or_default();
 
-    let cmd = value.get("command").and_then(|v| v.as_str()).unwrap_or("press");
+    let cmd = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("press");
     if cmd != "press" {
         warn!(%device_id, %cmd, "Button: unknown command (only 'press' supported)");
         return;
@@ -45,5 +51,6 @@ pub async fn handle_cmd(state: &StateStore, pub_bus: &EventBus, device_id: &str,
     let now = Utc::now().to_rfc3339();
     apply_state_update(state, pub_bus, device_id, change, |attrs| {
         attrs.insert("last_pressed".into(), json!(now));
-    }).await;
+    })
+    .await;
 }

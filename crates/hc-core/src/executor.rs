@@ -632,13 +632,8 @@ fn run_single_action(
                     state
                 };
                 debug!(device = %device, payload = %actual_state, track_event_value, "action: SetDeviceState");
-                publish_device_command(
-                    &ctx,
-                    &device_id,
-                    actual_state,
-                    rule_change(&ctx, "rule"),
-                )
-                .await?;
+                publish_device_command(&ctx, &device_id, actual_state, rule_change(&ctx, "rule"))
+                    .await?;
                 debug!(device = %device, "action: SetDeviceState — published");
             }
 
@@ -1258,13 +1253,8 @@ fn run_single_action(
                     }
                     Some(state) => {
                         info!(rule = %ctx.rule_name, device = %device, state = %state, "action: SetDeviceStatePerMode — applying");
-                        publish_device_command(
-                            &ctx,
-                            &device_id,
-                            state,
-                            rule_change(&ctx, "rule"),
-                        )
-                        .await?;
+                        publish_device_command(&ctx, &device_id, state, rule_change(&ctx, "rule"))
+                            .await?;
                     }
                 }
             }
@@ -1369,13 +1359,7 @@ fn run_single_action(
                     ModeCommand::Toggle => serde_json::json!({ "command": "toggle" }),
                 };
                 info!(rule = %ctx.rule_name, mode_id, command = ?command, "action: SetMode");
-                publish_device_command(
-                    &ctx,
-                    &mode_id,
-                    payload,
-                    rule_change(&ctx, "rule"),
-                )
-                .await?;
+                publish_device_command(&ctx, &mode_id, payload, rule_change(&ctx, "rule")).await?;
             }
 
             // ── ActivateScenePerMode ──────────────────────────────────────────────
@@ -1551,13 +1535,8 @@ fn run_single_action(
                         warn!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — no publish handle");
                         break;
                     }
-                    publish_device_command(
-                        &ctx,
-                        &device_id,
-                        state,
-                        rule_change(&ctx, "rule"),
-                    )
-                    .await?;
+                    publish_device_command(&ctx, &device_id, state, rule_change(&ctx, "rule"))
+                        .await?;
                 }
                 debug!(rule = %ctx.rule_name, device = %device, "action: FadeDevice — complete");
             }

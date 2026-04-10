@@ -513,9 +513,7 @@ impl TimerManager {
             .chain(previous.keys().filter(|k| !current.contains_key(*k)))
             .cloned()
             .collect();
-        let remaining = current
-            .get("remaining_secs")
-            .and_then(|v| v.as_u64());
+        let remaining = current.get("remaining_secs").and_then(|v| v.as_u64());
 
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),

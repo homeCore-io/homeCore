@@ -136,7 +136,10 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
         let mut rule_files: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "ron" || ext == "toml"))
+            .filter(|p| {
+                p.extension()
+                    .map_or(false, |ext| ext == "ron" || ext == "toml")
+            })
             .collect();
         rule_files.sort();
         for path in rule_files {
@@ -247,13 +250,10 @@ pub async fn restore_handler(
 }
 
 /// Validate and extract a backup ZIP, copying files to their canonical locations.
-fn extract_restore(
-    paths: &BackupPaths,
-    zip_bytes: &[u8],
-) -> anyhow::Result<serde_json::Value> {
+fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
     let reader = Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| anyhow::anyhow!("invalid ZIP archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| anyhow::anyhow!("invalid ZIP archive: {e}"))?;
 
     let mut restored = Vec::new();
     let mut skipped = Vec::new();
@@ -271,10 +271,7 @@ fn extract_restore(
             "state.redb" => Some(paths.state_db_path.clone()),
             "history.db" => Some(paths.history_db_path.clone()),
             "config/homecore.toml" => Some(paths.config_path.clone()),
-            "config/modes.toml" => paths
-                .config_path
-                .parent()
-                .map(|p| p.join("modes.toml")),
+            "config/modes.toml" => paths.config_path.parent().map(|p| p.join("modes.toml")),
             "config/mode_definitions.json" => paths
                 .config_path
                 .parent()

@@ -98,7 +98,14 @@ pub(crate) async fn apply_state_update(
         return;
     }
 
-    publish_state_change(pub_bus, device_id, &dev.name, previous, dev.attributes, change);
+    publish_state_change(
+        pub_bus,
+        device_id,
+        &dev.name,
+        previous,
+        dev.attributes,
+        change,
+    );
 }
 
 /// Parse a command topic: `homecore/devices/{id}/cmd` → Some(device_id).
@@ -154,16 +161,25 @@ impl GlueManager {
             let parent = path.parent().unwrap_or(path).to_path_buf();
             let tx = reload_tx.clone();
             let filename = path.file_name().map(|f| f.to_os_string());
-            let mut watcher = notify::recommended_watcher(move |res: notify::Result<NotifyEvent>| {
-                let Ok(event) = res else { return };
-                let relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
-                    && filename.as_ref().map(|f| event.paths.iter().any(|p| p.file_name() == Some(f))).unwrap_or(false);
-                if relevant {
-                    let _ = tx.blocking_send(());
-                }
-            }).map_err(|e| warn!(error = %e, "GlueManager: watcher failed")).ok()?;
-            watcher.watch(&parent, RecursiveMode::NonRecursive)
-                .map_err(|e| warn!(error = %e, "GlueManager: watch failed")).ok()?;
+            let mut watcher =
+                notify::recommended_watcher(move |res: notify::Result<NotifyEvent>| {
+                    let Ok(event) = res else { return };
+                    let relevant =
+                        matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+                            && filename
+                                .as_ref()
+                                .map(|f| event.paths.iter().any(|p| p.file_name() == Some(f)))
+                                .unwrap_or(false);
+                    if relevant {
+                        let _ = tx.blocking_send(());
+                    }
+                })
+                .map_err(|e| warn!(error = %e, "GlueManager: watcher failed"))
+                .ok()?;
+            watcher
+                .watch(&parent, RecursiveMode::NonRecursive)
+                .map_err(|e| warn!(error = %e, "GlueManager: watch failed"))
+                .ok()?;
             info!(dir = %parent.display(), "Glue hot-reload watcher active");
             Some(watcher)
         });
@@ -242,7 +258,9 @@ impl GlueManager {
 
         for dev in &devices {
             if dev.device_id.starts_with(group::GROUP_ID_PREFIX) {
-                let is_member = dev.attributes.get("member_ids")
+                let is_member = dev
+                    .attributes
+                    .get("member_ids")
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().any(|v| v.as_str() == Some(changed_device_id)))
                     .unwrap_or(false);
@@ -250,8 +268,11 @@ impl GlueManager {
                     group::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
                 }
             } else if dev.device_id.starts_with(threshold::THRESHOLD_ID_PREFIX) {
-                let is_source = dev.attributes.get("source_device_id")
-                    .and_then(|v| v.as_str()) == Some(changed_device_id);
+                let is_source = dev
+                    .attributes
+                    .get("source_device_id")
+                    .and_then(|v| v.as_str())
+                    == Some(changed_device_id);
                 if is_source {
                     threshold::recalculate(&self.state, &self.pub_bus, &dev.device_id).await;
                 }
@@ -281,7 +302,10 @@ impl GlueManager {
 pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
     let devices = match store.list_devices().await {
         Ok(d) => d,
-        Err(e) => { warn!(error = %e, "Glue migration: failed to list devices"); return; }
+        Err(e) => {
+            warn!(error = %e, "Glue migration: failed to list devices");
+            return;
+        }
     };
 
     let mut migrated = 0u32;
@@ -300,8 +324,16 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
             && (dev.plugin_id == "core.glue" || dev.plugin_id == "core.timer")
         {
             let prefixes = &[
-                "switch_", "timer_", "counter_", "number_", "select_",
-                "text_", "button_", "datetime_", "group_", "threshold_",
+                "switch_",
+                "timer_",
+                "counter_",
+                "number_",
+                "select_",
+                "text_",
+                "button_",
+                "datetime_",
+                "group_",
+                "threshold_",
                 "schedule_",
             ];
             for prefix in prefixes {
@@ -313,7 +345,9 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
             }
         }
 
-        if !changed { continue; }
+        if !changed {
+            continue;
+        }
 
         if let Err(e) = store.upsert_device(&dev).await {
             warn!(device_id = %dev.device_id, error = %e, "Glue migration: failed to update device");
@@ -323,6 +357,9 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
     }
 
     if migrated > 0 {
-        info!(migrated, "Glue migration: updated legacy devices (plugin_id / device_type)");
+        info!(
+            migrated,
+            "Glue migration: updated legacy devices (plugin_id / device_type)"
+        );
     }
 }

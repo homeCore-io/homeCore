@@ -27,8 +27,12 @@ pub const SCHEDULE_ID_PREFIX: &str = "schedule_";
 
 fn weekday_name(wd: Weekday) -> &'static str {
     match wd {
-        Weekday::Mon => "Mon", Weekday::Tue => "Tue", Weekday::Wed => "Wed",
-        Weekday::Thu => "Thu", Weekday::Fri => "Fri", Weekday::Sat => "Sat",
+        Weekday::Mon => "Mon",
+        Weekday::Tue => "Tue",
+        Weekday::Wed => "Wed",
+        Weekday::Thu => "Thu",
+        Weekday::Fri => "Fri",
+        Weekday::Sat => "Sat",
         Weekday::Sun => "Sun",
     }
 }
@@ -45,10 +49,15 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
     let dev = match state.get_device(device_id).await {
         Ok(Some(d)) => d,
         Ok(None) => return,
-        Err(e) => { warn!(%device_id, error = %e, "Schedule: read failed"); return; }
+        Err(e) => {
+            warn!(%device_id, error = %e, "Schedule: read failed");
+            return;
+        }
     };
 
-    let blocks = dev.attributes.get("blocks")
+    let blocks = dev
+        .attributes
+        .get("blocks")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -59,11 +68,14 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
 
     let mut is_active = false;
     for block in &blocks {
-        let days = block["days"].as_array()
+        let days = block["days"]
+            .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
 
-        if !days.iter().any(|d| *d == today) { continue; }
+        if !days.iter().any(|d| *d == today) {
+            continue;
+        }
 
         let start = block["start"].as_str().and_then(parse_hm);
         let end = block["end"].as_str().and_then(parse_hm);
@@ -88,14 +100,19 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
         }
     }
 
-    let currently_active = dev.attributes.get("active")
+    let currently_active = dev
+        .attributes
+        .get("active")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    if is_active == currently_active { return; }
+    if is_active == currently_active {
+        return;
+    }
 
     let change = DeviceChange::homecore("schedule_tick");
     apply_state_update(state, pub_bus, device_id, change, |attrs| {
         attrs.insert("active".into(), json!(is_active));
-    }).await;
+    })
+    .await;
 }

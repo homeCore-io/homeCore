@@ -132,8 +132,7 @@ impl RuleFileStore {
         let new_path = self.dir.join(format!("{new_slug}.ron"));
 
         let cfg = ron::ser::PrettyConfig::default().struct_names(true);
-        let content =
-            ron::ser::to_string_pretty(rule, cfg).context("serializing rule to RON")?;
+        let content = ron::ser::to_string_pretty(rule, cfg).context("serializing rule to RON")?;
 
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating rules directory {}", self.dir.display()))?;
