@@ -23,6 +23,7 @@
 
 use crate::auth_middleware::whitelist_claims;
 use crate::event_log::{event_device_id, event_type_name};
+use hc_types::event::Event;
 use crate::AppState;
 use axum::{
     extract::{
@@ -152,6 +153,11 @@ async fn handle_socket(
     loop {
         match rx.recv().await {
             Ok(event) => {
+                // Skip noisy heartbeats unless the client explicitly asked for them.
+                if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
+                    continue;
+                }
+
                 // Apply device_id filter.
                 if let Some(ref wanted_device) = device_filter {
                     if !event_device_id(&event)

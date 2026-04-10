@@ -3,8 +3,8 @@
 //! Stores the last `capacity` events from the event bus as JSON values.
 //! Shared between the background subscriber task and the `GET /events` handler.
 //!
-//! Events excluded from the log: `MqttMessage` (high-frequency, low value for
-//! the API consumer; use the WebSocket stream if raw MQTT visibility is needed).
+//! Events excluded from the log: `MqttMessage` and `PluginHeartbeat`
+//! (high-frequency, low value for the API consumer).
 
 use hc_types::event::Event;
 use serde_json::Value;
@@ -57,7 +57,9 @@ impl EventLog {
         // Skip high-frequency / low-value events.
         if matches!(
             event,
-            Event::MqttMessage { .. } | Event::RuleEvaluationFailed { .. }
+            Event::MqttMessage { .. }
+                | Event::RuleEvaluationFailed { .. }
+                | Event::PluginHeartbeat { .. }
         ) {
             return;
         }
