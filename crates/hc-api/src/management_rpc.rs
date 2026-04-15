@@ -148,4 +148,17 @@ impl ManagementRpc {
         self.request(plugin_id, "set_log_level", Some(json!({ "level": level })))
             .await
     }
+
+    /// Send an arbitrary plugin-specific command.  `params` is merged into the
+    /// command envelope (alongside `action` + `request_id`).  Used by the
+    /// generic `POST /plugins/{id}/command` endpoint.
+    pub async fn send_command(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let extra = if params.is_object() { Some(params) } else { None };
+        self.request(plugin_id, action, extra).await
+    }
 }

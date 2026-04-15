@@ -632,6 +632,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_plugin_config).put(handlers::put_plugin_config),
         )
         .route(
+            "/plugins/:id/command",
+            post(handlers::post_plugin_command),
+        )
+        .route(
             "/plugins/matter/commission",
             post(handlers::matter_commission),
         )

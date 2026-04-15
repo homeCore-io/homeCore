@@ -4850,6 +4850,61 @@ pub async fn put_plugin_config(
     }
 }
 
+/// `POST /plugins/{id}/command` — send a plugin-specific management command.
+///
+/// Body: `{ "action": "...", ...extra fields }`.  Forwarded verbatim (plus a
+/// generated `request_id`) to the plugin via the management RPC.  Used for
+/// plugin-defined actions beyond the built-in `get_config`/`set_config`/
+/// `set_log_level` set (e.g. yolink's `rescan_devices`).
+pub async fn post_plugin_command(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(action) = body["action"].as_str().map(str::to_string) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing 'action' field" })),
+        )
+            .into_response();
+    };
+
+    {
+        let map = s.plugins.read().await;
+        if !map.contains_key(&id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not found" })),
+            )
+                .into_response();
+        }
+    }
+
+    let Some(ref rpc) = s.management_rpc else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "management RPC not configured" })),
+        )
+            .into_response();
+    };
+
+    // Forward all fields except `action` as params.
+    let mut params = body.clone();
+    if let Some(obj) = params.as_object_mut() {
+        obj.remove("action");
+    }
+
+    match rpc.send_command(&id, &action, params).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn matter_commission(
     State(s): State<AppState>,
     PluginsWrite(claims): PluginsWrite,
