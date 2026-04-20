@@ -176,7 +176,10 @@ impl StateBridge {
         }
 
         // --- Canonical HomeCore schema handling ---
-        let parts: Vec<&str> = topic.splitn(4, '/').collect();
+        // NOTE: use `split` (unlimited) rather than `splitn(4, ...)`, since
+        // 5-part topics like `homecore/plugins/{id}/manage/response` and
+        // `/manage/cmd` need parts[4] to match correctly.
+        let parts: Vec<&str> = topic.split('/').collect();
 
         // homecore/devices/{id}/state | state/partial | availability | schema | cmd
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "devices" {
