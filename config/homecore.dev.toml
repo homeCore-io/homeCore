@@ -186,6 +186,12 @@ config  = "../plugins/hc-isy/config/config.dev.toml"
 enabled = false
 
 [[plugins]]
+id      = "plugin.thermostat"
+binary  = "../plugins/hc-thermostat/target/debug/hc-thermostat"
+config  = "../plugins/hc-thermostat/config/config.dev.toml"
+enabled = true
+
+[[plugins]]
 id      = "plugin.matter"
 binary  = "../plugins/hc-matter/target/debug/hc-matter"
 config  = "../plugins/hc-matter/config/config.dev.toml"

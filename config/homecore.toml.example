@@ -67,6 +67,22 @@ port = 1883
 # allow_pub = ["homecore/devices/zigbee_+/state", "homecore/plugins/zigbee/+"]
 # allow_sub = ["homecore/devices/zigbee_+/cmd"]
 
+# Cross-device consumer plugin (e.g. hc-thermostat) — needs to read state from
+# OTHER plugins' devices and publish commands to them. Broader ACL required:
+# [[broker.clients]]
+# id       = "plugin.thermostat"
+# password = "plugin-thermostat-password"
+# allow_pub = [
+#     "homecore/devices/thermostat_+/state",       # own thermostat state
+#     "homecore/devices/+/cmd",                    # commands to any actuator
+#     "homecore/plugins/plugin.thermostat/+",      # heartbeat, logs
+# ]
+# allow_sub = [
+#     "homecore/devices/thermostat_+/cmd",         # own command topic
+#     "homecore/devices/+/state",                  # read all sensors
+#     "homecore/plugins/plugin.thermostat/manage/cmd",
+# ]
+
 # ---------------------------------------------------------------------------
 # Location  (used for sunrise/sunset calculations)
 # ---------------------------------------------------------------------------

@@ -40,3 +40,4 @@ name = "Any Deck Door Open"
 type = "switch"
 id   = "switch_auto_garage_door"
 name = "Auto Garage Door"
+

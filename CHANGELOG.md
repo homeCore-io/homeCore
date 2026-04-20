@@ -2,6 +2,37 @@
 
 All notable changes to homeCore are documented in this file.
 
+## Unreleased
+
+### Added
+
+- **hc-thermostat plugin** — virtual thermostat with multi-sensor aggregation,
+  configurable hysteresis, mode control (heat/cool/off), short-cycle protection
+  (min_on/min_off), and automatic actuator commanding. Devices registered under
+  `plugin.thermostat` with `device_type = "thermostat"`. Runtime config via MQTT
+  commands (setpoint, mode, hysteresis, sensors, actuator, aggregation,
+  short-cycle), persisted back to `config.toml`. Management commands:
+  `recalculate_all`, `reload_config`, `add_thermostat`, `remove_thermostat`,
+  `get_thermostats`.
+- **SDK: cross-device state subscription** —
+  `PluginClient::subscribe_state()` (and `DevicePublisher` counterpart) +
+  `run_managed_with_state()` for plugins that consume state from other
+  plugins' devices. Existing `run`/`run_managed` unchanged.
+- **Glue: `override_from_config` flag** — per-entry toggle that re-applies
+  config-shaped attributes to existing glue devices on load while preserving
+  runtime state (counts, timer state, etc).
+
+### Changed
+
+- Leptos admin: dedicated `ThermostatCard` component on device detail pages
+  (big temp readout, setpoint stepper, mode segmented control, hysteresis
+  slider, diagnostics banner, collapsible Configuration section with sensor
+  multi-select + actuator picker, 1h/6h/24h/7d history chart with setpoint
+  overlay and actuator-on shading, delete flow).
+- Plugin detail page gains a "Thermostat commands" panel for
+  `plugin.thermostat` with Recalculate all / Reload config / create-thermostat
+  wizard actions.
+
 ## 0.1.0 — 2026-04-09
 
 Initial release. Runs a house, not yet packaged for general use.

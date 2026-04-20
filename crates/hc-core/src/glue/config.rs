@@ -71,6 +71,14 @@ struct GlueEntry {
     id: String,
     name: String,
 
+    /// When true, re-apply this entry's config fields to the device even if it
+    /// already exists in the store. Runtime state (counts, timer state, call_for, etc.)
+    /// is preserved — only config-shaped attributes are overwritten.
+    ///
+    /// When false/omitted, existing devices are skipped entirely (seed-only).
+    #[serde(default)]
+    override_from_config: bool,
+
     // Counter
     #[serde(default)]
     step: Option<i64>,
@@ -141,6 +149,7 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
         toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
 
     let mut created = 0u32;
+    let mut updated = 0u32;
     let mut skipped = 0u32;
 
     for entry in &config.glue {
@@ -169,11 +178,16 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
             format!("{prefix}{}", entry.id)
         };
 
-        // Skip if device already exists.
-        if let Ok(Some(_)) = store.get_device(&device_id).await {
-            skipped += 1;
-            continue;
-        }
+        // If device exists and override is not requested, skip.
+        let existing = store.get_device(&device_id).await.ok().flatten();
+        let mode = match (&existing, entry.override_from_config) {
+            (Some(_), false) => {
+                skipped += 1;
+                continue;
+            }
+            (Some(_), true) => SeedMode::Override,
+            (None, _) => SeedMode::Create,
+        };
 
         let mut dev = DeviceState::new(&device_id, &entry.name, GLUE_PLUGIN_ID);
         dev.device_type = Some(entry.glue_type.clone());
@@ -277,17 +291,61 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
             _ => {}
         }
 
+        // Preserve runtime attributes from the existing device when in Override mode.
+        // The type-specific match above seeded config + runtime defaults; we want to
+        // keep the live runtime values (counts, call_for, timer state, etc.) while
+        // replacing the config-shaped fields.
+        if let (SeedMode::Override, Some(old)) = (mode, existing.as_ref()) {
+            for key in runtime_keys_for(entry.glue_type.as_str()) {
+                if let Some(v) = old.attributes.get(*key) {
+                    dev.attributes.insert((*key).to_string(), v.clone());
+                }
+            }
+        }
+
+        let is_override = matches!(mode, SeedMode::Override);
         match store.upsert_device(&dev).await {
             Ok(_) => {
-                info!(device_id = %device_id, name = %entry.name, r#type = %entry.glue_type, "Glue device created from config");
-                created += 1;
+                if is_override {
+                    info!(device_id = %device_id, name = %entry.name, r#type = %entry.glue_type, "Glue device config overridden");
+                    updated += 1;
+                } else {
+                    info!(device_id = %device_id, name = %entry.name, r#type = %entry.glue_type, "Glue device created from config");
+                    created += 1;
+                }
             }
             Err(e) => {
-                warn!(device_id = %device_id, error = %e, "Failed to create glue device from config")
+                warn!(device_id = %device_id, error = %e, "Failed to write glue device from config")
             }
         }
     }
 
-    info!(created, skipped, path = %path.display(), "Glue config loaded");
+    info!(created, updated, skipped, path = %path.display(), "Glue config loaded");
     Ok(())
+}
+
+#[derive(Copy, Clone)]
+enum SeedMode {
+    Create,
+    Override,
+}
+
+/// Attribute keys considered "runtime state" per glue type. These are preserved
+/// when `override_from_config = true` so live counts, timer states, thermostat
+/// call_for, etc. survive a config edit.
+fn runtime_keys_for(glue_type: &str) -> &'static [&'static str] {
+    match glue_type {
+        "switch" => &["on"],
+        "timer" => &["state", "duration_secs", "remaining_secs", "started_at", "repeat"],
+        "counter" => &["count"],
+        "number" => &["value"],
+        "select" => &["selected"],
+        "text" => &["value"],
+        "button" => &["last_pressed"],
+        "datetime" => &["value"],
+        "group" => &["on", "active_count", "member_count"],
+        "threshold" => &["above", "source_value"],
+        "schedule" => &["active"],
+        _ => &[],
+    }
 }

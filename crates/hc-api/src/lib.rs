@@ -277,8 +277,11 @@ impl AppState {
                             if let Some(d) = device_count {
                                 rec.device_count = d;
                             }
-                            // If plugin was offline, mark it active again.
-                            if rec.status == "offline" {
+                            // A heartbeat means the plugin is alive. Promote from
+                            // "starting" or "offline" to "active". (A zero-device
+                            // plugin never publishes a register message, so this
+                            // is the only path out of "starting" for those.)
+                            if rec.status == "offline" || rec.status == "starting" {
                                 rec.status = "active".into();
                             }
                         }
