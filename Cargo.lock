@@ -1320,6 +1320,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "chrono",
+ "hc-api-types",
  "hc-auth",
  "hc-core",
  "hc-logging",
@@ -1344,6 +1345,16 @@ dependencies = [
  "utoipa",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "hc-api-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hc-auth",
+ "serde",
+ "uuid",
 ]
 
 [[package]]

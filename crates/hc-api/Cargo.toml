@@ -18,6 +18,7 @@ hc-core    = { version = "0.1.0", path = "../hc-core" }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 hc-auth = { version = "0.1.0", path = "../hc-auth" }
+hc-api-types = { path = "../hc-api-types" }
 chrono = { workspace = true, features = ["serde"] }
 hc-mqtt-client = { version = "0.1.0", path = "../hc-mqtt-client" }
 hc-scripting = { version = "0.1.0", path = "../hc-scripting" }

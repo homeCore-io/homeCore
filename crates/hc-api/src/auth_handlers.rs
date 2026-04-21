@@ -6,8 +6,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use hc_auth::{hash_password, verify_password, Role, User, UserInfo};
-use serde::Deserialize;
+use hc_api_types::auth::{
+    ChangePasswordRequest, CreateUserRequest, LoginRequest, LoginResponse, SetRoleRequest,
+};
+use hc_auth::{hash_password, verify_password, User, UserInfo};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -15,15 +17,12 @@ use crate::{auth_middleware::AuthUser, AppState};
 
 // ---------- Login ----------
 
-#[derive(Deserialize)]
-pub struct LoginBody {
-    pub username: String,
-    pub password: String,
-}
-
 /// `POST /api/v1/auth/login`
 /// Returns a signed JWT on success.
-pub async fn login(State(s): State<AppState>, Json(body): Json<LoginBody>) -> impl IntoResponse {
+pub async fn login(
+    State(s): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> impl IntoResponse {
     // Fetch user record.
     let user = match s.store.get_user_by_username(&body.username).await {
         Ok(Some(u)) => u,
@@ -70,16 +69,13 @@ pub async fn login(State(s): State<AppState>, Json(body): Json<LoginBody>) -> im
     match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "token": token,
-                    "token_type": "Bearer",
-                    "expires_in": expires_in,
-                    "user": UserInfo::from(&user),
-                })),
-            )
-                .into_response()
+            let body = LoginResponse {
+                token,
+                token_type: "Bearer".into(),
+                expires_in,
+                user: UserInfo::from(&user),
+            };
+            (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -115,18 +111,12 @@ pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl I
 
 // ---------- Change password ----------
 
-#[derive(Deserialize)]
-pub struct ChangePasswordBody {
-    pub current_password: String,
-    pub new_password: String,
-}
-
 /// `POST /api/v1/auth/change-password`
 /// Authenticated users can change their own password.
 pub async fn change_password(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
-    Json(body): Json<ChangePasswordBody>,
+    Json(body): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
     if body.new_password.len() < 8 {
         return (
@@ -212,18 +202,11 @@ pub async fn change_password(
 
 // ---------- User management (admin only) ----------
 
-#[derive(Deserialize)]
-pub struct CreateUserBody {
-    pub username: String,
-    pub password: String,
-    pub role: Role,
-}
-
 /// `POST /api/v1/auth/users` — admin only
 pub async fn create_user(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
-    Json(body): Json<CreateUserBody>,
+    Json(body): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
         return (
@@ -357,16 +340,11 @@ pub async fn delete_user(
 }
 
 /// `PATCH /api/v1/auth/users/{id}/role` — admin only
-#[derive(Deserialize)]
-pub struct SetRoleBody {
-    pub role: Role,
-}
-
 pub async fn set_user_role(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
     Path(id): Path<Uuid>,
-    Json(body): Json<SetRoleBody>,
+    Json(body): Json<SetRoleRequest>,
 ) -> impl IntoResponse {
     if !claims.is_admin() {
         return (

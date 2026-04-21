@@ -1,0 +1,13 @@
+[package]
+name = "hc-api-types"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Shared request/response types for the homeCore REST API"
+repository = "https://github.com/homeCore-io/homeCore"
+
+[dependencies]
+hc-auth = { path = "../hc-auth" }
+serde   = { workspace = true }
+uuid    = { workspace = true }
+chrono  = { workspace = true }

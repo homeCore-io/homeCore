@@ -18,6 +18,7 @@ members = [
     "crates/hc-api",
     "crates/hc-web-admin",
     "crates/hc-auth",
+    "crates/hc-api-types",
     "crates/hc-scripting",
     "crates/hc-notify",
     "crates/hc-logging",

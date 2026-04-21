@@ -100,7 +100,10 @@ fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
 // ---------- Health ----------
 
 pub async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+    Json(hc_api_types::health::HealthResponse {
+        status: "ok".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    })
 }
 
 // ---------- System status ----------
