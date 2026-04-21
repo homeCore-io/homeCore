@@ -1,9 +1,11 @@
 //! JWT issuance and validation (HS256).
 
+use crate::actor::Actor;
 use crate::user::Role;
 use anyhow::{anyhow, Context, Result};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Claims embedded in a HomeCore JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,11 @@ pub struct Claims {
     pub role: Role,
     /// Scopes granted by the role.
     pub scopes: Vec<String>,
+    /// Who is making this request. `None` on wire = old token pre-dating
+    /// the Actor refactor; `Claims::ensure_actor` synthesises a `User`
+    /// variant from `uid`/`sub` on first access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<Actor>,
 }
 
 impl Claims {
@@ -27,6 +34,20 @@ impl Claims {
 
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
+    }
+
+    /// Return the Actor for this token, synthesising a `User` from `uid`/`sub`
+    /// if the token predates the Actor refactor. Tokens issued after Phase A
+    /// always include the field natively.
+    pub fn actor(&self) -> Actor {
+        if let Some(a) = &self.actor {
+            return a.clone();
+        }
+        let uid = Uuid::parse_str(&self.uid).unwrap_or(Uuid::nil());
+        Actor::User {
+            uid,
+            username: self.sub.clone(),
+        }
     }
 }
 
@@ -59,12 +80,17 @@ impl JwtService {
             .unwrap()
             .as_secs()
             + self.expiry_hours * 3600;
+        let actor_uid = Uuid::parse_str(uid).unwrap_or(Uuid::nil());
         let claims = Claims {
             sub: username.to_string(),
             uid: uid.to_string(),
             exp,
             scopes: role.scopes(),
             role,
+            actor: Some(Actor::User {
+                uid: actor_uid,
+                username: username.to_string(),
+            }),
         };
         encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
             .context("JWT encoding failed")
@@ -144,6 +170,7 @@ mod tests {
             exp: 1, // way in the past
             role: Role::Admin,
             scopes: Role::Admin.scopes(),
+            actor: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

@@ -119,6 +119,10 @@ pub fn whitelist_claims() -> Claims {
         exp: u64::MAX,
         role: Role::Admin,
         scopes: Role::Admin.scopes(),
+        // CIDR whitelist bypass predates the Actor refactor and has no
+        // meaningful user identity; LocalAdmin with peer_uid=None captures
+        // "trusted transport, no known principal" for audit purposes.
+        actor: Some(hc_auth::Actor::LocalAdmin { peer_uid: None }),
     }
 }
 
@@ -394,6 +398,7 @@ mod tests {
             exp,
             role: hc_auth::user::Role::ReadOnly,
             scopes: vec![], // no scopes
+            actor: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -436,6 +441,7 @@ mod tests {
             exp,
             role: hc_auth::user::Role::ReadOnly,
             scopes: vec!["devices:read".into()],
+            actor: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

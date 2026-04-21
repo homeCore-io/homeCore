@@ -6337,6 +6337,7 @@ mod tests {
             exp: u64::MAX,
             role,
             scopes: role.scopes(),
+            actor: None,
         }
     }
 

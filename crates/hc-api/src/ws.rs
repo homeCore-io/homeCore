@@ -262,6 +262,7 @@ mod tests {
             exp: 1, // way in the past
             role: Role::User,
             scopes: Role::User.scopes(),
+            actor: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
