@@ -1,6 +1,7 @@
 //! `hc-auth` — multi-user authentication and authorisation for HomeCore.
 
 pub mod actor;
+pub mod api_key;
 pub mod jwt;
 pub mod mqtt_creds;
 pub mod password;

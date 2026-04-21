@@ -29,7 +29,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use hc_auth::{Claims, Role};
+use hc_auth::api_key::{self, API_KEY_PREFIX};
+use hc_auth::{Actor, Claims, Role};
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr};
 
@@ -60,6 +61,18 @@ pub async fn require_auth(
         .map(|t| t.to_string());
 
     if let Some(token) = bearer_token {
+        // API key path — `hc_sk_...` tokens are validated against the
+        // api_keys table, not the JWT signing secret.
+        if let Some(body) = token.strip_prefix(API_KEY_PREFIX) {
+            match verify_api_key(&state, &token, body).await {
+                Ok(claims) => {
+                    request.extensions_mut().insert(claims);
+                    return next.run(request).await;
+                }
+                Err(resp) => return resp,
+            }
+        }
+
         match state.jwt.validate(&token) {
             Ok(claims) => {
                 request.extensions_mut().insert(claims);
@@ -108,6 +121,88 @@ pub async fn require_auth(
         Json(json!({ "error": "missing or malformed Authorization header" })),
     )
         .into_response()
+}
+
+/// Validate a bearer token with the `hc_sk_` prefix against the api_keys
+/// store. On success, returns synthetic `Claims` carrying the API key's
+/// owner identity and granted scopes.
+async fn verify_api_key(
+    state: &AppState,
+    full_token: &str,
+    body: &str,
+) -> Result<Claims, Response> {
+    let Some(prefix) = api_key::lookup_prefix_from_body(body) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "malformed API key" })),
+        )
+            .into_response());
+    };
+
+    let record = match state.store.get_api_key_by_prefix(prefix).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid API key" })),
+            )
+                .into_response());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "api_key store lookup failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "auth store unavailable" })),
+            )
+                .into_response());
+        }
+    };
+
+    let now = chrono::Utc::now();
+    if !record.is_usable(now) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "API key revoked or expired" })),
+        )
+            .into_response());
+    }
+
+    // Hash verification is CPU-bound — run on a blocking thread.
+    let stored_hash = record.hash.clone();
+    let token_owned = full_token.to_string();
+    let ok = tokio::task::spawn_blocking(move || api_key::verify_token(&token_owned, &stored_hash))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid API key" })),
+        )
+            .into_response());
+    }
+
+    // Fire-and-forget: update last_used_at without blocking the request.
+    let store_handle = state.store.clone();
+    let id = record.id;
+    tokio::spawn(async move {
+        if let Err(e) = store_handle.touch_api_key_last_used(id).await {
+            tracing::debug!(error = %e, "touch_api_key_last_used failed");
+        }
+    });
+
+    Ok(Claims {
+        sub: format!("api_key:{}", record.label),
+        uid: record.owner_uid.to_string(),
+        exp: u64::MAX, // Expiry already enforced by record.is_usable.
+        role: Role::Admin, // Role is decorative when an Actor is present —
+                           // scope enforcement uses `scopes` directly.
+        scopes: record.scopes.clone(),
+        actor: Some(Actor::ApiKey {
+            id: record.id,
+            owner_uid: record.owner_uid,
+            label: record.label,
+        }),
+    })
 }
 
 /// Synthetic Admin claims injected for whitelisted source IPs.

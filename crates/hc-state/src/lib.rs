@@ -15,17 +15,21 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
+pub mod api_key_store;
 pub mod device_store;
 pub mod history;
 pub mod rule_store;
 pub mod schema_store;
 pub mod user_store;
 
+use api_key_store::ApiKeyStore;
 use device_store::DeviceStore;
 use history::HistoryStore;
 use rule_store::RuleStore;
 use schema_store::SchemaStore;
 use user_store::UserStore;
+
+pub use api_key_store::ApiKeyRecord;
 
 /// Combined handle to both storage back-ends.
 #[derive(Clone)]
@@ -35,6 +39,7 @@ pub struct StateStore {
     history: Arc<HistoryStore>,
     schemas: Arc<SchemaStore>,
     users: Arc<UserStore>,
+    api_keys: Arc<ApiKeyStore>,
 }
 
 impl StateStore {
@@ -44,7 +49,7 @@ impl StateStore {
         let state_path = state_db_path.to_string();
         let history_path = history_db_path.to_string();
 
-        let (devices, rules, history, schemas, users) = tokio::task::spawn_blocking(move || {
+        let (devices, rules, history, schemas, users, api_keys) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -67,7 +72,8 @@ impl StateStore {
             let history = HistoryStore::open(&history_path)?;
             let schemas = SchemaStore::new(Arc::clone(&db))?;
             let users = UserStore::new(Arc::clone(&db))?;
-            Ok::<_, anyhow::Error>((devices, rules, history, schemas, users))
+            let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
+            Ok::<_, anyhow::Error>((devices, rules, history, schemas, users, api_keys))
         })
         .await??;
 
@@ -77,7 +83,61 @@ impl StateStore {
             history: Arc::new(history),
             schemas: Arc::new(schemas),
             users: Arc::new(users),
+            api_keys: Arc::new(api_keys),
         })
+    }
+
+    // --- API keys ---
+
+    pub async fn create_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
+        let store = Arc::clone(&self.api_keys);
+        let r = record.clone();
+        tokio::task::spawn_blocking(move || store.create(&r)).await?
+    }
+
+    pub async fn api_key_prefix_exists(&self, prefix: &str) -> Result<bool> {
+        let store = Arc::clone(&self.api_keys);
+        let p = prefix.to_string();
+        tokio::task::spawn_blocking(move || store.prefix_exists(&p)).await?
+    }
+
+    pub async fn get_api_key_by_prefix(&self, prefix: &str) -> Result<Option<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        let p = prefix.to_string();
+        tokio::task::spawn_blocking(move || store.get_by_prefix(&p)).await?
+    }
+
+    pub async fn get_api_key_by_id(&self, id: Uuid) -> Result<Option<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        tokio::task::spawn_blocking(move || store.get_by_id(id)).await?
+    }
+
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        tokio::task::spawn_blocking(move || store.list()).await?
+    }
+
+    pub async fn list_api_keys_by_owner(&self, owner_uid: Uuid) -> Result<Vec<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        tokio::task::spawn_blocking(move || store.list_by_owner(owner_uid)).await?
+    }
+
+    pub async fn update_api_key(&self, record: &ApiKeyRecord) -> Result<()> {
+        let store = Arc::clone(&self.api_keys);
+        let r = record.clone();
+        tokio::task::spawn_blocking(move || store.update(&r)).await?
+    }
+
+    pub async fn revoke_api_key(&self, id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.api_keys);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.revoke(id, now)).await?
+    }
+
+    pub async fn touch_api_key_last_used(&self, id: Uuid) -> Result<()> {
+        let store = Arc::clone(&self.api_keys);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.touch_last_used(id, now)).await?
     }
 
     // --- Device registry ---

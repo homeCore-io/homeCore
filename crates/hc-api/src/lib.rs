@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+pub mod api_key_handlers;
 pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
@@ -480,6 +481,15 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/auth/users/:id", delete(auth_handlers::delete_user))
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
+        // API keys
+        .route(
+            "/auth/api-keys",
+            get(api_key_handlers::list_api_keys).post(api_key_handlers::create_api_key),
+        )
+        .route(
+            "/auth/api-keys/:id",
+            delete(api_key_handlers::revoke_api_key).patch(api_key_handlers::update_api_key),
+        )
         // Devices
         .route(
             "/devices",

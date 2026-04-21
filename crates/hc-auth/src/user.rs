@@ -35,6 +35,10 @@ impl Role {
                 "users:write".into(),
                 "plugins:read".into(),
                 "plugins:write".into(),
+                // Management of API keys owned by OTHER users. Self-scoped
+                // key operations don't need any scope (self-authentication
+                // is sufficient).
+                "api_keys:admin".into(),
             ],
             Role::User => vec![
                 "devices:read".into(),

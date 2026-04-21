@@ -16,3 +16,6 @@ hc-types   = { path = "../hc-types" }
 hc-auth    = { path = "../hc-auth" }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
