@@ -1,6 +1,6 @@
 //! `hc-api` — axum HTTP + WebSocket API server.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     middleware,
     routing::{delete, get, patch, post, put},
@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+pub mod admin_uds;
 pub mod api_key_handlers;
 pub mod auth_handlers;
 pub mod auth_middleware;
@@ -123,6 +124,11 @@ pub struct AppState {
     pub event_log: EventLog,
     /// IP/CIDR ranges that bypass JWT authentication and receive Admin access.
     pub whitelist: Arc<Vec<IpNet>>,
+    /// UIDs allowed to connect to the admin UDS listener. Empty = "only the
+    /// homecore service UID", which is resolved and added by main.rs at
+    /// startup. Checked defensively after filesystem perms so a misconfigured
+    /// socket mode can't silently grant admin access to every local user.
+    pub uds_allowed_uids: Arc<std::collections::HashSet<u32>>,
     /// Path to `config/modes.toml` — used by mode API handlers.
     pub modes_path: Option<Arc<std::path::PathBuf>>,
     /// Log streaming state (broadcast channel + ring buffer).
@@ -365,6 +371,7 @@ impl AppState {
             jwt: Arc::new(jwt),
             event_log,
             whitelist: Arc::new(whitelist),
+            uds_allowed_uids: Arc::new(std::collections::HashSet::new()),
             modes_path: modes_path.map(|p| Arc::new(p)),
             log_stream: None,
             metrics,
@@ -387,6 +394,26 @@ impl AppState {
         metrics::spawn_metrics_listener(&state, Arc::clone(&state.metrics));
 
         state
+    }
+
+    /// Populate the UDS-peer UID allow-list. Empty means no UDS connections
+    /// are accepted; this must be called with at least the service UID
+    /// before the UDS admin listener starts.
+    pub fn with_uds_allowed_uids(
+        mut self,
+        uids: std::collections::HashSet<u32>,
+    ) -> Self {
+        self.uds_allowed_uids = Arc::new(uids);
+        self
+    }
+
+    /// Check whether a peer UID from SO_PEERCRED is allowed on the admin UDS.
+    /// `None` peer UID means the platform could not determine it — rejected.
+    pub fn uds_uid_allowed(&self, peer_uid: Option<u32>) -> bool {
+        let Some(uid) = peer_uid else {
+            return false;
+        };
+        self.uds_allowed_uids.contains(&uid)
     }
 
     /// Attach log streaming state (broadcast channel + ring buffer) obtained
@@ -700,6 +727,15 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
 ///
 /// When `shutdown` receives `true` the server stops accepting new connections,
 /// drains in-flight requests, and returns.
+/// Admin UDS listener configuration.
+#[derive(Clone, Debug)]
+pub struct AdminUdsConfig {
+    pub path: std::path::PathBuf,
+    pub group: String,
+    /// Octal file mode (e.g. 0o660).
+    pub mode: u32,
+}
+
 pub async fn serve(
     host: &str,
     port: u16,
@@ -707,6 +743,7 @@ pub async fn serve(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     drain_timeout_secs: u64,
     web_admin_dist: Option<std::path::PathBuf>,
+    admin_uds: Option<AdminUdsConfig>,
 ) -> Result<()> {
     let addr = format!("{host}:{port}");
     info!(%addr, "HomeCore API server starting");
@@ -723,10 +760,36 @@ pub async fn serve(
         }
         info!("API server: shutdown signal received — draining connections");
     };
+
+    // Build the router once, then clone it for each listener. The Router
+    // uses Arc internally so clones are cheap.
+    let app = router(state.clone(), web_admin_dist);
+
+    // Admin UDS listener — if configured, share the same router but with
+    // the admin-bypass middleware layer applied at the transport boundary.
+    if let Some(uds_cfg) = admin_uds {
+        match prepare_uds(&uds_cfg).await {
+            Ok(uds_listener) => {
+                let app_for_uds = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = admin_uds::serve(uds_listener, app_for_uds).await {
+                        warn!(error = %e, "Admin UDS listener exited with error");
+                    }
+                });
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to bind admin UDS — continuing without it"
+                );
+            }
+        }
+    }
+
     let mut server = tokio::spawn(async move {
         axum::serve(
             listener,
-            router(state, web_admin_dist).into_make_service_with_connect_info::<SocketAddr>(),
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(signal)
         .await
@@ -773,3 +836,43 @@ pub async fn serve(
         }
     }
 }
+
+/// Bind the admin UDS, set its group + mode, and return the listener.
+async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Clean any stale socket from a previous run.
+    let _ = std::fs::remove_file(&cfg.path);
+
+    // Ensure parent directory exists.
+    if let Some(parent) = cfg.path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating UDS parent dir {}", parent.display()))?;
+    }
+
+    let listener = tokio::net::UnixListener::bind(&cfg.path)
+        .with_context(|| format!("binding UDS at {}", cfg.path.display()))?;
+
+    // chown to the admin group — members of this group can connect.
+    let gid = admin_uds::resolve_group_gid(&cfg.group)
+        .with_context(|| format!("resolving admin UDS group `{}`", cfg.group))?;
+    nix::unistd::chown(&cfg.path, None, Some(nix::unistd::Gid::from_raw(gid)))
+        .with_context(|| format!("chown {} to gid {gid}", cfg.path.display()))?;
+
+    std::fs::set_permissions(
+        &cfg.path,
+        std::fs::Permissions::from_mode(cfg.mode),
+    )
+    .with_context(|| format!("chmod {} to {:o}", cfg.path.display(), cfg.mode))?;
+
+    admin_uds::warn_if_mode_too_loose(&cfg.path);
+
+    info!(
+        path = %cfg.path.display(),
+        group = %cfg.group,
+        mode = format!("{:o}", cfg.mode),
+        "Admin UDS listener bound"
+    );
+    Ok(listener)
+}
+

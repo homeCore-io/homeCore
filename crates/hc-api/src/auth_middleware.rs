@@ -36,19 +36,56 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::AppState;
 
+/// Marker inserted by the admin UDS listener for every request that arrives
+/// over the Unix domain socket. Carries the connecting peer's effective UID
+/// when `SO_PEERCRED` is available.
+///
+/// Presence of this marker is the trust boundary for local admin access —
+/// filesystem permissions on the socket gate who can connect.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalAdminMarker {
+    pub peer_uid: Option<u32>,
+}
+
 /// Middleware that enforces authentication on protected routes.
+///
+/// **UDS admin bypass:** if a `LocalAdminMarker` was inserted by the UDS
+/// listener, synthesise `Claims` with `Actor::LocalAdmin` and pass through.
+/// A defensive check against `AppState::uds_allowed_uids` prevents a
+/// misconfigured socket mode from leaking admin access to unintended users.
 ///
 /// **Whitelist bypass:** if the request's source IP matches any entry in
 /// `AppState::whitelist`, synthetic Admin `Claims` are injected and the JWT
-/// check is skipped entirely.  Whitelisted requests are logged at debug level.
+/// check is skipped entirely.  Whitelisted requests emit a warn-level
+/// deprecation log — migrate to UDS + API keys.
 ///
 /// **JWT path:** for non-whitelisted sources a valid `Bearer` token must be
-/// present in the `Authorization` header.
+/// present in the `Authorization` header. API keys (`hc_sk_...` prefix)
+/// dispatch to the api_keys store; other bearer tokens are validated as JWT.
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    // ── 0. UDS admin bypass (if the connection arrived on the admin UDS) ──
+    if let Some(marker) = request.extensions().get::<LocalAdminMarker>().copied() {
+        // Defensive peer-uid check: empty allow-list = "only the homecore
+        // service user itself", unless the admin explicitly allows more.
+        if !state.uds_uid_allowed(marker.peer_uid) {
+            tracing::warn!(
+                peer_uid = ?marker.peer_uid,
+                "UDS admin connection rejected — peer UID not in allowed_uids"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "UDS peer UID not permitted" })),
+            )
+                .into_response();
+        }
+        let claims = local_admin_claims(marker.peer_uid);
+        request.extensions_mut().insert(claims);
+        return next.run(request).await;
+    }
     // ── 1. JWT validation (preferred) ─────────────────────────────────────
     // Always try the Bearer token first so that authenticated users on
     // whitelisted IPs get their real claims (required for change-password
@@ -88,10 +125,15 @@ pub async fn require_auth(
         }
     }
 
-    // ── 2. IP whitelist fallback (no token provided) ───────────────────────
+    // ── 2. IP whitelist fallback (deprecated — use UDS + API keys) ─────────
     // Only grant whitelist access when the client did not present any token.
     // This ensures whitelisted IPs can call the API without a token while
     // still receiving their real JWT claims when one is provided.
+    //
+    // The CIDR whitelist was the original "localhost admin bypass" and is
+    // being replaced by the UDS admin listener — see auth.admin_uds config.
+    // Kept functional for one release so operators can migrate; emits a
+    // warn-level log on every bypass.
     if !state.whitelist.is_empty() {
         // Canonicalize IPv4-mapped IPv6 (::ffff:x.x.x.x → x.x.x.x) so that
         // clients connecting to a dual-stack 0.0.0.0 listener match IPv4 entries.
@@ -108,7 +150,12 @@ pub async fn require_auth(
 
         if let Some(ip) = remote_ip {
             if state.whitelist.iter().any(|net| net.contains(&ip)) {
-                tracing::debug!(%ip, "IP whitelist bypass — granting Admin access");
+                tracing::warn!(
+                    %ip,
+                    "CIDR whitelist bypass granted Admin — deprecated. \
+                     Migrate to the UDS admin listener (auth.admin_uds) or \
+                     issue an API key via hc-cli."
+                );
                 let claims = whitelist_claims();
                 request.extensions_mut().insert(claims);
                 return next.run(request).await;
@@ -203,6 +250,19 @@ async fn verify_api_key(
             label: record.label,
         }),
     })
+}
+
+/// Synthetic Admin claims for a request arriving on the admin UDS.
+/// `peer_uid` is recorded on the Actor so audit events can attribute.
+pub fn local_admin_claims(peer_uid: Option<u32>) -> Claims {
+    Claims {
+        sub: "local_admin".into(),
+        uid: "local_admin".into(),
+        exp: u64::MAX,
+        role: Role::Admin,
+        scopes: Role::Admin.scopes(),
+        actor: Some(Actor::LocalAdmin { peer_uid }),
+    }
 }
 
 /// Synthetic Admin claims injected for whitelisted source IPs.

@@ -548,8 +548,55 @@ struct AuthSection {
     /// a JWT.  Requests from these addresses receive full Admin access.
     /// Parsed as standard CIDR notation.  Both IPv4 and IPv6 are supported.
     /// Example: ["127.0.0.1/32", "::1/128", "192.168.1.0/24"]
+    ///
+    /// **Deprecated** — prefer `[auth.admin_uds]` for same-host admin
+    /// tooling. This option will be removed in a future release.
     #[serde(default)]
     whitelist: Vec<String>,
+    /// Admin-only Unix domain socket listener for `hc-cli` and other
+    /// same-host admin tooling. Replaces the CIDR whitelist.
+    #[serde(default)]
+    admin_uds: AdminUdsSection,
+}
+
+#[derive(Deserialize, Clone)]
+struct AdminUdsSection {
+    #[serde(default)]
+    enabled: bool,
+    /// Default: `/run/homecore/admin.sock`.
+    #[serde(default = "default_admin_uds_path")]
+    path: String,
+    /// POSIX group that owns the socket. Members of this group can connect.
+    #[serde(default = "default_admin_uds_group")]
+    group: String,
+    /// Mode for the socket file, as an octal string (e.g. "0660").
+    #[serde(default = "default_admin_uds_mode")]
+    mode: String,
+    /// Extra UIDs allowed to connect. The process UID is always allowed.
+    #[serde(default)]
+    allowed_uids: Vec<u32>,
+}
+
+fn default_admin_uds_path() -> String {
+    "/run/homecore/admin.sock".into()
+}
+fn default_admin_uds_group() -> String {
+    "homecore-admin".into()
+}
+fn default_admin_uds_mode() -> String {
+    "0660".into()
+}
+
+impl Default for AdminUdsSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_admin_uds_path(),
+            group: default_admin_uds_group(),
+            mode: default_admin_uds_mode(),
+            allowed_uids: vec![],
+        }
+    }
 }
 
 fn default_expiry() -> u64 {
@@ -563,6 +610,7 @@ impl Default for AuthSection {
             jwt_secret_file: None,
             token_expiry_hours: 24,
             whitelist: vec![],
+            admin_uds: AdminUdsSection::default(),
         }
     }
 }
@@ -1080,7 +1128,10 @@ async fn main() -> Result<()> {
         publish_handle_rpc,
         &pub_bus_rpc,
     ))
-    .with_log_level_handle(log_level_handle);
+    .with_log_level_handle(log_level_handle)
+    .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(
+        &config.auth.admin_uds.allowed_uids,
+    ));
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store
@@ -1123,6 +1174,31 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Admin UDS listener (optional). If misconfigured at parse time (e.g.
+    // unparseable mode), log and skip — don't fail startup.
+    let admin_uds_cfg = if config.auth.admin_uds.enabled {
+        match u32::from_str_radix(
+            config.auth.admin_uds.mode.trim_start_matches("0o").trim_start_matches('0'),
+            8,
+        ) {
+            Ok(mode) => Some(hc_api::AdminUdsConfig {
+                path: std::path::PathBuf::from(&config.auth.admin_uds.path),
+                group: config.auth.admin_uds.group.clone(),
+                mode,
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    mode = %config.auth.admin_uds.mode,
+                    error = %e,
+                    "Invalid auth.admin_uds.mode — admin UDS disabled"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut api_task = tokio::spawn(async move {
         hc_api::serve(
             &api_host,
@@ -1131,6 +1207,7 @@ async fn main() -> Result<()> {
             api_shutdown_rx,
             drain_timeout_secs,
             web_admin_dist_path,
+            admin_uds_cfg,
         )
         .await
     });

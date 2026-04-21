@@ -31,6 +31,10 @@ toml         = { workspace = true }
 ron          = { workspace = true }
 prometheus   = { workspace = true }
 zip          = { version = "2", default-features = false, features = ["deflate"] }
+hyper        = { version = "1", features = ["server", "http1"] }
+hyper-util   = { version = "0.1", features = ["tokio", "server-auto"] }
+tower        = { version = "0.5", features = ["util"] }
+nix          = { version = "0.29", features = ["user", "fs"] }
 
 [dev-dependencies]
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
