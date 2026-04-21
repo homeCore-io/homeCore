@@ -79,10 +79,15 @@ timezone  = "America/New_York"
 # ---------------------------------------------------------------------------
 [auth]
 # HMAC-SHA256 secret for signing JWTs.
-# Change this to a long random string before deploying.
-# If omitted, a random secret is generated at startup — tokens will not
-# survive server restarts.
-jwt_secret         = "change-me-to-a-long-random-string-before-deploying"
+#
+# Leave unset to let the core manage a persistent secret file automatically
+# (default path: `<parent-of-state_db_path>/jwt_secret`, 0600). The file is
+# generated once on first startup and reused across restarts, so issued
+# tokens survive reboots.
+#
+# `jwt_secret` (inline) still works but is deprecated; prefer `jwt_secret_file`.
+# jwt_secret      = "change-me-to-a-long-random-string-before-deploying"
+# jwt_secret_file = "/var/lib/homecore/jwt_secret"
 token_expiry_hours = 24
 
 # IP whitelist — addresses that bypass JWT authentication entirely.

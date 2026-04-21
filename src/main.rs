@@ -1,3 +1,4 @@
+mod jwt_secret;
 mod plugin_manager;
 
 use anyhow::Result;
@@ -531,9 +532,16 @@ impl Default for LocationSection {
 
 #[derive(Deserialize)]
 struct AuthSection {
-    /// HMAC-SHA256 secret for signing JWTs.  If not set, a random secret is
-    /// generated at startup (tokens will be invalidated on restart).
+    /// HMAC-SHA256 secret for signing JWTs. **Deprecated** — prefer leaving
+    /// this unset and letting the core manage `jwt_secret_file` automatically.
+    /// If set, takes precedence over `jwt_secret_file` and emits a warning.
     jwt_secret: Option<String>,
+    /// Path to a file holding the persistent JWT HS256 secret. When unset,
+    /// defaults to `<parent-of-state_db_path>/jwt_secret`. The file is
+    /// auto-generated with 0600 perms on first startup and re-used across
+    /// restarts so issued tokens survive reboots.
+    #[serde(default)]
+    jwt_secret_file: Option<std::path::PathBuf>,
     #[serde(default = "default_expiry")]
     token_expiry_hours: u64,
     /// IP addresses or CIDR ranges that may access all API endpoints without
@@ -552,6 +560,7 @@ impl Default for AuthSection {
     fn default() -> Self {
         Self {
             jwt_secret: None,
+            jwt_secret_file: None,
             token_expiry_hours: 24,
             whitelist: vec![],
         }
@@ -958,14 +967,14 @@ async fn main() -> Result<()> {
     )?;
 
     // ── 17. JWT service ────────────────────────────────────────────────────
-    let jwt_secret = match &config.auth.jwt_secret {
-        Some(s) => s.clone(),
-        None => {
-            tracing::warn!("No jwt_secret configured — generating a random secret. Tokens will not survive restarts.");
-            random_password(64)
-        }
-    };
-    let jwt = JwtService::new_hs256(jwt_secret.as_bytes(), config.auth.token_expiry_hours);
+    let jwt_secret_path = config.auth.jwt_secret_file.clone().unwrap_or_else(|| {
+        jwt_secret::default_secret_path(std::path::Path::new(&config.storage.state_db_path))
+    });
+    let jwt_secret_bytes = jwt_secret::load_or_create(
+        config.auth.jwt_secret.as_deref(),
+        &jwt_secret_path,
+    )?;
+    let jwt = JwtService::new_hs256(&jwt_secret_bytes, config.auth.token_expiry_hours);
 
     // ── 18. Bootstrap default admin account ───────────────────────────────
     let count = store.user_count().await?;
