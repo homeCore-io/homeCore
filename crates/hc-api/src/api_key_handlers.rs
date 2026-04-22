@@ -56,13 +56,32 @@ pub async fn create_api_key(
         return err(StatusCode::UNPROCESSABLE_ENTITY, "label is required");
     }
 
-    // Resolve owner: default to self, require api_keys:admin if different.
-    let caller_uid = match Uuid::parse_str(&claims.uid) {
-        Ok(u) => u,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid caller uid"),
+    // The caller's identity comes from the Actor enum — not every authenticated
+    // principal has a parseable uid (LocalAdmin on the UDS doesn't).
+    let actor = claims.actor();
+    let caller_uid = actor.effective_uid();
+
+    // Resolve owner:
+    // - User / ApiKey: default to self, require api_keys:admin if different.
+    // - LocalAdmin: owner_uid MUST be supplied explicitly; admin bypass
+    //   implies api_keys:admin scope.
+    let owner_uid = match (body.owner_uid, caller_uid, actor.is_local_admin()) {
+        (Some(u), _, _) => u,
+        (None, Some(u), _) => u,
+        (None, None, true) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "owner_uid is required when issuing via the admin UDS",
+            );
+        }
+        (None, None, false) => {
+            return err(StatusCode::BAD_REQUEST, "invalid caller identity");
+        }
     };
-    let owner_uid = body.owner_uid.unwrap_or(caller_uid);
-    if owner_uid != caller_uid && !claims.has_scope("api_keys:admin") {
+    if !actor.is_local_admin()
+        && Some(owner_uid) != caller_uid
+        && !claims.has_scope("api_keys:admin")
+    {
         return err(
             StatusCode::FORBIDDEN,
             "api_keys:admin scope required to issue keys for other users",
@@ -70,11 +89,9 @@ pub async fn create_api_key(
     }
 
     // Scope subset check.
-    //
-    // For self-scoped: requested ⊆ caller's own scopes.
-    // For admin-scoped (owner_uid != caller): requested ⊆ owner's role scopes
-    // (via the owner's user record).
-    let allowed_scopes: HashSet<String> = if owner_uid == caller_uid {
+    // - User caller (self-scoped): requested ⊆ caller's own scopes.
+    // - ApiKey or LocalAdmin or cross-owner: requested ⊆ owner's role scopes.
+    let allowed_scopes: HashSet<String> = if actor.is_user() && Some(owner_uid) == caller_uid {
         claims.scopes.iter().cloned().collect()
     } else {
         match s.store.get_user_by_id(owner_uid).await {
@@ -166,13 +183,15 @@ pub async fn list_api_keys(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
 ) -> impl IntoResponse {
-    let caller_uid = match Uuid::parse_str(&claims.uid) {
-        Ok(u) => u,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid caller uid"),
-    };
-    let records = if claims.has_scope("api_keys:admin") {
+    let actor = claims.actor();
+    // LocalAdmin and any api_keys:admin holder see everything.
+    let admin = actor.is_local_admin() || claims.has_scope("api_keys:admin");
+    let records = if admin {
         s.store.list_api_keys().await
     } else {
+        let Some(caller_uid) = actor.effective_uid() else {
+            return err(StatusCode::BAD_REQUEST, "invalid caller identity");
+        };
         s.store.list_api_keys_by_owner(caller_uid).await
     };
     match records {
@@ -193,11 +212,7 @@ pub async fn revoke_api_key(
     AuthUser(claims): AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let caller_uid = match Uuid::parse_str(&claims.uid) {
-        Ok(u) => u,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid caller uid"),
-    };
-
+    let actor = claims.actor();
     // Load to check ownership.
     let rec = match s.store.get_api_key_by_id(id).await {
         Ok(Some(r)) => r,
@@ -207,7 +222,9 @@ pub async fn revoke_api_key(
             return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
         }
     };
-    if rec.owner_uid != caller_uid && !claims.has_scope("api_keys:admin") {
+    let is_admin = actor.is_local_admin() || claims.has_scope("api_keys:admin");
+    let is_self = actor.effective_uid() == Some(rec.owner_uid);
+    if !is_admin && !is_self {
         return err(StatusCode::FORBIDDEN, "not authorised to revoke this key");
     }
 
@@ -228,10 +245,7 @@ pub async fn update_api_key(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateApiKeyRequest>,
 ) -> impl IntoResponse {
-    let caller_uid = match Uuid::parse_str(&claims.uid) {
-        Ok(u) => u,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid caller uid"),
-    };
+    let actor = claims.actor();
     let mut rec = match s.store.get_api_key_by_id(id).await {
         Ok(Some(r)) => r,
         Ok(None) => return err(StatusCode::NOT_FOUND, "API key not found"),
@@ -240,7 +254,9 @@ pub async fn update_api_key(
             return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
         }
     };
-    if rec.owner_uid != caller_uid && !claims.has_scope("api_keys:admin") {
+    let is_admin = actor.is_local_admin() || claims.has_scope("api_keys:admin");
+    let is_self = actor.effective_uid() == Some(rec.owner_uid);
+    if !is_admin && !is_self {
         return err(StatusCode::FORBIDDEN, "not authorised to update this key");
     }
 
