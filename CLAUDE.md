@@ -17,7 +17,7 @@
 - Plugin/adapter model: any language can integrate devices via MQTT or REST SDK
 - Sandboxed scripting via Rhai (and optionally WASM) for custom logic
 
-Comparable systems: Home Assistant (Python, single-threaded), HomeSeer, OpenHAB. HomeCore's advantage is true async concurrency, schema-first devices, and MQTT as the native transport.
+Design emphases: true async concurrency, schema-first devices, and MQTT as the native transport fabric.
 
 ---
 

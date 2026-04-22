@@ -12,7 +12,7 @@
 //! against the snapshot after the lock is released, so hot-reload is never
 //! blocked while rules are being evaluated.
 //!
-//! # New features (Hubitat parity)
+//! # Advanced rule features
 //! - `required_expression` — Rhai gate evaluated before trigger fires
 //! - `trigger_condition` — per-rule Rhai gate evaluated after trigger fires
 //! - `from` / `not_from` / `not_to` / `device_ids` on DeviceStateChanged

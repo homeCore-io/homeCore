@@ -2770,9 +2770,11 @@ state     = { brightness = 255, on = true }
 
 ---
 
-## Hubitat Rule Machine parity features
+## Advanced rule engine features
 
-The following features bring homeCore's rule engine to Hubitat RM 5.1 / Home Assistant parity. All are optional fields with safe defaults.
+The following optional fields extend the rule engine beyond the minimal
+trigger / condition / action skeleton. All are optional with safe defaults,
+so existing rules keep working unchanged.
 
 ---
 
@@ -5432,7 +5434,7 @@ type = "parallel"
 
 ## Action: SetDeviceStatePerMode
 
-Apply a different device state depending on which **mode** is currently active, without writing a `Conditional` chain for every case. Equivalent to Hubitat Rule Machine's "Set Switches/Dimmers Per Mode".
+Apply a different device state depending on which **mode** is currently active, without writing a `Conditional` chain for every case.
 
 The executor checks the `modes` list in order. The first entry whose mode device reports `on == true` wins and its `state` is applied. If no mode matches, `default_state` is applied (when present). If neither matches, the action is a no-op.
 
@@ -7095,9 +7097,9 @@ command = "on"          # "on" | "off" | "toggle"
 
 ---
 
-## HA-style Run Mode (item 59)
+## Rule run mode (item 59)
 
-Controls what happens when a rule is triggered while its previous actions are still executing.  Mirrors Home Assistant's `mode:` automation field.
+Controls what happens when a rule is triggered while its previous actions are still executing.
 
 ```toml
 # In rule TOML — default is "parallel" (omit field to keep current behavior)

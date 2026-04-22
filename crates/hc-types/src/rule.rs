@@ -14,8 +14,6 @@ use uuid::Uuid;
 /// Controls how a rule behaves when it is triggered while previous actions
 /// from the same rule are still executing.
 ///
-/// Mirrors Home Assistant's `mode` automation field.
-///
 /// ```toml
 /// run_mode = "single"   # skip if already running
 /// run_mode = "restart"  # cancel in-flight and restart
@@ -548,8 +546,8 @@ pub enum Action {
         device_id: String,
         state: JsonValue,
         /// When `true`, use the trigger event's value instead of `state`.
-        /// Mirrors Hubitat's "Track Event Switch/Dimmer" — useful for
-        /// "when switch A changes, mirror the state to switch B".
+        /// Useful for mirror-style rules: "when switch A changes, mirror
+        /// the new state to switch B".
         #[serde(default)]
         track_event_value: bool,
     },
@@ -684,7 +682,8 @@ pub enum Action {
         op: Option<VariableOp>,
     },
     /// Directly run the actions of another rule (bypassing its trigger and
-    /// required expression).  Equivalent to Hubitat's "Run Rule Actions".
+    /// required expression). Use to share an action sequence across rules
+    /// without re-firing through the event bus.
     RunRuleActions { rule_id: Uuid },
     /// Pause another rule (prevent its actions from running on trigger events
     /// while paused).
@@ -718,9 +717,9 @@ pub enum Action {
     },
     /// Apply a different device state depending on which mode is currently active.
     ///
-    /// The first entry whose mode device reports `on == true` wins.  If no mode
-    /// matches, `default_state` is applied (when set).  Equivalent to Hubitat's
-    /// "Set Switches/Dimmers Per Mode".
+    /// The first entry whose mode device reports `on == true` wins. If no mode
+    /// matches, `default_state` is applied (when set). Useful for "set this
+    /// device differently depending on which named mode the system is in".
     ///
     /// ```toml
     /// [[actions]]

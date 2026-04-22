@@ -286,7 +286,7 @@ Build a fresh Matter controller and bridge plugin for HomeCore using [matter.js]
 ### Why Start Fresh with matter.js
 - **Prior approach** (Rust matter-rs): Complex protocol stack, steep async/embassy learning curve, limited ecosystem maturity
 - **matter.js advantages**:
-  - Proven in production: Apple Home, Google Home, Home Assistant, OpenHAB, Amazon Alexa compatible
+  - Mature, production-grade Matter protocol stack with a large active user base
   - JavaScript/TypeScript: faster iteration, easier debugging, rich npm ecosystem
   - Standalone Node.js process: clean separation, reusable plugin pattern
   - WebSocket bridge: natural fit for HomeCore's MQTT event model
@@ -582,7 +582,7 @@ GET    /api/v1/plugins/matter/metrics          # Runtime metrics
 **Goal**: Expose HomeCore devices as Matter endpoints
 
 **Deliverables**:
-1. Home Assistant-compatible endpoint ID strategy (stable hashing)
+1. Stable endpoint ID strategy (deterministic hashing that survives restarts and device renames)
 2. Device include/exclude filtering (explicit IDs + glob patterns + device_type/area filters)
 3. Deterministic cluster composition by device_type
 4. State bidirectional sync (HomeCore → Matter + Matter → HomeCore)
