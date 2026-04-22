@@ -76,6 +76,41 @@ enum Command {
     /// User management (admin-scoped operations).
     #[command(subcommand)]
     User(UserCommand),
+
+    /// Query the audit log (admin-scoped).
+    #[command(subcommand)]
+    Audit(AuditCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCommand {
+    /// List audit events with optional filters.
+    Query {
+        #[arg(long)]
+        actor_id: Option<uuid::Uuid>,
+        /// user | api_key | local_admin | ip_whitelist | system | anonymous
+        #[arg(long)]
+        actor_type: Option<String>,
+        #[arg(long)]
+        event_type: Option<String>,
+        #[arg(long)]
+        target_kind: Option<String>,
+        #[arg(long)]
+        target_id: Option<String>,
+        /// success | denied | error
+        #[arg(long)]
+        result: Option<String>,
+        /// RFC3339 timestamp lower bound (inclusive).
+        #[arg(long)]
+        from: Option<String>,
+        /// RFC3339 timestamp upper bound (inclusive).
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        #[arg(long, default_value = "0")]
+        offset: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -298,6 +333,34 @@ async fn main() -> Result<()> {
             UserCommand::Delete { id } => cmd_user_delete(&cli, &cfg, *id).await,
             UserCommand::SetRole { id, role } => cmd_user_set_role(&cli, &cfg, *id, role).await,
         },
+        Command::Audit(AuditCommand::Query {
+            actor_id,
+            actor_type,
+            event_type,
+            target_kind,
+            target_id,
+            result,
+            from,
+            to,
+            limit,
+            offset,
+        }) => {
+            cmd_audit_query(
+                &cli,
+                &cfg,
+                *actor_id,
+                actor_type.as_deref(),
+                event_type.as_deref(),
+                target_kind.as_deref(),
+                target_id.as_deref(),
+                result.as_deref(),
+                from.as_deref(),
+                to.as_deref(),
+                *limit,
+                *offset,
+            )
+            .await
+        }
     }
 }
 
@@ -631,6 +694,105 @@ async fn cmd_user_delete(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()> 
     let path = format!("/auth/users/{id}");
     client.delete(&path).await?;
     println!("Deleted user {id}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_audit_query(
+    cli: &Cli,
+    cfg: &Config,
+    actor_id: Option<uuid::Uuid>,
+    actor_type: Option<&str>,
+    event_type: Option<&str>,
+    target_kind: Option<&str>,
+    target_id: Option<&str>,
+    result: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let mut query: Vec<(&str, String)> = Vec::new();
+    if let Some(v) = actor_id {
+        query.push(("actor_id", v.to_string()));
+    }
+    if let Some(v) = actor_type {
+        query.push(("actor_type", v.to_string()));
+    }
+    if let Some(v) = event_type {
+        query.push(("event_type", v.to_string()));
+    }
+    if let Some(v) = target_kind {
+        query.push(("target_kind", v.to_string()));
+    }
+    if let Some(v) = target_id {
+        query.push(("target_id", v.to_string()));
+    }
+    if let Some(v) = result {
+        query.push(("result", v.to_string()));
+    }
+    if let Some(v) = from {
+        query.push(("from", v.to_string()));
+    }
+    if let Some(v) = to {
+        query.push(("to", v.to_string()));
+    }
+    query.push(("limit", limit.to_string()));
+    query.push(("offset", offset.to_string()));
+    let qs: String = query
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{k}={}",
+                percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let path = format!("/audit?{qs}");
+    let rows: Vec<serde_json::Value> = client.get(&path).await?;
+
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("(no matching audit events)");
+        return Ok(());
+    }
+    println!(
+        "{:<20}  {:<10}  {:<24}  {:<22}  {:<8}  {}",
+        "Timestamp", "Result", "Event", "Actor", "Kind", "Target"
+    );
+    for r in &rows {
+        let ts = r
+            .get("ts")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .splitn(2, '.')
+            .next()
+            .unwrap_or("")
+            .replace('T', " ");
+        let result = r.get("result").and_then(|s| s.as_str()).unwrap_or("");
+        let ev = r.get("event_type").and_then(|s| s.as_str()).unwrap_or("");
+        let actor = r
+            .get("actor_label")
+            .and_then(|s| s.as_str())
+            .unwrap_or("?");
+        let kind = r.get("target_kind").and_then(|s| s.as_str()).unwrap_or("");
+        let target = r.get("target_id").and_then(|s| s.as_str()).unwrap_or("");
+        println!(
+            "{:<20}  {:<10}  {:<24}  {:<22}  {:<8}  {}",
+            truncate(&ts, 20),
+            result,
+            truncate(ev, 24),
+            truncate(actor, 22),
+            kind,
+            target
+        );
+    }
     Ok(())
 }
 
