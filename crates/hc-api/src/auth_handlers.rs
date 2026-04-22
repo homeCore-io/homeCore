@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const REFRESH_MAX_RETRIES: u32 = 3;
 
-use crate::{auth_middleware::AuthUser, AppState};
+use crate::{audit, auth_middleware::AuthUser, AppState};
 
 // ---------- Login ----------
 
@@ -41,6 +41,7 @@ pub async fn login(
                 )
             })
             .await;
+            audit::login_failed(&s, &body.username).await;
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),
@@ -64,6 +65,7 @@ pub async fn login(
         .unwrap_or(false);
 
     if !ok {
+        audit::login_failed(&s, &body.username).await;
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid credentials" })),
@@ -71,6 +73,7 @@ pub async fn login(
             .into_response();
     }
 
+    audit::login_success(&s, user.id, &user.username).await;
     match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
@@ -203,6 +206,7 @@ pub async fn refresh(
             "Refresh token reuse detected — revoking entire chain"
         );
         let _ = s.store.revoke_refresh_chain(rec.id).await;
+        audit::refresh_reuse_detected(&s, rec.user_id).await;
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "refresh token reuse detected — chain revoked" })),
@@ -282,6 +286,7 @@ pub async fn refresh(
         }
     };
 
+    audit::refresh_success(&s, user.id, &user.username).await;
     (
         StatusCode::OK,
         Json(RefreshResponse {
@@ -480,7 +485,13 @@ pub async fn create_user(
         created_at: chrono::Utc::now(),
     };
     match s.store.create_user(&user).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(UserInfo::from(&user)))).into_response(),
+        Ok(_) => {
+            let mut e = audit::entry_from_claims(&claims, "user.created")
+                .with_target("user", user.id.to_string());
+            e.detail = json!({ "username": user.username, "role": user.role });
+            audit::emit(&s, e).await;
+            (StatusCode::CREATED, Json(json!(UserInfo::from(&user)))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -536,7 +547,12 @@ pub async fn delete_user(
             .into_response();
     }
     match s.store.delete_user(id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            let e = audit::entry_from_claims(&claims, "user.deleted")
+                .with_target("user", id.to_string());
+            audit::emit(&s, e).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "user not found" })),
@@ -581,9 +597,16 @@ pub async fn set_user_role(
                 .into_response()
         }
     };
+    let old_role = user.role;
     user.role = body.role;
     match s.store.update_user(&user).await {
-        Ok(_) => (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response(),
+        Ok(_) => {
+            let mut e = audit::entry_from_claims(&claims, "user.role_changed")
+                .with_target("user", id.to_string());
+            e.detail = json!({ "from": old_role, "to": user.role });
+            audit::emit(&s, e).await;
+            (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

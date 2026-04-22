@@ -16,6 +16,7 @@ use tracing::info;
 use uuid::Uuid;
 
 pub mod api_key_store;
+pub mod audit_store;
 pub mod device_store;
 pub mod history;
 pub mod refresh_token_store;
@@ -24,6 +25,7 @@ pub mod schema_store;
 pub mod user_store;
 
 use api_key_store::ApiKeyStore;
+use audit_store::AuditStore;
 use device_store::DeviceStore;
 use history::HistoryStore;
 use refresh_token_store::RefreshTokenStore;
@@ -32,6 +34,7 @@ use schema_store::SchemaStore;
 use user_store::UserStore;
 
 pub use api_key_store::ApiKeyRecord;
+pub use audit_store::{AuditActorType, AuditEntry, AuditQuery, AuditResult};
 pub use refresh_token_store::RefreshTokenRecord;
 
 /// Combined handle to both storage back-ends.
@@ -44,16 +47,34 @@ pub struct StateStore {
     users: Arc<UserStore>,
     api_keys: Arc<ApiKeyStore>,
     refresh_tokens: Arc<RefreshTokenStore>,
+    audit: Arc<AuditStore>,
 }
 
 impl StateStore {
-    /// Open (or create) the databases at the given paths.
+    /// Open (or create) the databases at the given paths. The audit log
+    /// defaults to `<parent-of-history_db_path>/audit.db` — use
+    /// [`open_with_audit`] to override.
     pub async fn open(state_db_path: &str, history_db_path: &str) -> Result<Self> {
-        info!(%state_db_path, %history_db_path, "Opening state store");
+        let audit_path = std::path::Path::new(history_db_path)
+            .parent()
+            .map(|d| d.join("audit.db"))
+            .unwrap_or_else(|| std::path::PathBuf::from("audit.db"));
+        Self::open_with_audit(state_db_path, history_db_path, audit_path.to_str().unwrap())
+            .await
+    }
+
+    /// Open all stores with an explicit audit log path.
+    pub async fn open_with_audit(
+        state_db_path: &str,
+        history_db_path: &str,
+        audit_db_path: &str,
+    ) -> Result<Self> {
+        info!(%state_db_path, %history_db_path, %audit_db_path, "Opening state store");
         let state_path = state_db_path.to_string();
         let history_path = history_db_path.to_string();
+        let audit_path = audit_db_path.to_string();
 
-        let (devices, rules, history, schemas, users, api_keys, refresh_tokens) = tokio::task::spawn_blocking(move || {
+        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -68,6 +89,14 @@ impl StateStore {
                     )
                 })?;
             }
+            if let Some(parent) = std::path::Path::new(&audit_path).parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create audit DB directory: {}",
+                        parent.display()
+                    )
+                })?;
+            }
 
             // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
             let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
@@ -78,6 +107,7 @@ impl StateStore {
             let users = UserStore::new(Arc::clone(&db))?;
             let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
             let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
+            let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -86,6 +116,7 @@ impl StateStore {
                 users,
                 api_keys,
                 refresh_tokens,
+                audit,
             ))
         })
         .await??;
@@ -98,7 +129,35 @@ impl StateStore {
             users: Arc::new(users),
             api_keys: Arc::new(api_keys),
             refresh_tokens: Arc::new(refresh_tokens),
+            audit: Arc::new(audit),
         })
+    }
+
+    // --- Audit log ---
+
+    /// Record an audit event. Returns the inserted rowid. Best-effort —
+    /// failures are surfaced to callers but should be logged and not crash
+    /// the originating operation.
+    pub async fn record_audit(&self, entry: &AuditEntry) -> Result<i64> {
+        let store = Arc::clone(&self.audit);
+        let e = entry.clone();
+        tokio::task::spawn_blocking(move || store.record(&e)).await?
+    }
+
+    pub async fn query_audit(&self, query: &AuditQuery) -> Result<Vec<AuditEntry>> {
+        let store = Arc::clone(&self.audit);
+        let q = query.clone();
+        tokio::task::spawn_blocking(move || store.query(&q)).await?
+    }
+
+    pub async fn prune_audit_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+        let store = Arc::clone(&self.audit);
+        tokio::task::spawn_blocking(move || store.prune_before(cutoff)).await?
+    }
+
+    pub async fn audit_count(&self) -> Result<i64> {
+        let store = Arc::clone(&self.audit);
+        tokio::task::spawn_blocking(move || store.count()).await?
     }
 
     // --- Refresh tokens ---

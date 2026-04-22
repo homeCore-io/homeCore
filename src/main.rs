@@ -549,6 +549,11 @@ struct AuthSection {
     /// Default: 30 days.
     #[serde(default = "default_refresh_days")]
     refresh_token_expiry_days: u64,
+    /// How many days of audit-log history to keep. Entries older than this
+    /// are pruned by a background task that runs every 6 hours.
+    /// Default: 365 days.
+    #[serde(default = "default_audit_retention_days")]
+    audit_retention_days: u64,
     /// IP addresses or CIDR ranges that may access all API endpoints without
     /// a JWT.  Requests from these addresses receive full Admin access.
     /// Parsed as standard CIDR notation.  Both IPv4 and IPv6 are supported.
@@ -612,6 +617,10 @@ fn default_refresh_days() -> u64 {
     30
 }
 
+fn default_audit_retention_days() -> u64 {
+    365
+}
+
 impl Default for AuthSection {
     fn default() -> Self {
         Self {
@@ -619,6 +628,7 @@ impl Default for AuthSection {
             jwt_secret_file: None,
             token_expiry_hours: 24,
             refresh_token_expiry_days: 30,
+            audit_retention_days: 365,
             whitelist: vec![],
             admin_uds: AdminUdsSection::default(),
         }
@@ -1223,6 +1233,26 @@ async fn main() -> Result<()> {
                     Ok(0) => {}
                     Ok(n) => tracing::debug!(pruned = n, "refresh tokens pruned"),
                     Err(e) => tracing::warn!(error = %e, "refresh token prune failed"),
+                }
+            }
+        });
+    }
+
+    // Periodic prune of the audit log to honour the retention window.
+    // Fires every 6 hours.
+    {
+        let store = app_state.store.clone();
+        let retention_days = config.auth.audit_retention_days as i64;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
+                match store.prune_audit_before(cutoff).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(pruned = n, "audit log pruned"),
+                    Err(e) => tracing::warn!(error = %e, "audit prune failed"),
                 }
             }
         });

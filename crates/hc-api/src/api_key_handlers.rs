@@ -23,7 +23,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::{auth_middleware::AuthUser, AppState};
+use crate::{audit, auth_middleware::AuthUser, AppState};
 
 const MAX_PREFIX_COLLISION_RETRIES: u32 = 3;
 
@@ -163,6 +163,15 @@ pub async fn create_api_key(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
     }
 
+    let mut audit_e = audit::entry_from_claims(&claims, "api_key.created")
+        .with_target("api_key", record.id.to_string());
+    audit_e.detail = serde_json::json!({
+        "label": record.label,
+        "owner_uid": record.owner_uid,
+        "scopes": record.scopes,
+    });
+    audit::emit(&s, audit_e).await;
+
     let resp = CreateApiKeyResponse {
         id: record.id,
         label: record.label,
@@ -229,7 +238,12 @@ pub async fn revoke_api_key(
     }
 
     match s.store.revoke_api_key(id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            let audit_e = audit::entry_from_claims(&claims, "api_key.revoked")
+                .with_target("api_key", id.to_string());
+            audit::emit(&s, audit_e).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => err(StatusCode::NOT_FOUND, "API key not found"),
         Err(e) => {
             tracing::warn!(error = %e, "revoke_api_key failed");
@@ -295,7 +309,12 @@ pub async fn update_api_key(
     }
 
     match s.store.update_api_key(&rec).await {
-        Ok(_) => (StatusCode::OK, Json(record_to_summary(&rec))).into_response(),
+        Ok(_) => {
+            let audit_e = audit::entry_from_claims(&claims, "api_key.updated")
+                .with_target("api_key", rec.id.to_string());
+            audit::emit(&s, audit_e).await;
+            (StatusCode::OK, Json(record_to_summary(&rec))).into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "update_api_key failed");
             err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable")
@@ -366,6 +385,10 @@ pub async fn rotate_api_key(
             return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
         }
     };
+
+    let audit_e = audit::entry_from_claims(&claims, "api_key.rotated")
+        .with_target("api_key", rotated.id.to_string());
+    audit::emit(&s, audit_e).await;
 
     let resp = CreateApiKeyResponse {
         id: rotated.id,

@@ -20,6 +20,8 @@ use tracing::{info, warn};
 
 pub mod admin_uds;
 pub mod api_key_handlers;
+pub mod audit;
+pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
@@ -532,6 +534,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/auth/api-keys/:id/rotate",
             post(api_key_handlers::rotate_api_key),
         )
+        // Audit log — Admin only (handler enforces).
+        .route("/audit", get(audit_handlers::list_audit))
         // Devices
         .route(
             "/devices",
