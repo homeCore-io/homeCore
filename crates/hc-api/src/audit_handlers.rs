@@ -36,16 +36,21 @@ fn default_limit() -> u32 {
     100
 }
 
-/// `GET /api/v1/audit` — Admin-only.
+/// `GET /api/v1/audit` — requires the `audit:read` scope.
+///
+/// Previously Admin-only; gated on the `audit:read` scope so that preset
+/// roles like `Observer` and `ServiceOperator` can view the log without
+/// needing full admin powers.
 pub async fn list_audit(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
     Query(params): Query<AuditQueryParams>,
 ) -> impl IntoResponse {
-    if !claims.is_admin() {
+    // UDS bypass always passes — it's a synthetic Admin.
+    if !claims.has_scope("audit:read") && !claims.actor().is_local_admin() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({ "error": "admin role required" })),
+            Json(json!({ "error": "audit:read scope required" })),
         )
             .into_response();
     }
