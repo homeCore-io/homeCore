@@ -1,0 +1,40 @@
+[package]
+name        = "hc-cli"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Command-line administration tool for homeCore"
+repository  = "https://github.com/homeCore-io/homeCore"
+
+[[bin]]
+name = "hc-cli"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hc-api-types = { path = "../hc-api-types" }
+hc-auth      = { path = "../hc-auth" }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+toml         = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+chrono       = { workspace = true }
+uuid         = { workspace = true }
+clap         = { version = "4", features = ["derive"] }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hyper        = { version = "1", features = ["client", "http1"] }
+hyper-util   = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+hyperlocal   = "0.9"
+bytes        = "1"
+rpassword    = "7"
+dirs         = "5"
+rand               = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
