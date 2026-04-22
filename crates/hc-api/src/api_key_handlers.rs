@@ -302,3 +302,79 @@ pub async fn update_api_key(
         }
     }
 }
+
+/// `POST /api/v1/auth/api-keys/{id}/rotate`
+///
+/// Replaces the secret material on an existing key. Owner, scopes, label,
+/// CIDRs, and expiry are preserved. Returns the new token once — same
+/// "save it now" contract as create.
+pub async fn rotate_api_key(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let actor = claims.actor();
+    let rec = match s.store.get_api_key_by_id(id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "API key not found"),
+        Err(e) => {
+            tracing::warn!(error = %e, "get_api_key_by_id failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
+        }
+    };
+    let is_admin = actor.is_local_admin() || claims.has_scope("api_keys:admin");
+    let is_self = actor.effective_uid() == Some(rec.owner_uid);
+    if !is_admin && !is_self {
+        return err(StatusCode::FORBIDDEN, "not authorised to rotate this key");
+    }
+
+    // Mint a fresh secret (with prefix-collision retry) and swap it in.
+    let mut attempt = 0u32;
+    let new_key = loop {
+        let candidate = match api_key::generate() {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "api_key::generate failed during rotate");
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "key generation failed");
+            }
+        };
+        let exists = match s.store.api_key_prefix_exists(&candidate.lookup_prefix).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "api_key_prefix_exists failed");
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
+            }
+        };
+        if !exists {
+            break candidate;
+        }
+        attempt += 1;
+        if attempt >= MAX_PREFIX_COLLISION_RETRIES {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "key generation failed");
+        }
+    };
+
+    let rotated = match s
+        .store
+        .replace_api_key_secret(id, new_key.lookup_prefix.clone(), new_key.hash)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "API key vanished during rotate"),
+        Err(e) => {
+            tracing::warn!(error = %e, "replace_api_key_secret failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
+        }
+    };
+
+    let resp = CreateApiKeyResponse {
+        id: rotated.id,
+        label: rotated.label,
+        token: new_key.full_token,
+        owner_uid: rotated.owner_uid,
+        scopes: rotated.scopes,
+        created_at: rotated.created_at,
+        expires_at: rotated.expires_at,
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}

@@ -517,6 +517,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/auth/api-keys/:id",
             delete(api_key_handlers::revoke_api_key).patch(api_key_handlers::update_api_key),
         )
+        .route(
+            "/auth/api-keys/:id/rotate",
+            post(api_key_handlers::rotate_api_key),
+        )
         // Devices
         .route(
             "/devices",

@@ -140,6 +140,18 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.touch_last_used(id, now)).await?
     }
 
+    pub async fn replace_api_key_secret(
+        &self,
+        id: Uuid,
+        new_prefix: String,
+        new_hash: String,
+    ) -> Result<Option<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.replace_secret(id, new_prefix, new_hash, now))
+            .await?
+    }
+
     // --- Device registry ---
 
     pub async fn get_device(&self, device_id: &str) -> Result<Option<DeviceState>> {

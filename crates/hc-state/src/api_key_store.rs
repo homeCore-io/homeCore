@@ -173,6 +173,41 @@ impl ApiKeyStore {
         self.update(&rec)?;
         Ok(())
     }
+
+    /// Replace the secret material on an existing key while keeping its id,
+    /// owner, scopes, label, CIDRs, and expiry. Used by the `rotate` flow.
+    ///
+    /// The prefix moves, so this is not a simple in-place update — the old
+    /// prefix row is deleted and a new one inserted. The `by_id` index is
+    /// updated to point at the new prefix.
+    pub fn replace_secret(
+        &self,
+        id: Uuid,
+        new_prefix: String,
+        new_hash: String,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ApiKeyRecord>> {
+        let Some(mut rec) = self.get_by_id(id)? else {
+            return Ok(None);
+        };
+        let old_prefix = std::mem::replace(&mut rec.prefix, new_prefix.clone());
+        rec.hash = new_hash;
+        rec.last_used_at = None;
+        rec.revoked_at = None;
+        rec.created_at = now;
+
+        let json = serde_json::to_string(&rec)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut by_prefix = write_txn.open_table(API_KEYS_BY_PREFIX)?;
+            by_prefix.remove(old_prefix.as_str())?;
+            by_prefix.insert(new_prefix.as_str(), json.as_str())?;
+            let mut by_id = write_txn.open_table(API_KEYS_BY_ID)?;
+            by_id.insert(id.to_string().as_str(), new_prefix.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(Some(rec))
+    }
 }
 
 #[cfg(test)]

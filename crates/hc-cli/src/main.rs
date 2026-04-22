@@ -72,6 +72,10 @@ enum Command {
     /// API-key management.
     #[command(subcommand)]
     ApiKey(ApiKeyCommand),
+
+    /// User management (admin-scoped operations).
+    #[command(subcommand)]
+    User(UserCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -85,6 +89,10 @@ enum AuthCommand {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Show who the current credential authenticates as.
+    Whoami,
+    /// Discard the stored credential from the config.
+    Logout,
 }
 
 #[derive(Subcommand, Debug)]
@@ -103,13 +111,91 @@ enum ApiKeyCommand {
         /// Optional CIDR restrictions (repeatable).
         #[arg(long)]
         cidr: Vec<String>,
+        /// Target owner UID (requires api_keys:admin; defaults to self).
+        #[arg(long)]
+        owner: Option<uuid::Uuid>,
     },
-    /// List API keys. Without `api_keys:admin` scope, shows only self-owned.
-    List,
+    /// List API keys. Without `api_keys:admin`, shows only self-owned.
+    List {
+        /// Filter by owner UID (requires api_keys:admin if not self).
+        #[arg(long)]
+        owner: Option<uuid::Uuid>,
+        /// Include revoked keys in the listing.
+        #[arg(long, default_value = "false")]
+        include_revoked: bool,
+    },
+    /// Show details of one API key by ID.
+    Show {
+        #[arg(long)]
+        id: uuid::Uuid,
+    },
     /// Revoke an API key by ID.
     Revoke {
         #[arg(long)]
         id: uuid::Uuid,
+    },
+    /// Update mutable fields on an API key. Any flag omitted is left
+    /// unchanged. Does NOT rotate the secret — use `rotate` for that.
+    Update {
+        #[arg(long)]
+        id: uuid::Uuid,
+        #[arg(long)]
+        label: Option<String>,
+        /// Comma-separated scopes (replaces current).
+        #[arg(long)]
+        scopes: Option<String>,
+        #[arg(long)]
+        expires: Option<u32>,
+        /// Comma-separated CIDRs (replaces current). Pass an empty string
+        /// `""` to clear.
+        #[arg(long)]
+        cidrs: Option<String>,
+    },
+    /// Rotate the secret on an existing API key. Issues a fresh token
+    /// while keeping the id, scopes, label, and expiry. The new token is
+    /// printed once — save it.
+    Rotate {
+        #[arg(long)]
+        id: uuid::Uuid,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UserCommand {
+    /// List all users.
+    List,
+    /// Show one user by id or username.
+    Show {
+        /// User id (UUID). Mutually exclusive with --username.
+        #[arg(long)]
+        id: Option<uuid::Uuid>,
+        /// Username. Mutually exclusive with --id.
+        #[arg(long)]
+        username: Option<String>,
+    },
+    /// Create a new user.
+    Create {
+        #[arg(long)]
+        username: String,
+        /// `admin`, `user`, or `read_only`.
+        #[arg(long, default_value = "user")]
+        role: String,
+        /// Password (prompts if not provided).
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Delete a user by id.
+    Delete {
+        #[arg(long)]
+        id: uuid::Uuid,
+    },
+    /// Change a user's role.
+    SetRole {
+        #[arg(long)]
+        id: uuid::Uuid,
+        /// `admin`, `user`, or `read_only`.
+        #[arg(long)]
+        role: String,
     },
 }
 
@@ -156,18 +242,61 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Auth(AuthCommand::Login { username, password }) => {
-            cmd_auth_login(&cli, &cfg, &config_path, username, password.as_deref()).await
-        }
+        Command::Auth(cmd) => match cmd {
+            AuthCommand::Login { username, password } => {
+                cmd_auth_login(&cli, &cfg, &config_path, username, password.as_deref()).await
+            }
+            AuthCommand::Whoami => cmd_auth_whoami(&cli, &cfg).await,
+            AuthCommand::Logout => cmd_auth_logout(&cfg, &config_path),
+        },
         Command::ApiKey(cmd) => match cmd {
             ApiKeyCommand::Create {
                 label,
                 scopes,
                 expires,
                 cidr,
-            } => cmd_api_key_create(&cli, &cfg, label, scopes, *expires, cidr.clone()).await,
-            ApiKeyCommand::List => cmd_api_key_list(&cli, &cfg).await,
+                owner,
+            } => {
+                cmd_api_key_create(&cli, &cfg, label, scopes, *expires, cidr.clone(), *owner).await
+            }
+            ApiKeyCommand::List {
+                owner,
+                include_revoked,
+            } => cmd_api_key_list(&cli, &cfg, *owner, *include_revoked).await,
+            ApiKeyCommand::Show { id } => cmd_api_key_show(&cli, &cfg, *id).await,
             ApiKeyCommand::Revoke { id } => cmd_api_key_revoke(&cli, &cfg, *id).await,
+            ApiKeyCommand::Update {
+                id,
+                label,
+                scopes,
+                expires,
+                cidrs,
+            } => {
+                cmd_api_key_update(
+                    &cli,
+                    &cfg,
+                    *id,
+                    label.as_deref(),
+                    scopes.as_deref(),
+                    *expires,
+                    cidrs.as_deref(),
+                )
+                .await
+            }
+            ApiKeyCommand::Rotate { id } => cmd_api_key_rotate(&cli, &cfg, *id).await,
+        },
+        Command::User(cmd) => match cmd {
+            UserCommand::List => cmd_user_list(&cli, &cfg).await,
+            UserCommand::Show { id, username } => {
+                cmd_user_show(&cli, &cfg, *id, username.as_deref()).await
+            }
+            UserCommand::Create {
+                username,
+                role,
+                password,
+            } => cmd_user_create(&cli, &cfg, username, role, password.as_deref()).await,
+            UserCommand::Delete { id } => cmd_user_delete(&cli, &cfg, *id).await,
+            UserCommand::SetRole { id, role } => cmd_user_set_role(&cli, &cfg, *id, role).await,
         },
     }
 }
@@ -319,6 +448,209 @@ fn parse_role(s: &str) -> Result<Role> {
     }
 }
 
+// ── auth: whoami / logout ──────────────────────────────────────────────────
+
+async fn cmd_auth_whoami(cli: &Cli, cfg: &Config) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let v: serde_json::Value = client.get("/auth/me").await?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        let username = v.get("username").and_then(|s| s.as_str()).unwrap_or("(?)");
+        let role = v.get("role").and_then(|s| s.as_str()).unwrap_or("(?)");
+        let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("(?)");
+        println!("username: {username}");
+        println!("role:     {role}");
+        println!("id:       {id}");
+        // For UDS admin bypass, the /me endpoint may report the associated
+        // user account. If the caller is using a stored token, that token
+        // authenticates as `username`.
+        match client.transport() {
+            hc_cli::Transport::Uds { socket } => {
+                println!("via:      UDS {}", socket.display());
+            }
+            hc_cli::Transport::Tcp { base_url, token } => {
+                let form = if let Some(t) = token {
+                    if t.starts_with("hc_sk_") {
+                        "api key"
+                    } else {
+                        "JWT"
+                    }
+                } else {
+                    "unauth"
+                };
+                println!("via:      TCP {base_url} ({form})");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_auth_logout(cfg: &Config, config_path: &std::path::Path) -> Result<()> {
+    let mut new_cfg = cfg.clone();
+    if new_cfg.credentials.is_none() {
+        println!("(no stored credentials)");
+        return Ok(());
+    }
+    new_cfg.credentials = None;
+    new_cfg.save(config_path)?;
+    println!("Stored credentials cleared from {}", config_path.display());
+    Ok(())
+}
+
+// ── users ──────────────────────────────────────────────────────────────────
+
+async fn cmd_user_list(cli: &Cli, cfg: &Config) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let users: Vec<serde_json::Value> = client.get("/auth/users").await?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&users)?);
+        return Ok(());
+    }
+    if users.is_empty() {
+        println!("(no users)");
+        return Ok(());
+    }
+    println!(
+        "{:<38}  {:<20}  {:<10}  {}",
+        "ID", "Username", "Role", "Created"
+    );
+    for u in &users {
+        let id = u.get("id").and_then(|s| s.as_str()).unwrap_or("");
+        let username = u.get("username").and_then(|s| s.as_str()).unwrap_or("");
+        let role = u.get("role").and_then(|s| s.as_str()).unwrap_or("");
+        let created = u
+            .get("created_at")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .split('T')
+            .next()
+            .unwrap_or("");
+        println!(
+            "{:<38}  {:<20}  {:<10}  {}",
+            id,
+            truncate(username, 20),
+            role,
+            created
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_user_show(
+    cli: &Cli,
+    cfg: &Config,
+    id: Option<uuid::Uuid>,
+    username: Option<&str>,
+) -> Result<()> {
+    if id.is_some() && username.is_some() {
+        bail!("provide exactly one of --id or --username");
+    }
+    if id.is_none() && username.is_none() {
+        bail!("provide --id or --username");
+    }
+    let client = make_client(cli, cfg).await?;
+    let users: Vec<serde_json::Value> = client.get("/auth/users").await?;
+    let matched = users.into_iter().find(|u| {
+        if let Some(target) = id {
+            u.get("id").and_then(|s| s.as_str()) == Some(target.to_string().as_str())
+        } else {
+            u.get("username").and_then(|s| s.as_str()) == username
+        }
+    });
+    let Some(u) = matched else {
+        bail!("user not found");
+    };
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&u)?);
+    } else {
+        println!(
+            "id:       {}",
+            u.get("id").and_then(|s| s.as_str()).unwrap_or("")
+        );
+        println!(
+            "username: {}",
+            u.get("username").and_then(|s| s.as_str()).unwrap_or("")
+        );
+        println!(
+            "role:     {}",
+            u.get("role").and_then(|s| s.as_str()).unwrap_or("")
+        );
+        println!(
+            "created:  {}",
+            u.get("created_at").and_then(|s| s.as_str()).unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_user_create(
+    cli: &Cli,
+    cfg: &Config,
+    username: &str,
+    role: &str,
+    password: Option<&str>,
+) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let role = parse_role(role)?;
+    let password = match password {
+        Some(p) => p.to_string(),
+        None => rpassword::prompt_password(format!("Password for {username}: "))?,
+    };
+    if password.len() < 8 {
+        bail!("password must be at least 8 characters");
+    }
+    let req = CreateUserRequest {
+        username: username.into(),
+        password,
+        role,
+    };
+    let resp: serde_json::Value = client.post("/auth/users", &req).await?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("Created user:");
+        println!(
+            "  id:       {}",
+            resp.get("id").and_then(|s| s.as_str()).unwrap_or("")
+        );
+        println!(
+            "  username: {}",
+            resp.get("username").and_then(|s| s.as_str()).unwrap_or("")
+        );
+        println!(
+            "  role:     {}",
+            resp.get("role").and_then(|s| s.as_str()).unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_user_delete(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let path = format!("/auth/users/{id}");
+    client.delete(&path).await?;
+    println!("Deleted user {id}");
+    Ok(())
+}
+
+async fn cmd_user_set_role(cli: &Cli, cfg: &Config, id: uuid::Uuid, role: &str) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let role = parse_role(role)?;
+    let path = format!("/auth/users/{id}/role");
+    let body = hc_api_types::auth::SetRoleRequest { role };
+    let resp: serde_json::Value = client.patch(&path, &body).await?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!(
+            "Set user {id} role to {}",
+            resp.get("role").and_then(|s| s.as_str()).unwrap_or("?")
+        );
+    }
+    Ok(())
+}
+
 // ── auth login ─────────────────────────────────────────────────────────────
 
 async fn cmd_auth_login(
@@ -365,6 +697,7 @@ async fn cmd_api_key_create(
     scopes_csv: &str,
     expires: Option<u32>,
     cidrs: Vec<String>,
+    owner: Option<uuid::Uuid>,
 ) -> Result<()> {
     let client = make_client(cli, cfg).await?;
     let scopes: Vec<String> = scopes_csv
@@ -377,18 +710,26 @@ async fn cmd_api_key_create(
         scopes,
         expires_in_days: expires,
         allowed_cidrs: cidrs,
-        owner_uid: None,
+        owner_uid: owner,
     };
     let resp: CreateApiKeyResponse = client.post("/auth/api-keys", &req).await?;
+    print_create_response(cli, &resp);
+    Ok(())
+}
 
+fn print_create_response(cli: &Cli, resp: &CreateApiKeyResponse) {
     if cli.output == "json" {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
-    } else {
-        println!("id:      {}", resp.id);
-        println!("label:   {}", resp.label);
-        println!("scopes:  {}", resp.scopes.join(", "));
         println!(
-            "expires: {}",
+            "{}",
+            serde_json::to_string_pretty(resp).unwrap_or_else(|_| "{}".into())
+        );
+    } else {
+        println!("id:       {}", resp.id);
+        println!("label:    {}", resp.label);
+        println!("owner:    {}", resp.owner_uid);
+        println!("scopes:   {}", resp.scopes.join(", "));
+        println!(
+            "expires:  {}",
             resp.expires_at
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_else(|| "never".into())
@@ -397,26 +738,107 @@ async fn cmd_api_key_create(
         println!("token (save now — not shown again):");
         println!("  {}", resp.token);
     }
+}
+
+async fn cmd_api_key_list(
+    cli: &Cli,
+    cfg: &Config,
+    owner: Option<uuid::Uuid>,
+    include_revoked: bool,
+) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let mut resp: Vec<hc_api_types::api_keys::ApiKeySummary> =
+        client.get("/auth/api-keys").await?;
+    if let Some(o) = owner {
+        resp.retain(|k| k.owner_uid == o);
+    }
+    if !include_revoked {
+        resp.retain(|k| k.revoked_at.is_none());
+    }
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    if resp.is_empty() {
+        println!("(no API keys)");
+        return Ok(());
+    }
+    println!(
+        "{:<38}  {:<20}  {:<8}  {:<16}  {}",
+        "ID", "Label", "Status", "Last used", "Scopes"
+    );
+    for k in &resp {
+        let status = key_status(k);
+        let last_used = k
+            .last_used_at
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "{:<38}  {:<20}  {:<8}  {:<16}  {}",
+            k.id,
+            truncate(&k.label, 20),
+            status,
+            last_used,
+            k.scopes.join(",")
+        );
+    }
     Ok(())
 }
 
-async fn cmd_api_key_list(cli: &Cli, cfg: &Config) -> Result<()> {
-    let client = make_client(cli, cfg).await?;
-    let resp: Vec<hc_api_types::api_keys::ApiKeySummary> =
-        client.get("/auth/api-keys").await?;
-    if cli.output == "json" {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
-    } else if resp.is_empty() {
-        println!("(no API keys)");
+fn key_status(k: &hc_api_types::api_keys::ApiKeySummary) -> &'static str {
+    if k.revoked_at.is_some() {
+        "revoked"
+    } else if k
+        .expires_at
+        .map(|e| e <= chrono::Utc::now())
+        .unwrap_or(false)
+    {
+        "expired"
     } else {
-        println!("{:<38}  {:<20}  {:<40}", "ID", "Label", "Scopes");
-        for k in &resp {
-            let revoked = if k.revoked_at.is_some() { " [revoked]" } else { "" };
+        "active"
+    }
+}
+
+async fn cmd_api_key_show(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let all: Vec<hc_api_types::api_keys::ApiKeySummary> =
+        client.get("/auth/api-keys").await?;
+    let k = all
+        .into_iter()
+        .find(|k| k.id == id)
+        .ok_or_else(|| anyhow::anyhow!("API key {id} not found"))?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&k)?);
+    } else {
+        println!("id:          {}", k.id);
+        println!("label:       {}", k.label);
+        println!("owner:       {}", k.owner_uid);
+        println!("status:      {}", key_status(&k));
+        println!("prefix:      hc_sk_{}…", k.prefix);
+        println!("scopes:      {}", k.scopes.join(", "));
+        println!(
+            "created:     {}",
+            k.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!(
+            "last_used:   {}",
+            k.last_used_at
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "never".into())
+        );
+        println!(
+            "expires:     {}",
+            k.expires_at
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "never".into())
+        );
+        if !k.allowed_cidrs.is_empty() {
+            println!("cidrs:       {}", k.allowed_cidrs.join(", "));
+        }
+        if let Some(r) = k.revoked_at {
             println!(
-                "{:<38}  {:<20}  {}{revoked}",
-                k.id,
-                truncate(&k.label, 20),
-                k.scopes.join(",")
+                "revoked_at:  {}",
+                r.format("%Y-%m-%d %H:%M:%S UTC")
             );
         }
     }
@@ -428,6 +850,62 @@ async fn cmd_api_key_revoke(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<(
     let path = format!("/auth/api-keys/{id}");
     client.delete(&path).await?;
     println!("Revoked API key {id}");
+    Ok(())
+}
+
+async fn cmd_api_key_update(
+    cli: &Cli,
+    cfg: &Config,
+    id: uuid::Uuid,
+    label: Option<&str>,
+    scopes_csv: Option<&str>,
+    expires: Option<u32>,
+    cidrs_csv: Option<&str>,
+) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let scopes = scopes_csv.map(|s| {
+        s.split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let cidrs = cidrs_csv.map(|s| {
+        if s.trim().is_empty() {
+            Vec::new()
+        } else {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect::<Vec<_>>()
+        }
+    });
+    let body = hc_api_types::api_keys::UpdateApiKeyRequest {
+        label: label.map(str::to_string),
+        scopes,
+        expires_in_days: expires,
+        allowed_cidrs: cidrs,
+    };
+    let path = format!("/auth/api-keys/{id}");
+    let resp: hc_api_types::api_keys::ApiKeySummary = client.patch(&path, &body).await?;
+    if cli.output == "json" {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("Updated API key {id}");
+        println!("  label:   {}", resp.label);
+        println!("  scopes:  {}", resp.scopes.join(", "));
+    }
+    Ok(())
+}
+
+async fn cmd_api_key_rotate(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()> {
+    let client = make_client(cli, cfg).await?;
+    let path = format!("/auth/api-keys/{id}/rotate");
+    let resp: CreateApiKeyResponse = client.post(&path, &serde_json::json!({})).await?;
+    if cli.output != "json" {
+        println!("Rotated API key {id} — new secret issued.");
+        println!();
+    }
+    print_create_response(cli, &resp);
     Ok(())
 }
 
