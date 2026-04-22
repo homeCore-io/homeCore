@@ -1,0 +1,45 @@
+[Unit]
+Description=HomeCore Home Automation Server (external Mosquitto)
+Documentation=https://homecore-io.github.io/administration/systemd-deployment
+After=network-online.target mosquitto.service
+Wants=network-online.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+User=homecore
+Group=homecore
+Environment="HOMECORE_HOME=/var/lib/homecore"
+ExecStart=/usr/local/bin/homecore --config /etc/homecore/homecore.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecore
+
+# Hardening — safe defaults for a system service. Relax or tighten to
+# match the rest of your host's posture.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/homecore /var/log/homecore
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
