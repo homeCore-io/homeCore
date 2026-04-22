@@ -33,7 +33,10 @@ Protocol adapters & plugins  (separate processes, any language)
 
 MQTT broker  (embedded rumqttd — core layer)
   └── Topic schema: homecore/devices/+/state|cmd|availability
-  └── TLS, per-client ACL, retained messages, QoS 0/1/2
+  └── TLS, retained messages, QoS 0/1/2
+  └── ⚠ Embedded rumqttd enforces CONNECT authn only — NOT topic ACLs.
+      For per-plugin topic isolation, deploy with an external Mosquitto
+      broker (see mqttAuthzPlan.md + docker/docker-compose.external-broker.yml)
 
 Rust core kernel
   ├── MQTT client (rumqttc) — bridges broker → internal event bus
@@ -89,17 +92,30 @@ homecore/system/log                           # structured log stream (optional)
 
 ## MQTT ACL model
 
-Each plugin gets a unique client ID + credential, with topic-level permissions enforced by the broker. A compromised plugin cannot affect other plugins' devices.
+Each plugin gets a unique client ID + credential, with **topic-level
+permissions declared per client** in `[[broker.clients]]`:
+
+- **With the embedded rumqttd broker (default):** CONNECT authn is enforced,
+  but `allow_pub` / `allow_sub` are metadata only. The broker does not
+  enforce them at publish or subscribe time.
+- **With an external Mosquitto broker (recommended for containers, remote
+  plugins, or third-party code):** the same `allow_pub` / `allow_sub`
+  patterns are converted to Mosquitto's ACL file and enforced at the
+  broker. A compromised plugin cannot affect topics outside its ACL.
+
+Generate the Mosquitto deployment from your config with
+`hc-cli broker generate-mosquitto-config`. Full plan lives in
+`mqttAuthzPlan.md` at the repo root.
 
 ```toml
 # homecore.toml — broker ACL section
-[[mqtt.clients]]
+[[broker.clients]]
 id       = "plugin.zigbee"
 password = "{bcrypt_hash}"
 allow_pub = ["homecore/devices/zigbee_+/state", "homecore/plugins/zigbee/+"]
 allow_sub = ["homecore/devices/zigbee_+/cmd"]
 
-[[mqtt.clients]]
+[[broker.clients]]
 id       = "internal.core"
 password = "{bcrypt_hash}"
 allow_pub = ["homecore/#"]
@@ -351,7 +367,7 @@ homeCore/                          # container dir (no git)
 |---|---|---|
 | Language | Rust (stable) | No GC pauses, memory safety, Tokio ecosystem |
 | Async runtime | `tokio` | Mature, performant, shared across all crates |
-| Embedded MQTT broker | `rumqttd` 0.19 | Pure Rust, Tokio-native, TLS, ACL |
+| Embedded MQTT broker | `rumqttd` 0.19 | Pure Rust, Tokio-native, TLS, authn only |
 | Internal MQTT client | `rumqttc` 0.24 | Async, same Tokio runtime |
 | External broker (optional) | Mosquitto / EMQX | Config: point `broker.external_url` at it |
 | HTTP + WebSocket | `axum` 0.7 | Tower middleware, ergonomic, WS support |
@@ -361,7 +377,7 @@ homeCore/                          # container dir (no git)
 | Serialization | `serde` + `serde_json` | Universal |
 | Config format | `toml` 0.8 | Human-friendly, Rust standard |
 | Auth (REST) | JWT HS256 (`jsonwebtoken`) | Symmetric HMAC-SHA256; Argon2id for passwords |
-| Auth (MQTT) | bcrypt credentials per plugin | Per-plugin credentials enforced at broker ACL |
+| Auth (MQTT) | bcrypt credentials per plugin | CONNECT authn on embedded broker; topic ACLs when paired with external Mosquitto |
 | Notifications | `hc-notify` crate | Pushover + email (lettre); triggered by rule actions |
 | OpenAPI generation | `utoipa` 4 | Derive macros on handlers |
 | File-change watching | `notify` 6 | Hot-reload for rules and modes.toml |
@@ -376,7 +392,7 @@ homeCore/                          # container dir (no git)
 ### Phase 1 — Solid kernel ✅ Complete
 - [x] Workspace scaffold, all crate stubs
 - [x] `hc-types`: `Event`, `DeviceState`, `Rule`, `MqttMessage` types
-- [x] `hc-broker`: embed `rumqttd`, config-driven TLS + ACL
+- [x] `hc-broker`: embed `rumqttd`, config-driven TLS + authn (topic ACLs require external Mosquitto)
 - [x] `hc-mqtt-client`: subscribe to `homecore/#`, bridge to internal channel
 - [x] `hc-state`: `redb`-backed device registry, get/set/watch
 - [x] `hc-core`: rule engine, action executor
@@ -441,7 +457,7 @@ homeCore/                          # container dir (no git)
 1. **MQTT is the device communication fabric** — never route device state through REST-only paths; MQTT is always the source of truth for device state.
 2. **Core is side-effect free in conditions** — rule conditions must only read state, never call external services. This makes them safe to evaluate speculatively and test with dry-run.
 3. **Rules are data, not code** — stored as RON files, created/modified via API. No recompile to add automations.
-4. **Plugin isolation via MQTT ACL** — a plugin's broker credentials restrict it to its own device topics. Isolation is enforced at the transport layer.
+4. **Plugin isolation at the MQTT layer** — each plugin has its own credentials and declared ACL patterns. Enforcement depends on broker: the embedded rumqttd only enforces CONNECT authn (convention + network boundary provides the rest); deploying against external Mosquitto enforces per-topic ACLs as described in `mqttAuthzPlan.md`. Choose the deployment that matches your trust model.
 5. **API-first** — every operation the system can perform is available via REST or WebSocket. The future web UI is just another API consumer.
 6. **No cloud dependency** — solar events computed locally from lat/lon config. All automation logic runs offline.
 

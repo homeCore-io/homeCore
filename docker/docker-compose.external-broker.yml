@@ -1,0 +1,97 @@
+# docker-compose.external-broker.yml
+#
+# Sample deployment that runs homeCore with an EXTERNAL Mosquitto broker
+# instead of the embedded rumqttd. Mosquitto enforces topic authorization
+# (ACLs) — the thing the embedded broker does not do. See mqttAuthzPlan.md
+# for why and when to pick this deployment.
+#
+# Expected layout before `docker compose up`:
+#   ./mosquitto-config/mosquitto.conf   (generated)
+#   ./mosquitto-config/aclfile          (generated)
+#   ./mosquitto-config/passwd           (generated: see passwd.setup.sh)
+#   ./homecore-config/homecore.toml     (your config; broker.external_url set)
+#
+# Steps to produce mosquitto-config/ from an existing homecore.toml:
+#   1. hc-cli broker generate-mosquitto-config \
+#        --config ./homecore-config/homecore.toml \
+#        --out-dir ./mosquitto-config
+#   2. Edit mosquitto-config/passwd.setup.sh and replace each CHANGE_ME_<ID>
+#      with the plaintext password from the corresponding [[broker.clients]]
+#      entry in your homecore.toml.
+#   3. docker compose -f docker-compose.external-broker.yml run --rm \
+#        passwd-setup
+#      (This produces mosquitto-config/passwd with PBKDF2 hashes.)
+#   4. docker compose -f docker-compose.external-broker.yml up -d
+
+version: "3.9"
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: hc-mosquitto
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto-config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-logs:/mosquitto/log
+    ports:
+      - "1883:1883"
+    healthcheck:
+      test:
+        - CMD
+        - mosquitto_sub
+        - -h
+        - 127.0.0.1
+        - -t
+        - $$SYS/broker/uptime
+        - -C
+        - "1"
+        - -W
+        - "2"
+        - -u
+        - internal.core
+        - -P
+        - ${CORE_BROKER_PASSWORD}
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # One-shot helper. Runs passwd.setup.sh inside the Mosquitto image
+  # (which has mosquitto_passwd) and exits. Use via `docker compose run`.
+  passwd-setup:
+    image: eclipse-mosquitto:2
+    profiles: ["setup"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: "bash /mosquitto/config/passwd.setup.sh"
+    volumes:
+      - ./mosquitto-config:/mosquitto/config
+
+  homecore:
+    image: homecore:latest
+    container_name: hc-homecore
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      # Override log level via env if desired.
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./homecore-config:/etc/homecore:ro
+      - homecore-state:/var/lib/homecore
+      - homecore-logs:/var/log/homecore
+    ports:
+      - "8080:8080"
+    # homecore.toml inside the container must set:
+    #   [broker]
+    #   external_url = "mqtt://mosquitto:1883"
+    #
+    # and must NOT have `[[broker.clients]]` entries (those are now owned
+    # by Mosquitto's password_file + aclfile).
+    command: ["--config", "/etc/homecore/homecore.toml"]
+
+volumes:
+  mosquitto-data:
+  mosquitto-logs:
+  homecore-state:
+  homecore-logs:

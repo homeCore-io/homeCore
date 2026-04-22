@@ -20,7 +20,7 @@ homeCore is written in async Rust (Tokio), stores device state in an embedded [r
 |---|---|
 | **Embedded MQTT broker** | rumqttd ships in the binary — no external broker needed for basic installs |
 | **Rule engine** | 16+ trigger types, compound conditions, 40+ action types, Rhai scripting, per-rule fire history |
-| **Plugin architecture** | Connect devices via Rust, Python, or Node.js SDKs; plugins run as isolated processes with per-plugin MQTT ACL |
+| **Plugin architecture** | Connect devices via Rust, Python, or Node.js SDKs; plugins run as isolated processes with per-plugin MQTT credentials (topic ACL enforcement when paired with an external Mosquitto broker — see `mqttAuthzPlan.md`) |
 | **Scenes** | Native homeCore scenes + plugin-managed scenes (Hue, Lutron, etc.) |
 | **Solar events** | Sunrise/sunset triggers computed locally from lat/lon — no API key needed |
 | **Virtual devices** | Software timers, switches, and mode flags usable in rules |

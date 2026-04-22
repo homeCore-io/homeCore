@@ -1019,16 +1019,25 @@ topic.
 
 The `allow_pub` / `allow_sub` fields serve two purposes:
 1. Self-documenting config — makes the intended access pattern clear
-2. Exportable to an external broker config (Mosquitto, EMQX) that _does_
-   enforce topic ACL if strict isolation is required in production
+2. Convertible to an external broker config (Mosquitto) that _does_
+   enforce topic ACL when strict isolation is required
 
-For strict topic ACL in a production deployment, configure an external broker
-and point HomeCore at it:
-```toml
-# Not yet wired — planned for a future release.
-# [broker]
-# external_url = "mqtt://192.168.1.10:1883"
+For strict topic ACL in a production deployment, generate a Mosquitto
+configuration from your `homecore.toml` and run HomeCore against it:
+```bash
+hc-cli broker generate-mosquitto-config \
+  --config /etc/homecore/homecore.toml \
+  --out-dir ./mosquitto-config
 ```
+
+Then set:
+```toml
+[broker]
+external_url = "mqtt://mosquitto-host:1883"
+```
+
+A runnable compose file lives at `docker/docker-compose.external-broker.yml`.
+Full design and rollout plan: `mqttAuthzPlan.md` at the repo root.
 
 ---
 
