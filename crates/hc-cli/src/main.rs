@@ -31,8 +31,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// First-run bootstrap: create admin user, optionally issue an
-    /// initial mcp-service API key.
+    /// First-run bootstrap: create an admin user, optionally mint one
+    /// service API key in the same step. For additional keys later, use
+    /// `hc-cli api-key create`.
     Setup {
         /// Admin username (default `admin`).
         #[arg(long, default_value = "admin")]
@@ -40,9 +41,25 @@ enum Command {
         /// Admin password. If not provided, prompts interactively.
         #[arg(long)]
         admin_password: Option<String>,
-        /// Also create a `mcp-service` user + API key with read-only scopes.
+        /// Also create a service user + API key in one step. Use this when
+        /// you know the first consumer up front (a script, a bridge, hc-mcp);
+        /// otherwise run `hc-cli api-key create` later to mint keys as needed.
         #[arg(long, default_value = "false")]
-        create_mcp_key: bool,
+        create_service_key: bool,
+        /// Label for the service user and key (required when
+        /// `--create-service-key` is set). Used as both the username and
+        /// the key's display label.
+        #[arg(long, default_value = "api-service")]
+        service_label: String,
+        /// Comma-separated scopes for the service key. Must be a subset of
+        /// the service user's role scopes (controlled by `--service-role`).
+        #[arg(long, default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read")]
+        service_scopes: String,
+        /// Role for the service user: `read_only` or `user`. Defaults to the
+        /// safer `read_only` — bump to `user` for service accounts that
+        /// command devices or edit automations.
+        #[arg(long, default_value = "read_only")]
+        service_role: String,
         /// Skip all prompts; fail if input would be required.
         #[arg(long, default_value = "false")]
         non_interactive: bool,
@@ -119,7 +136,10 @@ async fn main() -> Result<()> {
         Command::Setup {
             admin_username,
             admin_password,
-            create_mcp_key,
+            create_service_key,
+            service_label,
+            service_scopes,
+            service_role,
             non_interactive,
         } => {
             cmd_setup(
@@ -128,7 +148,10 @@ async fn main() -> Result<()> {
                 &config_path,
                 admin_username,
                 admin_password.as_deref(),
-                *create_mcp_key,
+                *create_service_key,
+                service_label,
+                service_scopes,
+                service_role,
                 *non_interactive,
             )
             .await
@@ -182,7 +205,10 @@ async fn cmd_setup(
     _config_path: &std::path::Path,
     admin_username: &str,
     admin_password: Option<&str>,
-    create_mcp_key: bool,
+    create_service_key: bool,
+    service_label: &str,
+    service_scopes_csv: &str,
+    service_role: &str,
     non_interactive: bool,
 ) -> Result<()> {
     let client = make_client(cli, cfg).await?;
@@ -225,47 +251,55 @@ async fn cmd_setup(
         println!("Admin user already present — skipping admin creation.");
     }
 
-    if create_mcp_key {
-        // Create mcp-service user (ReadOnly by default).
-        let mcp_exists = existing
+    if create_service_key {
+        let role = parse_role(service_role)?;
+        let scopes: Vec<String> = service_scopes_csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if scopes.is_empty() {
+            bail!("--service-scopes must list at least one scope");
+        }
+
+        // Reuse an existing user with this label if present; otherwise create.
+        let svc_exists = existing
             .iter()
-            .any(|v| v.get("username").and_then(|u| u.as_str()) == Some("mcp-service"));
-        let mcp_uid: uuid::Uuid = if !mcp_exists {
-            let mcp_pw = rand_password(24);
+            .any(|v| v.get("username").and_then(|u| u.as_str()) == Some(service_label));
+        let svc_uid: uuid::Uuid = if !svc_exists {
+            let svc_pw = rand_password(24);
             let req = CreateUserRequest {
-                username: "mcp-service".into(),
-                password: mcp_pw,
-                role: Role::ReadOnly,
+                username: service_label.into(),
+                password: svc_pw,
+                role,
             };
             let created: serde_json::Value = client.post("/auth/users", &req).await?;
             let uid_s = created.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            uuid::Uuid::parse_str(uid_s).context("parsing mcp-service uid")?
+            uuid::Uuid::parse_str(uid_s)
+                .with_context(|| format!("parsing {service_label} uid"))?
         } else {
             let e = existing
                 .iter()
-                .find(|v| v.get("username").and_then(|u| u.as_str()) == Some("mcp-service"))
+                .find(|v| v.get("username").and_then(|u| u.as_str()) == Some(service_label))
                 .unwrap();
             uuid::Uuid::parse_str(e.get("id").and_then(|v| v.as_str()).unwrap_or(""))
-                .context("parsing mcp-service uid")?
+                .with_context(|| format!("parsing existing {service_label} uid"))?
         };
 
         let req = CreateApiKeyRequest {
-            label: "mcp-service".into(),
-            scopes: vec![
-                "devices:read".into(),
-                "automations:read".into(),
-                "scenes:read".into(),
-                "dashboards:read".into(),
-                "areas:read".into(),
-            ],
+            label: service_label.into(),
+            scopes,
             expires_in_days: None,
             allowed_cidrs: vec![],
-            owner_uid: Some(mcp_uid),
+            owner_uid: Some(svc_uid),
         };
         let resp: CreateApiKeyResponse = client.post("/auth/api-keys", &req).await?;
         println!();
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("  mcp-service API key (SAVE NOW — will not be shown again)");
+        println!(
+            "  API key for `{}` (SAVE NOW — will not be shown again)",
+            service_label
+        );
         println!();
         println!("  {}", resp.token);
         println!();
@@ -274,6 +308,15 @@ async fn cmd_setup(
     }
 
     Ok(())
+}
+
+fn parse_role(s: &str) -> Result<Role> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "admin" => Ok(Role::Admin),
+        "user" => Ok(Role::User),
+        "read_only" | "readonly" | "read-only" => Ok(Role::ReadOnly),
+        other => bail!("unknown role `{other}` — expected admin | user | read_only"),
+    }
 }
 
 // ── auth login ─────────────────────────────────────────────────────────────
