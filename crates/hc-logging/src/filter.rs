@@ -2,11 +2,34 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::LoggingConfig;
 
+/// Per-target log-level defaults applied before user config.
+///
+/// These quiet down noisy third-party crates that emit useful info-level
+/// events but spam DEBUG. Operators can override any of these via
+/// `[logging.targets]` in `homecore.toml` or via `RUST_LOG`, both of which
+/// are layered on top.
+///
+/// Tune carefully — entries here change the "default install" experience
+/// and should target genuine noise (per-packet keepalive logs, etc.) not
+/// debug events that would actually help an operator diagnose a problem.
+const NOISE_SUPPRESSION_DEFAULTS: &[(&str, &str)] = &[
+    // Pingreq + state-machine bookkeeping — fires every keep-alive
+    // (default 30s) on every MQTT client. With many plugins this is the
+    // dominant log volume and tells you nothing actionable.
+    ("rumqttc::state", "info"),
+    // Embedded broker has the same per-packet chatter at DEBUG.
+    ("rumqttd", "info"),
+];
+
 /// Build the filter directive string from config (without parsing).
 /// Used to seed the reload handle's initial value.
 pub fn build_filter_string(config: &LoggingConfig, level_override: Option<&str>) -> String {
     let base = level_override.unwrap_or(&config.level);
     let mut parts = vec![base.to_string()];
+    // Noise-suppression defaults first, so config overrides win.
+    for (target, level) in NOISE_SUPPRESSION_DEFAULTS {
+        parts.push(format!("{target}={level}"));
+    }
     for (target, level) in &config.targets {
         parts.push(format!("{target}={level}"));
     }
@@ -34,6 +57,14 @@ pub fn build_filter(config: &LoggingConfig, level_override: Option<&str>) -> Env
     let base = level_override.unwrap_or(&config.level);
     let mut filter = EnvFilter::new(base);
 
+    // Noise-suppression defaults first, so config + RUST_LOG win on conflict.
+    for (target, level) in NOISE_SUPPRESSION_DEFAULTS {
+        let directive = format!("{target}={level}");
+        if let Ok(d) = directive.parse() {
+            filter = filter.add_directive(d);
+        }
+    }
+
     for (target, level) in &config.targets {
         let directive = format!("{target}={level}");
         if let Ok(d) = directive.parse() {
@@ -57,4 +88,49 @@ pub fn build_filter(config: &LoggingConfig, level_override: Option<&str>) -> Env
     }
 
     filter
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with_targets(targets: &[(&str, &str)]) -> LoggingConfig {
+        let mut c = LoggingConfig::default();
+        c.level = "info".into();
+        c.targets = targets
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        c
+    }
+
+    #[test]
+    fn noise_defaults_in_directive_string() {
+        let s = build_filter_string(&cfg_with_targets(&[]), None);
+        assert!(
+            s.contains("rumqttc::state=info"),
+            "expected rumqttc::state default, got: {s}"
+        );
+        assert!(
+            s.contains("rumqttd=info"),
+            "expected rumqttd default, got: {s}"
+        );
+    }
+
+    #[test]
+    fn config_target_overrides_default() {
+        // Operator opts in to debug for one of the noisy crates — last
+        // matching directive wins in EnvFilter.
+        let s = build_filter_string(
+            &cfg_with_targets(&[("rumqttc::state", "debug")]),
+            None,
+        );
+        // The default appears first, then the override appears after.
+        let default_idx = s.find("rumqttc::state=info").expect("default present");
+        let override_idx = s.find("rumqttc::state=debug").expect("override present");
+        assert!(
+            override_idx > default_idx,
+            "config override must appear after the default so it wins"
+        );
+    }
 }
