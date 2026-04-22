@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub mod api_key_store;
 pub mod device_store;
 pub mod history;
+pub mod refresh_token_store;
 pub mod rule_store;
 pub mod schema_store;
 pub mod user_store;
@@ -25,11 +26,13 @@ pub mod user_store;
 use api_key_store::ApiKeyStore;
 use device_store::DeviceStore;
 use history::HistoryStore;
+use refresh_token_store::RefreshTokenStore;
 use rule_store::RuleStore;
 use schema_store::SchemaStore;
 use user_store::UserStore;
 
 pub use api_key_store::ApiKeyRecord;
+pub use refresh_token_store::RefreshTokenRecord;
 
 /// Combined handle to both storage back-ends.
 #[derive(Clone)]
@@ -40,6 +43,7 @@ pub struct StateStore {
     schemas: Arc<SchemaStore>,
     users: Arc<UserStore>,
     api_keys: Arc<ApiKeyStore>,
+    refresh_tokens: Arc<RefreshTokenStore>,
 }
 
 impl StateStore {
@@ -49,7 +53,7 @@ impl StateStore {
         let state_path = state_db_path.to_string();
         let history_path = history_db_path.to_string();
 
-        let (devices, rules, history, schemas, users, api_keys) = tokio::task::spawn_blocking(move || {
+        let (devices, rules, history, schemas, users, api_keys, refresh_tokens) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -73,7 +77,16 @@ impl StateStore {
             let schemas = SchemaStore::new(Arc::clone(&db))?;
             let users = UserStore::new(Arc::clone(&db))?;
             let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
-            Ok::<_, anyhow::Error>((devices, rules, history, schemas, users, api_keys))
+            let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
+            Ok::<_, anyhow::Error>((
+                devices,
+                rules,
+                history,
+                schemas,
+                users,
+                api_keys,
+                refresh_tokens,
+            ))
         })
         .await??;
 
@@ -84,7 +97,68 @@ impl StateStore {
             schemas: Arc::new(schemas),
             users: Arc::new(users),
             api_keys: Arc::new(api_keys),
+            refresh_tokens: Arc::new(refresh_tokens),
         })
+    }
+
+    // --- Refresh tokens ---
+
+    pub async fn create_refresh_token(&self, record: &RefreshTokenRecord) -> Result<()> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let r = record.clone();
+        tokio::task::spawn_blocking(move || store.create(&r)).await?
+    }
+
+    pub async fn refresh_prefix_exists(&self, prefix: &str) -> Result<bool> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let p = prefix.to_string();
+        tokio::task::spawn_blocking(move || store.prefix_exists(&p)).await?
+    }
+
+    pub async fn get_refresh_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<RefreshTokenRecord>> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let p = prefix.to_string();
+        tokio::task::spawn_blocking(move || store.get_by_prefix(&p)).await?
+    }
+
+    pub async fn get_refresh_by_id(&self, id: Uuid) -> Result<Option<RefreshTokenRecord>> {
+        let store = Arc::clone(&self.refresh_tokens);
+        tokio::task::spawn_blocking(move || store.get_by_id(id)).await?
+    }
+
+    pub async fn list_refresh_by_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<RefreshTokenRecord>> {
+        let store = Arc::clone(&self.refresh_tokens);
+        tokio::task::spawn_blocking(move || store.list_by_user(user_id)).await?
+    }
+
+    pub async fn mark_refresh_used(&self, id: Uuid) -> Result<()> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.mark_used(id, now)).await?
+    }
+
+    pub async fn revoke_refresh_chain(&self, id: Uuid) -> Result<usize> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.revoke_chain(id, now)).await?
+    }
+
+    pub async fn revoke_refresh(&self, id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.revoke(id, now)).await?
+    }
+
+    pub async fn prune_refresh_tokens(&self) -> Result<usize> {
+        let store = Arc::clone(&self.refresh_tokens);
+        let now = chrono::Utc::now();
+        tokio::task::spawn_blocking(move || store.prune(now)).await?
     }
 
     // --- API keys ---

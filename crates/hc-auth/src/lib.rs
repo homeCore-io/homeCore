@@ -5,6 +5,7 @@ pub mod api_key;
 pub mod jwt;
 pub mod mqtt_creds;
 pub mod password;
+pub mod refresh;
 pub mod user;
 
 pub use actor::Actor;

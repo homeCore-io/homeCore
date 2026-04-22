@@ -7,11 +7,16 @@ use axum::{
     Json,
 };
 use hc_api_types::auth::{
-    ChangePasswordRequest, CreateUserRequest, LoginRequest, LoginResponse, SetRoleRequest,
+    ChangePasswordRequest, CreateUserRequest, LoginRequest, LoginResponse, RefreshRequest,
+    RefreshResponse, SetRoleRequest,
 };
+use hc_auth::refresh;
 use hc_auth::{hash_password, verify_password, User, UserInfo};
+use hc_state::RefreshTokenRecord;
 use serde_json::json;
 use uuid::Uuid;
+
+const REFRESH_MAX_RETRIES: u32 = 3;
 
 use crate::{auth_middleware::AuthUser, AppState};
 
@@ -69,10 +74,22 @@ pub async fn login(
     match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
+            // Mint a refresh token alongside. If minting fails, still return
+            // the access token — login shouldn't break just because the
+            // refresh store had a transient issue.
+            let (refresh_token, refresh_expires_in) = match issue_refresh(&s, user.id, None).await {
+                Ok(r) => (Some(r.0), Some(r.1)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "refresh token issue failed on login");
+                    (None, None)
+                }
+            };
             let body = LoginResponse {
                 token,
                 token_type: "Bearer".into(),
                 expires_in,
+                refresh_token,
+                refresh_expires_in,
                 user: UserInfo::from(&user),
             };
             (StatusCode::OK, Json(body)).into_response()
@@ -83,6 +100,200 @@ pub async fn login(
         )
             .into_response(),
     }
+}
+
+/// Mint a refresh token and persist it. Returns `(full_token, ttl_seconds)`.
+async fn issue_refresh(
+    s: &AppState,
+    user_id: Uuid,
+    parent_id: Option<Uuid>,
+) -> anyhow::Result<(String, u64)> {
+    // Collision-safe generate.
+    let new_tok = {
+        let mut attempt = 0u32;
+        loop {
+            let candidate = refresh::generate()?;
+            if !s
+                .store
+                .refresh_prefix_exists(&candidate.lookup_prefix)
+                .await?
+            {
+                break candidate;
+            }
+            attempt += 1;
+            if attempt >= REFRESH_MAX_RETRIES {
+                anyhow::bail!("refresh token prefix collided {attempt} times");
+            }
+        }
+    };
+
+    let ttl_days = s.refresh_token_expiry_days;
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(ttl_days as i64);
+    let rec = RefreshTokenRecord {
+        id: Uuid::new_v4(),
+        user_id,
+        prefix: new_tok.lookup_prefix,
+        hash: new_tok.hash,
+        parent_id,
+        created_at: chrono::Utc::now(),
+        used_at: None,
+        expires_at,
+        revoked_at: None,
+        user_agent: String::new(),
+    };
+    s.store.create_refresh_token(&rec).await?;
+    Ok((new_tok.full_token, ttl_days * 24 * 3600))
+}
+
+/// `POST /api/v1/auth/refresh`
+///
+/// Trades a refresh token for a new access + refresh pair. The presented
+/// refresh token is marked used; a new one is issued with `parent_id`
+/// pointing at it. Presenting an already-used token triggers a full
+/// chain revocation — likely indicates token theft.
+pub async fn refresh(
+    State(s): State<AppState>,
+    Json(body): Json<RefreshRequest>,
+) -> impl IntoResponse {
+    let body_tok = match body.refresh_token.strip_prefix(refresh::REFRESH_TOKEN_PREFIX) {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "malformed refresh token" })),
+            )
+                .into_response();
+        }
+    };
+    let prefix = match refresh::lookup_prefix_from_body(body_tok) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "malformed refresh token" })),
+            )
+                .into_response();
+        }
+    };
+
+    let rec = match s.store.get_refresh_by_prefix(prefix).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid refresh token" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "refresh_by_prefix lookup failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store unavailable" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Reuse detection: token previously used → chain-revoke + reject.
+    if rec.used_at.is_some() {
+        tracing::warn!(
+            user_id = %rec.user_id,
+            chain_root = %rec.id,
+            "Refresh token reuse detected — revoking entire chain"
+        );
+        let _ = s.store.revoke_refresh_chain(rec.id).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "refresh token reuse detected — chain revoked" })),
+        )
+            .into_response();
+    }
+    if rec.revoked_at.is_some() || rec.expires_at <= chrono::Utc::now() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "refresh token revoked or expired" })),
+        )
+            .into_response();
+    }
+
+    // Verify hash. Blocking-pool to avoid stalling the reactor.
+    let stored_hash = rec.hash.clone();
+    let full_tok = body.refresh_token.clone();
+    let ok = tokio::task::spawn_blocking(move || refresh::verify_token(&full_tok, &stored_hash))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid refresh token" })),
+        )
+            .into_response();
+    }
+
+    // Valid. Mark the presented token used, mint a new access + refresh pair.
+    if let Err(e) = s.store.mark_refresh_used(rec.id).await {
+        tracing::warn!(error = %e, "mark_refresh_used failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "store unavailable" })),
+        )
+            .into_response();
+    }
+
+    let user = match s.store.get_user_by_id(rec.user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "user no longer exists" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "get_user_by_id failed during refresh");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store unavailable" })),
+            )
+                .into_response();
+        }
+    };
+
+    let access = match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let (new_refresh, refresh_ttl) = match issue_refresh(&s, rec.user_id, Some(rec.id)).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to issue rotated refresh");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "could not rotate refresh token" })),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(RefreshResponse {
+            token: access,
+            token_type: "Bearer".into(),
+            expires_in: s.jwt.expiry_hours() * 3600,
+            refresh_token: new_refresh,
+            refresh_expires_in: refresh_ttl,
+            user: UserInfo::from(&user),
+        }),
+    )
+        .into_response()
 }
 
 // ---------- Me ----------

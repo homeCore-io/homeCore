@@ -129,6 +129,9 @@ pub struct AppState {
     /// startup. Checked defensively after filesystem perms so a misconfigured
     /// socket mode can't silently grant admin access to every local user.
     pub uds_allowed_uids: Arc<std::collections::HashSet<u32>>,
+    /// Refresh-token lifetime in days. Set at startup from
+    /// `[auth].refresh_token_expiry_days`. Default 30.
+    pub refresh_token_expiry_days: u64,
     /// Path to `config/modes.toml` — used by mode API handlers.
     pub modes_path: Option<Arc<std::path::PathBuf>>,
     /// Log streaming state (broadcast channel + ring buffer).
@@ -372,6 +375,7 @@ impl AppState {
             event_log,
             whitelist: Arc::new(whitelist),
             uds_allowed_uids: Arc::new(std::collections::HashSet::new()),
+            refresh_token_expiry_days: 30,
             modes_path: modes_path.map(|p| Arc::new(p)),
             log_stream: None,
             metrics,
@@ -404,6 +408,12 @@ impl AppState {
         uids: std::collections::HashSet<u32>,
     ) -> Self {
         self.uds_allowed_uids = Arc::new(uids);
+        self
+    }
+
+    /// Override the refresh-token lifetime (default 30 days).
+    pub fn with_refresh_token_expiry_days(mut self, days: u64) -> Self {
+        self.refresh_token_expiry_days = days;
         self
     }
 
@@ -485,6 +495,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/health", get(handlers::health))
         .route("/metrics", get(metrics::metrics_handler))
         .route("/auth/login", post(auth_handlers::login))
+        .route("/auth/refresh", post(auth_handlers::refresh))
         // WebSocket stream authenticates via ?token= query param (browsers can't
         // set Authorization headers during WS upgrade).
         .route("/events/stream", get(ws::ws_events_handler))

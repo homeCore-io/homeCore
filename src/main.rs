@@ -544,6 +544,11 @@ struct AuthSection {
     jwt_secret_file: Option<std::path::PathBuf>,
     #[serde(default = "default_expiry")]
     token_expiry_hours: u64,
+    /// Refresh-token lifetime in days. A successful login also returns a
+    /// long-lived refresh token; each `/auth/refresh` call rotates it.
+    /// Default: 30 days.
+    #[serde(default = "default_refresh_days")]
+    refresh_token_expiry_days: u64,
     /// IP addresses or CIDR ranges that may access all API endpoints without
     /// a JWT.  Requests from these addresses receive full Admin access.
     /// Parsed as standard CIDR notation.  Both IPv4 and IPv6 are supported.
@@ -603,12 +608,17 @@ fn default_expiry() -> u64 {
     24
 }
 
+fn default_refresh_days() -> u64 {
+    30
+}
+
 impl Default for AuthSection {
     fn default() -> Self {
         Self {
             jwt_secret: None,
             jwt_secret_file: None,
             token_expiry_hours: 24,
+            refresh_token_expiry_days: 30,
             whitelist: vec![],
             admin_uds: AdminUdsSection::default(),
         }
@@ -1131,7 +1141,8 @@ async fn main() -> Result<()> {
     .with_log_level_handle(log_level_handle)
     .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(
         &config.auth.admin_uds.allowed_uids,
-    ));
+    ))
+    .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days);
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store
@@ -1198,6 +1209,24 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // Periodic prune of used/revoked refresh tokens. Keeps the store from
+    // growing unbounded over long uptimes. Fires every hour; cheap.
+    {
+        let store = app_state.store.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                match store.prune_refresh_tokens().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(pruned = n, "refresh tokens pruned"),
+                    Err(e) => tracing::warn!(error = %e, "refresh token prune failed"),
+                }
+            }
+        });
+    }
 
     let mut api_task = tokio::spawn(async move {
         hc_api::serve(

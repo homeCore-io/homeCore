@@ -15,10 +15,37 @@ pub struct LoginRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginResponse {
+    /// Access token (short-lived JWT) — include as `Authorization: Bearer ...`
+    /// on every subsequent request.
     pub token: String,
     pub token_type: String, // "Bearer"
-    /// Seconds until the token expires.
+    /// Seconds until the access token expires.
     pub expires_in: u64,
+    /// Long-lived refresh token. Exchanged for a new access token via
+    /// `POST /auth/refresh`. Single-use rotating — each successful
+    /// refresh returns a new refresh token and invalidates the old one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Seconds until the refresh token expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_in: Option<u64>,
+    pub user: UserInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+/// Response from `POST /auth/refresh`. Mirrors `LoginResponse` — callers
+/// replace both stored tokens with these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshResponse {
+    pub token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+    pub refresh_token: String,
+    pub refresh_expires_in: u64,
     pub user: UserInfo,
 }
 
