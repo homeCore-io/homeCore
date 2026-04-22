@@ -28,6 +28,9 @@ pub mod syslog_layer;
 
 pub use broadcast_layer::{BroadcastLayer, LogRing, LogSender};
 pub use config::LoggingConfig;
+pub use filter::{
+    noise_suppression_directives, with_noise_suppression, NOISE_SUPPRESSION_DEFAULTS,
+};
 
 impl LoggingConfig {
     /// Resolve any empty or relative path fields against `base_dir`.

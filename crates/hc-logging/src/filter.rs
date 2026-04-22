@@ -12,7 +12,7 @@ use crate::config::LoggingConfig;
 /// Tune carefully — entries here change the "default install" experience
 /// and should target genuine noise (per-packet keepalive logs, etc.) not
 /// debug events that would actually help an operator diagnose a problem.
-const NOISE_SUPPRESSION_DEFAULTS: &[(&str, &str)] = &[
+pub const NOISE_SUPPRESSION_DEFAULTS: &[(&str, &str)] = &[
     // Pingreq + state-machine bookkeeping — fires every keep-alive
     // (default 30s) on every MQTT client. With many plugins this is the
     // dominant log volume and tells you nothing actionable.
@@ -20,6 +20,32 @@ const NOISE_SUPPRESSION_DEFAULTS: &[(&str, &str)] = &[
     // Embedded broker has the same per-packet chatter at DEBUG.
     ("rumqttd", "info"),
 ];
+
+/// Return the noise-suppression defaults as a CSV directive string,
+/// suitable for prepending to a user-supplied filter spec.
+///
+/// Plugins (which build their `EnvFilter` directly rather than going
+/// through [`build_filter`]) call [`with_noise_suppression`] to apply
+/// the same defaults the core uses.
+pub fn noise_suppression_directives() -> String {
+    NOISE_SUPPRESSION_DEFAULTS
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Prepend the noise-suppression defaults to `directives`. The user's
+/// directives appear after the defaults so EnvFilter resolves them with
+/// higher precedence on conflict.
+pub fn with_noise_suppression(directives: &str) -> String {
+    let suppression = noise_suppression_directives();
+    if directives.is_empty() {
+        suppression
+    } else {
+        format!("{suppression},{directives}")
+    }
+}
 
 /// Build the filter directive string from config (without parsing).
 /// Used to seed the reload handle's initial value.
@@ -115,6 +141,23 @@ mod tests {
             s.contains("rumqttd=info"),
             "expected rumqttd default, got: {s}"
         );
+    }
+
+    #[test]
+    fn with_noise_suppression_prepends() {
+        let combined = with_noise_suppression("hc_thermostat=info");
+        assert!(combined.contains("rumqttc::state=info"));
+        assert!(combined.contains("rumqttd=info"));
+        // User directive after the defaults so it wins on conflict.
+        let user_idx = combined.find("hc_thermostat=info").unwrap();
+        let suppress_idx = combined.find("rumqttc::state=info").unwrap();
+        assert!(user_idx > suppress_idx);
+    }
+
+    #[test]
+    fn with_noise_suppression_handles_empty() {
+        let combined = with_noise_suppression("");
+        assert_eq!(combined, noise_suppression_directives());
     }
 
     #[test]
