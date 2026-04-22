@@ -37,9 +37,12 @@ plugins/hc-sonos/
 *.bak
 *.swp
 
-# Runtime databases (redb + SQLite)
+# Runtime databases (redb + SQLite, including WAL sidecars)
 *.redb
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Private keys, certificates, secrets
 *.key
