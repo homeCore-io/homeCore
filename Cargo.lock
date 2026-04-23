@@ -1412,6 +1412,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-captest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hc-logging",
+ "hc-types",
+ "plugin-sdk-rs",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hc-cli"
 version = "0.1.0"
 dependencies = [
@@ -1620,6 +1636,7 @@ dependencies = [
  "hc-api-types",
  "hc-auth",
  "hc-broker",
+ "hc-captest",
  "hc-cli",
  "hc-core",
  "hc-logging",
@@ -1632,6 +1649,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "nix",
+ "plugin-sdk-rs",
  "rand 0.8.5",
  "rumqttc",
  "serde",
@@ -2932,6 +2950,23 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "plugin-sdk-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hc-logging",
+ "hc-types",
+ "rumqttc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "portable-atomic"
