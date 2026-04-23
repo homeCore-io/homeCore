@@ -35,6 +35,7 @@ pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
 pub mod rule_file_store;
+pub mod streaming;
 pub mod ws;
 
 use auth_middleware::require_auth;
@@ -174,6 +175,9 @@ pub struct AppState {
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
     pub log_level_handle: Option<hc_logging::LogLevelHandle>,
+    /// Active streaming requests. Concurrency enforcement +
+    /// plugin-offline / timeout injection hang off this.
+    pub streaming_registry: streaming::StreamingRegistry,
 }
 
 impl AppState {
@@ -429,10 +433,38 @@ impl AppState {
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             management_rpc: None,
             log_level_handle: None,
+            streaming_registry: streaming::StreamingRegistry::new(),
         };
 
         // Spawn background task to increment metrics counters from bus events.
         metrics::spawn_metrics_listener(&state, Arc::clone(&state.metrics));
+        // Watch the bus for terminal stream events → release concurrency slots.
+        streaming::spawn_terminal_observer(state.streaming_registry.clone(), &state.event_bus);
+        // Watch for PluginStatusChanged → offline, inject synthetic error
+        // on every open stream belonging to the plugin.
+        if let Some(pub_handle) = state.publish.clone() {
+            let registry = state.streaming_registry.clone();
+            let mut rx = state.event_bus.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(hc_types::event::Event::PluginStatusChanged {
+                            plugin_id, status, ..
+                        }) if status == "offline" => {
+                            streaming::inject_plugin_offline(
+                                &registry,
+                                &pub_handle,
+                                &plugin_id,
+                            )
+                            .await;
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         state
     }
@@ -732,6 +764,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/:id/capabilities",
             get(handlers::get_plugin_capabilities),
+        )
+        .route(
+            "/plugins/:id/command/:request_id/stream",
+            get(handlers::get_plugin_stream_sse),
         )
         .route(
             "/plugins/matter/commission",

@@ -78,6 +78,22 @@ impl ManagementRpc {
         extra: Option<Value>,
     ) -> Result<Value, String> {
         let request_id = Uuid::new_v4().to_string();
+        self.request_with_id(plugin_id, action, &request_id, extra)
+            .await
+    }
+
+    /// Like [`ManagementRpc::request`] but uses a caller-supplied
+    /// `request_id`. Lets concurrency-tracked streaming handlers reserve
+    /// the slot before forwarding the command so a second invocation
+    /// racing in can observe the reservation.
+    pub async fn request_with_id(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        request_id: &str,
+        extra: Option<Value>,
+    ) -> Result<Value, String> {
+        let request_id = request_id.to_string();
         let topic = format!("homecore/plugins/{plugin_id}/manage/cmd");
 
         let mut payload = json!({
@@ -160,5 +176,19 @@ impl ManagementRpc {
     ) -> Result<Value, String> {
         let extra = if params.is_object() { Some(params) } else { None };
         self.request(plugin_id, action, extra).await
+    }
+
+    /// Like [`ManagementRpc::send_command`] with a caller-supplied
+    /// `request_id`. Used by the streaming handler so the tracker slot is
+    /// reserved before the command leaves core.
+    pub async fn send_command_with_id(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        request_id: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let extra = if params.is_object() { Some(params) } else { None };
+        self.request_with_id(plugin_id, action, request_id, extra).await
     }
 }

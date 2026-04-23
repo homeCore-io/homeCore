@@ -4627,6 +4627,70 @@ pub async fn get_plugin_capabilities(
     }
 }
 
+/// SSE bridge for streaming-action events. Subscribes to the core event
+/// bus and forwards every `MqttMessage` on
+/// `homecore/plugins/{id}/commands/{request_id}/events` as a Server-Sent
+/// Event. Closes on the first terminal stage
+/// (`complete`/`error`/`canceled`/`timeout`).
+///
+/// No special scope beyond `plugins:read` — the manifest action's
+/// `requires_role` is enforced at invocation, not on the stream reader.
+pub async fn get_plugin_stream_sse(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path((plugin_id, request_id)): Path<(String, String)>,
+) -> axum::response::Sse<
+    tokio_stream::wrappers::ReceiverStream<
+        Result<axum::response::sse::Event, std::convert::Infallible>,
+    >,
+> {
+    use axum::response::sse::{Event as SseEvent, KeepAlive};
+    use std::convert::Infallible;
+
+    let target_topic = format!("homecore/plugins/{plugin_id}/commands/{request_id}/events");
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(64);
+    let mut bus_rx = s.event_bus.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match bus_rx.recv().await {
+                Ok(hc_types::event::Event::MqttMessage { topic, payload, .. })
+                    if topic == target_topic =>
+                {
+                    if payload.is_empty() {
+                        // retained-clear — just drop.
+                        continue;
+                    }
+                    let text = match std::str::from_utf8(&payload) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => continue,
+                    };
+                    let stage = serde_json::from_slice::<Value>(&payload)
+                        .ok()
+                        .and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(str::to_string))
+                        .unwrap_or_default();
+                    let sse_event = SseEvent::default().event("stream").data(text);
+                    if tx.send(Ok(sse_event)).await.is_err() {
+                        return;
+                    }
+                    if matches!(
+                        stage.as_str(),
+                        "complete" | "error" | "canceled" | "timeout"
+                    ) {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    axum::response::Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 pub async fn start_plugin(
     State(s): State<AppState>,
     _: PluginsWrite,
@@ -4877,7 +4941,7 @@ pub async fn put_plugin_config(
 /// `set_log_level` set (e.g. yolink's `rescan_devices`).
 pub async fn post_plugin_command(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -4889,15 +4953,40 @@ pub async fn post_plugin_command(
             .into_response();
     };
 
-    {
+    // Resolve the manifest action (if any) to pick up requires_role,
+    // concurrency, stream, and timeout_ms. Unknown actions keep the
+    // pre-capabilities default (user / multi / non-streaming / no timeout).
+    let action_meta = {
         let map = s.plugins.read().await;
-        if !map.contains_key(&id) {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "plugin not found" })),
-            )
-                .into_response();
+        match map.get(&id) {
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "plugin not found" })),
+                )
+                    .into_response();
+            }
+            Some(rec) => rec
+                .capabilities
+                .as_ref()
+                .and_then(|c| c.actions.iter().find(|a| a.id == action))
+                .cloned(),
         }
+    };
+
+    let requires_admin = matches!(
+        action_meta.as_ref().map(|a| a.requires_role),
+        Some(hc_types::RequiresRole::Admin)
+    );
+    if requires_admin && !matches!(claims.role, hc_auth::user::Role::Admin) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "action requires admin role",
+                "requires_role": "admin",
+            })),
+        )
+            .into_response();
     }
 
     let Some(ref rpc) = s.management_rpc else {
@@ -4914,13 +5003,75 @@ pub async fn post_plugin_command(
         obj.remove("action");
     }
 
-    match rpc.send_command(&id, &action, params).await {
+    let is_streaming = action_meta.as_ref().map(|a| a.stream).unwrap_or(false);
+    let concurrency = action_meta
+        .as_ref()
+        .map(|a| a.concurrency)
+        .unwrap_or(hc_types::Concurrency::Multi);
+    let timeout_ms = action_meta.as_ref().and_then(|a| a.timeout_ms);
+
+    if is_streaming && matches!(concurrency, hc_types::Concurrency::Single) {
+        if let Some(active_rid) = s
+            .streaming_registry
+            .active_single(&id, &action)
+            .await
+        {
+            let stream_topic = format!(
+                "homecore/plugins/{id}/commands/{active_rid}/events",
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "status": "busy",
+                    "active_request_id": active_rid,
+                    "stream_topic": stream_topic,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Mint the request_id here so streaming slot reservation races cleanly.
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    if is_streaming {
+        s.streaming_registry
+            .reserve(
+                request_id.clone(),
+                crate::streaming::StreamingEntry {
+                    plugin_id: id.clone(),
+                    action_id: action.clone(),
+                    concurrency,
+                },
+            )
+            .await;
+        if let (Some(ms), Some(pub_handle)) = (timeout_ms, s.publish.clone()) {
+            crate::streaming::schedule_timeout(
+                &s.streaming_registry,
+                pub_handle,
+                id.clone(),
+                request_id.clone(),
+                ms,
+            )
+            .await;
+        }
+    }
+
+    match rpc
+        .send_command_with_id(&id, &action, &request_id, params)
+        .await
+    {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
-        Err(e) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) => {
+            if is_streaming {
+                s.streaming_registry.release(&request_id).await;
+            }
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     }
 }
 

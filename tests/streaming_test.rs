@@ -407,6 +407,332 @@ async fn awaiting_user_with_schema_roundtrip() -> Result<()> {
     Ok(())
 }
 
+// ── HTTP-level harness ─────────────────────────────────────────────────────
+//
+// The tests below need the full post_plugin_command handler in the loop,
+// not just MQTT. The harness below spins up AppState + axum on a free TCP
+// port, pre-seeds hc-captest's capability manifest into the plugin
+// registry (skipping state_bridge), and wires a minimal forwarder for
+// manage/response → Event::Custom("plugin_management_response") so
+// ManagementRpc can resolve requests.
+
+struct HttpHarness {
+    base_url: String,
+    // Kept so a future role-restructure can add a requires_role:"user" test.
+    // Admin has plugins:write today; User doesn't, so this token gets
+    // blocked by the base gate before the manifest check can fire.
+    #[allow(dead_code)]
+    user_token: String,
+    admin_token: String,
+    _shutdown_tx: tokio::sync::watch::Sender<bool>,
+    _keepalive: Vec<tokio::task::JoinHandle<()>>,
+    _state_db: String,
+    _history_db: String,
+}
+
+async fn boot_http_harness() -> Result<HttpHarness> {
+    use chrono::Utc;
+    use hc_api::{management_rpc::ManagementRpc, AppState, PluginRecord};
+    use hc_auth::{JwtService, Role};
+    use hc_core::EventBus;
+    use hc_mqtt_client::{MqttClient, MqttClientConfig};
+    use hc_state::StateStore;
+    use hc_types::event::Event;
+
+    let port = free_port();
+    Broker::new(BrokerConfig {
+        host: "127.0.0.1".into(),
+        port,
+        ..Default::default()
+    })
+    .spawn()?;
+
+    // In-process hc-captest plugin.
+    let plugin_config = PluginConfig {
+        broker_host: "127.0.0.1".into(),
+        broker_port: port,
+        plugin_id: hc_captest::PLUGIN_ID.to_string(),
+        password: String::new(),
+    };
+    let plugin = PluginClient::connect(plugin_config).await?;
+    let mgmt = plugin
+        .enable_management(60, Some("0.1.0-test".into()), None, None)
+        .await?;
+    let mgmt = hc_captest::register_actions(mgmt);
+    let plugin_task = tokio::spawn(async move {
+        let _ = plugin
+            .run_managed(|_dev, _pl| { /* no device commands */ }, mgmt)
+            .await;
+    });
+
+    // Core MQTT client — bridges MQTT → event bus.
+    let (mqtt_client, mut mqtt_rx) = MqttClient::new(MqttClientConfig {
+        broker_host: "127.0.0.1".into(),
+        broker_port: port,
+        client_id: "internal.core".into(),
+        username: None,
+        password: None,
+    });
+    let publish_handle = mqtt_client.publish_handle();
+    let mqtt_task = tokio::spawn(async move {
+        let _ = mqtt_client.run().await;
+    });
+
+    let bus = EventBus::new(512);
+
+    // Forwarder 1: mqtt_rx → bus (MqttMessage only — what the client emits).
+    let bus_fwd = bus.clone();
+    let fwd_task = tokio::spawn(async move {
+        loop {
+            match mqtt_rx.recv().await {
+                Ok(ev) => {
+                    let _ = bus_fwd.publish(ev);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // Forwarder 2 (state_bridge shim): synthesise the events downstream
+    // code expects. ManagementRpc needs Event::Custom with
+    // event_type="plugin_management_response". We skip the rest of
+    // state_bridge and pre-seed PluginRecord instead.
+    {
+        let mut rx = bus.subscribe();
+        let bus_shim = bus.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::MqttMessage { topic, payload, .. }) => {
+                        let parts: Vec<&str> = topic.split('/').collect();
+                        if parts.len() == 5
+                            && parts[0] == "homecore"
+                            && parts[1] == "plugins"
+                            && parts[3] == "manage"
+                            && parts[4] == "response"
+                        {
+                            if let Ok(resp) = serde_json::from_slice::<Value>(&payload) {
+                                let _ = bus_shim.publish(Event::Custom {
+                                    timestamp: Utc::now(),
+                                    event_type: "plugin_management_response".into(),
+                                    payload: resp,
+                                });
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // State store.
+    let state_db = format!("/tmp/hc-stream-test-{port}.redb");
+    let history_db = format!("/tmp/hc-stream-test-{port}.db");
+    let _ = std::fs::remove_file(&state_db);
+    let _ = std::fs::remove_file(&history_db);
+    let store = StateStore::open(&state_db, &history_db).await?;
+
+    // JwtService with fixed test secret.
+    let jwt_secret = b"test-secret-fixed-bytes-for-streaming-tests-32b";
+    let jwt = JwtService::new_hs256(jwt_secret, 24);
+    let user_token = jwt.issue("uid-user", "alice", Role::User)?;
+    let admin_token = jwt.issue("uid-admin", "root", Role::Admin)?;
+
+    // AppState.
+    let state = AppState::new(
+        store,
+        bus.clone(),
+        Some(publish_handle.clone()),
+        None,
+        None,
+        None,
+        jwt,
+        vec![],
+        None,
+    );
+    // Wire management_rpc so post_plugin_command forwards commands.
+    let rpc = ManagementRpc::new(publish_handle.clone(), &bus);
+    let state = AppState {
+        management_rpc: Some(rpc),
+        ..state
+    };
+    // Pre-seed the plugin registry with hc-captest's manifest so the
+    // role-check and concurrency-check branches in post_plugin_command
+    // fire. (Skips state_bridge's PluginCapabilities decode path.)
+    {
+        let mut map = state.plugins.write().await;
+        map.insert(
+            hc_captest::PLUGIN_ID.into(),
+            PluginRecord {
+                plugin_id: hc_captest::PLUGIN_ID.into(),
+                registered_at: chrono::Utc::now(),
+                status: "active".into(),
+                enabled: true,
+                managed: false,
+                config_path: None,
+                binary_path: None,
+                last_heartbeat: None,
+                last_restart: None,
+                restart_count: 0,
+                uptime_started: None,
+                device_count: 0,
+                log_level: None,
+                version: Some("0.1.0-test".into()),
+                supports_management: true,
+                capabilities: Some(hc_captest::capabilities_manifest()),
+            },
+        );
+    }
+
+    // HTTP listener.
+    let tcp_port = free_port();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let state_clone = state.clone();
+    let serve_task = tokio::spawn(async move {
+        let _ = hc_api::serve(
+            "127.0.0.1",
+            tcp_port,
+            state_clone,
+            shutdown_rx,
+            2,
+            None,
+            None,
+        )
+        .await;
+    });
+    drop(state);
+
+    // Wait for listener.
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", tcp_port))
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    Ok(HttpHarness {
+        base_url: format!("http://127.0.0.1:{tcp_port}"),
+        user_token,
+        admin_token,
+        _shutdown_tx: shutdown_tx,
+        _keepalive: vec![plugin_task, mqtt_task, fwd_task, serve_task],
+        _state_db: state_db,
+        _history_db: history_db,
+    })
+}
+
+#[tokio::test]
+async fn concurrency_single_blocks_second_caller() -> Result<()> {
+    let h = boot_http_harness().await?;
+    let client = reqwest::Client::new();
+
+    // Base guard on /plugins/:id/command is PluginsWrite, which only Admin
+    // role has today. Use admin_token for both calls so the handler
+    // actually reaches the concurrency check. A future role-restructure
+    // (see project_auth_expansion.md) will let a requires_role:"user"
+    // test exercise a non-admin path.
+    let resp1 = client
+        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .bearer_auth(&h.admin_token)
+        .json(&json!({ "action": "demo_cancelable" }))
+        .send()
+        .await?;
+    assert_eq!(resp1.status(), 200);
+    let body1: Value = resp1.json().await?;
+    assert_eq!(body1.get("status").and_then(Value::as_str), Some("accepted"));
+    let first_rid = body1["request_id"].as_str().unwrap().to_string();
+
+    // Give the tracker a moment to stabilise.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Second call — should get 409 busy with the first's request_id.
+    let resp2 = client
+        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .bearer_auth(&h.admin_token)
+        .json(&json!({ "action": "demo_cancelable" }))
+        .send()
+        .await?;
+    assert_eq!(resp2.status(), 409, "second invocation should be 409 busy");
+    let body2: Value = resp2.json().await?;
+    assert_eq!(body2.get("status").and_then(Value::as_str), Some("busy"));
+    assert_eq!(
+        body2.get("active_request_id").and_then(Value::as_str),
+        Some(first_rid.as_str())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn core_injects_synthetic_timeout() -> Result<()> {
+    let h = boot_http_harness().await?;
+    let client = reqwest::Client::new();
+
+    // Kick off demo_never_completes (manifest timeout_ms:300). Admin
+    // token — see concurrency_single_blocks_second_caller for rationale.
+    let resp = client
+        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .bearer_auth(&h.admin_token)
+        .json(&json!({ "action": "demo_never_completes" }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await?;
+    assert_eq!(body.get("status").and_then(Value::as_str), Some("accepted"));
+    let request_id = body["request_id"].as_str().unwrap().to_string();
+
+    // Poll the HTTP SSE endpoint — if core's injection fires, an SSE
+    // consumer will see the synthetic `timeout` terminal within
+    // manifest.timeout_ms + a small budget.
+    let sse_url = format!(
+        "{}/api/v1/plugins/{}/command/{}/stream",
+        h.base_url,
+        hc_captest::PLUGIN_ID,
+        request_id
+    );
+    let sse_resp = client
+        .get(&sse_url)
+        .bearer_auth(&h.admin_token)
+        .header("accept", "text/event-stream")
+        .send()
+        .await?;
+    assert_eq!(sse_resp.status(), 200);
+
+    // Read SSE body until we see a data: line containing "stage":"timeout".
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut stream = sse_resp.bytes_stream();
+    let mut buf = String::new();
+    use tokio_stream::StreamExt;
+    let mut saw_timeout = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                if let Ok(s) = std::str::from_utf8(&chunk) {
+                    buf.push_str(s);
+                    if buf.contains("\"stage\":\"timeout\"") {
+                        saw_timeout = true;
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_timeout,
+        "SSE bridge never delivered synthetic timeout; buf={buf}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn error_is_terminal_after_warnings() -> Result<()> {
     let (_port, _obs, mut rx, pub_client) = boot_captest().await?;
