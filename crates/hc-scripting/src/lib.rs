@@ -41,6 +41,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
+/// Re-export of `rhai::AST` so downstream crates can cache compiled scripts
+/// without taking a direct dependency on the `rhai` crate.
+pub use rhai::AST;
+
 // ---------------------------------------------------------------------------
 // Side-effect collection — bridges sync Rhai → async executor
 // ---------------------------------------------------------------------------
@@ -83,11 +87,15 @@ pub struct ScriptRuntime {
 impl ScriptRuntime {
     /// Runtime without device state or side-effect support.
     pub fn new() -> Self {
-        Self::new_with_devices(HashMap::new())
+        Self::new_with_devices(Arc::new(HashMap::new()))
     }
 
     /// Runtime with a device-state snapshot injected as `device_state(id)`.
-    pub fn new_with_devices(devices: HashMap<String, JsonValue>) -> Self {
+    ///
+    /// Takes the snapshot by `Arc` so callers that fire several rules off the
+    /// same snapshot (or nest script evaluations during action execution) can
+    /// share one allocation instead of cloning the full device map each time.
+    pub fn new_with_devices(devices: Arc<HashMap<String, JsonValue>>) -> Self {
         let mut engine = Engine::new();
         engine.set_max_operations(100_000);
         engine.set_max_call_levels(32);
@@ -98,8 +106,8 @@ impl ScriptRuntime {
         // Build Rhai-native device snapshot for zero-copy lookups.
         let rhai_devices: Arc<rhai::Map> = Arc::new(
             devices
-                .into_iter()
-                .map(|(id, attrs)| (id.into(), json_to_dynamic(attrs)))
+                .iter()
+                .map(|(id, attrs)| (id.clone().into(), json_to_dynamic(attrs.clone())))
                 .collect(),
         );
 
@@ -359,6 +367,20 @@ impl ScriptRuntime {
         Ok(result)
     }
 
+    /// Evaluate a pre-compiled boolean expression AST.
+    ///
+    /// Use this in hot paths to avoid re-parsing the script text on every
+    /// invocation. The AST must have been produced by [`compile_expression`]
+    /// (or [`compile`] for scripts that aren't pure expressions).
+    pub fn eval_condition_ast(&self, ast: &rhai::AST) -> Result<bool> {
+        let mut scope = Scope::new();
+        let result: bool = self
+            .engine
+            .eval_ast_with_scope(&mut scope, ast)
+            .map_err(|e| anyhow!("Condition script error: {e}"))?;
+        Ok(result)
+    }
+
     /// Execute a script (`Action::RunScript`).
     pub fn run_action(&self, script: &str) -> Result<Dynamic> {
         let mut scope = Scope::new();
@@ -368,6 +390,27 @@ impl ScriptRuntime {
             .map_err(|e| anyhow!("Action script error: {e}"))?;
         debug!(%script, "Action script executed");
         Ok(result)
+    }
+
+    /// Execute a pre-compiled script AST.
+    pub fn run_action_ast(&self, ast: &rhai::AST) -> Result<Dynamic> {
+        let mut scope = Scope::new();
+        let result = self
+            .engine
+            .eval_ast_with_scope::<Dynamic>(&mut scope, ast)
+            .map_err(|e| anyhow!("Action script error: {e}"))?;
+        Ok(result)
+    }
+
+    /// Compile an expression (boolean condition) into a reusable AST.
+    ///
+    /// Prefer this over [`compile`] for `Condition::ScriptExpression` and
+    /// the `required_expression` / `trigger_condition` gates — expressions
+    /// have stricter parse semantics than full scripts.
+    pub fn compile_expression(&self, script: &str) -> Result<rhai::AST> {
+        self.engine
+            .compile_expression(script)
+            .map_err(|e| anyhow!("Expression compilation error: {e}"))
     }
 
     /// Call a named transform function (used by `hc-topic-map`).
@@ -484,7 +527,7 @@ mod tests {
             "yolink_abc".to_string(),
             json!({ "locked": true, "battery": 75 }),
         );
-        let rt = ScriptRuntime::new_with_devices(devices);
+        let rt = ScriptRuntime::new_with_devices(Arc::new(devices));
         assert!(rt
             .eval_condition(r#"device_state("yolink_abc")["locked"] == true"#)
             .unwrap());
@@ -495,7 +538,7 @@ mod tests {
 
     #[test]
     fn device_state_unknown_returns_empty_map() {
-        let rt = ScriptRuntime::new_with_devices(HashMap::new());
+        let rt = ScriptRuntime::new_with_devices(Arc::new(HashMap::new()));
         assert!(rt
             .eval_condition(r#"device_state("no_such_device").is_empty()"#)
             .unwrap());
@@ -519,7 +562,7 @@ mod tests {
     fn side_effects_collected() {
         let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
         let rt =
-            ScriptRuntime::new_with_devices(HashMap::new()).with_side_effects(Arc::clone(&buf));
+            ScriptRuntime::new_with_devices(Arc::new(HashMap::new())).with_side_effects(Arc::clone(&buf));
         let _ = rt
             .run_action(
                 r#"

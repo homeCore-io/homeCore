@@ -235,22 +235,27 @@ impl ExecutorContext {
 ///
 /// Called by `WaitForExpression` and `RunRuleActions` when they need a fresh
 /// view of device state rather than the snapshot built at rule-fire time.
+///
+/// Returns an `Arc` so the snapshot can be shared cheaply between the async
+/// task that builds it and the `spawn_blocking` tasks that read it.
 fn snapshot_from_cache(
     cache: &DashMap<String, HashMap<String, JsonValue>>,
-) -> HashMap<String, JsonValue> {
-    cache
-        .iter()
-        .map(|entry| {
-            let attrs = JsonValue::Object(
-                entry
-                    .value()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            );
-            (entry.key().clone(), attrs)
-        })
-        .collect()
+) -> Arc<HashMap<String, JsonValue>> {
+    Arc::new(
+        cache
+            .iter()
+            .map(|entry| {
+                let attrs = JsonValue::Object(
+                    entry
+                        .value()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                );
+                (entry.key().clone(), attrs)
+            })
+            .collect(),
+    )
 }
 
 /// Promote an f64 to the most compact JSON number type.
@@ -280,7 +285,7 @@ fn to_json_number(f: f64) -> JsonValue {
 pub async fn execute_actions(
     actions: Vec<RuleAction>,
     ctx: Arc<ExecutorContext>,
-    snapshot: HashMap<String, JsonValue>,
+    snapshot: Arc<HashMap<String, JsonValue>>,
 ) -> Result<()> {
     let total = actions.len();
     for (idx, ra) in actions.into_iter().enumerate() {
@@ -321,7 +326,7 @@ pub async fn execute_actions(
 fn execute_actions_inner(
     actions: Vec<Action>,
     ctx: Arc<ExecutorContext>,
-    snapshot: HashMap<String, JsonValue>,
+    snapshot: Arc<HashMap<String, JsonValue>>,
     call_depth: u32,
 ) -> BoxFut {
     Box::pin(async move {
@@ -350,7 +355,7 @@ async fn execute_one(
     idx: usize,
     total: usize,
     ctx: Arc<ExecutorContext>,
-    snapshot: HashMap<String, JsonValue>,
+    snapshot: Arc<HashMap<String, JsonValue>>,
     call_depth: u32,
 ) -> Result<()> {
     let label = format!("action[{}/{}]", idx + 1, total);
@@ -441,7 +446,7 @@ async fn execute_one(
 fn run_single_action(
     action: Action,
     ctx: Arc<ExecutorContext>,
-    snapshot: HashMap<String, JsonValue>,
+    snapshot: Arc<HashMap<String, JsonValue>>,
     call_depth: u32,
 ) -> BoxFut {
     Box::pin(async move {
@@ -1919,8 +1924,8 @@ fn action_type_name(action: &Action) -> &'static str {
 mod tests {
     use super::*;
 
-    fn empty_snapshot() -> HashMap<String, JsonValue> {
-        HashMap::new()
+    fn empty_snapshot() -> Arc<HashMap<String, JsonValue>> {
+        Arc::new(HashMap::new())
     }
 
     fn ra(action: Action) -> RuleAction {

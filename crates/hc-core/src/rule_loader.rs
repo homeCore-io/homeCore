@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use hc_state::StateStore;
 use hc_types::rule::{Rule, RuleAction};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -303,38 +303,88 @@ impl RuleWatcher {
         handle: Arc<RwLock<Vec<Rule>>>,
         on_reload: Option<Arc<dyn Fn(&[Rule]) + Send + Sync>>,
     ) -> Result<Self> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
+        // Watcher sends `WatchSignal` messages — either targeted path changes
+        // for a surgical reload, or `FullReload` when the OS can't tell us
+        // which files changed.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WatchSignal>(64);
 
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let Ok(event) = res else { return };
-            let is_relevant = matches!(
+            if !matches!(
                 event.kind,
                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-            ) && event.paths.iter().any(|p| is_rule_file(p));
-            if is_relevant {
-                let _ = tx.blocking_send(());
+            ) {
+                return;
+            }
+            for p in event.paths.iter().filter(|p| is_rule_file(p)) {
+                let _ = tx.blocking_send(WatchSignal::Path(p.clone()));
             }
         })?;
 
         watcher.watch(&dir, RecursiveMode::NonRecursive)?;
         info!(dir = %dir.display(), "Rule hot-reload watcher active");
 
+        // Track the canonical filename that each rule was loaded from, so
+        // path-based reloads can locate the right entry in the live set.
+        let path_index: Arc<RwLock<HashMap<PathBuf, uuid::Uuid>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Seed the path index from the current rules directory so the first
+        // reload after startup doesn't have to fall back to a full rescan.
+        {
+            let dir_seed = dir.clone();
+            let path_index_seed = Arc::clone(&path_index);
+            tokio::spawn(async move {
+                let scan = tokio::task::spawn_blocking(move || scan_paths(&dir_seed)).await;
+                if let Ok(map) = scan {
+                    *path_index_seed.write().await = map;
+                }
+            });
+        }
+
         let dir_clone = dir.clone();
         tokio::spawn(async move {
             loop {
-                // Wait for first notification.
-                if rx.recv().await.is_none() {
-                    break;
+                let first = match rx.recv().await {
+                    Some(s) => s,
+                    None => break,
+                };
+                let mut changed_paths: HashSet<PathBuf> = HashSet::new();
+                let mut need_full = matches!(first, WatchSignal::FullReload);
+                if let WatchSignal::Path(p) = first {
+                    changed_paths.insert(p);
                 }
-                // Debounce: drain additional events within 200 ms.
+                // Debounce: drain additional events within 200 ms, collecting
+                // all changed paths.
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
-                        Ok(Some(())) => {} // more events, keep draining
+                        Ok(Some(WatchSignal::Path(p))) => {
+                            changed_paths.insert(p);
+                        }
+                        Ok(Some(WatchSignal::FullReload)) => need_full = true,
                         _ => break,
                     }
                 }
-                // Reload on a blocking thread (filesystem I/O).
+
+                let did_surgical = if !need_full && !changed_paths.is_empty() {
+                    surgical_reload(
+                        &changed_paths,
+                        &store,
+                        &source_handle,
+                        &handle,
+                        &path_index,
+                        &on_reload,
+                    )
+                    .await
+                } else {
+                    false
+                };
+                if did_surgical {
+                    continue;
+                }
+
+                // Full reload fallback.
                 let dir2 = dir_clone.clone();
                 match tokio::task::spawn_blocking(move || load_all(&dir2)).await {
                     Ok(Ok(new_rules)) => {
@@ -353,11 +403,16 @@ impl RuleWatcher {
                         };
                         let count = compiled.len();
                         *handle.write().await = compiled;
-                        // Purge stale rule state (DashMap entries for deleted rule IDs).
+                        let dir3 = dir_clone.clone();
+                        if let Ok(map) =
+                            tokio::task::spawn_blocking(move || scan_paths(&dir3)).await
+                        {
+                            *path_index.write().await = map;
+                        }
                         if let Some(ref cb) = on_reload {
                             cb(&rules_for_purge);
                         }
-                        info!(count, "Rules hot-reloaded successfully");
+                        info!(count, "Rules hot-reloaded (full)");
                     }
                     Ok(Err(e)) => {
                         warn!(error = %e, "Rule reload failed — existing rules unchanged");
@@ -371,4 +426,146 @@ impl RuleWatcher {
 
         Ok(Self { _watcher: watcher })
     }
+}
+
+/// Signal from the filesystem watcher to the debounce/reload loop.
+enum WatchSignal {
+    /// A single rule file changed (created, modified, or removed).
+    Path(PathBuf),
+    /// The watcher couldn't attribute the change to a specific file — force a
+    /// full directory rescan. Reserved for future use.
+    #[allow(dead_code)]
+    FullReload,
+}
+
+/// Scan the rules directory and return a `path → rule_id` map for all
+/// successfully parsed rule files.
+fn scan_paths(dir: &Path) -> HashMap<PathBuf, uuid::Uuid> {
+    let mut out = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_rule_file(&path) {
+            continue;
+        }
+        if let Ok(rule) = load_file(&path) {
+            out.insert(path, rule.id);
+        }
+    }
+    out
+}
+
+/// Reload only the rule files that changed during the debounce window.
+///
+/// Returns `true` if the surgical path completed successfully. On any
+/// unrecoverable inconsistency returns `false` so the caller falls back to a
+/// full rescan.
+async fn surgical_reload(
+    changed: &HashSet<PathBuf>,
+    store: &StateStore,
+    source_handle: &Arc<RwLock<Vec<Rule>>>,
+    handle: &Arc<RwLock<Vec<Rule>>>,
+    path_index: &Arc<RwLock<HashMap<PathBuf, uuid::Uuid>>>,
+    on_reload: &Option<Arc<dyn Fn(&[Rule]) + Send + Sync>>,
+) -> bool {
+    // Partition changes into (path, rule) pairs for files that still exist,
+    // and a separate list for deleted paths.
+    let mut reloaded: Vec<(PathBuf, Rule)> = Vec::new();
+    let mut removed_paths: Vec<PathBuf> = Vec::new();
+    for path in changed {
+        if path.exists() {
+            match load_file(path) {
+                Ok(rule) => reloaded.push((path.clone(), rule)),
+                Err(e) => {
+                    warn!(file = %path.display(), error = %e,
+                        "Surgical reload: parse error — inserting disabled stub");
+                    reloaded.push((path.clone(), broken_stub(path, &e)));
+                }
+            }
+        } else {
+            removed_paths.push(path.clone());
+        }
+    }
+
+    // Resolve deleted paths to the rule IDs they used to map to, and include
+    // any rule IDs whose file now points to a *different* rule (unlikely but
+    // possible if a user renames+replaces). We treat those as "replaced".
+    let idx_read = path_index.read().await;
+    let mut removed_ids: HashSet<uuid::Uuid> = removed_paths
+        .iter()
+        .filter_map(|p| idx_read.get(p).copied())
+        .collect();
+    // If a reloaded path now maps to a different rule ID than before, the
+    // previous rule is effectively removed.
+    for (path, rule) in &reloaded {
+        if let Some(prev_id) = idx_read.get(path) {
+            if *prev_id != rule.id {
+                removed_ids.insert(*prev_id);
+            }
+        }
+    }
+    drop(idx_read);
+
+    // Compile only the rules we actually loaded.
+    let rules_only: Vec<Rule> = reloaded.iter().map(|(_, r)| r.clone()).collect();
+    let compiled = match crate::rule_resolver::compile_rules_for_store(store, rules_only.clone())
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Surgical reload: compilation failed — falling back to full reload");
+            return false;
+        }
+    };
+
+    // Apply the diff to both handles.
+    {
+        let mut src = source_handle.write().await;
+        apply_rule_diff(&mut src, &rules_only, &removed_ids);
+    }
+    {
+        let mut live = handle.write().await;
+        apply_rule_diff(&mut live, &compiled, &removed_ids);
+    }
+
+    // Refresh the path index for this batch.
+    {
+        let mut idx = path_index.write().await;
+        for path in &removed_paths {
+            idx.remove(path);
+        }
+        for (path, rule) in &reloaded {
+            idx.insert(path.clone(), rule.id);
+        }
+    }
+
+    // Purge stale per-rule DashMap state for removed rule IDs.
+    if let Some(cb) = on_reload {
+        let live = handle.read().await;
+        cb(&live);
+    }
+
+    let added_or_updated = compiled.len();
+    let removed = removed_ids.len();
+    info!(
+        added_or_updated,
+        removed, "Rules hot-reloaded (surgical)"
+    );
+    true
+}
+
+/// Merge `new_rules` and remove `removed_ids` into the live `rules` slice.
+///
+/// Rules in `new_rules` with a matching ID replace the existing entry;
+/// otherwise they're appended. Rules whose ID appears in `removed_ids` are
+/// dropped.
+fn apply_rule_diff(rules: &mut Vec<Rule>, new_rules: &[Rule], removed_ids: &HashSet<uuid::Uuid>) {
+    // Drop removed IDs and IDs that are being replaced.
+    let replacing: HashSet<uuid::Uuid> = new_rules.iter().map(|r| r.id).collect();
+    rules.retain(|r| !removed_ids.contains(&r.id) && !replacing.contains(&r.id));
+    rules.extend(new_rules.iter().cloned());
+    // Keep priority-desc ordering consistent with `load_all`.
+    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
 }

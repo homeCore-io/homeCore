@@ -30,7 +30,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use hc_notify::NotificationService;
-use hc_scripting::ScriptRuntime;
+use hc_scripting::{ScriptRuntime, AST};
 use hc_state::StateStore;
 use hc_types::event::Event;
 use hc_types::rule::{
@@ -161,6 +161,10 @@ pub struct RuleEngine {
     drain_timeout_secs: u64,
     /// Shared calendar store for `Condition::CalendarActive`.
     calendars: Option<CalendarHandle>,
+    /// Per-script compiled Rhai ASTs, keyed by script text. Populated on first
+    /// use and retained for the lifetime of the engine. Stale entries are
+    /// harmless — they're simply never referenced again after a rule reload.
+    script_cache: Arc<DashMap<String, Arc<AST>>>,
 }
 
 impl RuleEngine {
@@ -201,7 +205,29 @@ impl RuleEngine {
             rule_in_flight: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
             calendars: None,
+            script_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Get-or-compile a script AST, caching the result for later reuse.
+    ///
+    /// `as_expression = true` uses Rhai's stricter expression parser (no
+    /// statements, no trailing semicolon); used for condition gates.
+    fn get_or_compile_ast(&self, script: &str, as_expression: bool) -> Result<Arc<AST>> {
+        if let Some(entry) = self.script_cache.get(script) {
+            let arc: &Arc<AST> = entry.value();
+            return Ok(Arc::clone(arc));
+        }
+        let runtime = ScriptRuntime::new();
+        let ast = if as_expression {
+            runtime.compile_expression(script)?
+        } else {
+            runtime.compile(script)?
+        };
+        let arc: Arc<AST> = Arc::new(ast);
+        self.script_cache
+            .insert(script.to_string(), Arc::clone(&arc));
+        Ok(arc)
     }
 
     /// Attach a calendar handle for `Condition::CalendarActive` evaluation.
@@ -487,6 +513,9 @@ impl RuleEngine {
                 debug!(rule_name = %rule.name, "rule.trigger: SKIP (disabled)");
                 continue;
             }
+            if !trigger_kind_can_match_event(&rule.trigger, event) {
+                continue;
+            }
             match trigger_check(&rule.trigger, event) {
                 TriggerResult::Matched => {
                     if rule.log_events {
@@ -677,11 +706,11 @@ impl RuleEngine {
         if let Some(ref expr) = rule.required_expression {
             let snap = snapshot.clone();
             let tctx = trigger_ctx.clone();
-            let expr = expr.clone();
+            let ast = self.get_or_compile_ast(expr, true)?;
             let passes = tokio::task::spawn_blocking(move || {
                 ScriptRuntime::new_with_devices(snap)
                     .with_trigger_context(&tctx)
-                    .eval_condition(&expr)
+                    .eval_condition_ast(ast.as_ref())
             })
             .await??;
             if !passes {
@@ -711,11 +740,11 @@ impl RuleEngine {
         if let Some(ref expr) = rule.trigger_condition {
             let snap = snapshot.clone();
             let tctx = trigger_ctx.clone();
-            let expr = expr.clone();
+            let ast = self.get_or_compile_ast(expr, true)?;
             let passes = tokio::task::spawn_blocking(move || {
                 ScriptRuntime::new_with_devices(snap)
                     .with_trigger_context(&tctx)
-                    .eval_condition(&expr)
+                    .eval_condition_ast(ast.as_ref())
             })
             .await??;
             if !passes {
@@ -964,7 +993,7 @@ impl RuleEngine {
     async fn evaluate_conditions(
         &self,
         rule: &Rule,
-        snapshot: &HashMap<String, JsonValue>,
+        snapshot: &Arc<HashMap<String, JsonValue>>,
     ) -> Result<Vec<ConditionTrace>> {
         if rule.conditions.is_empty() {
             debug!(rule_name = %rule.name, "rule.conditions: none — auto-pass");
@@ -996,7 +1025,7 @@ impl RuleEngine {
         idx: usize,
         total: usize,
         condition: &Condition,
-        snapshot: &HashMap<String, JsonValue>,
+        snapshot: &Arc<HashMap<String, JsonValue>>,
     ) -> Result<(bool, ConditionTrace)> {
         let cond_label = format!("{}/{}", idx + 1, total);
 
@@ -1116,7 +1145,7 @@ impl RuleEngine {
                     script = %snippet, "rule.condition: ScriptExpression — evaluating"
                 );
                 let snap = snapshot.clone();
-                let script_body = script.clone();
+                let ast = self.get_or_compile_ast(script, true)?;
                 let hub_snap: HashMap<String, JsonValue> = self
                     .hub_vars
                     .iter()
@@ -1127,7 +1156,7 @@ impl RuleEngine {
                     ScriptRuntime::new_with_devices(snap)
                         .with_hub_vars(hub_snap)
                         .with_trigger_context(&tctx)
-                        .eval_condition(&script_body)
+                        .eval_condition_ast(ast.as_ref())
                 })
                 .await??;
                 debug!(
@@ -1562,20 +1591,25 @@ impl RuleEngine {
     }
 
     /// Convert the DashMap cache to a `HashMap<device_id, {attrs}>` for Rhai scripts.
-    fn snapshot_from_cache(&self) -> HashMap<String, JsonValue> {
-        self.device_cache
-            .iter()
-            .map(|entry| {
-                let attrs = JsonValue::Object(
-                    entry
-                        .value()
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                );
-                (entry.key().clone(), attrs)
-            })
-            .collect()
+    ///
+    /// Wrapped in `Arc` so multiple script evaluations within a single rule
+    /// firing share the same allocation instead of each cloning the full map.
+    fn snapshot_from_cache(&self) -> Arc<HashMap<String, JsonValue>> {
+        Arc::new(
+            self.device_cache
+                .iter()
+                .map(|entry| {
+                    let attrs = JsonValue::Object(
+                        entry
+                            .value()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                    );
+                    (entry.key().clone(), attrs)
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1862,6 +1896,51 @@ async fn log_incoming_event(state: &StateStore, event: &Event) {
 enum TriggerResult {
     Matched,
     NoMatch(&'static str),
+}
+
+/// Fast discriminant-level pre-filter for the dispatch loop.
+///
+/// Returns `false` when the event's variant (and, for `Custom`, its event_type)
+/// cannot possibly match this trigger kind — lets the dispatcher skip
+/// `trigger_check` entirely for rules whose trigger type is unrelated to the
+/// incoming event. Should remain conservative: return `true` on any uncertainty
+/// so rules that could match never get silently dropped.
+fn trigger_kind_can_match_event(trigger: &Trigger, event: &Event) -> bool {
+    // Scheduler-only triggers (TimeOfDay, SunEvent, Cron, Periodic) never
+    // match a dispatched event — the scheduler fires them via `scheduler_tick`
+    // which is short-circuited before this function is reached.
+    // ManualTrigger is API-only and also never matches here.
+    match trigger {
+        Trigger::TimeOfDay { .. }
+        | Trigger::SunEvent { .. }
+        | Trigger::Cron { .. }
+        | Trigger::Periodic { .. }
+        | Trigger::ManualTrigger => return false,
+        _ => {}
+    }
+    match event {
+        Event::DeviceStateChanged { .. } => matches!(
+            trigger,
+            Trigger::DeviceStateChanged { .. }
+                | Trigger::ButtonEvent { .. }
+                | Trigger::NumericThreshold { .. }
+        ),
+        Event::DeviceAvailabilityChanged { .. } => {
+            matches!(trigger, Trigger::DeviceAvailabilityChanged { .. })
+        }
+        Event::MqttMessage { .. } => matches!(trigger, Trigger::MqttMessage { .. }),
+        Event::Custom { event_type, .. } => match event_type.as_str() {
+            "webhook" => matches!(trigger, Trigger::WebhookReceived { .. }),
+            "hub_variable_changed" => matches!(trigger, Trigger::HubVariableChanged { .. }),
+            "calendar_event" => matches!(trigger, Trigger::CalendarEvent { .. }),
+            "system_started" => matches!(trigger, Trigger::SystemStarted),
+            "mode_changed" => matches!(trigger, Trigger::ModeChanged { .. }),
+            // Unknown or user-emitted events can only match CustomEvent triggers.
+            _ => matches!(trigger, Trigger::CustomEvent { .. }),
+        },
+        // Unknown event variants: don't filter — preserve existing behavior.
+        _ => true,
+    }
 }
 
 /// Check whether an event matches a trigger.
