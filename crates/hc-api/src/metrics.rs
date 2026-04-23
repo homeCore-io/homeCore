@@ -229,6 +229,7 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::DeviceCommandSent { .. } => "device_command_sent",
                         Event::ModeChanged { .. } => "mode_changed",
                         Event::TimerStateChanged { .. } => "timer_state_changed",
+                        Event::PluginCapabilities { .. } => "plugin_capabilities",
                     };
                     metrics.events_total.with_label_values(&[label]).inc();
 

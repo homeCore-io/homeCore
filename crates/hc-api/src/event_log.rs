@@ -170,6 +170,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::DeviceCommandSent { .. } => "device_command_sent",
         Event::ModeChanged { .. } => "mode_changed",
         Event::TimerStateChanged { .. } => "timer_state_changed",
+        Event::PluginCapabilities { .. } => "plugin_capabilities",
     }
 }
 

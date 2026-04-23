@@ -4611,6 +4611,22 @@ pub async fn get_plugin(
     }
 }
 
+pub async fn get_plugin_capabilities(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id).and_then(|r| r.capabilities.as_ref()) {
+        Some(caps) => (StatusCode::OK, Json(json!(caps))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "capabilities not published" })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn start_plugin(
     State(s): State<AppState>,
     _: PluginsWrite,

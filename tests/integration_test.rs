@@ -198,3 +198,129 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
 
     Ok(())
 }
+
+/// Phase 1 round-trip for plugin capabilities: a retained manifest published
+/// to `homecore/plugins/{id}/capabilities` must surface on the event bus as
+/// `Event::PluginCapabilities` with the decoded manifest. Covers the
+/// state_bridge subscription + typed decode hop that the HTTP handler
+/// then reads from `PluginRecord.capabilities`.
+#[tokio::test]
+async fn plugin_capabilities_manifest_surfaces_on_bus() -> Result<()> {
+    let port = free_port();
+
+    Broker::new(BrokerConfig {
+        host: "127.0.0.1".into(),
+        port,
+        ..Default::default()
+    })
+    .spawn()?;
+
+    let state_db = format!("/tmp/hc-caps-test-{port}.redb");
+    let history_db = format!("/tmp/hc-caps-test-{port}.db");
+    let _ = std::fs::remove_file(&state_db);
+    let _ = std::fs::remove_file(&history_db);
+    let store = StateStore::open(&state_db, &history_db).await?;
+
+    let (mqtt_client, mut mqtt_rx) = MqttClient::new(MqttClientConfig {
+        broker_host: "127.0.0.1".into(),
+        broker_port: port,
+        client_id: "internal.core".into(),
+        username: None,
+        password: None,
+    });
+    let publish_handle = mqtt_client.publish_handle();
+    let bus = EventBus::new(512);
+    let mut bus_rx = bus.subscribe();
+
+    {
+        let bus_clone = bus.clone();
+        tokio::spawn(async move {
+            loop {
+                match mqtt_rx.recv().await {
+                    Ok(ev) => {
+                        let _ = bus_clone.publish(ev);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
+        let _ = mqtt_client.run().await;
+    });
+
+    let core = Core::new(
+        bus.clone(),
+        bus.clone(),
+        store.clone(),
+        Some(publish_handle.clone()),
+    );
+    core.start(vec![]).await?;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mut opts = MqttOptions::new("caps-test-publisher", "127.0.0.1", port);
+    opts.set_keep_alive(Duration::from_secs(10));
+    let (pub_client, mut pub_eventloop) = AsyncClient::new(opts, 64);
+    tokio::spawn(async move {
+        loop {
+            if pub_eventloop.poll().await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let manifest = json!({
+        "spec": "1",
+        "plugin_id": "hc-caps-test",
+        "actions": [{
+            "id": "rescan_devices",
+            "label": "Rescan devices",
+            "requires_role": "user"
+        }]
+    });
+    pub_client
+        .publish(
+            "homecore/plugins/hc-caps-test/capabilities",
+            QoS::AtLeastOnce,
+            true,
+            manifest.to_string().as_bytes(),
+        )
+        .await?;
+
+    let found = timeout(Duration::from_secs(8), async {
+        loop {
+            match bus_rx.recv().await {
+                Ok(Event::PluginCapabilities {
+                    plugin_id,
+                    capabilities,
+                    ..
+                }) if plugin_id == "hc-caps-test" => return Some(capabilities),
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let _ = std::fs::remove_file(&state_db);
+    let _ = std::fs::remove_file(&history_db);
+
+    let caps = found.expect("PluginCapabilities event never arrived on bus");
+    assert_eq!(caps.spec, "1");
+    assert_eq!(caps.plugin_id, "hc-caps-test");
+    assert_eq!(caps.actions.len(), 1);
+    let action = &caps.actions[0];
+    assert_eq!(action.id, "rescan_devices");
+    assert_eq!(action.label, "Rescan devices");
+    assert!(!action.stream);
+    assert_eq!(action.requires_role, hc_types::RequiresRole::User);
+
+    Ok(())
+}

@@ -84,6 +84,15 @@ pub enum Event {
         status: String,
         previous_status: String,
     },
+    /// A plugin published (or republished) its capability manifest.
+    /// Emitted when `homecore/plugins/{id}/capabilities` arrives. Consumers
+    /// cache the manifest in `PluginRecord.capabilities` so the HTTP API and
+    /// hc-mcp can serve it without re-reading MQTT.
+    PluginCapabilities {
+        timestamp: DateTime<Utc>,
+        plugin_id: String,
+        capabilities: crate::plugin_capabilities::Capabilities,
+    },
     /// A device's human-readable name was changed at the source (plugin or user).
     DeviceNameChanged {
         timestamp: DateTime<Utc>,
@@ -195,7 +204,8 @@ impl Event {
             | Event::ModeChanged { timestamp, .. }
             | Event::TimerStateChanged { timestamp, .. }
             | Event::PluginHeartbeat { timestamp, .. }
-            | Event::PluginStatusChanged { timestamp, .. } => *timestamp,
+            | Event::PluginStatusChanged { timestamp, .. }
+            | Event::PluginCapabilities { timestamp, .. } => *timestamp,
         }
     }
 }

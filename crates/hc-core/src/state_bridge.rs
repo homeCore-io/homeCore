@@ -251,6 +251,34 @@ impl StateBridge {
             return Ok(());
         }
 
+        // homecore/plugins/{id}/capabilities
+        if parts.len() >= 4
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "capabilities"
+        {
+            let plugin_id = parts[2];
+            // Empty retained payload = "clear manifest"; ignore.
+            if payload.is_empty() {
+                return Ok(());
+            }
+            match serde_json::from_slice::<hc_types::Capabilities>(payload) {
+                Ok(caps) => {
+                    let _ = self.pub_bus.publish(Event::PluginCapabilities {
+                        timestamp: Utc::now(),
+                        plugin_id: plugin_id.to_string(),
+                        capabilities: caps,
+                    });
+                }
+                Err(e) => warn!(
+                    plugin_id,
+                    error = %e,
+                    "Discarding malformed plugin capability manifest"
+                ),
+            }
+            return Ok(());
+        }
+
         // homecore/plugins/{id}/heartbeat
         if parts.len() >= 4
             && parts[0] == "homecore"

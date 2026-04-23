@@ -979,6 +979,7 @@ async fn main() -> Result<()> {
                         log_level: None,
                         version: None,
                         supports_management: false,
+                        capabilities: None,
                     });
             }
         }

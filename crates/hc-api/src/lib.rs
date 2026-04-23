@@ -101,6 +101,11 @@ pub struct PluginRecord {
     /// Plugin has responded to the management protocol (heartbeat, etc.).
     #[serde(default)]
     pub supports_management: bool,
+    /// Capability manifest last published on
+    /// `homecore/plugins/{id}/capabilities`. `None` until the plugin
+    /// publishes, or if the published manifest failed to decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<hc_types::Capabilities>,
 }
 
 /// Shared state injected into every handler via axum's `State` extractor.
@@ -240,6 +245,7 @@ impl AppState {
                                         log_level: None,
                                         version: None,
                                         supports_management: false,
+                                        capabilities: None,
                                     });
                             rec.status = "active".into();
                             rec.registered_at = timestamp;
@@ -276,6 +282,7 @@ impl AppState {
                                         log_level: None,
                                         version: None,
                                         supports_management: false,
+                                        capabilities: None,
                                     });
                             rec.last_heartbeat = Some(timestamp);
                             rec.supports_management = true;
@@ -296,6 +303,34 @@ impl AppState {
                             if rec.status == "offline" || rec.status == "starting" {
                                 rec.status = "active".into();
                             }
+                        }
+                        Ok(hc_types::event::Event::PluginCapabilities {
+                            plugin_id,
+                            timestamp,
+                            capabilities,
+                        }) => {
+                            let mut map = plugins_clone.write().await;
+                            let rec =
+                                map.entry(plugin_id.clone())
+                                    .or_insert_with(|| PluginRecord {
+                                        plugin_id: plugin_id.clone(),
+                                        registered_at: timestamp,
+                                        status: "active".into(),
+                                        enabled: false,
+                                        managed: false,
+                                        config_path: None,
+                                        binary_path: None,
+                                        last_heartbeat: None,
+                                        last_restart: None,
+                                        restart_count: 0,
+                                        uptime_started: None,
+                                        device_count: 0,
+                                        log_level: None,
+                                        version: None,
+                                        supports_management: false,
+                                        capabilities: None,
+                                    });
+                            rec.capabilities = Some(capabilities);
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -693,6 +728,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/:id/command",
             post(handlers::post_plugin_command),
+        )
+        .route(
+            "/plugins/:id/capabilities",
+            get(handlers::get_plugin_capabilities),
         )
         .route(
             "/plugins/matter/commission",
