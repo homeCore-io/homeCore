@@ -705,11 +705,12 @@ fn parse_role(s: &str) -> Result<Role> {
         "user" => Ok(Role::User),
         "read_only" | "readonly" | "read-only" => Ok(Role::ReadOnly),
         "observer" => Ok(Role::Observer),
+        "device_operator" | "deviceoperator" | "device-operator" => Ok(Role::DeviceOperator),
         "rule_editor" | "ruleeditor" | "rule-editor" => Ok(Role::RuleEditor),
         "service_operator" | "serviceoperator" | "service-operator" => Ok(Role::ServiceOperator),
         other => bail!(
             "unknown role `{other}` — expected \
-             admin | user | read_only | observer | rule_editor | service_operator"
+             admin | user | read_only | observer | device_operator | rule_editor | service_operator"
         ),
     }
 }

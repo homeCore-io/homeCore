@@ -17,6 +17,7 @@ use uuid::Uuid;
 /// | `User`             | Normal operator: command devices, edit automations   |
 /// | `ReadOnly`         | Minimal read-only view (dashboards, devices, rules)  |
 /// | `Observer`         | Broader read: adds plugins + audit log               |
+/// | `DeviceOperator`   | Observer + command devices; no automation authoring  |
 /// | `RuleEditor`       | Observer + automation/scene/area authoring           |
 /// | `ServiceOperator`  | Typical service account: User + audit:read           |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +33,11 @@ pub enum Role {
     /// Broader read view: `ReadOnly` plus `plugins:read` and `audit:read`.
     /// Good default for dashboards and observability services.
     Observer,
+    /// Observer permissions plus `devices:write` — can command devices
+    /// but cannot author automations, scenes, or areas. Typical shape for
+    /// a physical-operator account (wall panel, kiosk) that should drive
+    /// devices without touching automation logic.
+    DeviceOperator,
     /// Observer permissions plus authoring automations, scenes, and areas.
     /// No device writes (can't command); no user/plugin management.
     RuleEditor,
@@ -91,6 +97,12 @@ impl Role {
                 v.extend(["plugins:read".into(), "audit:read".into()]);
                 v
             }
+            Role::DeviceOperator => {
+                let mut v = to_strings(read_all);
+                v.push("devices:write".into());
+                v.extend(["plugins:read".into(), "audit:read".into()]);
+                v
+            }
             Role::RuleEditor => {
                 let mut v = to_strings(read_all);
                 v.extend(to_strings(write_authoring));
@@ -147,6 +159,19 @@ mod role_tests {
     }
 
     #[test]
+    fn device_operator_can_command_but_not_author() {
+        let s = Role::DeviceOperator.scopes();
+        assert!(s.contains(&"devices:write".into()));
+        assert!(s.contains(&"audit:read".into()));
+        assert!(s.contains(&"plugins:read".into()));
+        assert!(!s.contains(&"automations:write".into()));
+        assert!(!s.contains(&"scenes:write".into()));
+        assert!(!s.contains(&"areas:write".into()));
+        assert!(!s.contains(&"users:write".into()));
+        assert!(!s.contains(&"api_keys:admin".into()));
+    }
+
+    #[test]
     fn rule_editor_can_author_but_not_command_devices() {
         let s = Role::RuleEditor.scopes();
         assert!(s.contains(&"automations:write".into()));
@@ -172,6 +197,7 @@ mod role_tests {
             Role::User,
             Role::ReadOnly,
             Role::Observer,
+            Role::DeviceOperator,
             Role::RuleEditor,
             Role::ServiceOperator,
         ];
@@ -185,6 +211,10 @@ mod role_tests {
         assert_eq!(
             serde_json::to_string(&Role::Observer).unwrap(),
             "\"observer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Role::DeviceOperator).unwrap(),
+            "\"device_operator\""
         );
         assert_eq!(
             serde_json::to_string(&Role::RuleEditor).unwrap(),
