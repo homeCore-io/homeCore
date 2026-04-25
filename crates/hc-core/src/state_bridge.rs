@@ -191,23 +191,32 @@ impl StateBridge {
                 );
                 return Ok(());
             }
-            match parts[3] {
-                "state" => {
+            // Important: `parts` came from `topic.split('/')`, so
+            // `homecore/devices/{id}/state/partial` splits into FIVE parts
+            // (`state` and `partial` separately). Earlier code matched
+            // `parts[3]` against the literal `"state/partial"`, which never
+            // hit — every partial publish was silently routed through the
+            // full-replace `"state"` branch. That wiped device.attributes
+            // on every per-attribute partial, manifesting as devices with
+            // only the most-recent single attribute.
+            let tail = if parts.len() >= 5 { Some(parts[4]) } else { None };
+            match (parts[3], tail) {
+                ("state", None) => {
                     let json: serde_json::Value = serde_json::from_slice(payload)?;
                     return self.handle_state(device_id, &json, false).await;
                 }
-                "state/partial" => {
+                ("state", Some("partial")) => {
                     let json: serde_json::Value = serde_json::from_slice(payload)?;
                     return self.handle_state(device_id, &json, true).await;
                 }
-                "availability" => {
+                ("availability", None) => {
                     let available = matches!(
                         std::str::from_utf8(payload).unwrap_or("").trim(),
                         "online" | "Online" | "1" | "true"
                     );
                     return self.handle_availability(device_id, available).await;
                 }
-                "schema" => {
+                ("schema", None) => {
                     return self.handle_device_schema(device_id, payload).await;
                 }
                 _ => {}

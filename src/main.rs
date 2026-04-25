@@ -795,6 +795,12 @@ async fn main() -> Result<()> {
     // Per-plugin command channels for start/stop/restart from API handlers.
     let plugin_commands: hc_api::PluginCommandChannels = Arc::new(RwLock::new(HashMap::new()));
 
+    // Subscribe the plugin-registry listener early — BEFORE plugins spawn.
+    // Plugins publish their retained capability manifest on CONNACK during
+    // startup; spawning this inside AppState::new_with_plugins is too late
+    // because broadcast channels don't replay history on late subscribe.
+    hc_api::spawn_plugin_registry_listener(pub_bus.clone(), plugin_registry.clone());
+
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
     let rules = {
@@ -938,6 +944,27 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── 13b. Notification service + Core.start BEFORE MQTT client runs ─────
+    //
+    // State_bridge subscribes to internal_bus inside Core::start. It must be
+    // live before the MQTT client begins receiving retained messages on
+    // `homecore/#`, otherwise those early deliveries (plugin capability
+    // manifests in particular) are broadcast to zero subscribers and lost.
+    // tokio::broadcast does not buffer for future subscribers.
+    if !config.notify.channels.is_empty() {
+        let count = config.notify.channels.len();
+        let svc = NotificationService::from_configs(config.notify.channels);
+        info!(
+            channels = count,
+            registered = svc.channel_names().len(),
+            "Notification service ready"
+        );
+        core = core.with_notify(svc);
+    }
+
+    let (rules_handle, fire_history, calendar_handle, purge_fn) =
+        core.start(rules).await?;
+
     // ── 14. MQTT event loop ────────────────────────────────────────────────
     tokio::spawn(async move {
         if let Err(e) = mqtt_client.run().await {
@@ -1011,19 +1038,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    // ── 16. Notification service ───────────────────────────────────────────
-    if !config.notify.channels.is_empty() {
-        let count = config.notify.channels.len();
-        let svc = NotificationService::from_configs(config.notify.channels);
-        info!(
-            channels = count,
-            registered = svc.channel_names().len(),
-            "Notification service ready"
-        );
-        core = core.with_notify(svc);
-    }
-
-    let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
+    // ── 16. Notification service + core.start moved up to 13b so the state
+    //        bridge subscribes to internal_bus before the MQTT client begins
+    //        delivering retained manifest messages.
 
     // ── Hot-reload watcher for rule TOML files ─────────────────────────────
     // Must be kept alive for the duration of the process.
@@ -1113,9 +1130,10 @@ async fn main() -> Result<()> {
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();
-    let app_state = AppState::new_with_plugins(
+    let app_state = AppState::new_with_plugins_and_raw_bus(
         store,
         pub_bus,
+        internal_bus.clone(),
         Some(publish_handle),
         Some(source_rules_handle),
         Some(rules_handle),

@@ -32,6 +32,111 @@ pub struct StreamingEntry {
     pub concurrency: Concurrency,
 }
 
+/// Ordered cache of stream events per request_id. The plan deliberately
+/// clears the retained MQTT message on terminal so late subscribers don't
+/// see stale state, but that makes fast actions (which finish before the
+/// HTTP client can open SSE) appear as empty drawers. This cache bridges
+/// that window: state_bridge still lives on MQTT retained, but an
+/// in-process cache lets the SSE handler replay events emitted before
+/// the subscriber attached.
+///
+/// Entries are pruned `ENTRY_TTL_SECS` after the terminal event so the
+/// cache doesn't grow without bound.
+#[derive(Clone, Default)]
+pub struct StreamCache {
+    inner: Arc<Mutex<HashMap<String, CachedStream>>>,
+}
+
+const ENTRY_TTL_SECS: u64 = 60;
+const MAX_EVENTS_PER_REQUEST: usize = 256;
+
+#[derive(Clone)]
+struct CachedStream {
+    events: Vec<Value>,
+    terminal_at: Option<std::time::Instant>,
+}
+
+impl StreamCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn snapshot(&self, request_id: &str) -> Vec<Value> {
+        let guard = self.inner.lock().await;
+        guard
+            .get(request_id)
+            .map(|c| c.events.clone())
+            .unwrap_or_default()
+    }
+
+    async fn append(&self, request_id: String, event: Value, is_terminal: bool) {
+        let mut guard = self.inner.lock().await;
+        let entry = guard.entry(request_id).or_insert_with(|| CachedStream {
+            events: Vec::new(),
+            terminal_at: None,
+        });
+        if entry.events.len() < MAX_EVENTS_PER_REQUEST {
+            entry.events.push(event);
+        }
+        if is_terminal {
+            entry.terminal_at = Some(std::time::Instant::now());
+        }
+    }
+
+    async fn gc(&self) {
+        let now = std::time::Instant::now();
+        let mut guard = self.inner.lock().await;
+        guard.retain(|_rid, c| match c.terminal_at {
+            Some(t) => now.duration_since(t) < std::time::Duration::from_secs(ENTRY_TTL_SECS),
+            None => true,
+        });
+    }
+}
+
+/// Subscribe to the raw bus, mirror stream events into a [`StreamCache`].
+/// Call from main.rs (production) or the test harness, once per process.
+pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
+    let mut rx = raw_bus.subscribe();
+    tokio::spawn(async move {
+        let mut gc_interval =
+            tokio::time::interval(std::time::Duration::from_secs(ENTRY_TTL_SECS));
+        // Skip the first immediate tick.
+        gc_interval.tick().await;
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(Event::MqttMessage { topic, payload, .. }) => {
+                            let Some((_pid, request_id)) = parse_stream_topic(&topic) else {
+                                continue;
+                            };
+                            // Empty retained-clear — not a real event; skip.
+                            if payload.is_empty() {
+                                continue;
+                            }
+                            let Ok(val) = serde_json::from_slice::<Value>(&payload) else {
+                                continue;
+                            };
+                            let is_term = val
+                                .get("stage")
+                                .and_then(Value::as_str)
+                                .map(is_terminal)
+                                .unwrap_or(false);
+                            cache.append(request_id, val, is_term).await;
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = gc_interval.tick() => {
+                    cache.gc().await;
+                }
+            }
+        }
+    });
+}
+
 /// Cloneable registry of active streaming requests.
 #[derive(Clone, Default)]
 pub struct StreamingRegistry {

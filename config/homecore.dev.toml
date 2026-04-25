@@ -203,6 +203,16 @@ binary  = "../plugins/hc-ecowitt/target/debug/hc-ecowitt"
 config  = "../plugins/hc-ecowitt/config/config.dev.toml"
 enabled = true
 
+# hc-captest — conformance plugin for the capability/streaming contract.
+# Exposes 6 demo streaming actions with no real-device dependency; used
+# both by core/tests/streaming_test.rs and manual browser smoke tests
+# of the Leptos ActionDrawer.
+[[plugins]]
+id      = "hc-captest"
+binary  = "../plugins/hc-captest/target/debug/hc-captest"
+config  = "../plugins/hc-captest/config/config.dev.toml"
+enabled = true
+
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------

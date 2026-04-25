@@ -4627,48 +4627,150 @@ pub async fn get_plugin_capabilities(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct PluginStreamQuery {
+    /// JWT token — browsers can't set `Authorization` on `EventSource`, so
+    /// the stream endpoint lives on the public router and validates the
+    /// token from the query string (same pattern as `/events/stream`).
+    pub token: Option<String>,
+}
+
 /// SSE bridge for streaming-action events. Subscribes to the core event
 /// bus and forwards every `MqttMessage` on
 /// `homecore/plugins/{id}/commands/{request_id}/events` as a Server-Sent
 /// Event. Closes on the first terminal stage
 /// (`complete`/`error`/`canceled`/`timeout`).
 ///
-/// No special scope beyond `plugins:read` — the manifest action's
-/// `requires_role` is enforced at invocation, not on the stream reader.
+/// Public route: auth is enforced here rather than via the Bearer
+/// middleware, because `EventSource` can't send custom headers. Accepts
+/// `?token=<jwt>` (query) or `Authorization: Bearer <jwt>` (header) or
+/// falls back to the IP whitelist. Requires `plugins:read` scope.
 pub async fn get_plugin_stream_sse(
     State(s): State<AppState>,
-    _: PluginsRead,
     Path((plugin_id, request_id)): Path<(String, String)>,
-) -> axum::response::Sse<
-    tokio_stream::wrappers::ReceiverStream<
-        Result<axum::response::sse::Event, std::convert::Infallible>,
-    >,
-> {
+    Query(query): Query<PluginStreamQuery>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> axum::response::Response {
     use axum::response::sse::{Event as SseEvent, KeepAlive};
+    use axum::response::IntoResponse;
     use std::convert::Infallible;
+
+    // Inline auth: whitelist → Admin; otherwise require a valid JWT with
+    // `plugins:read` (from ?token= or Authorization: Bearer). Mirrors
+    // `ws::authenticate_ws` so the streaming endpoints behave similarly,
+    // plus header fallback so programmatic clients can reuse their Bearer
+    // token without URL-encoding it.
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let claims = {
+        let remote_ip = match addr.ip() {
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(std::net::IpAddr::V6(v6)),
+            v4 => v4,
+        };
+        let whitelisted = !s.whitelist.is_empty()
+            && s.whitelist.iter().any(|net| net.contains(&remote_ip));
+        if whitelisted {
+            crate::auth_middleware::whitelist_claims()
+        } else {
+            let token = bearer
+                .as_deref()
+                .or(query.token.as_deref())
+                .unwrap_or("");
+            if token.is_empty() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "missing token (query ?token= or Authorization header)" })),
+                )
+                    .into_response();
+            }
+            match s.jwt.validate(token) {
+                Ok(c) => c,
+                Err(_) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "invalid or expired token" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+    if !claims.has_scope("plugins:read") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "scope 'plugins:read' required" })),
+        )
+            .into_response();
+    }
 
     let target_topic = format!("homecore/plugins/{plugin_id}/commands/{request_id}/events");
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(64);
-    let mut bus_rx = s.event_bus.subscribe();
+    // Subscribe BEFORE reading the cache so any event that lands between
+    // the snapshot and the first recv() is still captured on the live bus.
+    let mut bus_rx = s.raw_bus.subscribe();
+    let cache_snapshot = s.stream_cache.snapshot(&request_id).await;
 
     tokio::spawn(async move {
+        // Step 1: replay cached events. The plan's "retained last event
+        // is the resilience floor" is implemented by this cache (rather
+        // than by MQTT retained) so late subscribers see the full history
+        // up to the cache limit.
+        let mut last_terminal = false;
+        let mut seen_ts: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for val in &cache_snapshot {
+            if let Some(ts) = val.get("ts").and_then(|v| v.as_str()) {
+                seen_ts.insert(ts.to_string());
+            }
+            let stage = val
+                .get("stage")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let data = serde_json::to_string(val).unwrap_or_default();
+            let sse_event = SseEvent::default().event("stream").data(data);
+            if tx.send(Ok(sse_event)).await.is_err() {
+                return;
+            }
+            if matches!(stage, "complete" | "error" | "canceled" | "timeout") {
+                last_terminal = true;
+            }
+        }
+        if last_terminal {
+            return;
+        }
+
+        // Step 2: forward live events. Dedup by `ts` against the cache —
+        // bus_rx was subscribed before the snapshot, so any event that
+        // appears in both channels shares a timestamp and is skipped.
         loop {
             match bus_rx.recv().await {
                 Ok(hc_types::event::Event::MqttMessage { topic, payload, .. })
                     if topic == target_topic =>
                 {
                     if payload.is_empty() {
-                        // retained-clear — just drop.
                         continue;
                     }
-                    let text = match std::str::from_utf8(&payload) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => continue,
+                    let Ok(val) = serde_json::from_slice::<Value>(&payload) else {
+                        continue;
                     };
-                    let stage = serde_json::from_slice::<Value>(&payload)
-                        .ok()
-                        .and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(str::to_string))
-                        .unwrap_or_default();
+                    if let Some(ts) = val.get("ts").and_then(|v| v.as_str()) {
+                        if !seen_ts.insert(ts.to_string()) {
+                            continue;
+                        }
+                    }
+                    let stage = val
+                        .get("stage")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let text = serde_json::to_string(&val).unwrap_or_default();
                     let sse_event = SseEvent::default().event("stream").data(text);
                     if tx.send(Ok(sse_event)).await.is_err() {
                         return;
@@ -4688,7 +4790,9 @@ pub async fn get_plugin_stream_sse(
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    axum::response::Sse::new(stream).keep_alive(KeepAlive::default())
+    axum::response::Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 pub async fn start_plugin(

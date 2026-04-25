@@ -114,6 +114,13 @@ pub struct PluginRecord {
 pub struct AppState {
     pub store: StateStore,
     pub event_bus: EventBus,
+    /// Raw `Event::MqttMessage` bus. The SSE bridge for plugin streaming
+    /// actions needs this because stream events are plain MQTT publishes
+    /// on `homecore/plugins/{id}/commands/{rid}/events` — they never get
+    /// converted into typed events on `event_bus`. In production this is
+    /// `internal_bus`; in tests with a single merged bus it's a clone of
+    /// `event_bus`.
+    pub raw_bus: EventBus,
     pub publish: Option<PublishHandle>,
     /// Live source rule set exactly as authored on disk/API input.
     pub source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
@@ -178,6 +185,144 @@ pub struct AppState {
     /// Active streaming requests. Concurrency enforcement +
     /// plugin-offline / timeout injection hang off this.
     pub streaming_registry: streaming::StreamingRegistry,
+    /// In-process event cache per streaming request_id. The SSE handler
+    /// replays cached events to subscribers that connect after emission
+    /// began (common for fast actions — the HTTP accept→open round-trip
+    /// is longer than the whole action).
+    pub stream_cache: streaming::StreamCache,
+}
+
+/// Subscribe to `event_bus` and mirror `PluginRegistered`,
+/// `PluginHeartbeat`, `PluginOffline`, and `PluginCapabilities` events
+/// into the shared `plugins` map.
+///
+/// **Call this BEFORE plugins are spawned.** Plugins publish their retained
+/// capability manifest on CONNACK; the MQTT retained delivery → state_bridge
+/// → pub_bus chain happens during plugin startup, well before
+/// `AppState::new_with_plugins` is built. If this listener is spawned only
+/// inside the AppState constructor, the initial manifest events fire while
+/// it has no subscriber and are lost forever (tokio broadcast does not
+/// replay history on late subscribe).
+pub fn spawn_plugin_registry_listener(
+    event_bus: EventBus,
+    plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
+) {
+    let mut rx = event_bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(hc_types::event::Event::PluginRegistered {
+                    plugin_id,
+                    timestamp,
+                }) => {
+                    let mut map = plugins.write().await;
+                    let rec = map
+                        .entry(plugin_id.clone())
+                        .or_insert_with(|| PluginRecord {
+                            plugin_id: plugin_id.clone(),
+                            registered_at: timestamp,
+                            status: "active".into(),
+                            enabled: false,
+                            managed: false,
+                            config_path: None,
+                            binary_path: None,
+                            last_heartbeat: None,
+                            last_restart: None,
+                            restart_count: 0,
+                            uptime_started: None,
+                            device_count: 0,
+                            log_level: None,
+                            version: None,
+                            supports_management: false,
+                            capabilities: None,
+                        });
+                    rec.status = "active".into();
+                    rec.registered_at = timestamp;
+                }
+                Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
+                    let mut map = plugins.write().await;
+                    if let Some(rec) = map.get_mut(&plugin_id) {
+                        rec.status = "offline".into();
+                    }
+                }
+                Ok(hc_types::event::Event::PluginHeartbeat {
+                    plugin_id,
+                    timestamp,
+                    version,
+                    uptime_secs,
+                    device_count,
+                }) => {
+                    let mut map = plugins.write().await;
+                    let rec = map
+                        .entry(plugin_id.clone())
+                        .or_insert_with(|| PluginRecord {
+                            plugin_id: plugin_id.clone(),
+                            registered_at: timestamp,
+                            status: "active".into(),
+                            enabled: false,
+                            managed: false,
+                            config_path: None,
+                            binary_path: None,
+                            last_heartbeat: None,
+                            last_restart: None,
+                            restart_count: 0,
+                            uptime_started: None,
+                            device_count: 0,
+                            log_level: None,
+                            version: None,
+                            supports_management: false,
+                            capabilities: None,
+                        });
+                    rec.last_heartbeat = Some(timestamp);
+                    rec.supports_management = true;
+                    if let Some(v) = version {
+                        rec.version = Some(v);
+                    }
+                    if let Some(u) = uptime_secs {
+                        rec.uptime_started =
+                            Some(timestamp - chrono::Duration::seconds(u as i64));
+                    }
+                    if let Some(d) = device_count {
+                        rec.device_count = d;
+                    }
+                    if rec.status == "offline" || rec.status == "starting" {
+                        rec.status = "active".into();
+                    }
+                }
+                Ok(hc_types::event::Event::PluginCapabilities {
+                    plugin_id,
+                    timestamp,
+                    capabilities,
+                }) => {
+                    let mut map = plugins.write().await;
+                    let rec = map
+                        .entry(plugin_id.clone())
+                        .or_insert_with(|| PluginRecord {
+                            plugin_id: plugin_id.clone(),
+                            registered_at: timestamp,
+                            status: "active".into(),
+                            enabled: false,
+                            managed: false,
+                            config_path: None,
+                            binary_path: None,
+                            last_heartbeat: None,
+                            last_restart: None,
+                            restart_count: 0,
+                            uptime_started: None,
+                            device_count: 0,
+                            log_level: None,
+                            version: None,
+                            supports_management: false,
+                            capabilities: None,
+                        });
+                    rec.capabilities = Some(capabilities);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 impl AppState {
@@ -192,9 +337,13 @@ impl AppState {
         whitelist: Vec<IpNet>,
         modes_path: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::new_with_plugins(
+        // Default single-bus construction — suitable for test harnesses
+        // that merge raw MqttMessage and typed events onto one channel.
+        let raw_bus = event_bus.clone();
+        Self::new_with_plugins_and_raw_bus(
             store,
             event_bus,
+            raw_bus,
             publish,
             source_rules_handle,
             rules_handle,
@@ -206,7 +355,10 @@ impl AppState {
         )
     }
 
-    /// Create with a pre-populated plugin registry (shared with PluginManager).
+    /// Back-compat: creates with a pre-populated plugin registry, using
+    /// `event_bus` for the raw bus as well. Prefer
+    /// `new_with_plugins_and_raw_bus` in production where internal_bus
+    /// (MqttMessage only) is distinct from pub_bus (typed events only).
     pub fn new_with_plugins(
         store: StateStore,
         event_bus: EventBus,
@@ -219,130 +371,45 @@ impl AppState {
         modes_path: Option<std::path::PathBuf>,
         plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
     ) -> Self {
-        // Spawn background task to keep plugin registry in sync with bus events.
-        {
-            let mut rx = event_bus.subscribe();
-            let plugins_clone = Arc::clone(&plugins);
-            tokio::spawn(async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(hc_types::event::Event::PluginRegistered {
-                            plugin_id,
-                            timestamp,
-                        }) => {
-                            let mut map = plugins_clone.write().await;
-                            let rec =
-                                map.entry(plugin_id.clone())
-                                    .or_insert_with(|| PluginRecord {
-                                        plugin_id: plugin_id.clone(),
-                                        registered_at: timestamp,
-                                        status: "active".into(),
-                                        enabled: false,
-                                        managed: false,
-                                        config_path: None,
-                                        binary_path: None,
-                                        last_heartbeat: None,
-                                        last_restart: None,
-                                        restart_count: 0,
-                                        uptime_started: None,
-                                        device_count: 0,
-                                        log_level: None,
-                                        version: None,
-                                        supports_management: false,
-                                        capabilities: None,
-                                    });
-                            rec.status = "active".into();
-                            rec.registered_at = timestamp;
-                        }
-                        Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
-                            let mut map = plugins_clone.write().await;
-                            if let Some(rec) = map.get_mut(&plugin_id) {
-                                rec.status = "offline".into();
-                            }
-                        }
-                        Ok(hc_types::event::Event::PluginHeartbeat {
-                            plugin_id,
-                            timestamp,
-                            version,
-                            uptime_secs,
-                            device_count,
-                        }) => {
-                            let mut map = plugins_clone.write().await;
-                            let rec =
-                                map.entry(plugin_id.clone())
-                                    .or_insert_with(|| PluginRecord {
-                                        plugin_id: plugin_id.clone(),
-                                        registered_at: timestamp,
-                                        status: "active".into(),
-                                        enabled: false,
-                                        managed: false,
-                                        config_path: None,
-                                        binary_path: None,
-                                        last_heartbeat: None,
-                                        last_restart: None,
-                                        restart_count: 0,
-                                        uptime_started: None,
-                                        device_count: 0,
-                                        log_level: None,
-                                        version: None,
-                                        supports_management: false,
-                                        capabilities: None,
-                                    });
-                            rec.last_heartbeat = Some(timestamp);
-                            rec.supports_management = true;
-                            if let Some(v) = version {
-                                rec.version = Some(v);
-                            }
-                            if let Some(u) = uptime_secs {
-                                rec.uptime_started =
-                                    Some(timestamp - chrono::Duration::seconds(u as i64));
-                            }
-                            if let Some(d) = device_count {
-                                rec.device_count = d;
-                            }
-                            // A heartbeat means the plugin is alive. Promote from
-                            // "starting" or "offline" to "active". (A zero-device
-                            // plugin never publishes a register message, so this
-                            // is the only path out of "starting" for those.)
-                            if rec.status == "offline" || rec.status == "starting" {
-                                rec.status = "active".into();
-                            }
-                        }
-                        Ok(hc_types::event::Event::PluginCapabilities {
-                            plugin_id,
-                            timestamp,
-                            capabilities,
-                        }) => {
-                            let mut map = plugins_clone.write().await;
-                            let rec =
-                                map.entry(plugin_id.clone())
-                                    .or_insert_with(|| PluginRecord {
-                                        plugin_id: plugin_id.clone(),
-                                        registered_at: timestamp,
-                                        status: "active".into(),
-                                        enabled: false,
-                                        managed: false,
-                                        config_path: None,
-                                        binary_path: None,
-                                        last_heartbeat: None,
-                                        last_restart: None,
-                                        restart_count: 0,
-                                        uptime_started: None,
-                                        device_count: 0,
-                                        log_level: None,
-                                        version: None,
-                                        supports_management: false,
-                                        capabilities: None,
-                                    });
-                            rec.capabilities = Some(capabilities);
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
-        }
+        let raw_bus = event_bus.clone();
+        Self::new_with_plugins_and_raw_bus(
+            store,
+            event_bus,
+            raw_bus,
+            publish,
+            source_rules_handle,
+            rules_handle,
+            rule_file_store,
+            jwt,
+            whitelist,
+            modes_path,
+            plugins,
+        )
+    }
+
+    /// Primary constructor used by production. `raw_bus` carries
+    /// `Event::MqttMessage` (in production this is `internal_bus`);
+    /// `event_bus` carries typed events (production = `pub_bus`). The
+    /// plugin-stream SSE handler and terminal observer subscribe to
+    /// `raw_bus`.
+    pub fn new_with_plugins_and_raw_bus(
+        store: StateStore,
+        event_bus: EventBus,
+        raw_bus: EventBus,
+        publish: Option<PublishHandle>,
+        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+        rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+        rule_file_store: Option<RuleFileStore>,
+        jwt: JwtService,
+        whitelist: Vec<IpNet>,
+        modes_path: Option<std::path::PathBuf>,
+        plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
+    ) -> Self {
+        // Plugin-registry sync listener is spawned by the caller BEFORE
+        // plugins spawn (see `spawn_plugin_registry_listener`), so the
+        // retained manifest events aren't missed. Spawning it here is too
+        // late: plugins publish on CONNACK which happens minutes before
+        // AppState is built.
 
         // Spawn heartbeat timeout sweep — marks plugins offline if no heartbeat
         // received within 90 seconds (for plugins that support management).
@@ -406,6 +473,7 @@ impl AppState {
 
         let state = Self {
             store,
+            raw_bus,
             event_bus,
             publish,
             source_rules_handle,
@@ -434,12 +502,18 @@ impl AppState {
             management_rpc: None,
             log_level_handle: None,
             streaming_registry: streaming::StreamingRegistry::new(),
+            stream_cache: streaming::StreamCache::new(),
         };
 
         // Spawn background task to increment metrics counters from bus events.
         metrics::spawn_metrics_listener(&state, Arc::clone(&state.metrics));
-        // Watch the bus for terminal stream events → release concurrency slots.
-        streaming::spawn_terminal_observer(state.streaming_registry.clone(), &state.event_bus);
+        // Watch the bus for terminal stream events → release concurrency
+        // slots. Stream events are raw MQTT publishes, not typed events,
+        // so we need the raw bus (=internal_bus in production).
+        streaming::spawn_terminal_observer(state.streaming_registry.clone(), &state.raw_bus);
+        // Populate the stream-event cache from the same raw bus so late
+        // SSE subscribers can see events that landed before they connected.
+        streaming::spawn_stream_cache_populator(&state.raw_bus, state.stream_cache.clone());
         // Watch for PluginStatusChanged → offline, inject synthetic error
         // on every open stream belonging to the plugin.
         if let Some(pub_handle) = state.publish.clone() {
@@ -570,6 +644,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/events/stream", get(ws::ws_events_handler))
         // Log streaming WebSocket — same auth pattern as /events/stream.
         .route("/logs/stream", get(logs::log_stream_handler))
+        // Plugin command SSE — same ?token= pattern. Can't live behind the
+        // Bearer middleware because EventSource can't send headers.
+        .route(
+            "/plugins/:id/command/:request_id/stream",
+            get(handlers::get_plugin_stream_sse),
+        )
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/:path", post(handlers::receive_webhook));
@@ -764,10 +844,6 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/:id/capabilities",
             get(handlers::get_plugin_capabilities),
-        )
-        .route(
-            "/plugins/:id/command/:request_id/stream",
-            get(handlers::get_plugin_stream_sse),
         )
         .route(
             "/plugins/matter/commission",
