@@ -4595,6 +4595,110 @@ pub async fn deregister_plugin(
     }
 }
 
+/// `DELETE /api/v1/plugins/:id/devices`
+///
+/// Bulk-wipe every device whose `plugin_id` matches `:id`. The plugin
+/// itself stays registered — only the devices it had registered are
+/// removed. On the plugin's next sync cycle, devices it still cares
+/// about will be re-registered automatically.
+///
+/// Use this to clean up zombies left over from development churn,
+/// from a plugin's pre-cleanup behavior, or after rearranging device
+/// IDs in a plugin's config.
+///
+/// Reuses the same `delete_device` path as the single + bulk device
+/// endpoints, including rule-reference nullification, so any rule
+/// that referenced one of the wiped devices is patched (and disabled
+/// if its trigger device was the deleted one) on the way out.
+///
+/// Returns `{ "deleted": N, "device_ids": ["id1", ...], "affected_rules": ["rule name", ...] }`.
+pub async fn delete_plugin_devices(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let devices_before_delete = match s.store.list_devices().await {
+        Ok(devices) => devices,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let target_ids: Vec<String> = devices_before_delete
+        .iter()
+        .filter(|d| d.plugin_id == plugin_id)
+        .map(|d| d.device_id.clone())
+        .collect();
+
+    if target_ids.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "deleted": 0,
+                "device_ids": [],
+                "affected_rules": [],
+                "note": format!("no devices found with plugin_id = '{plugin_id}'"),
+            })),
+        )
+            .into_response();
+    }
+
+    let mut deleted = 0usize;
+    let mut affected_rules: Vec<String> = Vec::new();
+    for id in &target_ids {
+        match s.store.delete_device(id).await {
+            Ok(true) => {
+                deleted += 1;
+                if let Some(rfs) = &s.rule_file_store {
+                    if let Ok(names) = crate::rule_file_store::nullify_device_refs(
+                        &rfs.dir,
+                        id,
+                        &devices_before_delete,
+                    ) {
+                        for name in names {
+                            if !affected_rules.contains(&name) {
+                                affected_rules.push(name);
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            device_id = %id,
+                            "delete_plugin_devices: failed to nullify rule refs"
+                        );
+                    }
+                }
+            }
+            Ok(false) => {
+                // Race: device disappeared between list and delete. Not an error.
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": e.to_string(),
+                        "deleted_so_far": deleted,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "deleted": deleted,
+            "device_ids": target_ids,
+            "affected_rules": affected_rules,
+        })),
+    )
+        .into_response()
+}
+
 pub async fn get_plugin(
     State(s): State<AppState>,
     _: PluginsRead,

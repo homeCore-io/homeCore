@@ -846,6 +846,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_plugin_capabilities),
         )
         .route(
+            "/plugins/:id/devices",
+            delete(handlers::delete_plugin_devices),
+        )
+        .route(
             "/plugins/matter/commission",
             post(handlers::matter_commission),
         )
