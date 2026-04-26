@@ -53,6 +53,10 @@ pub enum DashboardWidgetType {
     WebEmbed,
     Markdown,
     DashboardLink,
+    /// Full-width "House Status" hero — 4-6 system tiles (Lighting,
+    /// Climate, Security, Media, Energy, Activity) derived from the
+    /// live device map. The default dashboard pins this at the top.
+    HouseStatusHero,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

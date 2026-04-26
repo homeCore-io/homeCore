@@ -3264,6 +3264,18 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             let _ = config_object(widget)?;
             Ok(())
         }
+        // Hero is rendered client-side from the live device map. Config is
+        // optional (defaults to all 6 systems); accept any object shape and
+        // let the renderer ignore unknown fields.
+        hc_types::dashboard::DashboardWidgetType::HouseStatusHero => {
+            if !widget.config.is_object() && !widget.config.is_null() {
+                return Err(format!(
+                    "widget '{}' config must be an object",
+                    widget.id
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
