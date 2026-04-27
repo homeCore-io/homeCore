@@ -2307,6 +2307,62 @@ pub async fn get_automation(
     }
 }
 
+/// `GET /automations/:id/ron` — return the rule's on-disk RON file
+/// content as `text/plain`. Surfaces the literal authoring artifact
+/// (preserving field order and any embedded comments) to read-only
+/// clients like `hc-tui` that want to display rules without
+/// re-serializing through JSON. Auto-generated rules backed only by
+/// the in-memory store (no `.ron` file) return 404.
+pub async fn get_automation_ron(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some(ref store) = s.rule_file_store else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            json!({ "error": "rule file store not available" }).to_string(),
+        )
+            .into_response();
+    };
+
+    let path = match store.find_file(id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json!({ "error": "rule has no .ron file backing" }).to_string(),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json!({ "error": e.to_string() }).to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            text,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            json!({ "error": format!("read {}: {e}", path.display()) }).to_string(),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn update_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
