@@ -4,7 +4,12 @@ tmp.md
 debug/
 target/
 let
-core/data/
+# Runtime dashboard store — written by hc-api on every dashboard
+# edit, same category as state.redb / history.db (which are already
+# covered by *.redb / *.db). The seed code returns
+# DashboardStoreData::default() when this file is missing, so a fresh
+# checkout starts with a clean dashboard set.
+data/dashboards.json
 
 # Ignore rules
 rules/
