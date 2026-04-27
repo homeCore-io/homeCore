@@ -318,6 +318,20 @@ pub enum Trigger {
         #[serde(default)]
         offset_minutes: i32,
     },
+    /// Fires once when a device's battery level crosses the configured low
+    /// threshold (synthesized by the battery watcher with hysteresis).
+    /// `device_id = None` matches any battery-powered device.
+    DeviceBatteryLow {
+        #[serde(default, skip_serializing_if = "Option::is_none", alias = "device")]
+        device_id: Option<String>,
+    },
+    /// Fires once when a previously-low device's battery climbs back above the
+    /// recover band. Counterpart to `DeviceBatteryLow`.
+    /// `device_id = None` matches any device.
+    DeviceBatteryRecovered {
+        #[serde(default, skip_serializing_if = "Option::is_none", alias = "device")]
+        device_id: Option<String>,
+    },
 }
 
 /// Button event types for `Trigger::ButtonEvent`.

@@ -93,6 +93,23 @@ longitude = -77.0369
 timezone  = "America/New_York"
 
 # ---------------------------------------------------------------------------
+# Battery alerts
+# ---------------------------------------------------------------------------
+# Synthesizes `device.battery_low` / `device.battery_recovered` events from
+# device state changes, with hysteresis (latches at threshold_pct, clears at
+# threshold_pct + recover_band_pct). Rules can react via the matching
+# triggers; see core/rules/examples/battery_low_notify.ron.
+[battery]
+threshold_pct    = 20.0
+recover_band_pct = 5.0
+# Optional built-in notify shortcut. If set, a notification is sent on each
+# low edge using the named hc-notify channel — no rule required. Leave unset
+# to keep notifications strictly rule-driven.
+# notify_channel       = "all"
+# Recovery edges are typically less actionable; opt in explicitly.
+# notify_on_recovered  = false
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 [auth]

@@ -190,6 +190,10 @@ pub struct AppState {
     /// began (common for fast actions — the HTTP accept→open round-trip
     /// is longer than the whole action).
     pub stream_cache: streaming::StreamCache,
+    /// Live battery watcher config — `Some` when the watcher is enabled.
+    /// Read by `GET /system/battery_settings`. Holding the sender here keeps
+    /// open the option of a future `PATCH` updating thresholds at runtime.
+    pub battery_config: Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
 }
 
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
@@ -503,6 +507,7 @@ impl AppState {
             log_level_handle: None,
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
+            battery_config: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -551,6 +556,16 @@ impl AppState {
         uids: std::collections::HashSet<u32>,
     ) -> Self {
         self.uds_allowed_uids = Arc::new(uids);
+        self
+    }
+
+    /// Attach the live battery watcher config sender. Holding the sender
+    /// allows future PATCH endpoints to update thresholds at runtime.
+    pub fn with_battery_config(
+        mut self,
+        sender: Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>,
+    ) -> Self {
+        self.battery_config = Some(sender);
         self
     }
 
@@ -872,6 +887,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/calendars/:id/events", get(handlers::list_calendar_events))
         // System
         .route("/system/status", get(handlers::system_status))
+        .route(
+            "/system/battery_settings",
+            get(handlers::battery_settings),
+        )
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/restore", post(backup::restore_handler))
         .route(

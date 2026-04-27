@@ -144,7 +144,9 @@ pub fn event_device_id(event: &Event) -> Option<&str> {
         Event::DeviceStateChanged { device_id, .. }
         | Event::DeviceAvailabilityChanged { device_id, .. }
         | Event::DeviceNameChanged { device_id, .. }
-        | Event::DeviceCommandSent { device_id, .. } => Some(device_id),
+        | Event::DeviceCommandSent { device_id, .. }
+        | Event::DeviceBatteryLow { device_id, .. }
+        | Event::DeviceBatteryRecovered { device_id, .. } => Some(device_id),
         Event::TimerStateChanged { timer_id, .. } => Some(timer_id),
         _ => None,
     }
@@ -171,6 +173,8 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::ModeChanged { .. } => "mode_changed",
         Event::TimerStateChanged { .. } => "timer_state_changed",
         Event::PluginCapabilities { .. } => "plugin_capabilities",
+        Event::DeviceBatteryLow { .. } => "device_battery_low",
+        Event::DeviceBatteryRecovered { .. } => "device_battery_recovered",
     }
 }
 

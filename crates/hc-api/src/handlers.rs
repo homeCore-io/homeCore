@@ -152,6 +152,20 @@ pub async fn set_log_level(
     }
 }
 
+pub async fn battery_settings(State(s): State<AppState>) -> impl IntoResponse {
+    let cfg = s
+        .battery_config
+        .as_ref()
+        .map(|tx| tx.borrow().clone())
+        .unwrap_or_default();
+    Json(json!({
+        "threshold_pct": cfg.threshold_pct,
+        "recover_band_pct": cfg.recover_band_pct,
+        "notify_channel": cfg.notify_channel,
+        "notify_on_recovered": cfg.notify_on_recovered,
+    }))
+}
+
 pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
     let uptime_secs = (chrono::Utc::now() - s.started_at).num_seconds().max(0);
 
@@ -2092,6 +2106,8 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::HubVariableChanged { .. } => "hub_variable_changed",
         Trigger::CalendarEvent { .. } => "calendar_event",
         Trigger::ModeChanged { .. } => "mode_changed",
+        Trigger::DeviceBatteryLow { .. } => "device_battery_low",
+        Trigger::DeviceBatteryRecovered { .. } => "device_battery_recovered",
     }
 }
 

@@ -7121,3 +7121,58 @@ The `Skipped` outcome appears in the rule fire history:
 ```json
 { "type": "skipped", "reason": "single: already in-flight" }
 ```
+
+---
+
+## Battery alerts (`Trigger::DeviceBatteryLow` / `Recovered`)
+
+Core synthesizes `device.battery_low` and `device.battery_recovered` events
+from `DeviceStateChanged` updates that touch a battery attribute
+(`battery`, `battery_pct`, or `battery_level`). Hysteresis is enforced in
+the watcher (`hc-core/src/battery_watcher.rs`) and persisted in
+`hc-state`'s `battery_state` redb table, so a restart while a device is
+already low does not re-emit on the next reading.
+
+### Configuration (`homecore.toml`)
+
+```toml
+[battery]
+threshold_pct       = 20.0      # latch at or below this percent
+recover_band_pct    = 5.0       # clear at threshold + recover_band
+# notify_channel      = "all"   # optional — fires hc-notify on each edge
+# notify_on_recovered = false   # opt-in for recovery notifications
+```
+
+`GET /api/v1/system/battery_settings` returns the current values for the
+admin UI. The hero tile in hc-web-leptos reads from this endpoint, so
+its low-count and click-through filter always match the watcher.
+
+### Identifying the device in a rule action
+
+The trigger fires with the device's id and current battery percentage
+embedded in the event. **Action params don't yet support template
+substitution** (e.g. you can't write
+`Notify { message: "Battery low: {{event.device_id}}" }`). Until that
+lands, use `RunScript` and Rhai's built-in `trigger_device()`:
+
+```ron
+trigger: DeviceBatteryLow(device_id: None),
+actions: [
+    RuleAction(action: RunScript(script: r#"
+        let id = trigger_device();
+        let dev = device_state(id);
+        notify("all", "Battery low",
+            "Battery low: " + dev["name"] + " at " + dev["attributes"]["battery"] + "%");
+    "#)),
+]
+```
+
+A reference rule lives at `core/rules/examples/battery_low_notify.ron`.
+
+### When to use each path
+
+| Want | Use |
+|---|---|
+| One-line "send me a notification on any low battery" | `[battery] notify_channel = "..."` in homecore.toml |
+| Custom message, multiple channels, conditional logic | `Trigger::DeviceBatteryLow` rule with `RunScript` |
+| Non-notification reaction (e.g. set a hub variable, fire a scene) | Rule with any action; identify the device via `trigger_device()` |

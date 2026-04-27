@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
+pub mod battery_watcher;
 pub mod calendar_store;
 pub mod device_naming;
 pub mod engine;
@@ -99,6 +100,10 @@ pub struct Core {
     log_tx: Option<tokio::sync::broadcast::Sender<hc_types::LogLine>>,
     log_ring:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<hc_types::LogLine>>>>,
+    /// Live battery thresholds + optional notify channel. None disables the
+    /// watcher entirely. The receiver is read on each event so REST patches
+    /// take effect without restart.
+    battery_config: Option<watch::Receiver<battery_watcher::BatteryConfig>>,
 }
 
 impl Core {
@@ -128,7 +133,19 @@ impl Core {
             calendar_expansion_days: 400,
             log_tx: None,
             log_ring: None,
+            battery_config: None,
         }
+    }
+
+    /// Provide the live battery-watcher config receiver. When set, the
+    /// watcher subscribes to the public bus and emits low/recovered events
+    /// alongside optional hc-notify shortcuts.
+    pub fn with_battery_config(
+        mut self,
+        rx: watch::Receiver<battery_watcher::BatteryConfig>,
+    ) -> Self {
+        self.battery_config = Some(rx);
+        self
     }
 
     /// Override the plugin startup grace period (default: 10 s).
@@ -349,6 +366,17 @@ impl Core {
             self.state.clone(),
         );
         tokio::spawn(timer_mgr.start());
+
+        // Battery watcher: synthesizes DeviceBatteryLow/Recovered events from
+        // DeviceStateChanged with hysteresis, latched in the BatteryStore.
+        if let Some(cfg) = self.battery_config.clone() {
+            battery_watcher::spawn(
+                self.pub_bus.clone(),
+                self.state.clone(),
+                self.notify.clone(),
+                cfg,
+            );
+        }
 
         // Load glue device definitions from config/glue.toml (seed-only).
         if let Some(glue_path) = self.glue_path.as_ref() {

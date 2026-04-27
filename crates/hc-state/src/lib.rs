@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 pub mod api_key_store;
 pub mod audit_store;
+pub mod battery_store;
 pub mod device_store;
 pub mod history;
 pub mod refresh_token_store;
@@ -26,6 +27,7 @@ pub mod user_store;
 
 use api_key_store::ApiKeyStore;
 use audit_store::AuditStore;
+use battery_store::BatteryStore;
 use device_store::DeviceStore;
 use history::HistoryStore;
 use refresh_token_store::RefreshTokenStore;
@@ -35,6 +37,7 @@ use user_store::UserStore;
 
 pub use api_key_store::ApiKeyRecord;
 pub use audit_store::{AuditActorType, AuditEntry, AuditQuery, AuditResult};
+pub use battery_store::{BatteryEdge, BatteryRecord};
 pub use refresh_token_store::RefreshTokenRecord;
 
 /// Combined handle to both storage back-ends.
@@ -48,6 +51,7 @@ pub struct StateStore {
     api_keys: Arc<ApiKeyStore>,
     refresh_tokens: Arc<RefreshTokenStore>,
     audit: Arc<AuditStore>,
+    battery: Arc<BatteryStore>,
 }
 
 impl StateStore {
@@ -74,7 +78,7 @@ impl StateStore {
         let history_path = history_db_path.to_string();
         let audit_path = audit_db_path.to_string();
 
-        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit) = tokio::task::spawn_blocking(move || {
+        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit, battery) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
@@ -108,6 +112,7 @@ impl StateStore {
             let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
             let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
             let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
+            let battery = BatteryStore::new(Arc::clone(&db))?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -117,6 +122,7 @@ impl StateStore {
                 api_keys,
                 refresh_tokens,
                 audit,
+                battery,
             ))
         })
         .await??;
@@ -130,7 +136,33 @@ impl StateStore {
             api_keys: Arc::new(api_keys),
             refresh_tokens: Arc::new(refresh_tokens),
             audit: Arc::new(audit),
+            battery: Arc::new(battery),
         })
+    }
+
+    // --- Battery latch ---
+
+    /// Apply a new battery reading. Returns `Some(edge)` when the latch
+    /// state machine transitions, `None` for noise inside the band.
+    pub async fn evaluate_battery(
+        &self,
+        device_id: &str,
+        pct: f64,
+        threshold: f64,
+        recover_band: f64,
+    ) -> Result<Option<BatteryEdge>> {
+        let store = Arc::clone(&self.battery);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.evaluate(&id, pct, threshold, recover_band))
+            .await?
+    }
+
+    /// Drop the battery latch entry for a device (called when the device
+    /// is deleted from the registry).
+    pub async fn forget_battery(&self, device_id: &str) -> Result<()> {
+        let store = Arc::clone(&self.battery);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.forget(&id)).await?
     }
 
     // --- Audit log ---

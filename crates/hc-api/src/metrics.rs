@@ -230,6 +230,8 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::ModeChanged { .. } => "mode_changed",
                         Event::TimerStateChanged { .. } => "timer_state_changed",
                         Event::PluginCapabilities { .. } => "plugin_capabilities",
+                        Event::DeviceBatteryLow { .. } => "device_battery_low",
+                        Event::DeviceBatteryRecovered { .. } => "device_battery_recovered",
                     };
                     metrics.events_total.with_label_values(&[label]).inc();
 

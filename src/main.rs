@@ -183,6 +183,8 @@ struct AppConfig {
     plugins: Vec<PluginEntry>,
     #[serde(default)]
     calendars: CalendarsSection,
+    #[serde(default)]
+    battery: BatterySection,
 }
 
 impl AppConfig {
@@ -273,6 +275,43 @@ fn default_server_host() -> String {
 }
 fn default_server_port() -> u16 {
     8080
+}
+
+/// `[battery]` section of homecore.toml — drives the battery watcher.
+#[derive(Deserialize, Clone)]
+struct BatterySection {
+    /// Battery percentage at or below which the latch engages.
+    #[serde(default = "default_battery_threshold")]
+    threshold_pct: f64,
+    /// Recovery band added to threshold to clear the latch.
+    #[serde(default = "default_battery_recover")]
+    recover_band_pct: f64,
+    /// Optional hc-notify channel for the built-in notification shortcut.
+    /// Leave unset to disable the shortcut (rules-engine still receives the
+    /// `device.battery_low` events either way).
+    #[serde(default)]
+    notify_channel: Option<String>,
+    /// When true and `notify_channel` is set, recovery edges also notify.
+    #[serde(default)]
+    notify_on_recovered: bool,
+}
+
+impl Default for BatterySection {
+    fn default() -> Self {
+        Self {
+            threshold_pct: default_battery_threshold(),
+            recover_band_pct: default_battery_recover(),
+            notify_channel: None,
+            notify_on_recovered: false,
+        }
+    }
+}
+
+fn default_battery_threshold() -> f64 {
+    20.0
+}
+fn default_battery_recover() -> f64 {
+    5.0
 }
 
 #[derive(Deserialize, Default)]
@@ -870,6 +909,17 @@ async fn main() -> Result<()> {
     let calendar_dir = PathBuf::from(&config.calendars.dir);
     let calendar_expansion_days = config.calendars.expansion_days;
 
+    // Live battery watcher config — held by AppState so REST handlers can
+    // read (and one day patch) it; the receiver is read by the watcher.
+    let battery_initial = hc_core::battery_watcher::BatteryConfig {
+        threshold_pct: config.battery.threshold_pct,
+        recover_band_pct: config.battery.recover_band_pct,
+        notify_channel: config.battery.notify_channel.clone(),
+        notify_on_recovered: config.battery.notify_on_recovered,
+    };
+    let (battery_tx, battery_rx) = tokio::sync::watch::channel(battery_initial);
+    let battery_tx = Arc::new(battery_tx);
+
     let mut core = Core::new(
         internal_bus.clone(),
         pub_bus.clone(),
@@ -886,7 +936,8 @@ async fn main() -> Result<()> {
     .with_calendar_dir(calendar_dir.clone())
     .with_calendar_expansion_days(calendar_expansion_days)
     .with_shutdown(shutdown_rx.clone())
-    .with_log_stream(log_tx.clone(), log_ring.clone());
+    .with_log_stream(log_tx.clone(), log_ring.clone())
+    .with_battery_config(battery_rx);
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
     match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
@@ -1155,7 +1206,8 @@ async fn main() -> Result<()> {
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups)
-    .with_dashboard_store(dashboard_store, dashboard_data);
+    .with_dashboard_store(dashboard_store, dashboard_data)
+    .with_battery_config(battery_tx);
 
     let app_state = if let Some(cal) = calendar_handle {
         app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)

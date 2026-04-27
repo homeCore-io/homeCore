@@ -100,6 +100,29 @@ pub enum Event {
         previous_name: String,
         current_name: String,
     },
+    /// A battery-powered device's level dropped to or below the configured
+    /// alert threshold. Synthesized by the battery watcher with hysteresis,
+    /// so this fires once per crossing — not on every battery report.
+    DeviceBatteryLow {
+        timestamp: DateTime<Utc>,
+        device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
+        /// Battery percentage that triggered the latch (0–100).
+        battery_pct: f64,
+        /// Threshold value that was crossed (0–100).
+        threshold_pct: f64,
+    },
+    /// A previously-low device's battery has climbed back above the recover
+    /// band (threshold + recover_band_pct). Counterpart to `DeviceBatteryLow`.
+    DeviceBatteryRecovered {
+        timestamp: DateTime<Utc>,
+        device_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_name: Option<String>,
+        /// Battery percentage at the time the latch cleared (0–100).
+        battery_pct: f64,
+    },
     /// A raw MQTT message arrived (used before topic routing is applied).
     MqttMessage {
         timestamp: DateTime<Utc>,
@@ -205,7 +228,9 @@ impl Event {
             | Event::TimerStateChanged { timestamp, .. }
             | Event::PluginHeartbeat { timestamp, .. }
             | Event::PluginStatusChanged { timestamp, .. }
-            | Event::PluginCapabilities { timestamp, .. } => *timestamp,
+            | Event::PluginCapabilities { timestamp, .. }
+            | Event::DeviceBatteryLow { timestamp, .. }
+            | Event::DeviceBatteryRecovered { timestamp, .. } => *timestamp,
         }
     }
 }

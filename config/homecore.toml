@@ -75,6 +75,19 @@ longitude = -77.0369
 timezone  = "America/New_York"
 
 # ---------------------------------------------------------------------------
+# Battery alerts
+# ---------------------------------------------------------------------------
+# Synthesizes `device.battery_low` / `device.battery_recovered` events from
+# device state changes, with hysteresis (latches at threshold_pct, clears at
+# threshold_pct + recover_band_pct). Rules can react via the matching
+# triggers; see core/rules/examples/battery_low_notify.ron.
+[battery]
+threshold_pct    = 20.0
+recover_band_pct = 5.0
+# notify_channel       = "all"     # uncomment to enable built-in notify shortcut
+# notify_on_recovered  = false
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 [auth]

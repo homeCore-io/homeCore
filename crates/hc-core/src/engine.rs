@@ -1740,6 +1740,43 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             extra: None,
             trigger_label: label,
         },
+        Event::DeviceBatteryLow {
+            device_id,
+            battery_pct,
+            threshold_pct,
+            ..
+        } => TriggerContext {
+            device_id: Some(device_id.clone()),
+            attribute: Some("battery".into()),
+            value: serde_json::Number::from_f64(*battery_pct).map(JsonValue::Number),
+            prev_value: serde_json::Number::from_f64(*threshold_pct).map(JsonValue::Number),
+            event_type: Some("device_battery_low".into()),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
+            extra: None,
+            trigger_label: label,
+        },
+        Event::DeviceBatteryRecovered {
+            device_id,
+            battery_pct,
+            ..
+        } => TriggerContext {
+            device_id: Some(device_id.clone()),
+            attribute: Some("battery".into()),
+            value: serde_json::Number::from_f64(*battery_pct).map(JsonValue::Number),
+            prev_value: None,
+            event_type: Some("device_battery_recovered".into()),
+            change_kind: None,
+            change_source: None,
+            change_actor_id: None,
+            change_actor_name: None,
+            correlation_id: None,
+            extra: None,
+            trigger_label: label,
+        },
         _ => TriggerContext::default(),
     }
 }
@@ -1842,6 +1879,8 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::HubVariableChanged { .. } => "HubVariableChanged",
         Trigger::CalendarEvent { .. } => "CalendarEvent",
         Trigger::ModeChanged { .. } => "ModeChanged",
+        Trigger::DeviceBatteryLow { .. } => "DeviceBatteryLow",
+        Trigger::DeviceBatteryRecovered { .. } => "DeviceBatteryRecovered",
     }
 }
 
@@ -1927,6 +1966,12 @@ fn trigger_kind_can_match_event(trigger: &Trigger, event: &Event) -> bool {
         ),
         Event::DeviceAvailabilityChanged { .. } => {
             matches!(trigger, Trigger::DeviceAvailabilityChanged { .. })
+        }
+        Event::DeviceBatteryLow { .. } => {
+            matches!(trigger, Trigger::DeviceBatteryLow { .. })
+        }
+        Event::DeviceBatteryRecovered { .. } => {
+            matches!(trigger, Trigger::DeviceBatteryRecovered { .. })
         }
         Event::MqttMessage { .. } => matches!(trigger, Trigger::MqttMessage { .. }),
         Event::Custom { event_type, .. } => match event_type.as_str() {
@@ -2257,6 +2302,36 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
         }
         (_, Event::DeviceAvailabilityChanged { .. }) => {
             NoMatch("wrong trigger type for DeviceAvailabilityChanged")
+        }
+
+        // ── DeviceBatteryLow ───────────────────────────────────────────────
+        (
+            Trigger::DeviceBatteryLow { device_id },
+            Event::DeviceBatteryLow {
+                device_id: ev_device,
+                ..
+            },
+        ) => match device_id {
+            Some(want) if want != ev_device => NoMatch("device_id mismatch"),
+            _ => Matched,
+        },
+        (_, Event::DeviceBatteryLow { .. }) => {
+            NoMatch("wrong trigger type for DeviceBatteryLow")
+        }
+
+        // ── DeviceBatteryRecovered ─────────────────────────────────────────
+        (
+            Trigger::DeviceBatteryRecovered { device_id },
+            Event::DeviceBatteryRecovered {
+                device_id: ev_device,
+                ..
+            },
+        ) => match device_id {
+            Some(want) if want != ev_device => NoMatch("device_id mismatch"),
+            _ => Matched,
+        },
+        (_, Event::DeviceBatteryRecovered { .. }) => {
+            NoMatch("wrong trigger type for DeviceBatteryRecovered")
         }
 
         _ => NoMatch("event type does not match trigger type"),
