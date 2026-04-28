@@ -56,6 +56,17 @@ dashmap           = "6"
 cron              = "0.12"
 icalendar         = { version = "0.16", default-features = false, features = ["parser"] }
 
+# Size-optimized release profile. Applies workspace-wide.
+# Strip removes debug symbols (~30-50% binary size reduction).
+# thin LTO catches cross-crate inlining without the build-time cost of
+# fat LTO. codegen-units=1 enables better inlining; trade compile time
+# for runtime + size. panic=unwind kept (default) so async tasks can
+# unwind cleanly under tokio without killing the whole daemon.
+[profile.release]
+strip         = "symbols"
+lto           = "thin"
+codegen-units = 1
+
 [dependencies]
 hc-broker      = { path = "crates/hc-broker" }
 hc-mqtt-client = { path = "crates/hc-mqtt-client" }
