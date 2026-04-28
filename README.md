@@ -1,5 +1,7 @@
 # homeCore
 
+[![CI](https://github.com/homeCore-io/homeCore/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/homeCore/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/homeCore/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/homeCore/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore.io/lf-workflow-dash/)
+
 Open-source home automation built in Rust. MQTT-native, API-first, and fully local — no cloud required.
 
 ## What is homeCore?
