@@ -361,7 +361,7 @@ pub async fn remove_managed_rules(state: &AppState, rule_ids: &[Uuid]) -> Result
     Ok(())
 }
 
-pub fn managed_rule_owner<'a>(definitions: &'a [ModeDefinition], rule_id: Uuid) -> Option<&'a str> {
+pub fn managed_rule_owner(definitions: &[ModeDefinition], rule_id: Uuid) -> Option<&str> {
     definitions
         .iter()
         .find(|definition| definition.generated_rule_ids.contains(&rule_id))

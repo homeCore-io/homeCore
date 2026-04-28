@@ -122,7 +122,11 @@ pub async fn create_api_key(
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "key generation failed");
             }
         };
-        let exists = match s.store.api_key_prefix_exists(&candidate.lookup_prefix).await {
+        let exists = match s
+            .store
+            .api_key_prefix_exists(&candidate.lookup_prefix)
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(error = %e, "api_key_prefix_exists failed");
@@ -357,7 +361,11 @@ pub async fn rotate_api_key(
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "key generation failed");
             }
         };
-        let exists = match s.store.api_key_prefix_exists(&candidate.lookup_prefix).await {
+        let exists = match s
+            .store
+            .api_key_prefix_exists(&candidate.lookup_prefix)
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(error = %e, "api_key_prefix_exists failed");

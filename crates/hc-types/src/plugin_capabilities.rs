@@ -144,7 +144,10 @@ mod tests {
         let a = &m.actions[0];
         assert_eq!(a.concurrency, Concurrency::Single);
         assert_eq!(a.requires_role, RequiresRole::Admin);
-        assert_eq!(a.item_operations.as_deref(), Some(&[ItemOp::Add, ItemOp::Update][..]));
+        assert_eq!(
+            a.item_operations.as_deref(),
+            Some(&[ItemOp::Add, ItemOp::Update][..])
+        );
         let back = serde_json::to_value(&m).unwrap();
         assert_eq!(back, raw);
     }

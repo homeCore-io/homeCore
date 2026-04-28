@@ -58,8 +58,8 @@ pub fn lookup_prefix_from_body(body: &str) -> Option<&str> {
 
 pub fn hash_token(full_token: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let params = Params::new(19_456, 1, 1, None)
-        .map_err(|e| anyhow!("Argon2 params error: {e}"))?;
+    let params =
+        Params::new(19_456, 1, 1, None).map_err(|e| anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     argon2
         .hash_password(full_token.as_bytes(), &salt)
@@ -98,6 +98,9 @@ mod tests {
     fn prefix_extracted_from_body() {
         let k = generate().unwrap();
         let body = k.full_token.strip_prefix(REFRESH_TOKEN_PREFIX).unwrap();
-        assert_eq!(lookup_prefix_from_body(body), Some(k.lookup_prefix.as_str()));
+        assert_eq!(
+            lookup_prefix_from_body(body),
+            Some(k.lookup_prefix.as_str())
+        );
     }
 }

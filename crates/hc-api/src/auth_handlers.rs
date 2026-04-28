@@ -24,10 +24,7 @@ use crate::{audit, auth_middleware::AuthUser, AppState};
 
 /// `POST /api/v1/auth/login`
 /// Returns a signed JWT on success.
-pub async fn login(
-    State(s): State<AppState>,
-    Json(body): Json<LoginRequest>,
-) -> impl IntoResponse {
+pub async fn login(State(s): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
     // Fetch user record.
     let user = match s.store.get_user_by_username(&body.username).await {
         Ok(Some(u)) => u,
@@ -158,7 +155,10 @@ pub async fn refresh(
     State(s): State<AppState>,
     Json(body): Json<RefreshRequest>,
 ) -> impl IntoResponse {
-    let body_tok = match body.refresh_token.strip_prefix(refresh::REFRESH_TOKEN_PREFIX) {
+    let body_tok = match body
+        .refresh_token
+        .strip_prefix(refresh::REFRESH_TOKEN_PREFIX)
+    {
         Some(b) => b,
         None => {
             return (

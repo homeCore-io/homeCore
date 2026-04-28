@@ -199,7 +199,11 @@ impl StateBridge {
             // full-replace `"state"` branch. That wiped device.attributes
             // on every per-attribute partial, manifesting as devices with
             // only the most-recent single attribute.
-            let tail = if parts.len() >= 5 { Some(parts[4]) } else { None };
+            let tail = if parts.len() >= 5 {
+                Some(parts[4])
+            } else {
+                None
+            };
             match (parts[3], tail) {
                 ("state", None) => {
                     let json: serde_json::Value = serde_json::from_slice(payload)?;

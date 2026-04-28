@@ -195,8 +195,8 @@ pub fn load_file(path: &Path) -> Result<Rule> {
 fn has_empty_id(content: &str) -> bool {
     for line in content.lines() {
         let t = line.trim();
-        if t.starts_with("id") {
-            let after_key = t["id".len()..].trim_start();
+        if let Some(after_key) = t.strip_prefix("id") {
+            let after_key = after_key.trim_start();
             if let Some(after_eq) = after_key.strip_prefix('=') {
                 return after_eq.trim() == r#""""#;
             }
@@ -224,8 +224,8 @@ fn replace_empty_id(content: &str, new_id: &str) -> String {
     for line in content.lines() {
         if !replaced {
             let t = line.trim();
-            if t.starts_with("id") {
-                let after_key = t["id".len()..].trim_start();
+            if let Some(after_key) = t.strip_prefix("id") {
+                let after_key = after_key.trim_start();
                 if let Some(after_eq) = after_key.strip_prefix('=') {
                     if after_eq.trim() == r#""""# {
                         result.push_str(&format!("id = \"{new_id}\""));
@@ -283,6 +283,11 @@ fn slugify(name: &str) -> String {
 
 /// Watches a rules directory for filesystem changes and hot-reloads the live
 /// rule set atomically.
+/// Optional callback fired after rules reload from disk — used by the
+/// engine to purge per-rule state for rules that disappeared.
+/// Aliased to keep signatures under clippy's `type_complexity` threshold.
+pub type RulesReloadCallback = Arc<dyn Fn(&[Rule]) + Send + Sync>;
+
 pub struct RuleWatcher {
     _watcher: RecommendedWatcher,
 }
@@ -301,7 +306,7 @@ impl RuleWatcher {
         store: StateStore,
         source_handle: Arc<RwLock<Vec<Rule>>>,
         handle: Arc<RwLock<Vec<Rule>>>,
-        on_reload: Option<Arc<dyn Fn(&[Rule]) + Send + Sync>>,
+        on_reload: Option<RulesReloadCallback>,
     ) -> Result<Self> {
         // Watcher sends `WatchSignal` messages — either targeted path changes
         // for a surgical reload, or `FullReload` when the OS can't tell us
@@ -468,7 +473,7 @@ async fn surgical_reload(
     source_handle: &Arc<RwLock<Vec<Rule>>>,
     handle: &Arc<RwLock<Vec<Rule>>>,
     path_index: &Arc<RwLock<HashMap<PathBuf, uuid::Uuid>>>,
-    on_reload: &Option<Arc<dyn Fn(&[Rule]) + Send + Sync>>,
+    on_reload: &Option<RulesReloadCallback>,
 ) -> bool {
     // Partition changes into (path, rule) pairs for files that still exist,
     // and a separate list for deleted paths.
@@ -549,10 +554,7 @@ async fn surgical_reload(
 
     let added_or_updated = compiled.len();
     let removed = removed_ids.len();
-    info!(
-        added_or_updated,
-        removed, "Rules hot-reloaded (surgical)"
-    );
+    info!(added_or_updated, removed, "Rules hot-reloaded (surgical)");
     true
 }
 

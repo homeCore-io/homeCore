@@ -21,8 +21,7 @@ use uuid::Uuid;
 
 const REFRESH_BY_PREFIX: TableDefinition<&str, &str> =
     TableDefinition::new("refresh_tokens_by_prefix");
-const REFRESH_BY_ID: TableDefinition<&str, &str> =
-    TableDefinition::new("refresh_tokens_by_id");
+const REFRESH_BY_ID: TableDefinition<&str, &str> = TableDefinition::new("refresh_tokens_by_id");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshTokenRecord {
@@ -322,7 +321,7 @@ mod tests {
         let (_d, s) = fresh();
         let u = Uuid::new_v4();
 
-        let mut active = sample(u, "active1aaaaa", None);
+        let active = sample(u, "active1aaaaa", None);
         s.create(&active).unwrap();
 
         let mut retired_fresh = sample(u, "retired2aaaa", None);

@@ -39,8 +39,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(transport: Transport) -> Self {
-        let uds_client: HyperClient<UnixConnector, Full<Bytes>> =
-            HyperClient::unix();
+        let uds_client: HyperClient<UnixConnector, Full<Bytes>> = HyperClient::unix();
         let tcp_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -68,11 +67,7 @@ impl Client {
     }
 
     /// `POST {base}/api/v1/{path}` with a JSON body.
-    pub async fn post<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T> {
+    pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         self.request(Method::POST, path, Some(body)).await
     }
 
@@ -111,10 +106,16 @@ impl Client {
                 if let Some(b) = body {
                     req = req.json(b);
                 }
-                let resp = req.send().await.with_context(|| format!("{method} {url}"))?;
+                let resp = req
+                    .send()
+                    .await
+                    .with_context(|| format!("{method} {url}"))?;
                 let status = resp.status();
                 let bytes = resp.bytes().await.context("reading response body")?;
-                (StatusCode::from_u16(status.as_u16()).unwrap(), bytes.to_vec())
+                (
+                    StatusCode::from_u16(status.as_u16()).unwrap(),
+                    bytes.to_vec(),
+                )
             }
             Transport::Uds { socket } => {
                 let uri: hyper::Uri = UnixUri::new(socket.clone(), &full_path).into();

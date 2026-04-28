@@ -336,7 +336,13 @@ enum SeedMode {
 fn runtime_keys_for(glue_type: &str) -> &'static [&'static str] {
     match glue_type {
         "switch" => &["on"],
-        "timer" => &["state", "duration_secs", "remaining_secs", "started_at", "repeat"],
+        "timer" => &[
+            "state",
+            "duration_secs",
+            "remaining_secs",
+            "started_at",
+            "repeat",
+        ],
         "counter" => &["count"],
         "number" => &["value"],
         "select" => &["selected"],

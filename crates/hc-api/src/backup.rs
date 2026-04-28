@@ -138,7 +138,7 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
             .map(|e| e.path())
             .filter(|p| {
                 p.extension()
-                    .map_or(false, |ext| ext == "ron" || ext == "toml")
+                    .is_some_and(|ext| ext == "ron" || ext == "toml")
             })
             .collect();
         rule_files.sort();

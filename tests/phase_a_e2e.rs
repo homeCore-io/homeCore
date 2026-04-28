@@ -39,7 +39,10 @@ struct Harness {
     tcp_port: u16,
     uds_path: PathBuf,
     jwt_secret_path: PathBuf,
+    // Held for tempdir lifetime; not read after construction.
+    #[allow(dead_code)]
     state_db_path: PathBuf,
+    #[allow(dead_code)]
     history_db_path: PathBuf,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     serve_task: tokio::task::JoinHandle<()>,
@@ -62,18 +65,8 @@ impl Harness {
         .await?;
 
         let bus = EventBus::new(256);
-        let state = AppState::new(
-            store,
-            bus,
-            None,
-            None,
-            None,
-            None,
-            jwt,
-            vec![],
-            None,
-        )
-        .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]));
+        let state = AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
+            .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]));
 
         let tcp_port = free_port();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -133,7 +126,10 @@ impl Harness {
 
 async fn wait_for_tcp(port: u16) -> Result<()> {
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         sleep(Duration::from_millis(50)).await;
@@ -251,7 +247,10 @@ async fn phase_a_e2e() -> Result<()> {
     let err = tcp_with_key.get::<serde_json::Value>("/devices").await;
     assert!(err.is_err(), "revoked key must be rejected");
     let msg = format!("{}", err.unwrap_err());
-    assert!(msg.contains("401") || msg.contains("Unauthorized"), "got: {msg}");
+    assert!(
+        msg.contains("401") || msg.contains("Unauthorized"),
+        "got: {msg}"
+    );
 
     // ── 8. Admin JWT still works ────────────────────────────────────────
     let tcp_jwt = Client::new(Transport::Tcp {

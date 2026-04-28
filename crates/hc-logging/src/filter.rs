@@ -164,10 +164,7 @@ mod tests {
     fn config_target_overrides_default() {
         // Operator opts in to debug for one of the noisy crates — last
         // matching directive wins in EnvFilter.
-        let s = build_filter_string(
-            &cfg_with_targets(&[("rumqttc::state", "debug")]),
-            None,
-        );
+        let s = build_filter_string(&cfg_with_targets(&[("rumqttc::state", "debug")]), None);
         // The default appears first, then the override appears after.
         let default_idx = s.find("rumqttc::state=info").expect("default present");
         let override_idx = s.find("rumqttc::state=debug").expect("override present");

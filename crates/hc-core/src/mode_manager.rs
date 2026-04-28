@@ -386,7 +386,7 @@ impl ModeManager {
                         Ok(Event::MqttMessage { topic, payload, .. }) => {
                             if let Some(mode_id) = parse_mode_cmd_topic(&topic) {
                                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                                    self.handle_mode_cmd(&mode_id, &v, &mut modes).await;
+                                    self.handle_mode_cmd(mode_id, &v, &mut modes).await;
                                 }
                             }
                         }
@@ -567,7 +567,7 @@ impl ModeManager {
         &self,
         mode_id: &str,
         cmd: &serde_json::Value,
-        modes: &mut Vec<ModeConfig>,
+        modes: &mut [ModeConfig],
     ) {
         let Some(mode_idx) = modes.iter().position(|m| m.id == mode_id) else {
             return;
@@ -593,11 +593,7 @@ impl ModeManager {
                     "toggle" => Some(!current_on),
                     _ => None,
                 }
-            } else if let Some(b) = cmd.get("on").and_then(|v| v.as_bool()) {
-                Some(b)
-            } else {
-                None
-            };
+            } else { cmd.get("on").and_then(|v| v.as_bool()) };
 
             if let Some(on) = new_on {
                 info!(mode_id, on, "ModeManager: manual mode command");

@@ -78,8 +78,8 @@ pub fn hash_token(full_token: &str) -> Result<String> {
     // ~19 MiB, 1 iteration, parallelism 1 — roughly 5 ms verify on
     // commodity hardware. Tokens are 256-bit random, so brute force isn't
     // the threat model.
-    let params = Params::new(19_456, 1, 1, None)
-        .map_err(|e| anyhow!("Argon2 params error: {e}"))?;
+    let params =
+        Params::new(19_456, 1, 1, None).map_err(|e| anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     argon2
         .hash_password(full_token.as_bytes(), &salt)
@@ -133,7 +133,10 @@ mod tests {
     fn lookup_prefix_extracted_from_body() {
         let k = generate().unwrap();
         let body = k.full_token.strip_prefix(API_KEY_PREFIX).unwrap();
-        assert_eq!(lookup_prefix_from_body(body), Some(k.lookup_prefix.as_str()));
+        assert_eq!(
+            lookup_prefix_from_body(body),
+            Some(k.lookup_prefix.as_str())
+        );
     }
 
     #[test]

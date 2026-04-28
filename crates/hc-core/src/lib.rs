@@ -491,7 +491,7 @@ impl Core {
         tokio::spawn(sched.run(shutdown_rx.clone()));
 
         // Combined purge callback: cleans engine DashMaps + scheduler periodic map.
-        let purge_fn: Arc<dyn Fn(&[Rule]) + Send + Sync> = Arc::new(move |rules: &[Rule]| {
+        let purge_fn: rule_loader::RulesReloadCallback = Arc::new(move |rules: &[Rule]| {
             engine_purge(rules);
             let live_ids: std::collections::HashSet<uuid::Uuid> =
                 rules.iter().map(|r| r.id).collect();

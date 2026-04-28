@@ -73,7 +73,7 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
 
-        if !days.iter().any(|d| *d == today) {
+        if !days.contains(&today) {
             continue;
         }
 

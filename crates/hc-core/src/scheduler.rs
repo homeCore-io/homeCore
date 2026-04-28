@@ -506,7 +506,7 @@ pub(crate) fn solar_event_time(
         (zenith_deg.to_radians().cos() - decl.sin() * lat_rad.sin()) / (decl.cos() * lat_rad.cos());
 
     // No event this day (e.g. polar summer/winter).
-    if cos_hour_angle < -1.0 || cos_hour_angle > 1.0 {
+    if !(-1.0..=1.0).contains(&cos_hour_angle) {
         return None;
     }
 

@@ -2350,7 +2350,10 @@ pub async fn get_automation_ron(
     match std::fs::read_to_string(&path) {
         Ok(text) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             text,
         )
             .into_response(),
@@ -3108,9 +3111,9 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     Ok(())
 }
 
-fn config_object<'a>(
-    widget: &'a hc_types::dashboard::DashboardWidget,
-) -> Result<&'a serde_json::Map<String, Value>, String> {
+fn config_object(
+    widget: &hc_types::dashboard::DashboardWidget,
+) -> Result<&serde_json::Map<String, Value>, String> {
     widget
         .config
         .as_object()
@@ -3360,10 +3363,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
         // let the renderer ignore unknown fields.
         hc_types::dashboard::DashboardWidgetType::HouseStatusHero => {
             if !widget.config.is_object() && !widget.config.is_null() {
-                return Err(format!(
-                    "widget '{}' config must be an object",
-                    widget.id
-                ));
+                return Err(format!("widget '{}' config must be an object", widget.id));
             }
             Ok(())
         }
@@ -4885,19 +4885,18 @@ pub async fn get_plugin_stream_sse(
                 .unwrap_or(std::net::IpAddr::V6(v6)),
             v4 => v4,
         };
-        let whitelisted = !s.whitelist.is_empty()
-            && s.whitelist.iter().any(|net| net.contains(&remote_ip));
+        let whitelisted =
+            !s.whitelist.is_empty() && s.whitelist.iter().any(|net| net.contains(&remote_ip));
         if whitelisted {
             crate::auth_middleware::whitelist_claims()
         } else {
-            let token = bearer
-                .as_deref()
-                .or(query.token.as_deref())
-                .unwrap_or("");
+            let token = bearer.as_deref().or(query.token.as_deref()).unwrap_or("");
             if token.is_empty() {
                 return (
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({ "error": "missing token (query ?token= or Authorization header)" })),
+                    Json(
+                        json!({ "error": "missing token (query ?token= or Authorization header)" }),
+                    ),
                 )
                     .into_response();
             }
@@ -4934,16 +4933,12 @@ pub async fn get_plugin_stream_sse(
         // than by MQTT retained) so late subscribers see the full history
         // up to the cache limit.
         let mut last_terminal = false;
-        let mut seen_ts: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_ts: std::collections::HashSet<String> = std::collections::HashSet::new();
         for val in &cache_snapshot {
             if let Some(ts) = val.get("ts").and_then(|v| v.as_str()) {
                 seen_ts.insert(ts.to_string());
             }
-            let stage = val
-                .get("stage")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
+            let stage = val.get("stage").and_then(|s| s.as_str()).unwrap_or("");
             let data = serde_json::to_string(val).unwrap_or_default();
             let sse_event = SseEvent::default().event("stream").data(data);
             if tx.send(Ok(sse_event)).await.is_err() {
@@ -5326,14 +5321,8 @@ pub async fn post_plugin_command(
     let timeout_ms = action_meta.as_ref().and_then(|a| a.timeout_ms);
 
     if is_streaming && matches!(concurrency, hc_types::Concurrency::Single) {
-        if let Some(active_rid) = s
-            .streaming_registry
-            .active_single(&id, &action)
-            .await
-        {
-            let stream_topic = format!(
-                "homecore/plugins/{id}/commands/{active_rid}/events",
-            );
+        if let Some(active_rid) = s.streaming_registry.active_single(&id, &action).await {
+            let stream_topic = format!("homecore/plugins/{id}/commands/{active_rid}/events",);
             return (
                 StatusCode::CONFLICT,
                 Json(json!({
@@ -5381,11 +5370,7 @@ pub async fn post_plugin_command(
             if is_streaming {
                 s.streaming_registry.release(&request_id).await;
             }
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": e })),
-            )
-                .into_response()
+            (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response()
         }
     }
 }

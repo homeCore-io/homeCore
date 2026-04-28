@@ -337,13 +337,13 @@ fn expand_rrule(
     let until: Option<DateTime<Utc>> = rrule
         .split(';')
         .find(|p| p.to_ascii_uppercase().starts_with("UNTIL="))
-        .and_then(|p| p.splitn(2, '=').nth(1))
+        .and_then(|p| p.split_once('=').map(|x| x.1))
         .and_then(parse_ical_dt);
 
     let count_limit: Option<u32> = rrule
         .split(';')
         .find(|p| p.to_ascii_uppercase().starts_with("COUNT="))
-        .and_then(|p| p.splitn(2, '=').nth(1))
+        .and_then(|p| p.split_once('=').map(|x| x.1))
         .and_then(|s| s.parse().ok());
 
     let effective_end = match until {
@@ -482,7 +482,7 @@ pub async fn fetch_and_save(
     } else {
         derived_name = url
             .split('/')
-            .last()
+            .next_back()
             .and_then(|s| s.split('?').next())
             .map(|s| s.trim_end_matches(".ics"))
             .unwrap_or("calendar")

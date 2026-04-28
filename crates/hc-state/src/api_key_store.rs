@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-const API_KEYS_BY_PREFIX: TableDefinition<&str, &str> =
-    TableDefinition::new("api_keys_by_prefix");
+const API_KEYS_BY_PREFIX: TableDefinition<&str, &str> = TableDefinition::new("api_keys_by_prefix");
 const API_KEYS_BY_ID: TableDefinition<&str, &str> = TableDefinition::new("api_keys_by_id");
 
 /// The persisted form of an API key. The plaintext token is NEVER stored —

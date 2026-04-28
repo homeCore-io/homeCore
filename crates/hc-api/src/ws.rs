@@ -17,8 +17,8 @@
 //!
 //! ## Filtering (optional)
 //! - `type`      — comma-separated event type names, e.g. `device_state_changed,rule_fired`.
-//!                 All events on the public bus are forwarded by default; `MqttMessage` events
-//!                 never reach the public bus and are not available here.
+//!   All events on the public bus are forwarded by default; `MqttMessage` events
+//!   never reach the public bus and are not available here.
 //! - `device_id` — only forward events for this device
 
 use crate::auth_middleware::whitelist_claims;
@@ -182,7 +182,7 @@ async fn handle_socket(
                         continue;
                     }
                 };
-                if socket.send(Message::Text(json.into())).await.is_err() {
+                if socket.send(Message::Text(json)).await.is_err() {
                     debug!(
                         ip = %remote_ip,
                         user = %claims.sub,

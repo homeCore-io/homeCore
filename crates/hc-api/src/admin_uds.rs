@@ -47,8 +47,8 @@ pub async fn serve(listener: UnixListener, app: Router) -> Result<()> {
                 let (parts, body) = req.into_parts();
                 let req = Request::from_parts(parts, Body::new(body));
                 let mut app = app_for_conn.clone();
-                let fut = app.call(req);
-                async move { fut.await }
+                
+                app.call(req)
             });
 
             let io = TokioIo::new(stream);
@@ -98,4 +98,3 @@ pub fn warn_if_mode_too_loose(path: &Path) {
         );
     }
 }
-

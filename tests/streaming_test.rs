@@ -27,7 +27,12 @@ fn free_port() -> u16 {
 ///   land on `observer_events`.
 /// - `pub_client` is used to inject `manage/cmd` messages that drive the
 ///   plugin.
-async fn boot_captest() -> Result<(u16, AsyncClient, mpsc::UnboundedReceiver<(String, Vec<u8>)>, AsyncClient)> {
+async fn boot_captest() -> Result<(
+    u16,
+    AsyncClient,
+    mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    AsyncClient,
+)> {
     let port = free_port();
 
     Broker::new(BrokerConfig {
@@ -57,11 +62,7 @@ async fn boot_captest() -> Result<(u16, AsyncClient, mpsc::UnboundedReceiver<(St
 
     // Observer client — subscribes to homecore/# and forwards every
     // publish into a channel so tests can await specific topics/events.
-    let mut obs_opts = MqttOptions::new(
-        format!("obs-{}", Uuid::new_v4()),
-        "127.0.0.1",
-        port,
-    );
+    let mut obs_opts = MqttOptions::new(format!("obs-{}", Uuid::new_v4()), "127.0.0.1", port);
     obs_opts.set_keep_alive(Duration::from_secs(10));
     let (obs_client, mut obs_ev) = AsyncClient::new(obs_opts, 256);
     let (tx, rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
@@ -79,11 +80,7 @@ async fn boot_captest() -> Result<(u16, AsyncClient, mpsc::UnboundedReceiver<(St
     obs_client.subscribe("homecore/#", QoS::AtLeastOnce).await?;
 
     // Publisher client — drives the plugin's management cmd topic.
-    let mut pub_opts = MqttOptions::new(
-        format!("pub-{}", Uuid::new_v4()),
-        "127.0.0.1",
-        port,
-    );
+    let mut pub_opts = MqttOptions::new(format!("pub-{}", Uuid::new_v4()), "127.0.0.1", port);
     pub_opts.set_keep_alive(Duration::from_secs(10));
     let (pub_client, mut pub_ev) = AsyncClient::new(pub_opts, 64);
     tokio::spawn(async move {
@@ -138,14 +135,15 @@ async fn collect_until_terminal(
     out
 }
 
-async fn publish_cmd(
-    pub_client: &AsyncClient,
-    plugin_id: &str,
-    payload: Value,
-) -> Result<()> {
+async fn publish_cmd(pub_client: &AsyncClient, plugin_id: &str, payload: Value) -> Result<()> {
     let topic = format!("homecore/plugins/{plugin_id}/manage/cmd");
     pub_client
-        .publish(&topic, QoS::AtLeastOnce, false, payload.to_string().as_bytes())
+        .publish(
+            &topic,
+            QoS::AtLeastOnce,
+            false,
+            payload.to_string().as_bytes(),
+        )
         .await?;
     Ok(())
 }
@@ -208,7 +206,10 @@ async fn happy_path_item_stream() -> Result<()> {
     )
     .await
     .expect("management reply never arrived");
-    assert_eq!(reply.get("status").and_then(Value::as_str), Some("accepted"));
+    assert_eq!(
+        reply.get("status").and_then(Value::as_str),
+        Some("accepted")
+    );
     assert_eq!(
         reply.get("stream_topic").and_then(Value::as_str),
         Some(stream_topic.as_str())
@@ -229,7 +230,12 @@ async fn happy_path_item_stream() -> Result<()> {
         .filter(|e| e.get("stage").and_then(Value::as_str) == Some("item"))
         .collect();
     // 3 adds + 3 updates.
-    assert_eq!(item_events.len(), 6, "expected 6 item events; got {}", item_events.len());
+    assert_eq!(
+        item_events.len(),
+        6,
+        "expected 6 item events; got {}",
+        item_events.len()
+    );
 
     let add_count = item_events
         .iter()
@@ -398,10 +404,7 @@ async fn awaiting_user_with_schema_roundtrip() -> Result<()> {
 
     let events = collect_until_terminal(&mut rx, &stream_topic, Duration::from_secs(3)).await;
     let last = events.last().unwrap();
-    assert_eq!(
-        last.get("stage").and_then(Value::as_str),
-        Some("complete")
-    );
+    assert_eq!(last.get("stage").and_then(Value::as_str), Some("complete"));
     assert_eq!(last["data"]["accepted"], json!(true));
 
     Ok(())
@@ -639,14 +642,21 @@ async fn concurrency_single_blocks_second_caller() -> Result<()> {
     // (see project_auth_expansion.md) will let a requires_role:"user"
     // test exercise a non-admin path.
     let resp1 = client
-        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .post(format!(
+            "{}/api/v1/plugins/{}/command",
+            h.base_url,
+            hc_captest::PLUGIN_ID
+        ))
         .bearer_auth(&h.admin_token)
         .json(&json!({ "action": "demo_cancelable" }))
         .send()
         .await?;
     assert_eq!(resp1.status(), 200);
     let body1: Value = resp1.json().await?;
-    assert_eq!(body1.get("status").and_then(Value::as_str), Some("accepted"));
+    assert_eq!(
+        body1.get("status").and_then(Value::as_str),
+        Some("accepted")
+    );
     let first_rid = body1["request_id"].as_str().unwrap().to_string();
 
     // Give the tracker a moment to stabilise.
@@ -654,7 +664,11 @@ async fn concurrency_single_blocks_second_caller() -> Result<()> {
 
     // Second call — should get 409 busy with the first's request_id.
     let resp2 = client
-        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .post(format!(
+            "{}/api/v1/plugins/{}/command",
+            h.base_url,
+            hc_captest::PLUGIN_ID
+        ))
         .bearer_auth(&h.admin_token)
         .json(&json!({ "action": "demo_cancelable" }))
         .send()
@@ -678,7 +692,11 @@ async fn core_injects_synthetic_timeout() -> Result<()> {
     // Kick off demo_never_completes (manifest timeout_ms:300). Admin
     // token — see concurrency_single_blocks_second_caller for rationale.
     let resp = client
-        .post(format!("{}/api/v1/plugins/{}/command", h.base_url, hc_captest::PLUGIN_ID))
+        .post(format!(
+            "{}/api/v1/plugins/{}/command",
+            h.base_url,
+            hc_captest::PLUGIN_ID
+        ))
         .bearer_auth(&h.admin_token)
         .json(&json!({ "action": "demo_never_completes" }))
         .send()
@@ -712,17 +730,14 @@ async fn core_injects_synthetic_timeout() -> Result<()> {
     use tokio_stream::StreamExt;
     let mut saw_timeout = false;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                if let Ok(s) = std::str::from_utf8(&chunk) {
-                    buf.push_str(s);
-                    if buf.contains("\"stage\":\"timeout\"") {
-                        saw_timeout = true;
-                        break;
-                    }
+        if let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            if let Ok(s) = std::str::from_utf8(&chunk) {
+                buf.push_str(s);
+                if buf.contains("\"stage\":\"timeout\"") {
+                    saw_timeout = true;
+                    break;
                 }
             }
-            _ => {}
         }
     }
     assert!(

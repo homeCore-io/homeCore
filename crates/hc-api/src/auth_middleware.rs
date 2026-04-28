@@ -240,9 +240,9 @@ async fn verify_api_key(
     Ok(Claims {
         sub: format!("api_key:{}", record.label),
         uid: record.owner_uid.to_string(),
-        exp: u64::MAX, // Expiry already enforced by record.is_usable.
+        exp: u64::MAX,     // Expiry already enforced by record.is_usable.
         role: Role::Admin, // Role is decorative when an Actor is present —
-                           // scope enforcement uses `scopes` directly.
+        // scope enforcement uses `scopes` directly.
         scopes: record.scopes.clone(),
         actor: Some(Actor::ApiKey {
             id: record.id,

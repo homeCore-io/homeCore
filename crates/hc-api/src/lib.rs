@@ -193,7 +193,8 @@ pub struct AppState {
     /// Live battery watcher config — `Some` when the watcher is enabled.
     /// Read by `GET /system/battery_settings`. Holding the sender here keeps
     /// open the option of a future `PATCH` updating thresholds at runtime.
-    pub battery_config: Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
+    pub battery_config:
+        Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
 }
 
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
@@ -283,8 +284,7 @@ pub fn spawn_plugin_registry_listener(
                         rec.version = Some(v);
                     }
                     if let Some(u) = uptime_secs {
-                        rec.uptime_started =
-                            Some(timestamp - chrono::Duration::seconds(u as i64));
+                        rec.uptime_started = Some(timestamp - chrono::Duration::seconds(u as i64));
                     }
                     if let Some(d) = device_count {
                         rec.device_count = d;
@@ -489,7 +489,7 @@ impl AppState {
             whitelist: Arc::new(whitelist),
             uds_allowed_uids: Arc::new(std::collections::HashSet::new()),
             refresh_token_expiry_days: 30,
-            modes_path: modes_path.map(|p| Arc::new(p)),
+            modes_path: modes_path.map(Arc::new),
             log_stream: None,
             metrics,
             backup_paths: None,
@@ -528,14 +528,12 @@ impl AppState {
                 loop {
                     match rx.recv().await {
                         Ok(hc_types::event::Event::PluginStatusChanged {
-                            plugin_id, status, ..
+                            plugin_id,
+                            status,
+                            ..
                         }) if status == "offline" => {
-                            streaming::inject_plugin_offline(
-                                &registry,
-                                &pub_handle,
-                                &plugin_id,
-                            )
-                            .await;
+                            streaming::inject_plugin_offline(&registry, &pub_handle, &plugin_id)
+                                .await;
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -551,10 +549,7 @@ impl AppState {
     /// Populate the UDS-peer UID allow-list. Empty means no UDS connections
     /// are accepted; this must be called with at least the service UID
     /// before the UDS admin listener starts.
-    pub fn with_uds_allowed_uids(
-        mut self,
-        uids: std::collections::HashSet<u32>,
-    ) -> Self {
+    pub fn with_uds_allowed_uids(mut self, uids: std::collections::HashSet<u32>) -> Self {
         self.uds_allowed_uids = Arc::new(uids);
         self
     }
@@ -853,10 +848,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugins/:id/config",
             get(handlers::get_plugin_config).put(handlers::put_plugin_config),
         )
-        .route(
-            "/plugins/:id/command",
-            post(handlers::post_plugin_command),
-        )
+        .route("/plugins/:id/command", post(handlers::post_plugin_command))
         .route(
             "/plugins/:id/capabilities",
             get(handlers::get_plugin_capabilities),
@@ -888,10 +880,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/calendars/:id/events", get(handlers::list_calendar_events))
         // System
         .route("/system/status", get(handlers::system_status))
-        .route(
-            "/system/battery_settings",
-            get(handlers::battery_settings),
-        )
+        .route("/system/battery_settings", get(handlers::battery_settings))
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/restore", post(backup::restore_handler))
         .route(
@@ -1053,11 +1042,8 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
     nix::unistd::chown(&cfg.path, None, Some(nix::unistd::Gid::from_raw(gid)))
         .with_context(|| format!("chown {} to gid {gid}", cfg.path.display()))?;
 
-    std::fs::set_permissions(
-        &cfg.path,
-        std::fs::Permissions::from_mode(cfg.mode),
-    )
-    .with_context(|| format!("chmod {} to {:o}", cfg.path.display(), cfg.mode))?;
+    std::fs::set_permissions(&cfg.path, std::fs::Permissions::from_mode(cfg.mode))
+        .with_context(|| format!("chmod {} to {:o}", cfg.path.display(), cfg.mode))?;
 
     admin_uds::warn_if_mode_too_loose(&cfg.path);
 
@@ -1069,4 +1055,3 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
     );
     Ok(listener)
 }
-

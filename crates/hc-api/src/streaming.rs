@@ -98,8 +98,7 @@ impl StreamCache {
 pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
     let mut rx = raw_bus.subscribe();
     tokio::spawn(async move {
-        let mut gc_interval =
-            tokio::time::interval(std::time::Duration::from_secs(ENTRY_TTL_SECS));
+        let mut gc_interval = tokio::time::interval(std::time::Duration::from_secs(ENTRY_TTL_SECS));
         // Skip the first immediate tick.
         gc_interval.tick().await;
         loop {

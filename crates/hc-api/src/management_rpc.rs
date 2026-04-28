@@ -174,7 +174,11 @@ impl ManagementRpc {
         action: &str,
         params: Value,
     ) -> Result<Value, String> {
-        let extra = if params.is_object() { Some(params) } else { None };
+        let extra = if params.is_object() {
+            Some(params)
+        } else {
+            None
+        };
         self.request(plugin_id, action, extra).await
     }
 
@@ -188,7 +192,12 @@ impl ManagementRpc {
         request_id: &str,
         params: Value,
     ) -> Result<Value, String> {
-        let extra = if params.is_object() { Some(params) } else { None };
-        self.request_with_id(plugin_id, action, request_id, extra).await
+        let extra = if params.is_object() {
+            Some(params)
+        } else {
+            None
+        };
+        self.request_with_id(plugin_id, action, request_id, extra)
+            .await
     }
 }

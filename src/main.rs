@@ -234,6 +234,7 @@ impl PluginEntry {
 
 /// `[rules]` section of homecore.toml.
 #[derive(Deserialize)]
+#[derive(Default)]
 struct RulesSection {
     /// Directory containing per-rule TOML files.
     /// Default: `{base_dir}/rules`
@@ -241,11 +242,6 @@ struct RulesSection {
     dir: String,
 }
 
-impl Default for RulesSection {
-    fn default() -> Self {
-        Self { dir: String::new() }
-    }
-}
 
 impl RulesSection {
     fn resolve(&mut self, base: &Path) {
@@ -334,6 +330,7 @@ impl StorageSection {
 }
 
 #[derive(Deserialize)]
+#[derive(Default)]
 struct ProfilesSection {
     /// Directory containing ecosystem profile TOML files (Shelly, Tasmota, etc.).
     /// Default: `{base_dir}/config/profiles`
@@ -341,11 +338,6 @@ struct ProfilesSection {
     dir: String,
 }
 
-impl Default for ProfilesSection {
-    fn default() -> Self {
-        Self { dir: String::new() }
-    }
-}
 
 impl ProfilesSection {
     fn resolve(&mut self, base: &Path) {
@@ -473,6 +465,7 @@ impl Default for ShutdownConfig {
 
 /// `[web_admin]` section of homecore.toml.
 #[derive(Deserialize)]
+#[derive(Default)]
 struct WebAdminSection {
     /// Enable the built-in admin UI served by HomeCore.
     ///
@@ -489,14 +482,6 @@ struct WebAdminSection {
     dist_path: Option<String>,
 }
 
-impl Default for WebAdminSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            dist_path: None,
-        }
-    }
-}
 
 /// `[calendars]` section of homecore.toml.
 #[derive(Deserialize)]
@@ -1013,8 +998,7 @@ async fn main() -> Result<()> {
         core = core.with_notify(svc);
     }
 
-    let (rules_handle, fire_history, calendar_handle, purge_fn) =
-        core.start(rules).await?;
+    let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
 
     // ── 14. MQTT event loop ────────────────────────────────────────────────
     tokio::spawn(async move {
@@ -1028,7 +1012,7 @@ async fn main() -> Result<()> {
     // Wait for the internal MQTT client to confirm its homecore/# subscription
     // before spawning plugins.  This ensures that registration messages
     // published by plugins on startup are not missed due to a race condition.
-    let _plugin_manager = {
+    {
         let _ = ready_rx.await;
 
         // Seed plugin records for ALL configured plugins (enabled and disabled)
@@ -1107,10 +1091,8 @@ async fn main() -> Result<()> {
     let jwt_secret_path = config.auth.jwt_secret_file.clone().unwrap_or_else(|| {
         jwt_secret::default_secret_path(std::path::Path::new(&config.storage.state_db_path))
     });
-    let jwt_secret_bytes = jwt_secret::load_or_create(
-        config.auth.jwt_secret.as_deref(),
-        &jwt_secret_path,
-    )?;
+    let jwt_secret_bytes =
+        jwt_secret::load_or_create(config.auth.jwt_secret.as_deref(), &jwt_secret_path)?;
     let jwt = JwtService::new_hs256(&jwt_secret_bytes, config.auth.token_expiry_hours);
 
     // ── 18. Bootstrap default admin account ───────────────────────────────
@@ -1270,7 +1252,12 @@ async fn main() -> Result<()> {
     // unparseable mode), log and skip — don't fail startup.
     let admin_uds_cfg = if config.auth.admin_uds.enabled {
         match u32::from_str_radix(
-            config.auth.admin_uds.mode.trim_start_matches("0o").trim_start_matches('0'),
+            config
+                .auth
+                .admin_uds
+                .mode
+                .trim_start_matches("0o")
+                .trim_start_matches('0'),
             8,
         ) {
             Ok(mode) => Some(hc_api::AdminUdsConfig {

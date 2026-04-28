@@ -289,7 +289,7 @@ impl AuditStore {
             args.len() + 1,
             args.len() + 2
         ));
-        let limit = q.limit.min(1000).max(1);
+        let limit = q.limit.clamp(1, 1000);
         args.push(Box::new(limit));
         args.push(Box::new(q.offset));
 
@@ -342,7 +342,9 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
 
     let ts = DateTime::parse_from_rfc3339(&ts_str)
         .map(|d| d.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?;
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?;
     let actor_type = AuditActorType::from_str(&actor_type_str).unwrap_or(AuditActorType::Anonymous);
     let actor_id = actor_id_str.and_then(|s| Uuid::parse_str(&s).ok());
     let result = AuditResult::from_str(&result_str).unwrap_or(AuditResult::Error);
@@ -402,10 +404,20 @@ mod tests {
         let (_d, s) = fresh();
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        s.record(&AuditEntry::success(AuditActorType::User, Some(a), "alice", "x"))
-            .unwrap();
-        s.record(&AuditEntry::success(AuditActorType::User, Some(b), "bob", "y"))
-            .unwrap();
+        s.record(&AuditEntry::success(
+            AuditActorType::User,
+            Some(a),
+            "alice",
+            "x",
+        ))
+        .unwrap();
+        s.record(&AuditEntry::success(
+            AuditActorType::User,
+            Some(b),
+            "bob",
+            "y",
+        ))
+        .unwrap();
         let rows = s
             .query(&AuditQuery {
                 actor_id: Some(a),
@@ -420,8 +432,13 @@ mod tests {
     #[test]
     fn filter_by_event_and_result() {
         let (_d, s) = fresh();
-        s.record(&AuditEntry::success(AuditActorType::User, None, "x", "auth.login"))
-            .unwrap();
+        s.record(&AuditEntry::success(
+            AuditActorType::User,
+            None,
+            "x",
+            "auth.login",
+        ))
+        .unwrap();
         s.record(
             &AuditEntry::success(AuditActorType::User, None, "x", "auth.failed")
                 .with_result(AuditResult::Denied),
@@ -465,12 +482,16 @@ mod tests {
     #[test]
     fn prune_before_removes_old_rows() {
         let (_d, s) = fresh();
-        let mut old =
-            AuditEntry::success(AuditActorType::User, None, "x", "ancient");
+        let mut old = AuditEntry::success(AuditActorType::User, None, "x", "ancient");
         old.ts = Utc::now() - chrono::Duration::days(10);
         s.record(&old).unwrap();
-        s.record(&AuditEntry::success(AuditActorType::User, None, "x", "recent"))
-            .unwrap();
+        s.record(&AuditEntry::success(
+            AuditActorType::User,
+            None,
+            "x",
+            "recent",
+        ))
+        .unwrap();
 
         let cutoff = Utc::now() - chrono::Duration::days(5);
         let n = s.prune_before(cutoff).unwrap();
@@ -483,8 +504,7 @@ mod tests {
         let (_d, s) = fresh();
         let t0 = Utc::now() - chrono::Duration::minutes(10);
         let t1 = Utc::now();
-        let mut e0 =
-            AuditEntry::success(AuditActorType::User, None, "x", "first");
+        let mut e0 = AuditEntry::success(AuditActorType::User, None, "x", "first");
         e0.ts = t0;
         let mut e1 = AuditEntry::success(AuditActorType::User, None, "x", "second");
         e1.ts = t1;
@@ -504,8 +524,13 @@ mod tests {
     fn limit_and_offset() {
         let (_d, s) = fresh();
         for i in 0..5 {
-            s.record(&AuditEntry::success(AuditActorType::User, None, "x", format!("ev{i}")))
-                .unwrap();
+            s.record(&AuditEntry::success(
+                AuditActorType::User,
+                None,
+                "x",
+                format!("ev{i}"),
+            ))
+            .unwrap();
         }
         let page1 = s
             .query(&AuditQuery {

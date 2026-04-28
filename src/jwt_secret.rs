@@ -39,10 +39,7 @@ pub fn default_secret_path(state_db_path: &Path) -> PathBuf {
 /// 2. Otherwise, read `file_path`. If the file exists, it must contain
 ///    exactly `SECRET_BYTES` bytes (raw, not hex/base64). If it does not
 ///    exist, generate a fresh 32-byte secret and write it with 0600 perms.
-pub fn load_or_create(
-    inline_secret: Option<&str>,
-    file_path: &Path,
-) -> Result<Vec<u8>> {
+pub fn load_or_create(inline_secret: Option<&str>, file_path: &Path) -> Result<Vec<u8>> {
     if let Some(s) = inline_secret {
         tracing::warn!(
             "[auth].jwt_secret is set inline in config. This is deprecated — \
@@ -53,8 +50,8 @@ pub fn load_or_create(
 
     match fs::metadata(file_path) {
         Ok(meta) if meta.is_file() => {
-            let bytes = fs::read(file_path)
-                .with_context(|| format!("reading {}", file_path.display()))?;
+            let bytes =
+                fs::read(file_path).with_context(|| format!("reading {}", file_path.display()))?;
             if bytes.len() != SECRET_BYTES {
                 return Err(anyhow!(
                     "jwt_secret_file {} has {} bytes, expected {}. Delete it \
@@ -75,12 +72,10 @@ pub fn load_or_create(
             "jwt_secret_file path {} exists but is not a regular file",
             file_path.display()
         )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            create(file_path)
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => create(file_path),
+        Err(e) => {
+            Err(e).with_context(|| format!("checking jwt_secret_file {}", file_path.display()))
         }
-        Err(e) => Err(e).with_context(|| {
-            format!("checking jwt_secret_file {}", file_path.display())
-        }),
     }
 }
 

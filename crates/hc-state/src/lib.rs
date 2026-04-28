@@ -63,8 +63,7 @@ impl StateStore {
             .parent()
             .map(|d| d.join("audit.db"))
             .unwrap_or_else(|| std::path::PathBuf::from("audit.db"));
-        Self::open_with_audit(state_db_path, history_db_path, audit_path.to_str().unwrap())
-            .await
+        Self::open_with_audit(state_db_path, history_db_path, audit_path.to_str().unwrap()).await
     }
 
     /// Open all stores with an explicit audit log path.
@@ -78,54 +77,53 @@ impl StateStore {
         let history_path = history_db_path.to_string();
         let audit_path = audit_db_path.to_string();
 
-        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit, battery) = tokio::task::spawn_blocking(move || {
-            // Ensure parent directories exist before opening databases.
-            if let Some(parent) = std::path::Path::new(&state_path).parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create state DB directory: {}", parent.display())
-                })?;
-            }
-            if let Some(parent) = std::path::Path::new(&history_path).parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create history DB directory: {}",
-                        parent.display()
-                    )
-                })?;
-            }
-            if let Some(parent) = std::path::Path::new(&audit_path).parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create audit DB directory: {}",
-                        parent.display()
-                    )
-                })?;
-            }
+        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit, battery) =
+            tokio::task::spawn_blocking(move || {
+                // Ensure parent directories exist before opening databases.
+                if let Some(parent) = std::path::Path::new(&state_path).parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create state DB directory: {}", parent.display())
+                    })?;
+                }
+                if let Some(parent) = std::path::Path::new(&history_path).parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "failed to create history DB directory: {}",
+                            parent.display()
+                        )
+                    })?;
+                }
+                if let Some(parent) = std::path::Path::new(&audit_path).parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create audit DB directory: {}", parent.display())
+                    })?;
+                }
 
-            // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
-            let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
-            let devices = DeviceStore::new(Arc::clone(&db))?;
-            let rules = RuleStore::new(Arc::clone(&db))?;
-            let history = HistoryStore::open(&history_path)?;
-            let schemas = SchemaStore::new(Arc::clone(&db))?;
-            let users = UserStore::new(Arc::clone(&db))?;
-            let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
-            let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
-            let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
-            let battery = BatteryStore::new(Arc::clone(&db))?;
-            Ok::<_, anyhow::Error>((
-                devices,
-                rules,
-                history,
-                schemas,
-                users,
-                api_keys,
-                refresh_tokens,
-                audit,
-                battery,
-            ))
-        })
-        .await??;
+                // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
+                let db =
+                    Arc::new(Database::create(&state_path).context("failed to open state DB")?);
+                let devices = DeviceStore::new(Arc::clone(&db))?;
+                let rules = RuleStore::new(Arc::clone(&db))?;
+                let history = HistoryStore::open(&history_path)?;
+                let schemas = SchemaStore::new(Arc::clone(&db))?;
+                let users = UserStore::new(Arc::clone(&db))?;
+                let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
+                let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
+                let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
+                let battery = BatteryStore::new(Arc::clone(&db))?;
+                Ok::<_, anyhow::Error>((
+                    devices,
+                    rules,
+                    history,
+                    schemas,
+                    users,
+                    api_keys,
+                    refresh_tokens,
+                    audit,
+                    battery,
+                ))
+            })
+            .await??;
 
         Ok(Self {
             devices: Arc::new(devices),
@@ -206,10 +204,7 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.prefix_exists(&p)).await?
     }
 
-    pub async fn get_refresh_by_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Option<RefreshTokenRecord>> {
+    pub async fn get_refresh_by_prefix(&self, prefix: &str) -> Result<Option<RefreshTokenRecord>> {
         let store = Arc::clone(&self.refresh_tokens);
         let p = prefix.to_string();
         tokio::task::spawn_blocking(move || store.get_by_prefix(&p)).await?
@@ -220,10 +215,7 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.get_by_id(id)).await?
     }
 
-    pub async fn list_refresh_by_user(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<RefreshTokenRecord>> {
+    pub async fn list_refresh_by_user(&self, user_id: Uuid) -> Result<Vec<RefreshTokenRecord>> {
         let store = Arc::clone(&self.refresh_tokens);
         tokio::task::spawn_blocking(move || store.list_by_user(user_id)).await?
     }

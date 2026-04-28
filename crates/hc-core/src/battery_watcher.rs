@@ -151,7 +151,7 @@ async fn run(
         }
 
         // Optional notify shortcut.
-        if let (Some(channel), Some(ref svc)) = (cfg.notify_channel.as_deref(), notify.as_ref()) {
+        if let (Some(channel), Some(svc)) = (cfg.notify_channel.as_deref(), notify.as_ref()) {
             let send = match edge {
                 BatteryEdge::WentLow => true,
                 BatteryEdge::Recovered => cfg.notify_on_recovered,

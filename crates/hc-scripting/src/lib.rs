@@ -561,8 +561,8 @@ mod tests {
     #[test]
     fn side_effects_collected() {
         let buf: EffectsBuf = Arc::new(Mutex::new(Vec::new()));
-        let rt =
-            ScriptRuntime::new_with_devices(Arc::new(HashMap::new())).with_side_effects(Arc::clone(&buf));
+        let rt = ScriptRuntime::new_with_devices(Arc::new(HashMap::new()))
+            .with_side_effects(Arc::clone(&buf));
         let _ = rt
             .run_action(
                 r#"

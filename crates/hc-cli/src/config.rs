@@ -50,10 +50,9 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str::<Config>(&text)
-            .with_context(|| format!("parsing {}", path.display()))
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<Config>(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
     /// Atomically write the config to `path`, creating parent dirs with 0700

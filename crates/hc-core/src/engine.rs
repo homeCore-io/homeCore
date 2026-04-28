@@ -52,7 +52,7 @@ async fn device_log_name(state: &StateStore, device_id: &str) -> String {
     match state.get_device(device_id).await {
         Ok(Some(device)) => device
             .canonical_name
-            .or_else(|| {
+            .or({
                 if device.name.is_empty() {
                     None
                 } else {
@@ -152,7 +152,7 @@ pub struct RuleEngine {
     priv_bools: Arc<DashMap<(Uuid, String), bool>>,
     /// Per-rule device state capture store for `CaptureDeviceState` /
     /// `RestoreDeviceState`.  Key: `(rule_id, capture_key)`.
-    capture_store: Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
+    capture_store: crate::executor::CaptureStore,
     /// Cross-rule hub variable store.  Key: variable name.
     hub_vars: Arc<DashMap<String, JsonValue>>,
     /// Per-rule in-flight action task counter, used by run_mode: single/queued.
@@ -439,8 +439,7 @@ impl RuleEngine {
                 for (k, new_v) in current {
                     let changed = prev_attrs
                         .as_ref()
-                        .and_then(|p| p.get(k.as_str()))
-                        .map_or(true, |old_v| old_v != new_v);
+                        .and_then(|p| p.get(k.as_str())) != Some(new_v);
                     if changed {
                         ts_entry.insert(k.clone(), now);
                     }
@@ -1574,7 +1573,7 @@ impl RuleEngine {
                     ConditionTrace {
                         condition_type: "calendar_active".into(),
                         passed: result,
-                        actual: matched_summary.map(|s| JsonValue::String(s)),
+                        actual: matched_summary.map(JsonValue::String),
                         expected: Some(serde_json::json!({
                             "calendar_id": calendar_id,
                             "title_contains": title_contains,
@@ -2131,10 +2130,10 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
                 ThresholdOp::Above => curr_f > threshold,
                 ThresholdOp::Below => curr_f < threshold,
                 ThresholdOp::CrossesAbove => {
-                    prev_f.map_or(false, |p| p <= threshold) && curr_f > threshold
+                    prev_f.is_some_and(|p| p <= threshold) && curr_f > threshold
                 }
                 ThresholdOp::CrossesBelow => {
-                    prev_f.map_or(false, |p| p >= threshold) && curr_f < threshold
+                    prev_f.is_some_and(|p| p >= threshold) && curr_f < threshold
                 }
             };
             if fires {
@@ -2315,9 +2314,7 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             Some(want) if want != ev_device => NoMatch("device_id mismatch"),
             _ => Matched,
         },
-        (_, Event::DeviceBatteryLow { .. }) => {
-            NoMatch("wrong trigger type for DeviceBatteryLow")
-        }
+        (_, Event::DeviceBatteryLow { .. }) => NoMatch("wrong trigger type for DeviceBatteryLow"),
 
         // ── DeviceBatteryRecovered ─────────────────────────────────────────
         (

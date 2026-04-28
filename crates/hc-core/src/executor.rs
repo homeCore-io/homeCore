@@ -86,7 +86,7 @@ async fn device_log_name(state: Option<&StateStore>, device_id: &str) -> String 
     match store.get_device(device_id).await {
         Ok(Some(device)) => device
             .canonical_name
-            .or_else(|| {
+            .or({
                 if device.name.is_empty() {
                     None
                 } else {
@@ -153,6 +153,11 @@ const MAX_CALL_DEPTH: u32 = 10;
 // ---------------------------------------------------------------------------
 
 /// Shared state threaded through every action handler in a single rule firing.
+/// Per-rule device state capture store. Key `(rule_id, capture_key)` →
+/// snapshot of device attributes. Aliased to keep struct fields under
+/// clippy's `type_complexity` threshold.
+pub type CaptureStore = Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>;
+
 ///
 /// Create one per rule firing, wrap in `Arc`, then pass to `execute_actions`.
 /// All fields are either immutable or wrapped in concurrent containers so
@@ -187,7 +192,7 @@ pub struct ExecutorContext {
     /// Per-rule device state capture store.  Key: `(rule_id, capture_key)`.
     /// Shared across all firings of the same rule so that Capture in one
     /// firing can be Restored in a later firing.
-    pub capture_store: Arc<DashMap<(Uuid, String), HashMap<String, HashMap<String, JsonValue>>>>,
+    pub capture_store: CaptureStore,
     /// Cross-rule hub variable store.
     pub hub_vars: Arc<DashMap<String, JsonValue>>,
     /// State store — used by `ActivateScenePerMode` to look up scene contents.
@@ -1110,31 +1115,26 @@ fn run_single_action(
                 );
                 let mut rx = bus.subscribe();
                 let wait_fut = async {
-                    loop {
-                        match rx.recv().await {
-                            Ok(event) => {
-                                let matched = match &event {
-                                    Event::Custom { event_type, .. } => {
-                                        et.as_deref().map_or(false, |e| e == event_type.as_str())
-                                    }
-                                    Event::DeviceStateChanged {
-                                        device_id: eid,
-                                        current,
-                                        ..
-                                    } => {
-                                        device_id.as_deref().map_or(false, |d| d == eid.as_str())
-                                            && attribute
-                                                .as_ref()
-                                                .map_or(true, |a| current.contains_key(a.as_str()))
-                                    }
-                                    _ => false,
-                                };
-                                if matched {
-                                    debug!(rule = %ctx.rule_name, "action: WaitForEvent — matched, resuming");
-                                    break;
-                                }
+                    while let Ok(event) = rx.recv().await {
+                        let matched = match &event {
+                            Event::Custom { event_type, .. } => {
+                                et.as_deref() == Some(event_type.as_str())
                             }
-                            Err(_) => break,
+                            Event::DeviceStateChanged {
+                                device_id: eid,
+                                current,
+                                ..
+                            } => {
+                                (device_id.as_deref() == Some(eid.as_str()))
+                                    && attribute
+                                        .as_ref()
+                                        .is_none_or(|a| current.contains_key(a.as_str()))
+                            }
+                            _ => false,
+                        };
+                        if matched {
+                            debug!(rule = %ctx.rule_name, "action: WaitForEvent — matched, resuming");
+                            break;
                         }
                     }
                 };
@@ -1158,7 +1158,7 @@ fn run_single_action(
                 let n = count.unwrap_or(1);
                 let wait_ms = ping_timeout_ms.unwrap_or(3000);
                 // Convert ms → whole seconds, minimum 1 s, for the -W flag.
-                let timeout_secs = ((wait_ms + 999) / 1000).max(1);
+                let timeout_secs = wait_ms.div_ceil(1000).max(1);
 
                 debug!(rule = %ctx.rule_name, host, n, timeout_secs, "action: PingHost — running");
 
@@ -1485,8 +1485,8 @@ fn run_single_action(
             } => {
                 let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                 let n_steps = steps
-                    .map(|s| (s as u64).max(2).min(100))
-                    .unwrap_or_else(|| duration_secs.max(2).min(100));
+                    .map(|s| (s as u64).clamp(2, 100))
+                    .unwrap_or_else(|| duration_secs.clamp(2, 100));
                 let interval_ms = (duration_secs * 1000).saturating_div(n_steps);
 
                 // Read current numeric values from the live device cache.

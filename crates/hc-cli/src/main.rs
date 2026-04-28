@@ -53,7 +53,10 @@ enum Command {
         service_label: String,
         /// Comma-separated scopes for the service key. Must be a subset of
         /// the service user's role scopes (controlled by `--service-role`).
-        #[arg(long, default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read")]
+        #[arg(
+            long,
+            default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read"
+        )]
         service_scopes: String,
         /// Role for the service user: `read_only` or `user`. Defaults to the
         /// safer `read_only` — bump to `user` for service accounts that
@@ -469,7 +472,10 @@ async fn cmd_setup(
         let created: serde_json::Value = client.post("/auth/users", &req).await?;
         println!(
             "Created admin user: {}",
-            created.get("username").and_then(|v| v.as_str()).unwrap_or(admin_username)
+            created
+                .get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or(admin_username)
         );
     } else {
         println!("Admin user already present — skipping admin creation.");
@@ -499,8 +505,7 @@ async fn cmd_setup(
             };
             let created: serde_json::Value = client.post("/auth/users", &req).await?;
             let uid_s = created.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            uuid::Uuid::parse_str(uid_s)
-                .with_context(|| format!("parsing {service_label} uid"))?
+            uuid::Uuid::parse_str(uid_s).with_context(|| format!("parsing {service_label} uid"))?
         } else {
             let e = existing
                 .iter()
@@ -564,14 +569,11 @@ fn cmd_broker_gen_mosquitto(
     listener_port: u16,
     force: bool,
 ) -> Result<()> {
-    let text = std::fs::read_to_string(config)
-        .with_context(|| format!("reading {}", config.display()))?;
-    let parsed: HomecoreTomlRoot = toml::from_str(&text)
-        .with_context(|| format!("parsing {}", config.display()))?;
-    let clients = parsed
-        .broker
-        .map(|b| b.clients)
-        .unwrap_or_default();
+    let text =
+        std::fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
+    let parsed: HomecoreTomlRoot =
+        toml::from_str(&text).with_context(|| format!("parsing {}", config.display()))?;
+    let clients = parsed.broker.map(|b| b.clients).unwrap_or_default();
     if clients.is_empty() {
         bail!(
             "no [[broker.clients]] entries found in {} — nothing to generate",
@@ -579,8 +581,7 @@ fn cmd_broker_gen_mosquitto(
         );
     }
 
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("creating {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
     let paths = [
         out_dir.join("mosquitto.conf"),
@@ -590,10 +591,7 @@ fn cmd_broker_gen_mosquitto(
     if !force {
         for p in &paths {
             if p.exists() {
-                bail!(
-                    "{} already exists (pass --force to overwrite)",
-                    p.display()
-                );
+                bail!("{} already exists (pass --force to overwrite)", p.display());
             }
         }
     }
@@ -695,8 +693,7 @@ fn cmd_broker_gen_mosquitto(
 }
 
 fn write_file(path: &std::path::Path, contents: &str) -> Result<()> {
-    std::fs::write(path, contents)
-        .with_context(|| format!("writing {}", path.display()))
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
 
 fn parse_role(s: &str) -> Result<Role> {
@@ -779,8 +776,8 @@ async fn cmd_user_list(cli: &Cli, cfg: &Config) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<38}  {:<20}  {:<10}  {}",
-        "ID", "Username", "Role", "Created"
+        "{:<38}  {:<20}  {:<10}  Created",
+        "ID", "Username", "Role"
     );
     for u in &users {
         let id = u.get("id").and_then(|s| s.as_str()).unwrap_or("");
@@ -967,24 +964,20 @@ async fn cmd_audit_query(
         return Ok(());
     }
     println!(
-        "{:<20}  {:<10}  {:<24}  {:<22}  {:<8}  {}",
-        "Timestamp", "Result", "Event", "Actor", "Kind", "Target"
+        "{:<20}  {:<10}  {:<24}  {:<22}  {:<8}  Target",
+        "Timestamp", "Result", "Event", "Actor", "Kind"
     );
     for r in &rows {
         let ts = r
             .get("ts")
             .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .splitn(2, '.')
+            .unwrap_or("").split('.')
             .next()
             .unwrap_or("")
             .replace('T', " ");
         let result = r.get("result").and_then(|s| s.as_str()).unwrap_or("");
         let ev = r.get("event_type").and_then(|s| s.as_str()).unwrap_or("");
-        let actor = r
-            .get("actor_label")
-            .and_then(|s| s.as_str())
-            .unwrap_or("?");
+        let actor = r.get("actor_label").and_then(|s| s.as_str()).unwrap_or("?");
         let kind = r.get("target_kind").and_then(|s| s.as_str()).unwrap_or("");
         let target = r.get("target_id").and_then(|s| s.as_str()).unwrap_or("");
         println!(
@@ -1113,8 +1106,7 @@ async fn cmd_api_key_list(
     include_revoked: bool,
 ) -> Result<()> {
     let client = make_client(cli, cfg).await?;
-    let mut resp: Vec<hc_api_types::api_keys::ApiKeySummary> =
-        client.get("/auth/api-keys").await?;
+    let mut resp: Vec<hc_api_types::api_keys::ApiKeySummary> = client.get("/auth/api-keys").await?;
     if let Some(o) = owner {
         resp.retain(|k| k.owner_uid == o);
     }
@@ -1130,8 +1122,8 @@ async fn cmd_api_key_list(
         return Ok(());
     }
     println!(
-        "{:<38}  {:<20}  {:<8}  {:<16}  {}",
-        "ID", "Label", "Status", "Last used", "Scopes"
+        "{:<38}  {:<20}  {:<8}  {:<16}  Scopes",
+        "ID", "Label", "Status", "Last used"
     );
     for k in &resp {
         let status = key_status(k);
@@ -1167,8 +1159,7 @@ fn key_status(k: &hc_api_types::api_keys::ApiKeySummary) -> &'static str {
 
 async fn cmd_api_key_show(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()> {
     let client = make_client(cli, cfg).await?;
-    let all: Vec<hc_api_types::api_keys::ApiKeySummary> =
-        client.get("/auth/api-keys").await?;
+    let all: Vec<hc_api_types::api_keys::ApiKeySummary> = client.get("/auth/api-keys").await?;
     let k = all
         .into_iter()
         .find(|k| k.id == id)
@@ -1202,10 +1193,7 @@ async fn cmd_api_key_show(cli: &Cli, cfg: &Config, id: uuid::Uuid) -> Result<()>
             println!("cidrs:       {}", k.allowed_cidrs.join(", "));
         }
         if let Some(r) = k.revoked_at {
-            println!(
-                "revoked_at:  {}",
-                r.format("%Y-%m-%d %H:%M:%S UTC")
-            );
+            println!("revoked_at:  {}", r.format("%Y-%m-%d %H:%M:%S UTC"));
         }
     }
     Ok(())
