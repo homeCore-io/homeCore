@@ -730,7 +730,9 @@ async fn core_injects_synthetic_timeout() -> Result<()> {
     use tokio_stream::StreamExt;
     let mut saw_timeout = false;
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+        if let Ok(Some(Ok(chunk))) =
+            tokio::time::timeout(Duration::from_millis(500), stream.next()).await
+        {
             if let Ok(s) = std::str::from_utf8(&chunk) {
                 buf.push_str(s);
                 if buf.contains("\"stage\":\"timeout\"") {

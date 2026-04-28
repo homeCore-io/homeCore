@@ -86,7 +86,7 @@ pub fn load_all(dir: &Path) -> Result<Vec<Rule>> {
     }
 
     // Sort by priority descending so the engine evaluates high-priority rules first.
-    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
     Ok(rules)
 }
@@ -569,5 +569,5 @@ fn apply_rule_diff(rules: &mut Vec<Rule>, new_rules: &[Rule], removed_ids: &Hash
     rules.retain(|r| !removed_ids.contains(&r.id) && !replacing.contains(&r.id));
     rules.extend(new_rules.iter().cloned());
     // Keep priority-desc ordering consistent with `load_all`.
-    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 }

@@ -437,9 +437,8 @@ impl RuleEngine {
                 let prev_attrs = self.device_cache.get(device_id.as_str());
                 let mut ts_entry = self.attr_changed_at.entry(device_id.clone()).or_default();
                 for (k, new_v) in current {
-                    let changed = prev_attrs
-                        .as_ref()
-                        .and_then(|p| p.get(k.as_str())) != Some(new_v);
+                    let changed =
+                        prev_attrs.as_ref().and_then(|p| p.get(k.as_str())) != Some(new_v);
                     if changed {
                         ts_entry.insert(k.clone(), now);
                     }

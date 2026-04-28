@@ -593,7 +593,9 @@ impl ModeManager {
                     "toggle" => Some(!current_on),
                     _ => None,
                 }
-            } else { cmd.get("on").and_then(|v| v.as_bool()) };
+            } else {
+                cmd.get("on").and_then(|v| v.as_bool())
+            };
 
             if let Some(on) = new_on {
                 info!(mode_id, on, "ModeManager: manual mode command");

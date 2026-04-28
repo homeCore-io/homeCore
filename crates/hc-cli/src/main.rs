@@ -775,10 +775,7 @@ async fn cmd_user_list(cli: &Cli, cfg: &Config) -> Result<()> {
         println!("(no users)");
         return Ok(());
     }
-    println!(
-        "{:<38}  {:<20}  {:<10}  Created",
-        "ID", "Username", "Role"
-    );
+    println!("{:<38}  {:<20}  {:<10}  Created", "ID", "Username", "Role");
     for u in &users {
         let id = u.get("id").and_then(|s| s.as_str()).unwrap_or("");
         let username = u.get("username").and_then(|s| s.as_str()).unwrap_or("");
@@ -971,7 +968,8 @@ async fn cmd_audit_query(
         let ts = r
             .get("ts")
             .and_then(|s| s.as_str())
-            .unwrap_or("").split('.')
+            .unwrap_or("")
+            .split('.')
             .next()
             .unwrap_or("")
             .replace('T', " ");

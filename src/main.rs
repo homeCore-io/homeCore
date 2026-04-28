@@ -233,15 +233,13 @@ impl PluginEntry {
 }
 
 /// `[rules]` section of homecore.toml.
-#[derive(Deserialize)]
-#[derive(Default)]
+#[derive(Deserialize, Default)]
 struct RulesSection {
     /// Directory containing per-rule TOML files.
     /// Default: `{base_dir}/rules`
     #[serde(default)]
     dir: String,
 }
-
 
 impl RulesSection {
     fn resolve(&mut self, base: &Path) {
@@ -329,15 +327,13 @@ impl StorageSection {
     }
 }
 
-#[derive(Deserialize)]
-#[derive(Default)]
+#[derive(Deserialize, Default)]
 struct ProfilesSection {
     /// Directory containing ecosystem profile TOML files (Shelly, Tasmota, etc.).
     /// Default: `{base_dir}/config/profiles`
     #[serde(default)]
     dir: String,
 }
-
 
 impl ProfilesSection {
     fn resolve(&mut self, base: &Path) {
@@ -464,8 +460,7 @@ impl Default for ShutdownConfig {
 }
 
 /// `[web_admin]` section of homecore.toml.
-#[derive(Deserialize)]
-#[derive(Default)]
+#[derive(Deserialize, Default)]
 struct WebAdminSection {
     /// Enable the built-in admin UI served by HomeCore.
     ///
@@ -481,7 +476,6 @@ struct WebAdminSection {
     #[serde(default)]
     dist_path: Option<String>,
 }
-
 
 /// `[calendars]` section of homecore.toml.
 #[derive(Deserialize)]

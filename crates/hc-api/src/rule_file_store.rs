@@ -426,10 +426,10 @@ fn replace_in_trigger(
         }
         Trigger::DeviceAvailabilityChanged { device_id: id, .. }
         | Trigger::ButtonEvent { device_id: id, .. }
-        | Trigger::NumericThreshold { device_id: id, .. } => {
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
-                *id = placeholder.to_string();
-            }
+        | Trigger::NumericThreshold { device_id: id, .. }
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
+        {
+            *id = placeholder.to_string();
         }
         _ => {}
     }
@@ -443,10 +443,10 @@ fn replace_in_condition(
 ) {
     match cond {
         Condition::DeviceState { device_id: id, .. }
-        | Condition::TimeElapsed { device_id: id, .. } => {
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
-                *id = placeholder.to_string();
-            }
+        | Condition::TimeElapsed { device_id: id, .. }
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
+        {
+            *id = placeholder.to_string();
         }
         Condition::Not { condition } => {
             replace_in_condition(condition, device_id, placeholder, devices)
@@ -471,18 +471,16 @@ fn replace_in_action(
     match action {
         Action::SetDeviceState { device_id: id, .. }
         | Action::SetDeviceStatePerMode { device_id: id, .. }
-        | Action::FadeDevice { device_id: id, .. } => {
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
-                *id = placeholder.to_string();
-            }
+        | Action::FadeDevice { device_id: id, .. }
+            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
+        {
+            *id = placeholder.to_string();
         }
         Action::WaitForEvent {
             device_id: Some(id),
             ..
-        } => {
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
-                *id = placeholder.to_string();
-            }
+        } if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) => {
+            *id = placeholder.to_string();
         }
         Action::CaptureDeviceState { device_ids, .. } => {
             for ref_id in device_ids {
