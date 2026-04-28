@@ -1,0 +1,13 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
+    with:
+      rust_version: "1.88"
