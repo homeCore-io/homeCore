@@ -2964,6 +2964,25 @@ fn find_dashboard_template(template_id: &str, owner_user_id: &str) -> Option<Das
         .find(|template| template.id == template_id)
 }
 
+/// Auto-populates `layouts` from `widgets` when the caller submitted an
+/// empty layouts array. Stacks each widget full-width (12 cols, h=3) per
+/// breakpoint so a freshly-created dashboard renders sensibly without the
+/// client needing to know the per-breakpoint placement schema.
+///
+/// No-op when layouts are already set or when there are no widgets.
+fn ensure_default_layouts(dashboard: &mut DashboardDefinition) {
+    if !dashboard.layouts.is_empty() || dashboard.widgets.is_empty() {
+        return;
+    }
+    let placements: Vec<(&str, i32, i32, i32, i32)> = dashboard
+        .widgets
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.id.as_str(), 0, (i as i32) * 3, 12, 3))
+        .collect();
+    dashboard.layouts = default_dashboard_layout(&placements);
+}
+
 fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     if dashboard.id.trim().is_empty() {
         return Err("dashboard id cannot be empty".into());
@@ -3444,6 +3463,8 @@ pub async fn create_dashboard(
     dashboard.created_at = now;
     dashboard.updated_at = now;
 
+    ensure_default_layouts(&mut dashboard);
+
     if let Err(error) = validate_dashboard(&dashboard) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
     }
@@ -3582,6 +3603,8 @@ pub async fn update_dashboard(
         dashboard.owner_user_id = existing.owner_user_id.clone();
         dashboard.created_at = existing.created_at;
         dashboard.updated_at = chrono::Utc::now();
+
+        ensure_default_layouts(&mut dashboard);
 
         if let Err(error) = validate_dashboard(&dashboard) {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
