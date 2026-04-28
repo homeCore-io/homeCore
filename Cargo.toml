@@ -101,3 +101,22 @@ plugin-sdk-rs = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", branc
 # assertions that hc-cli's bail-on-non-2xx wrapper would swallow.
 reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-stream  = "0.1"
+
+# ---------------------------------------------------------------------------
+# Cross-repo dep unification
+#
+# hc-captest (git dep, dev-only) transitively depends on hc-types/hc-logging
+# from homeCore-io/homeCore. Without this patch, cargo would resolve those
+# as a separate copy of the crates from the git source and the in-workspace
+# copy from `crates/`, producing E0308 'expected hc_types::Capabilities,
+# found Capabilities' in streaming_test.rs.
+#
+# Path is relative to this Cargo.toml — the workspace crates always exist
+# in any homeCore-io/homeCore checkout, so the patch works in standalone CI
+# as well as in the meta-layout.
+# ---------------------------------------------------------------------------
+[patch."https://github.com/homeCore-io/homeCore"]
+hc-types     = { path = "crates/hc-types" }
+hc-logging   = { path = "crates/hc-logging" }
+hc-api-types = { path = "crates/hc-api-types" }
+hc-auth      = { path = "crates/hc-auth" }
