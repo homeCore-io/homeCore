@@ -5,10 +5,11 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Required for the reusable workflow's release job to create a GitHub
-# Release on tag push. Repo default is read-only.
+# contents: write — reusable workflow's release job creates a GH Release.
+# packages: write — reusable workflow's docker-publish job pushes to ghcr.io.
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -20,3 +21,10 @@ jobs:
         config/profiles
         scripts/service-templates/homecore.service
       rust_version: "stable"
+      # Docker image: hc-core (binary is "homecore", image name diverges).
+      publish_docker_image: true
+      image_name: hc-core
+      dockerfile_name: Dockerfile.core
+      bundle_webui: true
+      webui_ref: develop  # while hc-web-leptos still on develop
+      docker_repo_ref: develop  # while homeCore-io/docker still on develop
