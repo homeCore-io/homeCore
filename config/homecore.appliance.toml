@@ -1,0 +1,68 @@
+# homeCore — appliance flavor
+#
+# Seeded by the appliance entrypoint on first boot into
+# /var/lib/homecore/config/homecore.toml. After first boot, edit through
+# the admin UI; this file is not re-applied.
+#
+# Defaults:
+#   - REST + WS API on 0.0.0.0:8080  (bound for --network host)
+#   - Embedded MQTT broker on 127.0.0.1:1883  (internal only; plugins use it)
+#   - Web admin UI served from the baked /opt/homecore/ui directory
+#   - JWT secret auto-generated and persisted under data/
+#   - Logs to stderr (visible via `docker logs`) and rolling files in logs/
+#
+# [[plugins]] entries are appended by the entrypoint based on $HC_PLUGINS.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[broker]
+# Bind to localhost only — broker is for in-container core <-> plugin comms.
+# To accept MQTT publishes from external devices (Tasmota, Shelly, ESPHome,
+# etc.), change this to "0.0.0.0" and add [[broker.clients]] credentials.
+host = "127.0.0.1"
+port = 1883
+
+[location]
+# Edit via the admin UI under Settings. Values below are placeholders;
+# sunrise/sunset rules will be wrong until set.
+latitude  = 38.9072
+longitude = -77.0369
+timezone  = "America/New_York"
+
+[battery]
+threshold_pct    = 20.0
+recover_band_pct = 5.0
+
+[auth]
+# JWT secret auto-managed in <base_dir>/data/jwt_secret on first boot.
+token_expiry_hours = 24
+
+[storage]
+# Defaults: data/state.redb, data/history.db (relative to --home)
+
+[rules]
+# dir = "rules" (default, relative to --home)
+
+[profiles]
+# dir = "config/profiles" (default, relative to --home)
+
+[web_admin]
+enabled   = true
+dist_path = "/opt/homecore/ui"
+
+[logging]
+level = "info"
+
+[logging.stderr]
+enabled = true
+format  = "pretty"
+ansi    = true
+
+[logging.file]
+enabled          = true
+prefix           = "homecore"
+rotation         = "daily"
+prune_after_days = 5
+format           = "json"
