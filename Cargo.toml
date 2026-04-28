@@ -95,8 +95,8 @@ nix           = { version = "0.29", features = ["user"] }
 # Phase 2a streaming conformance. hc-captest is a sibling plugin crate
 # (own workspace); we consume its library form from streaming_test.rs
 # to drive the SDK end-to-end without a subprocess.
-hc-captest    = { path = "../plugins/hc-captest" }
-plugin-sdk-rs = { path = "../sdks/hc-plugin-sdk-rs" }
+hc-captest    = { git = "https://github.com/homeCore-io/hc-captest", branch = "main" }
+plugin-sdk-rs = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", branch = "main" }
 # HTTP client for streaming tests — needed for raw status code / body
 # assertions that hc-cli's bail-on-non-2xx wrapper would swallow.
 reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
