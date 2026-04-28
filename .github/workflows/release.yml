@@ -19,4 +19,4 @@ jobs:
       extra_files: |
         config/profiles
         scripts/service-templates/homecore.service
-      rust_version: "1.88"
+      rust_version: "stable"

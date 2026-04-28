@@ -10,4 +10,4 @@ jobs:
   ci:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
     with:
-      rust_version: "1.88"
+      rust_version: "stable"
