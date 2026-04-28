@@ -5,6 +5,11 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Required for the reusable workflow's release job to create a GitHub
+# Release on tag push. Repo default is read-only.
+permissions:
+  contents: write
+
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
