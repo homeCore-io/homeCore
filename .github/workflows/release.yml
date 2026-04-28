@@ -18,6 +18,5 @@ jobs:
       config_example: config/homecore.toml.example
       extra_files: |
         config/profiles
-        rules/examples
         scripts/service-templates/homecore.service
       rust_version: "1.88"
