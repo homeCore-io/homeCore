@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::audit;
 use crate::auth_middleware::{
     AreasRead, AreasWrite, AuthUser, AutomationsRead, AutomationsWrite, DashboardsRead,
     DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
@@ -5084,13 +5085,17 @@ pub async fn restart_plugin(
 
 pub async fn patch_plugin(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     // Snapshot the previous enabled state + apply updates.
     // We hold the write lock only briefly so we can release it before
     // doing potentially-blocking I/O (config write) and channel sends.
+    let prev_log_level = {
+        let map = s.plugins.read().await;
+        map.get(&id).and_then(|r| r.log_level.clone())
+    };
     let (prev_enabled, new_rec) = {
         let mut map = s.plugins.write().await;
         let Some(rec) = map.get_mut(&id) else {
@@ -5172,6 +5177,31 @@ pub async fn patch_plugin(
                      no start/stop side effect"
                 );
             }
+        }
+    }
+
+    // Audit: emit on enabled transition or log_level change.
+    if let Some(new_enabled) = body["enabled"].as_bool() {
+        if new_enabled != prev_enabled {
+            let event = if new_enabled {
+                "plugin.enabled"
+            } else {
+                "plugin.disabled"
+            };
+            let audit_e = audit::entry_from_claims(&claims, event)
+                .with_target("plugin", id.clone());
+            audit::emit(&s, audit_e).await;
+        }
+    }
+    if let Some(level) = body["log_level"].as_str() {
+        if prev_log_level.as_deref() != Some(level) {
+            let mut audit_e = audit::entry_from_claims(&claims, "plugin.log_level_changed")
+                .with_target("plugin", id.clone());
+            audit_e.detail = json!({
+                "previous": prev_log_level,
+                "current":  level,
+            });
+            audit::emit(&s, audit_e).await;
         }
     }
 
@@ -6999,6 +7029,40 @@ pub async fn put_system_config(
 
     tracing::info!(path = %path.display(), "homecore.toml updated via PUT /system/config");
 
+    // Audit — record what the operator changed so the audit tab can
+    // surface "who flipped X at when" without leaking secrets. We
+    // record the mode + section path / section list, never the field
+    // values (which can include passwords, API tokens, etc.).
+    let detail = if let Some(patch) = body.get("patch").and_then(|v| v.as_object()) {
+        json!({
+            "mode": "patch",
+            "sections": patch.keys().cloned().collect::<Vec<_>>(),
+        })
+    } else if body.get("raw").is_some() {
+        json!({
+            "mode": "raw",
+            "bytes": new_raw.len(),
+        })
+    } else if let Some(aot) = body.get("array_of_tables") {
+        let section = aot.get("section").and_then(|v| v.as_str()).unwrap_or("");
+        let count = aot
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        json!({
+            "mode": "array_of_tables",
+            "section": section,
+            "items": count,
+        })
+    } else {
+        json!({})
+    };
+    let mut e = audit::entry_from_claims(&claims, "system.config_updated")
+        .with_target("config", "homecore.toml");
+    e.detail = detail;
+    audit::emit(&s, e).await;
+
     (
         StatusCode::OK,
         Json(json!({
@@ -7036,6 +7100,10 @@ pub async fn system_restart(
     };
 
     tracing::warn!(actor = %claims.sub, "Restart requested via /system/restart");
+
+    let audit_e = audit::entry_from_claims(&claims, "system.restart_requested")
+        .with_target("system", "homecore");
+    audit::emit(&s, audit_e).await;
 
     // Spawn the broadcast on a delay so the HTTP response can flush
     // before the server starts tearing down.
