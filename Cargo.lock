@@ -1340,9 +1340,11 @@ dependencies = [
  "ron 0.8.1",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
+ "toml_edit",
  "tower 0.5.3",
  "tower-http",
  "tracing",
@@ -1461,6 +1463,20 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hc-influx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hc-types",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1619,6 +1635,7 @@ dependencies = [
  "hc-captest",
  "hc-cli",
  "hc-core",
+ "hc-influx",
  "hc-logging",
  "hc-mqtt-client",
  "hc-notify",
@@ -3414,13 +3431,13 @@ dependencies = [
 
 [[package]]
 name = "rpassword"
-version = "7.4.0"
+version = "7.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66d4c8b64f049c6721ec8ccec37ddfc3d641c4a7fca57e8f2a89de509c73df39"
+checksum = "f3bc4a3dd492cd6974dd3f32d6626ba9f36e5122e3df3b083474b104aebd139b"
 dependencies = [
  "libc",
  "rtoolbox",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
