@@ -645,7 +645,7 @@ pub async fn bulk_patch_devices(
 /// Returns `{ "deleted": N, "not_found": ["id", ...], "affected_rules": ["rule name", ...] }`.
 pub async fn bulk_delete_devices(
     State(s): State<AppState>,
-    _: DevicesWrite,
+    DevicesWrite(claims): DevicesWrite,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
@@ -708,6 +708,19 @@ pub async fn bulk_delete_devices(
                 }
             }
         }
+    }
+
+    if deleted > 0 {
+        let mut audit_e = audit::entry_from_claims(&claims, "device.bulk_deleted")
+            .with_target("device", format!("{deleted} device(s)"));
+        audit_e.detail = json!({
+            "requested":      ids.len(),
+            "deleted":        deleted,
+            "not_found":      not_found.len(),
+            "ids":            ids,
+            "affected_rules": affected_rules,
+        });
+        audit::emit(&s, audit_e).await;
     }
 
     (
@@ -6519,7 +6532,7 @@ pub struct FetchCalendarBody {
 
 pub async fn fetch_calendar(
     State(s): State<AppState>,
-    _: AutomationsWrite,
+    AutomationsWrite(claims): AutomationsWrite,
     Json(body): Json<FetchCalendarBody>,
 ) -> impl IntoResponse {
     let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
@@ -6552,6 +6565,16 @@ pub async fn fetch_calendar(
             } else {
                 calendars.push(entry);
             }
+            drop(calendars);
+
+            let mut audit_e = audit::entry_from_claims(&claims, "calendar.fetched")
+                .with_target("calendar", id.clone());
+            audit_e.detail = json!({
+                "url":         body.url,
+                "event_count": event_count,
+            });
+            audit::emit(&s, audit_e).await;
+
             (
                 StatusCode::OK,
                 Json(json!({
@@ -6585,7 +6608,7 @@ pub struct UploadCalendarBody {
 
 pub async fn upload_calendar(
     State(s): State<AppState>,
-    _: AutomationsWrite,
+    AutomationsWrite(claims): AutomationsWrite,
     Json(body): Json<UploadCalendarBody>,
 ) -> impl IntoResponse {
     let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
@@ -6654,6 +6677,15 @@ pub async fn upload_calendar(
                 .map(|e| e.events.len())
                 .unwrap_or(0);
             *cal_handle.write().await = entries;
+
+            let mut audit_e = audit::entry_from_claims(&claims, "calendar.uploaded")
+                .with_target("calendar", cal_name.clone());
+            audit_e.detail = json!({
+                "event_count": event_count,
+                "bytes":       body.content.len(),
+            });
+            audit::emit(&s, audit_e).await;
+
             (
                 StatusCode::OK,
                 Json(json!({
@@ -6682,7 +6714,7 @@ pub async fn upload_calendar(
 /// store.  Returns a warning list of rules that reference `calendar_id`.
 pub async fn delete_calendar(
     State(s): State<AppState>,
-    _: AutomationsWrite,
+    AutomationsWrite(claims): AutomationsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let (Some(cal_handle), Some(cal_dir)) = (&s.calendar, &s.calendar_dir) else {
@@ -6748,6 +6780,13 @@ pub async fn delete_calendar(
     } else {
         vec![]
     };
+
+    let mut audit_e = audit::entry_from_claims(&claims, "calendar.deleted")
+        .with_target("calendar", id.clone());
+    audit_e.detail = json!({
+        "referencing_rules": referencing_rules.len(),
+    });
+    audit::emit(&s, audit_e).await;
 
     (
         StatusCode::OK,

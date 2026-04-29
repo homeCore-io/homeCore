@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 use zip::{write::SimpleFileOptions, ZipWriter};
 
-use crate::{auth_middleware::AuthUser, AppState};
+use crate::{audit, auth_middleware::AuthUser, AppState};
 
 /// Paths threaded from main.rs into AppState so the backup handler can find them.
 #[derive(Clone)]
@@ -71,18 +71,27 @@ pub async fn backup_handler(State(state): State<AppState>, AuthUser(claims): Aut
     let result = tokio::task::spawn_blocking(move || build_zip(&paths)).await;
 
     match result {
-        Ok(Ok(bytes)) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/zip"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    &format!("attachment; filename=\"{filename}\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(Ok(bytes)) => {
+            let mut audit_e = audit::entry_from_claims(&claims, "system.backup_created")
+                .with_target("system", "backup");
+            audit_e.detail = json!({
+                "filename": filename,
+                "bytes":    bytes.len(),
+            });
+            audit::emit(&state, audit_e).await;
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/zip"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{filename}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
         Ok(Err(e)) => {
             warn!(error = %e, "Backup creation failed");
             (
@@ -228,8 +237,23 @@ pub async fn restore_handler(
 
     let zip_bytes = body.to_vec();
 
+    let zip_len = zip_bytes.len();
     match tokio::task::spawn_blocking(move || extract_restore(&paths, &zip_bytes)).await {
-        Ok(Ok(summary)) => (StatusCode::OK, Json(summary)).into_response(),
+        Ok(Ok(summary)) => {
+            let restored_count = summary
+                .get("restored")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let mut audit_e = audit::entry_from_claims(&claims, "system.restore_completed")
+                .with_target("system", "backup");
+            audit_e.detail = json!({
+                "bytes":    zip_len,
+                "restored": restored_count,
+            });
+            audit::emit(&state, audit_e).await;
+            (StatusCode::OK, Json(summary)).into_response()
+        }
         Ok(Err(e)) => {
             warn!(error = %e, "Restore failed");
             (
