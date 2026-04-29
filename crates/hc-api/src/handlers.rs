@@ -6794,6 +6794,231 @@ pub async fn list_calendar_events(
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// System config + restart  (admin-only; modify homecore.toml at runtime)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/system/config`
+///
+/// Returns the current homecore.toml — both the raw text (for the raw
+/// editor in the admin UI) and a parsed JSON view (for the structured
+/// per-section forms to bind against). Admin-only.
+pub async fn get_system_config(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(path) = s.homecore_config_path.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "config path not available — hc-core started without --config" })),
+        )
+            .into_response();
+    };
+
+    let raw = match std::fs::read_to_string(path.as_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("read failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let parsed: Value = raw.parse::<toml::Value>()
+        .ok()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .unwrap_or(Value::Null);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "raw":    raw,
+            "parsed": parsed,
+            "path":   path.display().to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// `PUT /api/v1/system/config`
+///
+/// Two write modes, mutually exclusive in the body:
+///
+/// - `{ "patch": { "section_name": { "field": value, ... }, ... } }`
+///   Surgical edit via toml_edit — preserves comments, ordering, and
+///   sections you didn't touch. Use for per-section Save buttons.
+///
+/// - `{ "raw": "..." }` Full-file replace. Use for the raw editor.
+///
+/// Both modes validate that the result parses as TOML before writing.
+/// Admin-only. Returns the new content + a `restart_required` flag
+/// that's true unless the only thing changed is hot-reloadable
+/// (rules dir, modes — both already hot-reload elsewhere; this
+/// endpoint is for the static config so the answer is essentially
+/// always true for v0.1.0).
+pub async fn put_system_config(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(path) = s.homecore_config_path.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "config path not available — hc-core started without --config" })),
+        )
+            .into_response();
+    };
+
+    let path = path.as_path();
+
+    // Resolve patch vs raw mode.
+    let new_raw: String = match (body.get("patch"), body.get("raw")) {
+        (Some(_), Some(_)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "specify exactly one of `patch` or `raw`, not both" })),
+            )
+                .into_response();
+        }
+        (Some(patch), None) => {
+            // Apply patch to current file.
+            let current = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("read failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            match crate::config_writer::apply_section_patch(&current, patch) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": format!("patch failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        (None, Some(raw)) => {
+            let Some(s) = raw.as_str() else {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "`raw` must be a string" })),
+                )
+                    .into_response();
+            };
+            s.to_string()
+        }
+        (None, None) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "body must include `patch` or `raw`" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate the result parses as TOML. Full AppConfig deserialize
+    // happens at next core start; we only catch the shallow class of
+    // errors here (typos, missing quotes) so the operator gets
+    // immediate feedback without rejecting valid-but-unusual configs.
+    if let Err(e) = new_raw.parse::<toml::Value>() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": format!("TOML parse error: {e}") })),
+        )
+            .into_response();
+    }
+
+    // Atomic write via the same helper plugin-toggle persistence uses.
+    if let Err(e) = crate::config_writer::write_atomic(path, new_raw.as_bytes()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("write failed: {e}") })),
+        )
+            .into_response();
+    }
+
+    tracing::info!(path = %path.display(), "homecore.toml updated via PUT /system/config");
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "raw": new_raw,
+            "restart_required": true,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /api/v1/system/restart`
+///
+/// Triggers graceful shutdown via the broadcast channel hc-core's
+/// signal handler also uses. The runtime supervisor (systemd /
+/// docker / hand-rolled) is expected to spawn the process again.
+/// Returns 202 — the actual exit happens after the response flushes.
+pub async fn system_restart(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(tx) = s.shutdown_tx.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "shutdown channel not configured" })),
+        )
+            .into_response();
+    };
+
+    tracing::warn!(actor = %claims.sub, "Restart requested via /system/restart");
+
+    // Spawn the broadcast on a delay so the HTTP response can flush
+    // before the server starts tearing down.
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let _ = tx.send(true);
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "ok": true,
+            "message": "shutdown requested; supervisor should respawn within seconds",
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -58,9 +58,127 @@ pub fn persist_plugin_enabled(
         .with_context(|| format!("write {}", config_path.display()))
 }
 
+/// Apply a structured per-section patch to a TOML document and
+/// return the resulting text. The patch shape matches what the
+/// admin UI's per-section Save buttons emit:
+///
+/// ```json
+/// {
+///   "server":   { "port": 8090 },
+///   "battery":  { "threshold_pct": 25.0 },
+///   "auth.admin_uds": { "enabled": true, "path": "/run/foo.sock" }
+/// }
+/// ```
+///
+/// Section names are top-level TOML table keys, with dotted keys
+/// for nested tables (e.g. `auth.admin_uds`). For each section in
+/// the patch, every field/value pair surgically replaces the
+/// matching entry in the section, leaving comments + ordering +
+/// other sections untouched. New fields are appended at the end of
+/// the section.
+///
+/// Returns the new TOML string ready to write atomically.
+pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = current
+        .parse()
+        .with_context(|| "parse current homecore.toml")?;
+
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| anyhow!("patch must be a JSON object keyed by section name"))?;
+
+    for (section_path, section_patch) in patch_obj {
+        let fields = section_patch.as_object().ok_or_else(|| {
+            anyhow!(
+                "patch[{section_path:?}] must be an object of field=value pairs"
+            )
+        })?;
+
+        // Walk the dotted section path (e.g. "auth.admin_uds") to
+        // get a mutable Table handle.
+        let table = walk_to_table_mut(&mut doc, section_path)?;
+
+        for (key, value) in fields {
+            let item = json_to_toml_item(value).with_context(|| {
+                format!("section [{section_path}] field {key:?}: unsupported value type")
+            })?;
+            table[key.as_str()] = item;
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Walk a dotted section path (e.g. "auth.admin_uds") and return a
+/// mutable handle to the table at the leaf. Creates intermediate
+/// tables if missing.
+fn walk_to_table_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    section_path: &str,
+) -> Result<&'a mut toml_edit::Table> {
+    let segments: Vec<&str> = section_path.split('.').collect();
+
+    let mut current: &mut toml_edit::Table = doc.as_table_mut();
+    for seg in segments {
+        let item = current
+            .entry(seg)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        match item {
+            toml_edit::Item::Table(t) => current = t,
+            other => {
+                return Err(anyhow!(
+                    "section path {section_path:?} crosses non-table at {seg:?}: {other:?}"
+                ))
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Translate a JSON value into a toml_edit Item suitable for direct
+/// assignment. Supports strings, booleans, numbers (integer +
+/// floating), and arrays-of-the-same. Objects (nested tables in
+/// the patch) aren't supported here — use a dotted section path
+/// instead.
+fn json_to_toml_item(v: &serde_json::Value) -> Result<toml_edit::Item> {
+    use serde_json::Value as J;
+    let value: toml_edit::Value = match v {
+        J::Null => return Err(anyhow!("null is not a valid TOML value")),
+        J::Bool(b) => (*b).into(),
+        J::String(s) => s.as_str().into(),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into()
+            } else if let Some(f) = n.as_f64() {
+                f.into()
+            } else {
+                return Err(anyhow!("unrepresentable JSON number: {n}"));
+            }
+        }
+        J::Array(arr) => {
+            let mut a = toml_edit::Array::new();
+            for elem in arr {
+                let item = json_to_toml_item(elem)?;
+                if let toml_edit::Item::Value(v) = item {
+                    a.push(v);
+                } else {
+                    return Err(anyhow!("array elements must be primitives"));
+                }
+            }
+            a.into()
+        }
+        J::Object(_) => {
+            return Err(anyhow!(
+                "nested objects in patch values not supported — use dotted section path"
+            ))
+        }
+    };
+    Ok(toml_edit::Item::Value(value))
+}
+
 /// Write `bytes` to `path` via a sibling tmp file + rename, so a crash
 /// mid-write can never leave the destination half-populated.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let parent = path
@@ -188,6 +306,89 @@ enabled = false
             .unwrap_err()
             .to_string();
         assert!(err.contains("hc-mystery"));
+    }
+
+    #[test]
+    fn apply_patch_replaces_field_in_existing_section() {
+        let input = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[battery]
+threshold_pct    = 20.0
+recover_band_pct = 5.0
+"#;
+        let patch = serde_json::json!({ "battery": { "threshold_pct": 25.5 } });
+        let after = apply_section_patch(input, &patch).unwrap();
+
+        // toml_edit may preserve the original key-padding from the source
+        // document, so don't assert exact spacing. Match the value plus
+        // the surrounding section context.
+        assert!(after.contains("threshold_pct"));
+        assert!(after.contains("25.5"));
+        assert!(!after.contains("20.0"));   // old value gone
+        assert!(after.contains("recover_band_pct"));
+        assert!(after.contains("5.0"));
+        assert!(after.contains("[server]"));
+        assert!(after.contains("port = 8080"));
+    }
+
+    #[test]
+    fn apply_patch_dotted_section_path() {
+        let input = r#"
+[auth]
+token_expiry_hours = 24
+
+[auth.admin_uds]
+enabled = false
+path    = "/run/homecore/admin.sock"
+"#;
+        let patch = serde_json::json!({
+            "auth.admin_uds": { "enabled": true }
+        });
+        let after = apply_section_patch(input, &patch).unwrap();
+
+        assert!(after.contains("enabled = true"));
+        assert!(after.contains(r#"path    = "/run/homecore/admin.sock""#));
+        assert!(after.contains("token_expiry_hours = 24"));
+    }
+
+    #[test]
+    fn apply_patch_creates_missing_section() {
+        let input = r#"
+[server]
+port = 8080
+"#;
+        let patch = serde_json::json!({
+            "battery": { "threshold_pct": 20.0 }
+        });
+        let after = apply_section_patch(input, &patch).unwrap();
+        assert!(after.contains("[battery]"));
+        assert!(after.contains("threshold_pct = 20.0"));
+    }
+
+    #[test]
+    fn apply_patch_handles_arrays() {
+        let input = r#"
+[auth]
+whitelist = []
+"#;
+        let patch = serde_json::json!({
+            "auth": { "whitelist": ["127.0.0.1/32", "::1/128"] }
+        });
+        let after = apply_section_patch(input, &patch).unwrap();
+        assert!(after.contains(r#""127.0.0.1/32""#));
+        assert!(after.contains(r#""::1/128""#));
+    }
+
+    #[test]
+    fn apply_patch_rejects_nested_objects() {
+        let input = "";
+        let patch = serde_json::json!({
+            "server": { "nested": { "no": "good" } }
+        });
+        assert!(apply_section_patch(input, &patch).is_err());
     }
 
     #[test]

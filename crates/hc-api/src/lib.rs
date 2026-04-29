@@ -201,6 +201,11 @@ pub struct AppState {
     /// enable/disable toggle persists via this). `None` if hc-core
     /// was started in a way that didn't surface a config path.
     pub homecore_config_path: Option<Arc<std::path::PathBuf>>,
+    /// Sender on the graceful-shutdown channel. Held by AppState so
+    /// the `POST /system/restart` handler can request a clean exit;
+    /// the runtime supervisor (systemd / docker / hand-rolled) is
+    /// expected to spawn the process again.
+    pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
@@ -515,6 +520,7 @@ impl AppState {
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
             homecore_config_path: None,
+            shutdown_tx: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -604,6 +610,17 @@ impl AppState {
     /// enable/disable toggle in PATCH /plugins/{id}).
     pub fn with_homecore_config_path(mut self, path: std::path::PathBuf) -> Self {
         self.homecore_config_path = Some(Arc::new(path));
+        self
+    }
+
+    /// Attach the graceful-shutdown sender so POST /system/restart
+    /// can trigger a clean exit. The runtime supervisor is expected
+    /// to spawn the process again after exit.
+    pub fn with_shutdown_tx(
+        mut self,
+        tx: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
+        self.shutdown_tx = Some(Arc::new(tx));
         self
     }
 
@@ -902,6 +919,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/system/log-level",
             get(handlers::get_log_level).put(handlers::set_log_level),
         )
+        .route(
+            "/system/config",
+            get(handlers::get_system_config).put(handlers::put_system_config),
+        )
+        .route("/system/restart", post(handlers::system_restart))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

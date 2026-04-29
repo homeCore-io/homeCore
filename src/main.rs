@@ -945,15 +945,17 @@ async fn main() -> Result<()> {
 
     // ── Graceful shutdown channel ──────────────────────────────────────────
     //
-    // `shutdown_tx` is used by the signal handler task to broadcast to the
-    // rule engine, scheduler, and HTTP server.  `shutdown_rx` is cloned for
-    // each subsystem.
+    // `shutdown_tx` is used by the signal handler task AND the API's
+    // POST /system/restart handler to broadcast a shutdown to the rule
+    // engine, scheduler, HTTP server, and other long-running tasks.
+    // Each subsystem holds a cloned receiver.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Spawn a task that waits for SIGTERM/SIGINT and then sends the shutdown signal.
+    let shutdown_tx_signal = shutdown_tx.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
-        let _ = shutdown_tx.send(true);
+        let _ = shutdown_tx_signal.send(true);
     });
 
     let calendar_dir = PathBuf::from(&config.calendars.dir);
@@ -1291,7 +1293,8 @@ async fn main() -> Result<()> {
     .with_group_store(group_store, groups)
     .with_dashboard_store(dashboard_store, dashboard_data)
     .with_battery_config(battery_tx)
-    .with_homecore_config_path(config_path.clone());
+    .with_homecore_config_path(config_path.clone())
+    .with_shutdown_tx(shutdown_tx.clone());
 
     let app_state = if let Some(cal) = calendar_handle {
         app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)
