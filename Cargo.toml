@@ -23,6 +23,7 @@ members = [
     "crates/hc-scripting",
     "crates/hc-notify",
     "crates/hc-logging",
+    "crates/hc-influx",
 ]
 
 [workspace.dependencies]
@@ -78,6 +79,7 @@ hc-types       = { path = "crates/hc-types" }
 hc-topic-map   = { path = "crates/hc-topic-map" }
 hc-notify      = { path = "crates/hc-notify" }
 hc-logging     = { path = "crates/hc-logging" }
+hc-influx      = { path = "crates/hc-influx" }
 ipnet              = { workspace = true }
 tokio              = { workspace = true }
 serde              = { workspace = true }

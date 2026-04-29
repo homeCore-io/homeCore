@@ -14,6 +14,7 @@ use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
 use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
+use hc_influx::InfluxConfig;
 use hc_notify::{ChannelConfig, NotificationService};
 use hc_state::StateStore;
 use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, EcosystemRouter};
@@ -185,6 +186,8 @@ struct AppConfig {
     calendars: CalendarsSection,
     #[serde(default)]
     battery: BatterySection,
+    #[serde(default)]
+    influx: InfluxConfig,
 }
 
 impl AppConfig {
@@ -1157,6 +1160,15 @@ async fn main() -> Result<()> {
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();
+
+    // InfluxDB v2 metrics exporter (opt-in). Subscribes to pub_bus so it
+    // sees the same DeviceStateChanged events the rule engine + WebSocket
+    // clients see. Errors during writes are logged and dropped — never
+    // block the bus.
+    if config.influx.enabled {
+        hc_influx::spawn(config.influx.clone(), pub_bus.subscribe());
+    }
+
     let app_state = AppState::new_with_plugins_and_raw_bus(
         store,
         pub_bus,

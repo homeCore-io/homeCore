@@ -110,6 +110,32 @@ recover_band_pct = 5.0
 # notify_on_recovered  = false
 
 # ---------------------------------------------------------------------------
+# InfluxDB v2 metrics exporter (optional)
+# ---------------------------------------------------------------------------
+# When enabled, every DeviceStateChanged event for a device matching one of
+# the include_devices patterns has its numeric and boolean attributes
+# written to InfluxDB v2 as line-protocol points (one measurement per
+# attribute, value as the field). Use Grafana / Influx queries to graph.
+#
+# include_devices is OPT-IN by design — empty list = nothing exported.
+# Use ["*"] to export every device. With many chatty sensors this can
+# generate significant write volume, so the channel is bounded and
+# oldest-event-dropping rather than back-pressuring the event bus.
+#
+# [influx]
+# enabled              = true
+# url                  = "http://10.0.10.200:8086"
+# token                = "REPLACE_WITH_INFLUX_API_TOKEN"
+# org                  = "homecore"
+# bucket               = "devices"
+# flush_interval_secs  = 10        # flush even if batch_size not reached
+# batch_size           = 1000      # max points per write
+# channel_capacity     = 10000     # bounded backlog before dropping
+# include_devices      = ["sensor.*", "thermostat.*"]
+# exclude_attributes   = ["last_seen", "uptime"]
+# export_bools         = true      # bool attrs as 0/1 fields
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 [auth]
