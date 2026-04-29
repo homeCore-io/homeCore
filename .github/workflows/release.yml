@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      fast:
+        description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
+        type: boolean
+        default: true
 
 # contents: write — reusable workflow's release job creates a GH Release.
 # packages: write — reusable workflow's docker-publish job pushes to ghcr.io.
@@ -28,3 +33,9 @@ jobs:
       bundle_webui: true
       webui_ref: develop  # while hc-web-leptos still on develop
       docker_repo_ref: develop  # while homeCore-io/docker still on develop
+      # Forwards the workflow_dispatch input to the reusable workflow.
+      # On tag push (no inputs), the `|| false` fallback ensures
+      # full multi-arch — the reusable defaults `fast` to false too,
+      # but expression-context yields '' for an undefined input which
+      # the boolean coerces, so we're explicit here.
+      fast: ${{ inputs.fast || false }}
