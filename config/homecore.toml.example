@@ -155,9 +155,10 @@ token_expiry_hours = 24
 # the store, it generates a random admin password, prints it to the
 # warn-level log, AND writes it here at 0600 perms. Delete the file
 # after your first login. Leave commented out to use the default
-# (`<dir-of-state_db>/INITIAL_ADMIN_PASSWORD`); set to "" to disable
-# file output entirely (logs only).
-# initial_admin_password_file = "/var/lib/homecore/INITIAL_ADMIN_PASSWORD"
+# (`INITIAL_ADMIN_PASSWORD` at the root of homeCore's --home dir);
+# set to "" to disable file output entirely (logs only). Relative
+# paths resolve against --home.
+# initial_admin_password_file = "INITIAL_ADMIN_PASSWORD"
 
 # IP whitelist — addresses that bypass JWT authentication entirely.
 # Requests from these IPs receive full Admin access without a token.

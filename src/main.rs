@@ -670,14 +670,12 @@ impl Default for AuthSection {
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Default destination for the first-boot admin password file:
-/// `<dir-of-state_db>/INITIAL_ADMIN_PASSWORD`.
-fn default_admin_password_path(state_db_path: &std::path::Path) -> std::path::PathBuf {
-    let dir = state_db_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    dir.join("INITIAL_ADMIN_PASSWORD")
+/// `<base_dir>/INITIAL_ADMIN_PASSWORD` — at the root of homeCore's home,
+/// where it's the most discoverable. Operators bind-mounting the home
+/// dir (appliance setup) see the file at the top of their host volume
+/// rather than tucked inside `data/`.
+fn default_admin_password_path(base_dir: &std::path::Path) -> std::path::PathBuf {
+    base_dir.join("INITIAL_ADMIN_PASSWORD")
 }
 
 /// Write the auto-generated admin password to `path` with 0600 perms,
@@ -1182,14 +1180,15 @@ async fn main() -> Result<()> {
         store.create_user(&admin).await?;
 
         // Resolve where to drop the password file. Empty path opts out
-        // entirely; default sits next to the state DB.
+        // entirely; default sits at base_dir/INITIAL_ADMIN_PASSWORD.
+        // Relative overrides resolve against base_dir, matching the
+        // pattern used by storage / rules / profiles / logging paths.
         let pw_file_path: Option<std::path::PathBuf> =
             match config.auth.initial_admin_password_file.as_ref() {
                 Some(p) if p.as_os_str().is_empty() => None,
-                Some(p) => Some(p.clone()),
-                None => Some(default_admin_password_path(std::path::Path::new(
-                    &config.storage.state_db_path,
-                ))),
+                Some(p) if p.is_absolute() => Some(p.clone()),
+                Some(p) => Some(base_dir.join(p)),
+                None => Some(default_admin_password_path(&base_dir)),
             };
 
         if let Some(ref path) = pw_file_path {
