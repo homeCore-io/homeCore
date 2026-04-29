@@ -192,6 +192,25 @@ token_expiry_hours = 24
 # history_db_path = "data/history.db"    # relative to base_dir (default)
 
 # ---------------------------------------------------------------------------
+# Web admin UI
+#
+# When enabled, hc-core serves the bundled Leptos/WASM admin UI as
+# static files at `/`, with the API still under `/api/v1`. dist_path
+# points at the `trunk build --release` output directory; relative
+# paths resolve against base_dir.
+#
+# - Container deployments (hc-core image, appliance image) bake the UI
+#   bundle in and create a `ui` symlink at base_dir, so the default
+#   below works out of the box.
+# - Standalone tarball installs: drop your hc-web-leptos `dist/` at
+#   base_dir/ui (or set dist_path explicitly) before enabling.
+# - To run headless / API-only: set enabled = false.
+# ---------------------------------------------------------------------------
+[web_admin]
+enabled   = true
+dist_path = "ui"
+
+# ---------------------------------------------------------------------------
 # Automation rules
 #
 # Each rule lives in its own TOML file.  The filename (minus .toml) is the
