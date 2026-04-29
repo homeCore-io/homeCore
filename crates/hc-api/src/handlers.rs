@@ -6889,55 +6889,91 @@ pub async fn put_system_config(
 
     let path = path.as_path();
 
-    // Resolve patch vs raw mode.
-    let new_raw: String = match (body.get("patch"), body.get("raw")) {
-        (Some(_), Some(_)) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "error": "specify exactly one of `patch` or `raw`, not both" })),
-            )
-                .into_response();
-        }
-        (Some(patch), None) => {
-            // Apply patch to current file.
-            let current = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("read failed: {e}") })),
-                    )
-                        .into_response();
-                }
-            };
-            match crate::config_writer::apply_section_patch(&current, patch) {
-                Ok(s) => s,
-                Err(e) => {
-                    return (
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        Json(json!({ "error": format!("patch failed: {e}") })),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        (None, Some(raw)) => {
-            let Some(s) = raw.as_str() else {
+    // Resolve patch / raw / array_of_tables mode (mutually exclusive).
+    let modes_set = [
+        body.get("patch").is_some(),
+        body.get("raw").is_some(),
+        body.get("array_of_tables").is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    if modes_set > 1 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "specify exactly one of `patch`, `raw`, or `array_of_tables`" })),
+        )
+            .into_response();
+    }
+
+    let new_raw: String = if let Some(patch) = body.get("patch") {
+        let current = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
                 return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": "`raw` must be a string" })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("read failed: {e}") })),
                 )
                     .into_response();
-            };
-            s.to_string()
+            }
+        };
+        match crate::config_writer::apply_section_patch(&current, patch) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": format!("patch failed: {e}") })),
+                )
+                    .into_response();
+            }
         }
-        (None, None) => {
+    } else if let Some(raw) = body.get("raw") {
+        let Some(s) = raw.as_str() else {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "error": "body must include `patch` or `raw`" })),
+                Json(json!({ "error": "`raw` must be a string" })),
             )
                 .into_response();
+        };
+        s.to_string()
+    } else if let Some(aot) = body.get("array_of_tables") {
+        let section = aot.get("section").and_then(|v| v.as_str());
+        let items = aot.get("items").and_then(|v| v.as_array());
+        let (Some(section), Some(items)) = (section, items) else {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "`array_of_tables` requires `section` (string) and `items` (array)"
+                })),
+            )
+                .into_response();
+        };
+        let current = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("read failed: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        match crate::config_writer::replace_array_of_tables(&current, section, items) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": format!("array_of_tables write failed: {e}") })),
+                )
+                    .into_response();
+            }
         }
+    } else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "body must include `patch`, `raw`, or `array_of_tables`" })),
+        )
+            .into_response();
     };
 
     // Validate the result parses as TOML. Full AppConfig deserialize

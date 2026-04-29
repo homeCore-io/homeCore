@@ -109,6 +109,55 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
     Ok(doc.to_string())
 }
 
+/// Replace an entire `[[section.name]]` array-of-tables with the
+/// provided items.  `section_path` is a dotted parent path plus a
+/// trailing leaf key (e.g. `"notify.channels"` → parent `notify`,
+/// leaf `channels`).  Each item must be a JSON object whose values
+/// are primitives or arrays of primitives; nested objects are
+/// rejected so callers don't accidentally smuggle an inline table
+/// where an array-of-tables row is expected.
+///
+/// Comments and ordering of *other* sections are preserved; the
+/// existing array-of-tables block is replaced wholesale.  Use this
+/// for editors over `[[notify.channels]]` and similar list-shaped
+/// config that doesn't fit `apply_section_patch`'s field-merge
+/// model.
+pub fn replace_array_of_tables(
+    current: &str,
+    section_path: &str,
+    items: &[serde_json::Value],
+) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = current
+        .parse()
+        .with_context(|| "parse current homecore.toml")?;
+
+    let (parent_path, leaf) = section_path
+        .rsplit_once('.')
+        .ok_or_else(|| anyhow!("section path must be dotted (e.g. notify.channels)"))?;
+
+    let parent = walk_to_table_mut(&mut doc, parent_path)?;
+
+    let mut aot = toml_edit::ArrayOfTables::new();
+    for (idx, item) in items.iter().enumerate() {
+        let obj = item.as_object().ok_or_else(|| {
+            anyhow!("items[{idx}] must be a JSON object (TOML table)")
+        })?;
+        let mut tbl = toml_edit::Table::new();
+        for (k, v) in obj {
+            let item = json_to_toml_item(v).with_context(|| {
+                format!("items[{idx}] field {k:?}: unsupported value type")
+            })?;
+            tbl[k.as_str()] = item;
+        }
+        aot.push(tbl);
+    }
+
+    parent.remove(leaf);
+    parent.insert(leaf, toml_edit::Item::ArrayOfTables(aot));
+
+    Ok(doc.to_string())
+}
+
 /// Walk a dotted section path (e.g. "auth.admin_uds") and return a
 /// mutable handle to the table at the leaf. Creates intermediate
 /// tables if missing.
@@ -389,6 +438,96 @@ whitelist = []
             "server": { "nested": { "no": "good" } }
         });
         assert!(apply_section_patch(input, &patch).is_err());
+    }
+
+    #[test]
+    fn replace_aot_writes_proper_array_of_tables() {
+        let input = r#"
+[server]
+port = 8080
+
+[notify]
+default_channel = "phone"
+
+[[notify.channels]]
+name = "old"
+type = "pushover"
+api_token = "obsolete"
+user_key = "obsolete"
+"#;
+        let items = vec![
+            serde_json::json!({
+                "name": "phone",
+                "type": "pushover",
+                "api_token": "atok",
+                "user_key": "ukey"
+            }),
+            serde_json::json!({
+                "name": "ops",
+                "type": "telegram",
+                "bot_token": "bot",
+                "chat_id": "12345"
+            }),
+        ];
+        let after = replace_array_of_tables(input, "notify.channels", &items).unwrap();
+
+        // Old entry replaced.
+        assert!(!after.contains("obsolete"));
+        // Two new entries present as proper [[notify.channels]] tables.
+        assert_eq!(after.matches("[[notify.channels]]").count(), 2);
+        assert!(after.contains(r#"name = "phone""#));
+        assert!(after.contains(r#"type = "pushover""#));
+        assert!(after.contains(r#"api_token = "atok""#));
+        assert!(after.contains(r#"name = "ops""#));
+        assert!(after.contains(r#"chat_id = "12345""#));
+        // Sibling section untouched.
+        assert!(after.contains(r#"default_channel = "phone""#));
+        assert!(after.contains("[server]"));
+        assert!(after.contains("port = 8080"));
+    }
+
+    #[test]
+    fn replace_aot_handles_empty_items_list() {
+        let input = r#"
+[notify]
+
+[[notify.channels]]
+name = "doomed"
+type = "pushover"
+api_token = "x"
+user_key = "y"
+"#;
+        let after = replace_array_of_tables(input, "notify.channels", &[]).unwrap();
+        assert!(!after.contains("doomed"));
+        assert!(!after.contains("[[notify.channels]]"));
+        assert!(after.contains("[notify]"));
+    }
+
+    #[test]
+    fn replace_aot_creates_section_when_missing() {
+        let input = r#"
+[server]
+port = 8080
+"#;
+        let items = vec![serde_json::json!({
+            "name": "phone",
+            "type": "pushover",
+            "api_token": "t",
+            "user_key": "u"
+        })];
+        let after = replace_array_of_tables(input, "notify.channels", &items).unwrap();
+        assert!(after.contains("[[notify.channels]]"));
+        assert!(after.contains(r#"name = "phone""#));
+    }
+
+    #[test]
+    fn replace_aot_rejects_nested_objects() {
+        let input = "";
+        let items = vec![serde_json::json!({
+            "name": "x",
+            "nested": { "no": "good" }
+        })];
+        assert!(replace_array_of_tables(input, "notify.channels", &items).is_err());
     }
 
     #[test]
