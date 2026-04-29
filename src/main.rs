@@ -588,6 +588,16 @@ struct AuthSection {
     /// same-host admin tooling. Replaces the CIDR whitelist.
     #[serde(default)]
     admin_uds: AdminUdsSection,
+    /// Path where the auto-generated initial admin password is written
+    /// the first time homeCore boots with no users in the store. Set to
+    /// the empty string to disable file output (password is still
+    /// printed to logs).
+    ///
+    /// Defaults to `<parent-of-state_db_path>/INITIAL_ADMIN_PASSWORD`,
+    /// 0600. The file should be deleted by the operator after first
+    /// login; homeCore does NOT re-write it on subsequent boots.
+    #[serde(default)]
+    initial_admin_password_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -652,11 +662,71 @@ impl Default for AuthSection {
             audit_retention_days: 365,
             whitelist: vec![],
             admin_uds: AdminUdsSection::default(),
+            initial_admin_password_file: None,
         }
     }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+/// Default destination for the first-boot admin password file:
+/// `<dir-of-state_db>/INITIAL_ADMIN_PASSWORD`.
+fn default_admin_password_path(state_db_path: &std::path::Path) -> std::path::PathBuf {
+    let dir = state_db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    dir.join("INITIAL_ADMIN_PASSWORD")
+}
+
+/// Write the auto-generated admin password to `path` with 0600 perms,
+/// creating the parent directory if needed. Body is a small banner so
+/// the file is self-explanatory if anyone opens it months later.
+fn write_initial_admin_password(
+    path: &std::path::Path,
+    password: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let body = format!(
+        "homeCore initial admin credentials\n\
+         ---------------------------------\n\
+         Username: admin\n\
+         Password: {password}\n\
+         \n\
+         Generated automatically on first boot. Change the password\n\
+         after your first login and DELETE THIS FILE.\n"
+    );
+
+    // Write with 0600 directly (open-with-mode) rather than write+chmod,
+    // so the password is never on-disk world-readable for any window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    Ok(())
+}
 
 /// Generate a random alphanumeric password of the given length.
 fn random_password(len: usize) -> String {
@@ -1110,10 +1180,36 @@ async fn main() -> Result<()> {
             created_at: chrono::Utc::now(),
         };
         store.create_user(&admin).await?;
+
+        // Resolve where to drop the password file. Empty path opts out
+        // entirely; default sits next to the state DB.
+        let pw_file_path: Option<std::path::PathBuf> =
+            match config.auth.initial_admin_password_file.as_ref() {
+                Some(p) if p.as_os_str().is_empty() => None,
+                Some(p) => Some(p.clone()),
+                None => Some(default_admin_password_path(std::path::Path::new(
+                    &config.storage.state_db_path,
+                ))),
+            };
+
+        if let Some(ref path) = pw_file_path {
+            if let Err(e) = write_initial_admin_password(path, &password) {
+                tracing::warn!(path = %path.display(), error = %e,
+                    "Failed to write initial admin password file — \
+                     password is in the log banner below");
+            } else {
+                tracing::info!(path = %path.display(),
+                    "Initial admin password written (delete this file after first login)");
+            }
+        }
+
         tracing::warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         tracing::warn!("  Default admin account created.");
         tracing::warn!("  Username : admin");
         tracing::warn!("  Password : {password}");
+        if let Some(ref path) = pw_file_path {
+            tracing::warn!("  Saved to : {}", path.display());
+        }
         tracing::warn!("  Change this password immediately after first login!");
         tracing::warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }

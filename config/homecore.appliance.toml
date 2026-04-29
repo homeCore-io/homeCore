@@ -38,6 +38,10 @@ recover_band_pct = 5.0
 [auth]
 # JWT secret auto-managed in <base_dir>/data/jwt_secret on first boot.
 token_expiry_hours = 24
+# First-boot admin password lands here. Survives in the bind-mounted
+# /etc/homecore so users can `cat appliance-config/INITIAL_ADMIN_PASSWORD`.
+# Delete the file after first login — homeCore won't re-write it.
+initial_admin_password_file = "/etc/homecore/INITIAL_ADMIN_PASSWORD"
 
 [storage]
 # Defaults: data/state.redb, data/history.db (relative to --home)

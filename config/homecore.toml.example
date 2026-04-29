@@ -151,6 +151,14 @@ recover_band_pct = 5.0
 # jwt_secret_file = "/var/lib/homecore/jwt_secret"
 token_expiry_hours = 24
 
+# First-boot admin password file. When homeCore starts with no users in
+# the store, it generates a random admin password, prints it to the
+# warn-level log, AND writes it here at 0600 perms. Delete the file
+# after your first login. Leave commented out to use the default
+# (`<dir-of-state_db>/INITIAL_ADMIN_PASSWORD`); set to "" to disable
+# file output entirely (logs only).
+# initial_admin_password_file = "/var/lib/homecore/INITIAL_ADMIN_PASSWORD"
+
 # IP whitelist — addresses that bypass JWT authentication entirely.
 # Requests from these IPs receive full Admin access without a token.
 # Both IPv4 and IPv6 CIDR notation are supported.  A bare address without
