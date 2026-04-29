@@ -25,6 +25,7 @@ pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
+pub mod config_writer;
 pub mod dashboard_store;
 pub mod event_log;
 pub mod group_store;
@@ -195,6 +196,11 @@ pub struct AppState {
     /// open the option of a future `PATCH` updating thresholds at runtime.
     pub battery_config:
         Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
+    /// Path to homecore.toml — used by handlers that need to write
+    /// runtime changes back to disk (currently the plugin
+    /// enable/disable toggle persists via this). `None` if hc-core
+    /// was started in a way that didn't surface a config path.
+    pub homecore_config_path: Option<Arc<std::path::PathBuf>>,
 }
 
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
@@ -508,6 +514,7 @@ impl AppState {
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
+            homecore_config_path: None,
         };
 
         // Spawn background task to increment metrics counters from bus events.
@@ -589,6 +596,14 @@ impl AppState {
     /// Attach file paths used by `POST /system/backup`.
     pub fn with_backup_paths(mut self, paths: BackupPaths) -> Self {
         self.backup_paths = Some(paths);
+        self
+    }
+
+    /// Attach the homecore.toml path so handlers can write runtime
+    /// changes back to disk (currently used by the plugin
+    /// enable/disable toggle in PATCH /plugins/{id}).
+    pub fn with_homecore_config_path(mut self, path: std::path::PathBuf) -> Self {
+        self.homecore_config_path = Some(Arc::new(path));
         self
     }
 

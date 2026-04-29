@@ -5088,32 +5088,94 @@ pub async fn patch_plugin(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let mut map = s.plugins.write().await;
-    let Some(rec) = map.get_mut(&id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "plugin not found" })),
-        )
-            .into_response();
+    // Snapshot the previous enabled state + apply updates.
+    // We hold the write lock only briefly so we can release it before
+    // doing potentially-blocking I/O (config write) and channel sends.
+    let (prev_enabled, new_rec) = {
+        let mut map = s.plugins.write().await;
+        let Some(rec) = map.get_mut(&id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not found" })),
+            )
+                .into_response();
+        };
+        let prev = rec.enabled;
+        if let Some(enabled) = body["enabled"].as_bool() {
+            rec.enabled = enabled;
+        }
+        if let Some(level) = body["log_level"].as_str() {
+            rec.log_level = Some(level.to_string());
+            // Send MQTT management command so the plugin changes level
+            // immediately (if it supports the management protocol).
+            if let Some(ref rpc) = s.management_rpc {
+                let id = id.clone();
+                let level = level.to_string();
+                let rpc = rpc.clone();
+                tokio::spawn(async move {
+                    let _ = rpc.set_log_level(&id, &level).await;
+                });
+            }
+        }
+        (prev, rec.clone())
     };
-    if let Some(enabled) = body["enabled"].as_bool() {
-        rec.enabled = enabled;
-    }
-    if let Some(level) = body["log_level"].as_str() {
-        rec.log_level = Some(level.to_string());
-        // Send MQTT management command so the plugin changes level immediately
-        // (if it supports the management protocol).
-        if let Some(ref rpc) = s.management_rpc {
-            let id = id.clone();
-            let level = level.to_string();
-            let rpc = rpc.clone();
-            // Fire-and-forget — don't block the API response on plugin response.
-            tokio::spawn(async move {
-                let _ = rpc.set_log_level(&id, &level).await;
-            });
+
+    // ── Persist + react to enabled transitions ──────────────────────────
+    if let Some(new_enabled) = body["enabled"].as_bool() {
+        // 1. Persist the change to homecore.toml. Best-effort: if the
+        //    config path isn't known (rare; means hc-core was started
+        //    in some unusual way), or the plugin isn't declared in
+        //    [[plugins]] (e.g. it registered via MQTT only), we log
+        //    and continue. The runtime change in `s.plugins` already
+        //    landed above; we just don't survive a restart.
+        if let Some(ref path) = s.homecore_config_path {
+            match crate::config_writer::persist_plugin_enabled(
+                path.as_path(),
+                &id,
+                new_enabled,
+            ) {
+                Ok(()) => {
+                    tracing::info!(
+                        plugin = %id,
+                        enabled = new_enabled,
+                        "Persisted plugin enabled to homecore.toml"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %id,
+                        error = %e,
+                        "Failed to persist plugin enabled (runtime change applied; \
+                         will reset on next restart)"
+                    );
+                }
+            }
+        }
+
+        // 2. Auto-start / auto-stop on transition. The seeded config
+        //    expects this — flipping the toggle is the user-visible
+        //    action; spinning the supervisor is a side effect.
+        if new_enabled != prev_enabled {
+            let cmds = s.plugin_commands.read().await;
+            if let Some(tx) = cmds.get(&id) {
+                let action = if new_enabled {
+                    crate::PluginCommand::Start
+                } else {
+                    crate::PluginCommand::Stop
+                };
+                let _ = tx.send(action).await;
+            } else {
+                tracing::debug!(
+                    plugin = %id,
+                    enabled = new_enabled,
+                    "Plugin enabled flipped but plugin is not locally managed — \
+                     no start/stop side effect"
+                );
+            }
         }
     }
-    (StatusCode::OK, Json(json!(rec.clone()))).into_response()
+
+    (StatusCode::OK, Json(json!(new_rec))).into_response()
 }
 
 pub async fn get_plugin_config(

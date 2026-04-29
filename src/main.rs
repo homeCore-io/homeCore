@@ -1290,7 +1290,8 @@ async fn main() -> Result<()> {
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups)
     .with_dashboard_store(dashboard_store, dashboard_data)
-    .with_battery_config(battery_tx);
+    .with_battery_config(battery_tx)
+    .with_homecore_config_path(config_path.clone());
 
     let app_state = if let Some(cal) = calendar_handle {
         app_state.with_calendar(cal, calendar_dir, calendar_expansion_days)
