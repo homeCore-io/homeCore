@@ -43,3 +43,20 @@ jobs:
       # but expression-context yields '' for an undefined input which
       # the boolean coerces, so we're explicit here.
       fast: ${{ inputs.fast || false }}
+      # Tag-push-only: assemble homecore-appliance-<tag>-<platform>.tar.gz
+      # by downloading each plugin's matching release from its own repo
+      # and merging into a single archive. Every plugin in the list must
+      # have a release tagged the same as core's tag for assembly to
+      # succeed.
+      assemble_appliance: true
+      appliance_plugins: |
+        hc-hue
+        hc-yolink
+        hc-lutron
+        hc-caseta
+        hc-sonos
+        hc-ecowitt
+        hc-zwave
+        hc-isy
+        hc-wled
+        hc-thermostat
