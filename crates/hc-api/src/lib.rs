@@ -35,6 +35,7 @@ pub mod managed_modes;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod rate_limit;
 pub mod rule_file_store;
 pub mod streaming;
 pub mod ws;
@@ -140,6 +141,12 @@ pub struct AppState {
     pub event_log: EventLog,
     /// IP/CIDR ranges that bypass JWT authentication and receive Admin access.
     pub whitelist: Arc<Vec<IpNet>>,
+    /// IP/CIDR ranges allowed to scrape `GET /api/v1/metrics`. Separate from
+    /// the auth whitelist because Prometheus scrapers can't set Authorization
+    /// headers, and the policy "who may bypass auth" is not the same as
+    /// "who may scrape metrics". Empty (default) means the endpoint is locked
+    /// down — every caller gets 403.
+    pub metrics_whitelist: Arc<Vec<IpNet>>,
     /// UIDs allowed to connect to the admin UDS listener. Empty = "only the
     /// homecore service UID", which is resolved and added by main.rs at
     /// startup. Checked defensively after filesystem perms so a misconfigured
@@ -498,6 +505,7 @@ impl AppState {
             jwt: Arc::new(jwt),
             event_log,
             whitelist: Arc::new(whitelist),
+            metrics_whitelist: Arc::new(Vec::new()),
             uds_allowed_uids: Arc::new(std::collections::HashSet::new()),
             refresh_token_expiry_days: 30,
             modes_path: modes_path.map(Arc::new),
@@ -671,6 +679,13 @@ impl AppState {
         self.log_level_handle = Some(handle);
         self
     }
+
+    /// Configure the IP whitelist for `GET /api/v1/metrics`. An empty list
+    /// (the default) leaves the endpoint locked down — every caller gets 403.
+    pub fn with_metrics_whitelist(mut self, allow: Vec<IpNet>) -> Self {
+        self.metrics_whitelist = Arc::new(allow);
+        self
+    }
 }
 
 /// Build the top-level axum `Router`.
@@ -679,7 +694,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
     let public = Router::new()
         .route("/health", get(handlers::health))
         .route("/metrics", get(metrics::metrics_handler))
-        .route("/auth/login", post(auth_handlers::login))
+        .route(
+            "/auth/login",
+            post(auth_handlers::login)
+                .layer(middleware::from_fn(rate_limit::login_rate_limit)),
+        )
         .route("/auth/refresh", post(auth_handlers::refresh))
         // WebSocket stream authenticates via ?token= query param (browsers can't
         // set Authorization headers during WS upgrade).

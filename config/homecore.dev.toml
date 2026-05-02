@@ -6,8 +6,8 @@
 #            --config config/homecore.dev.toml
 #
 # Plugin binary paths are relative to HOMECORE_HOME and point directly into
-# each plugin's cargo target/debug directory so no install step is needed
-# during development.
+# the shared plugins workspace target/debug/ directory (per the meta-layout
+# at ../plugins/Cargo.toml) so no install step is needed during development.
 #
 # DO NOT use this config in production — use config/homecore.toml instead.
 
@@ -22,7 +22,7 @@ port = 8080
 # Embedded MQTT broker
 # ---------------------------------------------------------------------------
 [broker]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 1883
 # v5_port = 1884
 
@@ -44,10 +44,21 @@ recover_band_pct = 5.0
 # notify_on_recovered  = false
 
 # ---------------------------------------------------------------------------
+# Prometheus metrics endpoint  (GET /api/v1/metrics)
+# ---------------------------------------------------------------------------
+# IP whitelist — default-deny. Empty list = endpoint returns 403 to everyone.
+[metrics]
+whitelist = [
+    "127.0.0.1",
+    "10.0.10.200",
+]
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 [auth]
-jwt_secret         = "dev-secret-do-not-use-in-production"
+# jwt_secret is auto-generated and persisted to {state_db parent}/jwt_secret
+# (0600). Do not set inline — it would commit the signing key into git.
 token_expiry_hours = 24
 
 whitelist = [
@@ -148,55 +159,55 @@ catchup_window_minutes = 15
 
 [[plugins]]
 id      = "plugin.yolink"
-binary  = "../plugins/hc-yolink/target/debug/hc-yolink"
+binary  = "../plugins/target/debug/hc-yolink"
 config  = "../plugins/hc-yolink/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.lutron"
-binary  = "../plugins/hc-lutron/target/debug/hc-lutron"
+binary  = "../plugins/target/debug/hc-lutron"
 config  = "../plugins/hc-lutron/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.caseta"
-binary  = "../plugins/hc-caseta/target/debug/hc-caseta"
+binary  = "../plugins/target/debug/hc-caseta"
 config  = "../plugins/hc-caseta/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.sonos"
-binary  = "../plugins/hc-sonos/target/debug/hc-sonos"
+binary  = "../plugins/target/debug/hc-sonos"
 config  = "../plugins/hc-sonos/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.zwave"
-binary  = "../plugins/hc-zwave/target/debug/hc-zwave"
+binary  = "../plugins/target/debug/hc-zwave"
 config  = "../plugins/hc-zwave/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.hue"
-binary  = "../plugins/hc-hue/target/debug/hc-hue"
+binary  = "../plugins/target/debug/hc-hue"
 config  = "../plugins/hc-hue/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.wled"
-binary  = "../plugins/hc-wled/target/debug/hc-wled"
+binary  = "../plugins/target/debug/hc-wled"
 config  = "../plugins/hc-wled/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.isy"
-binary  = "../plugins/hc-isy/target/debug/hc-isy"
+binary  = "../plugins/target/debug/hc-isy"
 config  = "../plugins/hc-isy/config/config.dev.toml"
 enabled = false
 
 [[plugins]]
 id      = "plugin.thermostat"
-binary  = "../plugins/hc-thermostat/target/debug/hc-thermostat"
+binary  = "../plugins/target/debug/hc-thermostat"
 config  = "../plugins/hc-thermostat/config/config.dev.toml"
 enabled = true
 
@@ -208,7 +219,7 @@ enabled = false
 
 [[plugins]]
 id      = "plugin.ecowitt"
-binary  = "../plugins/hc-ecowitt/target/debug/hc-ecowitt"
+binary  = "../plugins/target/debug/hc-ecowitt"
 config  = "../plugins/hc-ecowitt/config/config.dev.toml"
 enabled = true
 
@@ -218,7 +229,7 @@ enabled = true
 # of the Leptos ActionDrawer.
 [[plugins]]
 id      = "hc-captest"
-binary  = "../plugins/hc-captest/target/debug/hc-captest"
+binary  = "../plugins/target/debug/hc-captest"
 config  = "../plugins/hc-captest/config/config.dev.toml"
 enabled = true
 

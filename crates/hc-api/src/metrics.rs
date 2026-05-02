@@ -17,8 +17,13 @@
 //! so they are isolated from any other crate that might use prometheus.
 
 use anyhow::Result;
-use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -150,11 +155,34 @@ impl MetricsCollector {
 
 /// `GET /metrics` — Prometheus text exposition.
 ///
-/// No authentication required; Prometheus scrapers typically run on the same
-/// local network and cannot set `Authorization` headers easily.  If you need
-/// to restrict access, put HomeCore behind a reverse proxy with basic auth on
-/// the `/metrics` path.
-pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+/// Gated by source IP via `[metrics].whitelist` in homecore.toml. Empty
+/// whitelist (the default) means every caller receives 403 — operators must
+/// explicitly list the scrape source(s). Prometheus scrapers can't set
+/// Authorization headers easily, so network identity is the access control.
+pub async fn metrics_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Canonicalize IPv4-mapped IPv6 (::ffff:x.x.x.x → x.x.x.x) so an IPv4
+    // entry in the whitelist still matches a client connecting through a
+    // dual-stack listener. Mirrors auth_middleware.rs.
+    let remote_ip = match addr.ip() {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+
+    let allowed = state
+        .metrics_whitelist
+        .iter()
+        .any(|net| net.contains(&remote_ip));
+    if !allowed {
+        tracing::debug!(ip = %remote_ip, "metrics scrape denied — IP not in metrics.whitelist");
+        return (StatusCode::FORBIDDEN, "metrics access denied\n").into_response();
+    }
+
     let m = &state.metrics;
 
     // Refresh gauges from live state before encoding.

@@ -188,6 +188,8 @@ struct AppConfig {
     battery: BatterySection,
     #[serde(default)]
     influx: InfluxConfig,
+    #[serde(default)]
+    metrics: MetricsSection,
 }
 
 impl AppConfig {
@@ -551,6 +553,22 @@ impl Default for LocationSection {
     }
 }
 
+/// `[metrics]` section — gates `GET /api/v1/metrics` by source IP.
+///
+/// Prometheus scrapers can't easily set Authorization headers, so the
+/// metrics endpoint is gated by network identity instead. The whitelist
+/// defaults to empty, which means **no IPs are allowed** — operators must
+/// explicitly list the scrape source(s) before metrics become reachable.
+#[derive(Deserialize, Default)]
+struct MetricsSection {
+    /// IP addresses or CIDR ranges allowed to scrape `/api/v1/metrics`.
+    /// Both IPv4 and IPv6 are supported.
+    /// Example: `whitelist = ["127.0.0.1/32", "10.0.0.0/24"]`.
+    /// Empty (default) means the endpoint returns 403 to every caller.
+    #[serde(default)]
+    whitelist: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct AuthSection {
     /// HMAC-SHA256 secret for signing JWTs. **Deprecated** — prefer leaving
@@ -728,26 +746,13 @@ fn write_initial_admin_password(
 
 /// Generate a random alphanumeric password of the given length.
 fn random_password(len: usize) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use rand::{rngs::OsRng, Rng};
 
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(42);
-    let pid = std::process::id() as u128;
-
-    let charset: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-    let mut result = String::with_capacity(len);
-    let mut state = seed ^ (pid << 32);
-    for i in 0..len {
-        let mut h = DefaultHasher::new();
-        (state ^ (i as u128 * 0x9e3779b97f4a7c15)).hash(&mut h);
-        state = h.finish() as u128;
-        result.push(charset[state as usize % charset.len()] as char);
-    }
-    result
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+    let mut rng = OsRng;
+    (0..len)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
 }
 
 // ── main ────────────────────────────────────────────────────────────────────
@@ -1236,6 +1241,25 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Parse the separate metrics whitelist — same lenient parser as the auth
+    // whitelist (CIDR or bare IP). Empty list means /metrics is unreachable.
+    let metrics_whitelist: Vec<IpNet> = config.metrics.whitelist.iter().filter_map(|s| {
+        s.parse::<IpNet>()
+            .or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from))
+            .map_err(|e| tracing::warn!(entry = %s, error = %e, "Invalid metrics whitelist entry — skipping"))
+            .ok()
+    }).collect();
+
+    if metrics_whitelist.is_empty() {
+        info!("/api/v1/metrics is locked down (no metrics.whitelist configured)");
+    } else {
+        info!(
+            count = metrics_whitelist.len(),
+            entries = %metrics_whitelist.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "),
+            "/api/v1/metrics whitelist active — only these source IPs may scrape"
+        );
+    }
+
     let rule_file_store = RuleFileStore::new(&rules_dir);
 
     let group_store = GroupStore::new(groups_path(&rules_dir));
@@ -1310,7 +1334,8 @@ async fn main() -> Result<()> {
     .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(
         &config.auth.admin_uds.allowed_uids,
     ))
-    .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days);
+    .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days)
+    .with_metrics_whitelist(metrics_whitelist);
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store

@@ -38,6 +38,16 @@ port = 8080
 # requires every client to authenticate with matching credentials.
 # The internal core client must always be listed when auth is enabled.
 #
+# Topic ACLs: rumqttd enforces only CONNECT authentication, NOT topic ACLs.
+# `allow_pub` / `allow_sub` are stored as metadata for documentation and for
+# generating an external Mosquitto config (`hc-cli broker generate-mosquitto-
+# config`). Deploy against external Mosquitto if you need per-topic isolation.
+#
+# Safety guard: homeCore refuses to start if the broker is bound to a
+# non-loopback address with no [[broker.clients]] configured (anonymous + LAN-
+# reachable). Either keep host = "127.0.0.1", or add credentials and remote
+# plugins, or set HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1 to override.
+#
 # TLS: set tls_port + cert_path + key_path to add a TLS listener.
 # cert_path and key_path may be absolute or relative to base_dir.
 # Generate a self-signed cert:
@@ -45,7 +55,7 @@ port = 8080
 #               -days 3650 -nodes -subj "/CN=homecore-broker"
 # ---------------------------------------------------------------------------
 [broker]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 1883
 # MQTT v5 listener (used by newer devices / Shelly Gen2/Gen3).  Set to null to disable.
 # v5_port = 1884
@@ -134,6 +144,17 @@ recover_band_pct = 5.0
 # include_devices      = ["sensor.*", "thermostat.*"]
 # exclude_attributes   = ["last_seen", "uptime"]
 # export_bools         = true      # bool attrs as 0/1 fields
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics endpoint  (GET /api/v1/metrics)
+# ---------------------------------------------------------------------------
+# Gated by source IP — Prometheus scrapers can't easily set Authorization
+# headers, so network identity is the access control. The whitelist is
+# default-deny: with no entries, every caller gets 403. List the scrape
+# source(s) explicitly to enable access.
+#
+# [metrics]
+# whitelist = ["127.0.0.1/32", "10.0.0.0/24"]
 
 # ---------------------------------------------------------------------------
 # Authentication
