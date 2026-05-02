@@ -361,10 +361,19 @@ impl ModeManager {
                     if let Some((_, ref mode_id, new_on)) = next_transition {
                         self.flip_mode(mode_id, new_on, &modes).await;
                     }
-                    // Around midnight: refresh solar times for the new day.
-                    if Local::now().hour() == 0 {
-                        self.apply_initial_states(&modes).await;
-                    }
+                    // Reconcile every mode against the current solar position.
+                    // Handles the simultaneous-edge case (e.g. sunset =
+                    // mode_day OFF + mode_night ON, where next_solar_transition
+                    // surfaces only one of the two candidates), plus DST jumps,
+                    // NTP slews, missed wakes, and the daily refresh of
+                    // "today" times — replaces the previous midnight-only
+                    // refresh.
+                    //
+                    // TODO(TZ-1): apply_initial_states currently uses
+                    // chrono::Local::now() (process TZ). Once TZ-1 lands,
+                    // route through [location].timezone for correctness in
+                    // containerized deployments.
+                    self.apply_initial_states(&modes).await;
                 }
 
                 // ── modes.toml changed on disk ────────────────────────────
@@ -416,6 +425,12 @@ impl ModeManager {
     }
 
     /// Determine and write the correct on/off state for every mode right now.
+    ///
+    /// Called at startup and after every solar wake. Re-deriving from solar
+    /// position is what makes the simultaneous-edge case (two inverse modes
+    /// sharing a transition instant) self-heal: regardless of which single
+    /// candidate `next_solar_transition` surfaced, every mode ends up in the
+    /// correct state for the current moment.
     async fn apply_initial_states(&self, modes: &[ModeConfig]) {
         let today = Local::now().date_naive();
         let lat = self.location.latitude;
