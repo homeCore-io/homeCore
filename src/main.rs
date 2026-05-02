@@ -1058,7 +1058,7 @@ async fn main() -> Result<()> {
     // tokio::broadcast does not buffer for future subscribers.
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
-        let svc = NotificationService::from_configs(config.notify.channels);
+        let svc = NotificationService::from_configs(config.notify.channels)?;
         info!(
             channels = count,
             registered = svc.channel_names().len(),
