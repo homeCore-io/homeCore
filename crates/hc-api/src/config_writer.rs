@@ -14,11 +14,7 @@ use anyhow::{anyhow, Context, Result};
 /// entry is found, or the write fails. The matching entry's other
 /// fields and surrounding TOML structure (other entries, comments,
 /// section ordering) are left untouched.
-pub fn persist_plugin_enabled(
-    config_path: &Path,
-    plugin_id: &str,
-    enabled: bool,
-) -> Result<()> {
+pub fn persist_plugin_enabled(config_path: &Path, plugin_id: &str, enabled: bool) -> Result<()> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("read {}", config_path.display()))?;
 
@@ -89,9 +85,7 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
 
     for (section_path, section_patch) in patch_obj {
         let fields = section_patch.as_object().ok_or_else(|| {
-            anyhow!(
-                "patch[{section_path:?}] must be an object of field=value pairs"
-            )
+            anyhow!("patch[{section_path:?}] must be an object of field=value pairs")
         })?;
 
         // Walk the dotted section path (e.g. "auth.admin_uds") to
@@ -139,14 +133,13 @@ pub fn replace_array_of_tables(
 
     let mut aot = toml_edit::ArrayOfTables::new();
     for (idx, item) in items.iter().enumerate() {
-        let obj = item.as_object().ok_or_else(|| {
-            anyhow!("items[{idx}] must be a JSON object (TOML table)")
-        })?;
+        let obj = item
+            .as_object()
+            .ok_or_else(|| anyhow!("items[{idx}] must be a JSON object (TOML table)"))?;
         let mut tbl = toml_edit::Table::new();
         for (k, v) in obj {
-            let item = json_to_toml_item(v).with_context(|| {
-                format!("items[{idx}] field {k:?}: unsupported value type")
-            })?;
+            let item = json_to_toml_item(v)
+                .with_context(|| format!("items[{idx}] field {k:?}: unsupported value type"))?;
             tbl[k.as_str()] = item;
         }
         aot.push(tbl);
@@ -269,10 +262,7 @@ mod tests {
 
     fn make_temp_config(content: &str) -> tempfile::NamedTempFile {
         use std::io::Write;
-        let mut f = tempfile::Builder::new()
-            .suffix(".toml")
-            .tempfile()
-            .unwrap();
+        let mut f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
     }
@@ -376,7 +366,7 @@ recover_band_pct = 5.0
         // the surrounding section context.
         assert!(after.contains("threshold_pct"));
         assert!(after.contains("25.5"));
-        assert!(!after.contains("20.0"));   // old value gone
+        assert!(!after.contains("20.0")); // old value gone
         assert!(after.contains("recover_band_pct"));
         assert!(after.contains("5.0"));
         assert!(after.contains("[server]"));

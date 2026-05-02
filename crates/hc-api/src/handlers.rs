@@ -5147,11 +5147,7 @@ pub async fn patch_plugin(
         //    and continue. The runtime change in `s.plugins` already
         //    landed above; we just don't survive a restart.
         if let Some(ref path) = s.homecore_config_path {
-            match crate::config_writer::persist_plugin_enabled(
-                path.as_path(),
-                &id,
-                new_enabled,
-            ) {
+            match crate::config_writer::persist_plugin_enabled(path.as_path(), &id, new_enabled) {
                 Ok(()) => {
                     tracing::info!(
                         plugin = %id,
@@ -5201,8 +5197,8 @@ pub async fn patch_plugin(
             } else {
                 "plugin.disabled"
             };
-            let audit_e = audit::entry_from_claims(&claims, event)
-                .with_target("plugin", id.clone());
+            let audit_e =
+                audit::entry_from_claims(&claims, event).with_target("plugin", id.clone());
             audit::emit(&s, audit_e).await;
         }
     }
@@ -6781,8 +6777,8 @@ pub async fn delete_calendar(
         vec![]
     };
 
-    let mut audit_e = audit::entry_from_claims(&claims, "calendar.deleted")
-        .with_target("calendar", id.clone());
+    let mut audit_e =
+        audit::entry_from_claims(&claims, "calendar.deleted").with_target("calendar", id.clone());
     audit_e.detail = json!({
         "referencing_rules": referencing_rules.len(),
     });
@@ -6887,7 +6883,9 @@ pub async fn get_system_config(
     let Some(path) = s.homecore_config_path.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "config path not available — hc-core started without --config" })),
+            Json(
+                json!({ "error": "config path not available — hc-core started without --config" }),
+            ),
         )
             .into_response();
     };
@@ -6903,7 +6901,8 @@ pub async fn get_system_config(
         }
     };
 
-    let parsed: Value = raw.parse::<toml::Value>()
+    let parsed: Value = raw
+        .parse::<toml::Value>()
         .ok()
         .and_then(|t| serde_json::to_value(t).ok())
         .unwrap_or(Value::Null);
@@ -6951,7 +6950,9 @@ pub async fn put_system_config(
     let Some(path) = s.homecore_config_path.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "config path not available — hc-core started without --config" })),
+            Json(
+                json!({ "error": "config path not available — hc-core started without --config" }),
+            ),
         )
             .into_response();
     };

@@ -38,6 +38,16 @@ port = 8080
 # requires every client to authenticate with matching credentials.
 # The internal core client must always be listed when auth is enabled.
 #
+# Topic ACLs: rumqttd enforces only CONNECT authentication, NOT topic ACLs.
+# `allow_pub` / `allow_sub` are stored as metadata for documentation and for
+# generating an external Mosquitto config (`hc-cli broker generate-mosquitto-
+# config`). Deploy against external Mosquitto if you need per-topic isolation.
+#
+# Safety guard: homeCore refuses to start if the broker is bound to a
+# non-loopback address with no [[broker.clients]] configured (anonymous + LAN-
+# reachable). Either keep host = "127.0.0.1", or add credentials and remote
+# plugins, or set HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1 to override.
+#
 # TLS: set tls_port + cert_path + key_path to add a TLS listener.
 # cert_path and key_path may be absolute or relative to base_dir.
 # Generate a self-signed cert:
@@ -45,7 +55,7 @@ port = 8080
 #               -days 3650 -nodes -subj "/CN=homecore-broker"
 # ---------------------------------------------------------------------------
 [broker]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 1883
 # tls_port = 8883
 # cert_path = "config/broker.crt"   # relative to base_dir

@@ -139,6 +139,67 @@ Physical devices (Zigbee, Z-Wave, WiFi, cloud APIs)
 
 ---
 
+## Security model
+
+homeCore is built for the single-operator homelab. The defaults are tuned for that — loopback-only, MQTT auth optional, scrape endpoints locked down. The points below are the parts where the deployment choice changes the security posture; read them before exposing homeCore beyond a single host.
+
+### MQTT broker — authn only, not authz
+
+The embedded `rumqttd` broker enforces **CONNECT authentication only**. The `allow_pub` / `allow_sub` patterns in `[[broker.clients]]` are stored as metadata for documentation and for generating an external Mosquitto config — `rumqttd` itself does not enforce per-topic ACLs at publish or subscribe time.
+
+Implications:
+- A compromised or malicious plugin connected to the embedded broker can publish to any topic, including command topics for devices it doesn't own and core management topics.
+- Topic isolation between plugins requires deploying against an **external Mosquitto broker**. Generate a deployment-ready config with `hc-cli broker generate-mosquitto-config`. See `mqttAuthzPlan.md` for the full plan.
+
+### Broker bind address — default loopback
+
+The default `[broker].host` is `127.0.0.1`. Plugins that run on the same host connect over loopback; the broker is unreachable from the LAN unless you change this.
+
+If you set `[broker].host` to a non-loopback address (e.g. `0.0.0.0` for remote plugins), homeCore **refuses to start unless you also configure `[[broker.clients]]` credentials**. The combination "anonymous + LAN-reachable" means anything on your network can publish to any topic, and the embedded broker won't stop it. To force the unsafe combination (e.g. you've isolated MQTT on its own VLAN), set the env var `HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1` — the warning still logs, but startup proceeds.
+
+### REST API — JWT bearer, rate limited
+
+- Authentication is JWT HS256 with a persistent 32-byte secret auto-generated on first boot to `<state-db-parent>/jwt_secret` (mode `0600`). Tokens survive restarts.
+- Passwords are Argon2id (m=64MiB, t=3, p=4) with a per-password salt.
+- The first-boot admin password is generated with the OS CSPRNG and written 0600 to `INITIAL_ADMIN_PASSWORD` next to the state DB. Delete it after first login; homeCore does not regenerate it.
+- `POST /api/v1/auth/login` is per-IP rate-limited (5 attempts per 60 s; further requests get HTTP 429 with `Retry-After`).
+- Refresh tokens rotate on every `/auth/refresh` and detect parent-chain reuse (token theft).
+- API keys (prefix `hc_sk_`) are hashed with Argon2id and verified per-request with lighter parameters.
+
+### Prometheus metrics — IP whitelist, default deny
+
+`GET /api/v1/metrics` is gated by source IP via `[metrics].whitelist` (CIDR or bare IP). The whitelist defaults to **empty**, which means every caller gets `403`. Prometheus scrapers can't easily set `Authorization` headers, so network identity is the access control. Example:
+
+```toml
+[metrics]
+whitelist = ["127.0.0.1/32", "10.0.0.0/24"]
+```
+
+### Web admin clients — token storage trade-off
+
+The Leptos and React admin clients store the JWT in browser `localStorage`. This is a deliberate choice for v0.1.0:
+
+- API requests carry the token via `Authorization: Bearer`. Cross-origin requests can't set custom headers, so this is CSRF-safe by browser CORS without needing a CSRF token flow.
+- WebSocket and Server-Sent Events streams pass the token as a `?token=…` query parameter because `EventSource` can't set custom headers on the upgrade request.
+- `localStorage` is JavaScript-readable. If an XSS bug is ever introduced in the admin UI, an attacker could exfiltrate the token. We have no XSS sinks today (no `dangerouslySetInnerHTML`, no `inner_html` on user-controlled fields), but this remains a class of risk worth naming.
+
+For homeCore's primary deployment model — single-operator homelab, one admin account — this trade-off is reasonable. An XSS in the admin UI would let the attacker act as the admin during the session regardless of where the token lives; token exfiltration only changes the recovery story, not the in-the-moment blast radius.
+
+If your deployment doesn't match the single-operator model — multi-user with reduced-trust roles, admin UI exposed on a less-trusted browsing context (work laptop, kiosk), or any internet-facing surface — consider waiting for v0.2.0, which is planned to migrate to an HttpOnly + Secure cookie flow with CSRF protection. That migration also retires the `?token=` query-param mechanism on streaming endpoints (cookies auto-attach to WebSocket and EventSource connections without it).
+
+### Plugin secrets in config
+
+Each plugin reads its config from a `config.toml` next to its binary. These files are gitignored by default and contain credentials for the device side (Hue app keys, YoLink client secrets, Lutron integration passwords, etc.). Treat them as secrets:
+- File mode `0600` recommended on shared hosts.
+- The `config.toml.example` files in each plugin repo use placeholder values; the real values land only in your local `config.toml`.
+- Plugin logs are forwarded over MQTT to `homecore/plugins/<id>/logs` for the live log stream. Do not log credentials from plugin code — they will be re-broadcast.
+
+### Reporting issues
+
+If you find a vulnerability, please report it through GitHub's private vulnerability reporting at <https://github.com/homeCore-io/homeCore/security/advisories/new> rather than opening a public issue.
+
+---
+
 ## Configuration
 
 The main config file is `config/homecore.toml`. Key sections:

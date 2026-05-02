@@ -28,8 +28,8 @@ members = [
 
 [workspace.dependencies]
 tokio             = { version = "1", features = ["full"] }
-rumqttd           = "0.19"
-rumqttc           = "0.24"
+rumqttd           = "0.20"
+rumqttc           = "0.25"
 axum              = { version = "0.7", features = ["ws"] }
 redb              = "2"
 rusqlite          = { version = "0.31", features = ["bundled"] }

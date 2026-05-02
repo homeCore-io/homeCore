@@ -206,9 +206,53 @@ impl Broker {
         }
     }
 
+    /// Refuse to start the embedded broker in the most dangerous configuration:
+    /// bound to a non-loopback address with no `[[broker.clients]]` configured.
+    /// rumqttd does not enforce topic ACLs, so anonymous + remotely-reachable
+    /// means anything on the LAN can publish to any topic — including device
+    /// command and core management topics.
+    ///
+    /// Operators who genuinely want this combination (e.g. behind an isolated
+    /// VLAN with external firewall) can set `HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1`
+    /// to bypass the check; the guard still emits a loud `error!` log.
+    fn validate_safety(&self) -> Result<()> {
+        let host: Ipv4Addr = self.config.host.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let is_loopback_only = host.is_loopback();
+        let anonymous = self.config.clients.is_empty();
+
+        if is_loopback_only || !anonymous {
+            return Ok(());
+        }
+
+        if std::env::var("HC_ALLOW_ANONYMOUS_REMOTE_BROKER").as_deref() == Ok("1") {
+            tracing::error!(
+                host = %self.config.host,
+                "Embedded broker accepting anonymous connections on a non-loopback \
+                 address — explicitly allowed via HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1. \
+                 Anyone reachable on this network can publish to any topic. \
+                 This is unsafe outside an isolated VLAN."
+            );
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "[broker] is bound to {host} (non-loopback) with no [[broker.clients]] \
+             credentials configured. The embedded rumqttd broker only enforces \
+             CONNECT authentication — without credentials, anyone on this network \
+             can publish to any topic.\n\n\
+             Choose one:\n  \
+               1. Set [broker].host = \"127.0.0.1\" to keep MQTT loopback-only.\n  \
+               2. Add at least one [[broker.clients]] entry with credentials \
+                  (run `hc-cli broker generate-credentials` to scaffold).\n  \
+               3. If you understand the risk and have isolated this network \
+                  another way, set HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1."
+        );
+    }
+
     /// Start the broker synchronously.  Blocks until the broker exits.
     /// Call [`Broker::spawn`] to run it in a background thread instead.
     pub fn start(self) -> Result<()> {
+        self.validate_safety()?;
         let port = self.config.port;
         info!(port, "Embedded MQTT broker starting");
         let mut broker = RumqttdBroker::new(self.build_config());
@@ -219,6 +263,10 @@ impl Broker {
     /// Spawn the broker on a dedicated OS thread.  Returns after the broker
     /// has had a brief moment to bind its port.
     pub fn spawn(self) -> Result<()> {
+        // Run the safety check on the calling thread so a misconfigured broker
+        // aborts startup rather than logging an error in a background thread
+        // and letting homeCore continue without a working broker.
+        self.validate_safety()?;
         let port = self.config.port;
         std::thread::Builder::new()
             .name("hc-broker".into())
@@ -232,5 +280,63 @@ impl Broker {
         std::thread::sleep(std::time::Duration::from_millis(300));
         info!(port, "Embedded MQTT broker ready");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(host: &str, with_creds: bool) -> BrokerConfig {
+        BrokerConfig {
+            host: host.into(),
+            port: 1883,
+            v5_port: None,
+            tls_port: None,
+            cert_path: None,
+            key_path: None,
+            clients: if with_creds {
+                vec![ClientAcl {
+                    client_id: "internal.core".into(),
+                    password: "x".into(),
+                    allow_pub: vec![],
+                    allow_sub: vec![],
+                }]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    #[test]
+    fn loopback_with_no_creds_is_allowed() {
+        Broker::new(cfg("127.0.0.1", false))
+            .validate_safety()
+            .expect("loopback + anonymous is the safe default");
+    }
+
+    #[test]
+    fn non_loopback_with_creds_is_allowed() {
+        Broker::new(cfg("0.0.0.0", true))
+            .validate_safety()
+            .expect("credentials gate the LAN-reachable broker");
+    }
+
+    // Refuse-and-override behaviors share a process-global env var, so they
+    // run together to avoid racing parallel test threads.
+    #[test]
+    fn non_loopback_anonymous_refuses_unless_overridden() {
+        std::env::remove_var("HC_ALLOW_ANONYMOUS_REMOTE_BROKER");
+        let err = Broker::new(cfg("0.0.0.0", false))
+            .validate_safety()
+            .expect_err("loopback-bound anonymous broker should refuse to start");
+        let msg = format!("{err}");
+        assert!(msg.contains("HC_ALLOW_ANONYMOUS_REMOTE_BROKER"));
+        assert!(msg.contains("[[broker.clients]]"));
+
+        std::env::set_var("HC_ALLOW_ANONYMOUS_REMOTE_BROKER", "1");
+        let result = Broker::new(cfg("0.0.0.0", false)).validate_safety();
+        std::env::remove_var("HC_ALLOW_ANONYMOUS_REMOTE_BROKER");
+        result.expect("override env should bypass the safety check");
     }
 }
