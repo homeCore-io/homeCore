@@ -624,10 +624,7 @@ impl AppState {
     /// Attach the graceful-shutdown sender so POST /system/restart
     /// can trigger a clean exit. The runtime supervisor is expected
     /// to spawn the process again after exit.
-    pub fn with_shutdown_tx(
-        mut self,
-        tx: tokio::sync::watch::Sender<bool>,
-    ) -> Self {
+    pub fn with_shutdown_tx(mut self, tx: tokio::sync::watch::Sender<bool>) -> Self {
         self.shutdown_tx = Some(Arc::new(tx));
         self
     }
@@ -696,8 +693,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/metrics", get(metrics::metrics_handler))
         .route(
             "/auth/login",
-            post(auth_handlers::login)
-                .layer(middleware::from_fn(rate_limit::login_rate_limit)),
+            post(auth_handlers::login).layer(middleware::from_fn(rate_limit::login_rate_limit)),
         )
         .route("/auth/refresh", post(auth_handlers::refresh))
         // WebSocket stream authenticates via ?token= query param (browsers can't

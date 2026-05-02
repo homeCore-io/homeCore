@@ -216,11 +216,7 @@ impl Broker {
     /// VLAN with external firewall) can set `HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1`
     /// to bypass the check; the guard still emits a loud `error!` log.
     fn validate_safety(&self) -> Result<()> {
-        let host: Ipv4Addr = self
-            .config
-            .host
-            .parse()
-            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let host: Ipv4Addr = self.config.host.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
         let is_loopback_only = host.is_loopback();
         let anonymous = self.config.clients.is_empty();
 

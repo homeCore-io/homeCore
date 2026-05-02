@@ -74,7 +74,9 @@ impl Pattern {
             Pattern::Exact(want) => s == want,
             Pattern::StartsWith(p) => s.starts_with(p),
             Pattern::EndsWith(p) => s.ends_with(p),
-            Pattern::StartsAndEnds(p, q) => s.starts_with(p) && s.ends_with(q) && s.len() >= p.len() + q.len(),
+            Pattern::StartsAndEnds(p, q) => {
+                s.starts_with(p) && s.ends_with(q) && s.len() >= p.len() + q.len()
+            }
         }
     }
 }

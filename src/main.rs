@@ -12,9 +12,9 @@ use hc_api::{
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
 use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
+use hc_influx::InfluxConfig;
 use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
-use hc_influx::InfluxConfig;
 use hc_notify::{ChannelConfig, NotificationService};
 use hc_state::StateStore;
 use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, EcosystemRouter};
@@ -699,10 +699,7 @@ fn default_admin_password_path(base_dir: &std::path::Path) -> std::path::PathBuf
 /// Write the auto-generated admin password to `path` with 0600 perms,
 /// creating the parent directory if needed. Body is a small banner so
 /// the file is self-explanatory if anyone opens it months later.
-fn write_initial_admin_password(
-    path: &std::path::Path,
-    password: &str,
-) -> std::io::Result<()> {
+fn write_initial_admin_password(path: &std::path::Path, password: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {

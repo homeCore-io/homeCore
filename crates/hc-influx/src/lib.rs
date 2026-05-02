@@ -56,10 +56,7 @@ pub fn spawn(
 /// They communicate via a bounded mpsc; if the writer falls behind (Influx
 /// unreachable, slow network) the subscriber drops oldest lines and logs a
 /// warning rather than blocking the main event bus.
-pub async fn run(
-    config: InfluxConfig,
-    mut events: broadcast::Receiver<Event>,
-) -> Result<()> {
+pub async fn run(config: InfluxConfig, mut events: broadcast::Receiver<Event>) -> Result<()> {
     config.validate()?;
     if !config.enabled {
         info!("hc-influx disabled in config — not starting");
@@ -204,12 +201,7 @@ async fn writer_loop(config: InfluxConfig, mut rx: mpsc::Receiver<String>) {
     }
 }
 
-async fn send_batch(
-    client: &reqwest::Client,
-    endpoint: &str,
-    token: &str,
-    buf: &mut Vec<String>,
-) {
+async fn send_batch(client: &reqwest::Client, endpoint: &str, token: &str, buf: &mut Vec<String>) {
     let body = buf.join("\n");
     let count = buf.len();
     buf.clear();
@@ -244,7 +236,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes() {
         match c {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(c as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(c as char)
+            }
             _ => {
                 let _ = std::fmt::Write::write_fmt(&mut out, format_args!("%{c:02X}"));
             }
