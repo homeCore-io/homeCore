@@ -542,6 +542,14 @@ impl Default for SchedulerSection {
 struct LocationSection {
     latitude: f64,
     longitude: f64,
+    /// IANA zone name (e.g. `"America/New_York"`). Drives every
+    /// user-facing timestamp — log file/stderr output, console-style
+    /// API endpoints, mode-manager "what time is it locally" checks.
+    /// Storage stays UTC. Falls back to UTC when unset or unparseable;
+    /// the parse error is logged at startup so a typo is visible
+    /// without reading the source.
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 impl Default for LocationSection {
@@ -549,6 +557,7 @@ impl Default for LocationSection {
         Self {
             latitude: 38.9072,
             longitude: -77.0369,
+            timezone: None,
         }
     }
 }
@@ -808,6 +817,20 @@ async fn main() -> Result<()> {
     // background file-writer thread stays alive.
     // We also wire in a BroadcastLayer so the log-streaming WebSocket endpoint
     // can replay recent lines and subscribe to live log events.
+    //
+    // hc_time::init MUST run before init_with_broadcast — the very first log
+    // line is formatted by the configured-tz timer, and OnceLock-set after
+    // that point is silently lost. Parse failures fall through to the
+    // default UTC (no panic) and emit a warning via eprintln! since logging
+    // isn't up yet.
+    if let Some(name) = config.location.timezone.as_deref() {
+        match hc_time::parse_iana(name) {
+            Ok(tz) => hc_time::init(tz),
+            Err(e) => eprintln!(
+                "[location].timezone unparseable ({e}); falling back to UTC for log/display formatting"
+            ),
+        }
+    }
     let (_logging_handle, log_tx, log_ring, log_level_handle) =
         hc_logging::init_with_broadcast(&config.logging, config.logging.stream.ring_buffer_size)?;
 
@@ -1058,7 +1081,7 @@ async fn main() -> Result<()> {
     // tokio::broadcast does not buffer for future subscribers.
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
-        let svc = NotificationService::from_configs(config.notify.channels);
+        let svc = NotificationService::from_configs(config.notify.channels)?;
         info!(
             channels = count,
             registered = svc.channel_names().len(),
@@ -1083,6 +1106,24 @@ async fn main() -> Result<()> {
     // published by plugins on startup are not missed due to a race condition.
     {
         let _ = ready_rx.await;
+
+        // Publish the configured TZ as a retained MQTT message so plugin
+        // SDKs can pick it up on connect and apply it to their tracing
+        // subscriber. Plugin tracing init runs before broker connect, so
+        // the very first log lines render in UTC; the SDK's subscription
+        // to this topic delivers the retained payload within a few ms of
+        // connect and `hc_time::init` swaps the formatter zone in place.
+        // No catch-up logic needed — `RwLock<Tz>` updates are seen by the
+        // next log event automatically.
+        let tz_name = hc_time::configured_tz().to_string();
+        if let Err(e) = publish_handle
+            .publish_retained("homecore/system/tz", tz_name.clone().into_bytes())
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to publish retained homecore/system/tz");
+        } else {
+            tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
+        }
 
         // Seed plugin records for ALL configured plugins (enabled and disabled)
         // so the API can list them before registration messages arrive.
@@ -1270,11 +1311,20 @@ async fn main() -> Result<()> {
         Default::default()
     });
 
+    let plugin_configs: Vec<hc_api::backup::PluginConfigEntry> = config
+        .plugins
+        .iter()
+        .map(|p| hc_api::backup::PluginConfigEntry {
+            id: p.id.clone(),
+            path: std::path::PathBuf::from(&p.config),
+        })
+        .collect();
     let backup_paths = hc_api::backup::BackupPaths {
         state_db_path: std::path::PathBuf::from(&config.storage.state_db_path),
         history_db_path: std::path::PathBuf::from(&config.storage.history_db_path),
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
+        plugin_configs,
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();

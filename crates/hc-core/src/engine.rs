@@ -1104,7 +1104,7 @@ impl RuleEngine {
             }
 
             Condition::TimeWindow { start, end } => {
-                let now = chrono::Local::now().time();
+                let now = hc_time::now_local().time();
                 let result = if start <= end {
                     now >= *start && now <= *end
                 } else {

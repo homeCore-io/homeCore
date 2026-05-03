@@ -135,7 +135,7 @@ impl RotatingWriter {
     fn next_rotated_path(&self) -> PathBuf {
         // For `Never` strategy, use a full timestamp so every rotation is unique.
         let period = if self.current_period.is_empty() {
-            chrono::Local::now().format("%Y-%m-%dT%H%M%S").to_string()
+            hc_time::now_local().format("%Y-%m-%dT%H%M%S").to_string()
         } else {
             self.current_period.clone()
         };
@@ -195,7 +195,7 @@ fn open_append(path: &Path) -> io::Result<File> {
 /// Compute the current time-period string for the given rotation strategy.
 /// Returns an empty string for `Never` (time-based rotation disabled).
 fn period_str(rotation: &RotationStrategy) -> String {
-    let now = chrono::Local::now();
+    let now = hc_time::now_local();
     match rotation {
         RotationStrategy::Hourly => now.format("%Y-%m-%d_%H").to_string(),
         RotationStrategy::Daily => now.format("%Y-%m-%d").to_string(),

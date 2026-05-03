@@ -17,7 +17,7 @@
 
 use super::apply_state_update;
 use crate::EventBus;
-use chrono::{Datelike, Local, Timelike, Weekday};
+use chrono::{Datelike, Timelike, Weekday};
 use hc_state::StateStore;
 use hc_types::device::DeviceChange;
 use serde_json::json;
@@ -62,7 +62,7 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
         .cloned()
         .unwrap_or_default();
 
-    let now = Local::now();
+    let now = hc_time::now_local();
     let today = weekday_name(now.weekday());
     let now_minutes = now.hour() * 60 + now.minute();
 

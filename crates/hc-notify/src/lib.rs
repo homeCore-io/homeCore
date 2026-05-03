@@ -44,6 +44,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// Sentinel value used in the shipped example configs for Telegram
+/// `bot_token` / `chat_id`. Channels carrying this sentinel are rejected
+/// at boot rather than silently dropping every notification at runtime.
+const TELEGRAM_PLACEHOLDER: &str = "CHANGE_ME";
+
 // ---------------------------------------------------------------------------
 // TOML config types
 // ---------------------------------------------------------------------------
@@ -102,8 +107,16 @@ impl NotificationService {
     }
 
     /// Build a service from TOML-deserialized channel configs.
-    /// Channels that fail to initialise are logged and skipped.
-    pub fn from_configs(configs: Vec<ChannelConfig>) -> Self {
+    ///
+    /// Returns `Err` if a Telegram channel is declared with placeholder
+    /// (`CHANGE_ME`) values for `bot_token` or `chat_id` — better to fail
+    /// fast at boot than to silently drop notifications at runtime when a
+    /// rule fires (release_0_1_1.md S4).
+    ///
+    /// Other channel-init errors (e.g. SMTP host unreachable for email)
+    /// are logged and the offending channel is skipped — those happen at
+    /// runtime and shouldn't block startup.
+    pub fn from_configs(configs: Vec<ChannelConfig>) -> Result<Self> {
         let mut svc = Self::new();
         for cfg in configs {
             let name = cfg.name;
@@ -122,12 +135,19 @@ impl NotificationService {
                     svc.register(name, PushoverChannel::new(pc));
                 }
                 ProviderConfig::Telegram(tc) => {
+                    if tc.bot_token == TELEGRAM_PLACEHOLDER || tc.chat_id == TELEGRAM_PLACEHOLDER {
+                        anyhow::bail!(
+                            "[[notify.channels]] '{name}' (type = telegram) still has \
+                             placeholder values — set a real bot_token (from @BotFather) \
+                             and chat_id, or comment out / remove this channel from the config"
+                        );
+                    }
                     info!(channel = %name, "Registered Telegram notification channel");
                     svc.register(name, TelegramChannel::new(tc));
                 }
             }
         }
-        svc
+        Ok(svc)
     }
 
     /// Send via the named channel.
@@ -166,5 +186,70 @@ impl NotificationService {
 
     pub fn channel_names(&self) -> Vec<&str> {
         self.channels.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn telegram_cfg(name: &str, bot_token: &str, chat_id: &str) -> ChannelConfig {
+        ChannelConfig {
+            name: name.into(),
+            provider: ProviderConfig::Telegram(TelegramConfig {
+                bot_token: bot_token.into(),
+                chat_id: chat_id.into(),
+                markdown: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn telegram_placeholder_bot_token_refuses_boot() {
+        let result = NotificationService::from_configs(vec![telegram_cfg(
+            "telegram",
+            TELEGRAM_PLACEHOLDER,
+            "-100123456789",
+        )]);
+        let err = result
+            .err()
+            .expect("expected boot-time error for placeholder bot_token");
+        let msg = err.to_string();
+        assert!(msg.contains("placeholder"), "error message: {msg}");
+        assert!(msg.contains("telegram"), "error message: {msg}");
+    }
+
+    #[test]
+    fn telegram_placeholder_chat_id_refuses_boot() {
+        let result = NotificationService::from_configs(vec![telegram_cfg(
+            "telegram",
+            "123456:ABC-DEF",
+            TELEGRAM_PLACEHOLDER,
+        )]);
+        let err = result
+            .err()
+            .expect("expected boot-time error for placeholder chat_id");
+        assert!(err.to_string().contains("placeholder"));
+    }
+
+    #[test]
+    fn telegram_real_values_register_cleanly() {
+        let svc = NotificationService::from_configs(vec![telegram_cfg(
+            "telegram",
+            "123456:ABC-DEF",
+            "-100123456789",
+        )])
+        .expect("real values should register without error");
+        assert_eq!(svc.channel_names(), vec!["telegram"]);
+    }
+
+    #[test]
+    fn empty_config_is_fine() {
+        let svc = NotificationService::from_configs(vec![]).expect("empty is OK");
+        assert!(svc.is_empty());
     }
 }

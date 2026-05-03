@@ -236,8 +236,10 @@ enabled = true
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
-[[notify.channels]]
-name      = "telegram"
-type      = "telegram"
-bot_token = "CHANGE_ME"   # Telegram Bot API token from @BotFather
-chat_id   = "CHANGE_ME"   # your chat/group/channel ID
+# Uncomment and set real values to enable. Leaving "CHANGE_ME" in place
+# now causes the server to refuse to start (S4 in release_0_1_1.md).
+# [[notify.channels]]
+# name      = "telegram"
+# type      = "telegram"
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# chat_id   = "-100123456789"

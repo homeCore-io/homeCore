@@ -121,13 +121,14 @@ mod tests {
     use super::*;
 
     fn cfg_with_targets(targets: &[(&str, &str)]) -> LoggingConfig {
-        let mut c = LoggingConfig::default();
-        c.level = "info".into();
-        c.targets = targets
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        c
+        LoggingConfig {
+            level: "info".into(),
+            targets: targets
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..LoggingConfig::default()
+        }
     }
 
     #[test]

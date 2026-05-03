@@ -120,13 +120,13 @@ impl ScriptRuntime {
 
         // Time helpers — always available, no side effects.
         engine.register_fn("current_hour", || -> i64 {
-            chrono::Local::now().hour() as i64
+            hc_time::now_local().hour() as i64
         });
         engine.register_fn("current_minute", || -> i64 {
-            chrono::Local::now().minute() as i64
+            hc_time::now_local().minute() as i64
         });
         engine.register_fn("current_weekday", || -> String {
-            format!("{:?}", chrono::Local::now().weekday())
+            format!("{:?}", hc_time::now_local().weekday())
         });
 
         Self { engine }
