@@ -136,3 +136,4 @@ hc-types     = { path = "crates/hc-types" }
 hc-logging   = { path = "crates/hc-logging" }
 hc-api-types = { path = "crates/hc-api-types" }
 hc-auth      = { path = "crates/hc-auth" }
+hc-time      = { path = "crates/hc-time" }

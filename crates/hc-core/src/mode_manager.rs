@@ -200,11 +200,21 @@ pub fn remove_mode(path: &Path, id: &str) -> Result<()> {
 
 /// Whether a solar mode is currently active based on local clock.
 ///
-/// Handles overnight windows (e.g. sunset → sunrise wraps midnight).
+/// `now_time` is the wall-clock time-of-day in the configured zone.
+/// Plumbed as a parameter (rather than read inline from
+/// `hc_time::now_local()`) so unit tests can pin behavior at exact
+/// boundary instants — sunrise/sunset edge cases are otherwise
+/// impossible to hit reliably with clock-based testing.
+///
+/// Handles overnight windows (e.g. sunset → sunrise wraps midnight)
+/// and the simultaneous-edge case where `on_t == off_t` (two inverse
+/// modes share a transition instant — `>=` on both sides ensures the
+/// mode is on at the boundary rather than off).
 fn solar_mode_is_on(
     lat: f64,
     lon: f64,
     today: NaiveDate,
+    now_time: chrono::NaiveTime,
     on_ev: SunEventType,
     off_ev: SunEventType,
     on_off: i32,
@@ -212,12 +222,11 @@ fn solar_mode_is_on(
 ) -> Option<bool> {
     let on_t = solar_event_time(lat, lon, today, on_ev, on_off)?;
     let off_t = solar_event_time(lat, lon, today, off_ev, off_off)?;
-    let now = hc_time::now_local().time();
     // Overnight window (sunset → sunrise): on_t is later in the day than off_t.
     Some(if on_t > off_t {
-        now >= on_t || now < off_t
+        now_time >= on_t || now_time < off_t
     } else {
-        now >= on_t && now < off_t
+        now_time >= on_t && now_time < off_t
     })
 }
 
@@ -430,7 +439,9 @@ impl ModeManager {
     /// candidate `next_solar_transition` surfaced, every mode ends up in the
     /// correct state for the current moment.
     async fn apply_initial_states(&self, modes: &[ModeConfig]) {
-        let today = hc_time::now_local().date_naive();
+        let now = hc_time::now_local();
+        let today = now.date_naive();
+        let now_time = now.time();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
 
@@ -444,6 +455,7 @@ impl ModeManager {
                         lat,
                         lon,
                         today,
+                        now_time,
                         on_ev,
                         off_ev,
                         mode.on_offset_minutes,
@@ -659,7 +671,9 @@ impl ModeManager {
         }
 
         // New or changed modes → recompute and apply state.
-        let today = hc_time::now_local().date_naive();
+        let now = hc_time::now_local();
+        let today = now.date_naive();
+        let now_time = now.time();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
 
@@ -675,6 +689,7 @@ impl ModeManager {
                                 lat,
                                 lon,
                                 today,
+                                now_time,
                                 on_ev,
                                 off_ev,
                                 new_mode.on_offset_minutes,
@@ -723,4 +738,138 @@ fn parse_mode_cmd_topic(topic: &str) -> Option<&str> {
 
 fn fmt_time(t: chrono::NaiveTime) -> String {
     format!("{:02}:{:02}", t.hour(), t.minute())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests pin `solar_mode_is_on` behavior at boundary instants —
+    //! sunrise/sunset edges and overnight wraps. Solar event times
+    //! are computed deterministically from lat/lon/date, so the
+    //! expected `on/off` is checkable by inspection: pick a `now_time`
+    //! relative to the day's actual sunrise/sunset and assert.
+    //!
+    //! Closes the MODE-1 simultaneous-edge follow-up — mode_manager
+    //! had no existing test scaffold; adding one required only that
+    //! `solar_mode_is_on` accept `now_time` as a parameter (TZ-1.d).
+    use super::*;
+    use chrono::NaiveDate;
+    use hc_types::rule::SunEventType;
+    // Washington, DC — same coordinates as the default config so
+    // expected sunrise/sunset numbers match what users see.
+    const LAT: f64 = 38.9072;
+    const LON: f64 = -77.0369;
+
+    fn naive_time(h: u32, m: u32) -> chrono::NaiveTime {
+        chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn day_mode_on_during_daylight() {
+        // 2026-06-21 (summer solstice) — high noon DC is unambiguously
+        // between sunrise and sunset. Use UTC noon so we don't have to
+        // think about offsets; solar_event_time returns UTC times for
+        // sun position, which is what the rest of the function compares
+        // against.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
+        let on = solar_mode_is_on(
+            LAT,
+            LON,
+            date,
+            naive_time(16, 0), // noon EDT ≈ 16:00 UTC
+            SunEventType::Sunrise,
+            SunEventType::Sunset,
+            0,
+            0,
+        );
+        assert_eq!(on, Some(true), "day mode should be ON at solar noon");
+    }
+
+    #[test]
+    fn night_mode_on_during_overnight_window() {
+        // mode_night uses inverse events: ON at sunset, OFF at sunrise.
+        // 03:00 UTC mid-summer is well after sunset and before sunrise
+        // — overnight window is active.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
+        let on = solar_mode_is_on(
+            LAT,
+            LON,
+            date,
+            naive_time(3, 0),
+            SunEventType::Sunset,
+            SunEventType::Sunrise,
+            0,
+            0,
+        );
+        assert_eq!(on, Some(true), "night mode should be ON at 03:00 UTC");
+    }
+
+    #[test]
+    fn simultaneous_edge_admits_mode_on_at_boundary() {
+        // The bug MODE-1 surfaced: at the exact transition instant, an
+        // off-by-one in the `>` vs `>=` comparison would leave the
+        // about-to-flip mode in the wrong state for one tick. With the
+        // `>= on_t` rule, a mode whose ON window starts NOW is reported
+        // active immediately, not on the next tick.
+        //
+        // Construct a same-day window (on=sunrise, off=sunset) and ask
+        // at exactly the day's computed sunrise time. Expected: ON.
+        let date = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
+        let sunrise = solar_event_time(LAT, LON, date, SunEventType::Sunrise, 0).unwrap();
+        let on_at_edge = solar_mode_is_on(
+            LAT,
+            LON,
+            date,
+            sunrise,
+            SunEventType::Sunrise,
+            SunEventType::Sunset,
+            0,
+            0,
+        );
+        assert_eq!(
+            on_at_edge,
+            Some(true),
+            "mode whose ON window starts at `now` must be reported active at the boundary"
+        );
+    }
+
+    #[test]
+    fn dst_jump_doesnt_skew_solar_eval() {
+        // DST jumps the wall clock by one hour but solar position
+        // doesn't care — `solar_event_time` returns a UTC `NaiveTime`
+        // and we feed in a UTC `now_time`. The test pins that the
+        // function's "is now between on and off" answer is identical
+        // for two days bracketing a DST transition (March 8 2026 is
+        // US spring-forward) when called with the same UTC instant.
+        //
+        // This is a regression guard: any future "convenience"
+        // refactor that introduces a `chrono::Local` somewhere
+        // inside the helper would skew here.
+        let pre = NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        let post = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        let probe = naive_time(17, 0); // mid-afternoon UTC, daytime both days
+        let pre_on = solar_mode_is_on(
+            LAT,
+            LON,
+            pre,
+            probe,
+            SunEventType::Sunrise,
+            SunEventType::Sunset,
+            0,
+            0,
+        );
+        let post_on = solar_mode_is_on(
+            LAT,
+            LON,
+            post,
+            probe,
+            SunEventType::Sunrise,
+            SunEventType::Sunset,
+            0,
+            0,
+        );
+        assert_eq!(
+            pre_on, post_on,
+            "DST transition shouldn't change the answer for the same UTC probe time"
+        );
+    }
 }

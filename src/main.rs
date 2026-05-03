@@ -1107,6 +1107,24 @@ async fn main() -> Result<()> {
     {
         let _ = ready_rx.await;
 
+        // Publish the configured TZ as a retained MQTT message so plugin
+        // SDKs can pick it up on connect and apply it to their tracing
+        // subscriber. Plugin tracing init runs before broker connect, so
+        // the very first log lines render in UTC; the SDK's subscription
+        // to this topic delivers the retained payload within a few ms of
+        // connect and `hc_time::init` swaps the formatter zone in place.
+        // No catch-up logic needed — `RwLock<Tz>` updates are seen by the
+        // next log event automatically.
+        let tz_name = hc_time::configured_tz().to_string();
+        if let Err(e) = publish_handle
+            .publish_retained("homecore/system/tz", tz_name.clone().into_bytes())
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to publish retained homecore/system/tz");
+        } else {
+            tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
+        }
+
         // Seed plugin records for ALL configured plugins (enabled and disabled)
         // so the API can list them before registration messages arrive.
         {

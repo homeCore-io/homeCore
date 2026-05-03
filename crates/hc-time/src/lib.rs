@@ -17,27 +17,40 @@
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use tracing_subscriber::fmt::time::FormatTime;
 
-static CONFIGURED_TZ: OnceLock<Tz> = OnceLock::new();
+// `RwLock<Tz>` (rather than `OnceLock<Tz>`) so the configured zone
+// can be updated at runtime, not just once at boot. This is what
+// allows the plugin SDK to apply a TZ pushed via the
+// `homecore/system/tz` retained MQTT topic — plugins start their
+// tracing subscriber before MQTT connects, so the very first log
+// lines render in UTC, then the formatter auto-swaps once the
+// retained payload arrives. `RwLock::new` is `const`-stable, so
+// the default-UTC initial value compiles statically.
+//
+// The lock is acquired once per log line on the read side; lock
+// contention is irrelevant at home-automation log volumes.
+static CONFIGURED_TZ: RwLock<Tz> = RwLock::new(Tz::UTC);
 
-/// Set the process-wide configured timezone. Should be called once
-/// at startup, **before** the tracing subscriber is built so
-/// [`ConfiguredTzTime`] reads the right zone for the very first log
-/// line.
+/// Set the process-wide configured timezone.
 ///
-/// Re-init silently no-ops — safe in tests that may run in parallel
-/// or call it multiple times.
+/// Call once at process startup, **before** the tracing subscriber
+/// is built, so [`ConfiguredTzTime`] reads the right zone for the
+/// very first log line. Plugin SDKs may call this again later when
+/// they receive a TZ over MQTT — the most recent successful call
+/// wins, and existing tracing layers pick up the new zone on the
+/// next event without needing to be rebuilt.
 pub fn init(tz: Tz) {
-    let _ = CONFIGURED_TZ.set(tz);
+    if let Ok(mut g) = CONFIGURED_TZ.write() {
+        *g = tz;
+    }
 }
 
 /// Return the configured timezone, defaulting to UTC if [`init`] has
-/// not been called. The default-UTC fallback means callers don't
-/// have to worry about ordering or panics.
+/// not been called (or if the lock is poisoned, defensively).
 pub fn configured_tz() -> Tz {
-    CONFIGURED_TZ.get().copied().unwrap_or(Tz::UTC)
+    CONFIGURED_TZ.read().map(|g| *g).unwrap_or(Tz::UTC)
 }
 
 /// "Now" in the configured zone. Replaces `chrono::Local::now()` for
