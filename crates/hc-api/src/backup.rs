@@ -9,6 +9,11 @@
 //! - `config/modes.toml`    — modes config (if present)
 //! - `config/mode_definitions.json` — criteria-mode definitions (if present)
 //! - `rules/*.ron`          — all rule files (if present)
+//! - `plugins/<plugin_id>/config.toml` — each registered plugin's config
+//!   file (if present). Plugin IDs are used as the archive key so a
+//!   backup taken on host A can restore correctly to host B even when
+//!   the absolute config paths differ — destinations on restore come
+//!   from the *running host's* `[[plugins]]` table.
 //!
 //! The archive is streamed as `application/zip` with a timestamped filename.
 //! Requires Admin role.
@@ -43,6 +48,20 @@ pub struct BackupPaths {
     pub history_db_path: PathBuf,
     pub config_path: PathBuf,
     pub rules_dir: PathBuf,
+    /// One entry per registered plugin. On backup, each entry's file is
+    /// archived under `plugins/<id>/config.toml`; on restore, the
+    /// destination path is looked up by `id` against this same table —
+    /// so cross-host restores work even when the absolute paths differ.
+    pub plugin_configs: Vec<PluginConfigEntry>,
+}
+
+/// A single plugin's config file location, threaded into `BackupPaths`.
+#[derive(Clone)]
+pub struct PluginConfigEntry {
+    /// Plugin id, e.g. `"plugin.hue"`. Used as the archive key.
+    pub id: String,
+    /// Resolved absolute path on the running host.
+    pub path: PathBuf,
 }
 
 pub async fn backup_handler(State(state): State<AppState>, AuthUser(claims): AuthUser) -> Response {
@@ -157,6 +176,14 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
                 add_file(&mut zip, &path, &archive_name, opts)?;
             }
         }
+    }
+
+    // ── Plugin configs ─────────────────────────────────────────────────────
+    // Optional per entry — a freshly-added plugin may not have written its
+    // config file yet, in which case add_file_opt skips silently.
+    for plugin in &paths.plugin_configs {
+        let archive_name = format!("plugins/{}/config.toml", plugin.id);
+        add_file_opt(&mut zip, &plugin.path, &archive_name, opts)?;
     }
 
     let cursor = zip.finish()?;
@@ -305,6 +332,23 @@ fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serd
                 let filename = name.file_name().map(|n| n.to_os_string());
                 filename.map(|n| paths.rules_dir.join(n))
             }
+            _ if name_str.starts_with("plugins/") => {
+                // Archive shape: "plugins/<plugin_id>/config.toml"
+                // Look up the destination path from the running host's
+                // [[plugins]] block — IDs match across hosts, paths don't.
+                // An ID not registered locally is skipped (the source host
+                // had a plugin this host doesn't run); an ID registered
+                // locally writes to whatever path local config dictates.
+                let id = name_str
+                    .strip_prefix("plugins/")
+                    .and_then(|s| s.strip_suffix("/config.toml"))
+                    .unwrap_or("");
+                paths
+                    .plugin_configs
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.path.clone())
+            }
             _ => {
                 skipped.push(name_str);
                 continue;
@@ -335,4 +379,164 @@ fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serd
         "skipped": skipped,
         "message": "Restore complete. Please restart the HomeCore server for changes to take effect.",
     }))
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// Build a `BackupPaths` rooted at `dir`, with the per-file destinations
+    /// already created under `dir`. `plugin_configs` is provided by the caller
+    /// because each test wants different shapes.
+    fn make_paths(dir: &Path, plugin_configs: Vec<PluginConfigEntry>) -> BackupPaths {
+        let state_db = dir.join("state.redb");
+        let history_db = dir.join("history.db");
+        let config_path = dir.join("config/homecore.toml");
+        let rules_dir = dir.join("rules");
+        fs::create_dir_all(rules_dir.parent().unwrap()).unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&rules_dir).unwrap();
+        fs::write(&state_db, b"redb-bytes").unwrap();
+        fs::write(&history_db, b"sqlite-bytes").unwrap();
+        fs::write(&config_path, b"# core config\n").unwrap();
+        BackupPaths {
+            state_db_path: state_db,
+            history_db_path: history_db,
+            config_path,
+            rules_dir,
+            plugin_configs,
+        }
+    }
+
+    fn write_plugin_config(dir: &Path, id: &str, contents: &str) -> PluginConfigEntry {
+        let p = dir.join(format!("plugins/{id}/config.toml"));
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, contents).unwrap();
+        PluginConfigEntry {
+            id: id.to_string(),
+            path: p,
+        }
+    }
+
+    #[test]
+    fn backup_archive_includes_plugin_configs() {
+        let dir = tempdir().unwrap();
+        let hue = write_plugin_config(dir.path(), "plugin.hue", "bridge_ip = \"10.0.0.5\"\n");
+        let yolink =
+            write_plugin_config(dir.path(), "plugin.yolink", "uaid = \"abc\"\n");
+        let paths = make_paths(dir.path(), vec![hue, yolink]);
+
+        let bytes = build_zip(&paths).expect("build_zip");
+
+        // Inspect the archive to confirm the plugin entries are present
+        // with the right contents.
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"plugins/plugin.hue/config.toml".to_string()));
+        assert!(names.contains(&"plugins/plugin.yolink/config.toml".to_string()));
+
+        let mut hue_file = zip.by_name("plugins/plugin.hue/config.toml").unwrap();
+        let mut hue_buf = String::new();
+        hue_file.read_to_string(&mut hue_buf).unwrap();
+        assert!(hue_buf.contains("10.0.0.5"));
+    }
+
+    #[test]
+    fn restore_writes_plugin_configs_translating_paths_across_hosts() {
+        // Simulate a cross-host restore: source plugin paths live under
+        // `src_dir`, destination paths under `dst_dir`. Same plugin ids on
+        // both sides so the path translation should land each file at its
+        // dest-host location.
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+
+        let src_hue = write_plugin_config(
+            src_dir.path(),
+            "plugin.hue",
+            "bridge_ip = \"10.0.0.5\"\n",
+        );
+        let src_paths = make_paths(src_dir.path(), vec![src_hue]);
+        let bytes = build_zip(&src_paths).expect("build_zip");
+
+        // Dest host has a *different* path for the same plugin id.
+        let dst_hue_path = dst_dir.path().join("opt/homecore/plugins/hc-hue/config.toml");
+        let dst_hue = PluginConfigEntry {
+            id: "plugin.hue".to_string(),
+            path: dst_hue_path.clone(),
+        };
+        let dst_paths = make_paths(dst_dir.path(), vec![dst_hue]);
+
+        let summary = extract_restore(&dst_paths, &bytes).expect("extract_restore");
+        assert!(
+            summary["restored"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml"))
+        );
+
+        // File landed at the dest-host path with source-host contents.
+        let written = fs::read_to_string(&dst_hue_path).unwrap();
+        assert!(written.contains("10.0.0.5"));
+    }
+
+    #[test]
+    fn restore_skips_plugin_id_not_registered_on_dest_host() {
+        // Source has plugin.hue; dest host's [[plugins]] does NOT include it.
+        // Expected: file is listed in `skipped`, not written.
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+
+        let src_hue = write_plugin_config(
+            src_dir.path(),
+            "plugin.hue",
+            "bridge_ip = \"10.0.0.5\"\n",
+        );
+        let src_paths = make_paths(src_dir.path(), vec![src_hue]);
+        let bytes = build_zip(&src_paths).expect("build_zip");
+
+        // Dest has no plugins registered.
+        let dst_paths = make_paths(dst_dir.path(), vec![]);
+        let summary = extract_restore(&dst_paths, &bytes).expect("extract_restore");
+
+        assert!(
+            summary["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml")),
+            "plugin entry should be skipped when not registered on dest host: {summary}"
+        );
+        assert!(
+            !summary["restored"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml"))
+        );
+    }
+
+    #[test]
+    fn backup_with_no_plugins_omits_plugin_section() {
+        let dir = tempdir().unwrap();
+        let paths = make_paths(dir.path(), vec![]);
+        let bytes = build_zip(&paths).expect("build_zip");
+        let zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| {
+                zip.clone()
+                    .by_index(i)
+                    .unwrap()
+                    .name()
+                    .to_string()
+            })
+            .collect();
+        assert!(!names.iter().any(|n| n.starts_with("plugins/")));
+    }
 }

@@ -1270,11 +1270,20 @@ async fn main() -> Result<()> {
         Default::default()
     });
 
+    let plugin_configs: Vec<hc_api::backup::PluginConfigEntry> = config
+        .plugins
+        .iter()
+        .map(|p| hc_api::backup::PluginConfigEntry {
+            id: p.id.clone(),
+            path: std::path::PathBuf::from(&p.config),
+        })
+        .collect();
     let backup_paths = hc_api::backup::BackupPaths {
         state_db_path: std::path::PathBuf::from(&config.storage.state_db_path),
         history_db_path: std::path::PathBuf::from(&config.storage.history_db_path),
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
+        plugin_configs,
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();
