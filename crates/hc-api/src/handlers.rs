@@ -5351,6 +5351,31 @@ pub async fn put_plugin_config(
 /// generated `request_id`) to the plugin via the management RPC.  Used for
 /// plugin-defined actions beyond the built-in `get_config`/`set_config`/
 /// `set_log_level` set (e.g. yolink's `rescan_devices`).
+//
+// SAFETY (W2-tail): authorization here is defense-in-depth across two
+// layers, but only Layer 1 covers actions whose capability manifest
+// is unknown:
+//
+//   Layer 1 — `PluginsWrite(claims)` extractor rejects with 403 before
+//             this body runs, for any caller missing the `plugins:write`
+//             scope.
+//   Layer 2 — `requires_admin` check below rejects when the *manifest*
+//             declares `requires_role: Admin` and the caller's role
+//             isn't Admin. Skipped (`requires_admin == false`) for any
+//             action `action_meta == None`.
+//
+// Layer 2 is a refinement of Layer 1 today — it's harmless that it skips
+// for unknown actions, because Layer 1 already restricts to admins (the
+// only role currently granted `plugins:write` is `Role::Admin`, asserted
+// by the `user_can_command_but_not_manage` test in `hc_auth::user`).
+//
+// If a future role is granted `plugins:write` (e.g. a hypothetical
+// `PluginOperator`), unknown manifest actions would silently bypass the
+// role check entirely. When that change lands, either:
+//   (a) require all plugin actions to be in the manifest before they're
+//       dispatched (close the unknown-action path), or
+//   (b) default `requires_admin = true` for `action_meta.is_none()`
+//       (fail closed when we don't know what an action does).
 pub async fn post_plugin_command(
     State(s): State<AppState>,
     PluginsWrite(claims): PluginsWrite,
