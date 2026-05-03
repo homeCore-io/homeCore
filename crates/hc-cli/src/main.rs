@@ -555,7 +555,12 @@ struct BrokerTomlSection {
 #[derive(serde::Deserialize)]
 struct BrokerClientToml {
     id: String,
+    // `password` field is read by the toml deserializer but no longer
+    // used directly — Mosquitto config generation lives in a different
+    // path. Kept for schema-compat; explicit allow rather than removing
+    // because removing changes the parse contract.
     #[serde(default)]
+    #[allow(dead_code)]
     password: String,
     #[serde(default)]
     allow_pub: Vec<String>,

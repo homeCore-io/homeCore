@@ -117,8 +117,10 @@ mod tests {
     fn save_then_load_roundtrip() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("config.toml");
-        let mut cfg = Config::default();
-        cfg.output = "json".into();
+        let cfg = Config {
+            output: "json".into(),
+            ..Config::default()
+        };
         cfg.save(&p).unwrap();
 
         let got = Config::load(&p).unwrap();

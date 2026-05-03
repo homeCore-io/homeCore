@@ -9,10 +9,10 @@ use axum::{
 };
 
 /// Maximum size of an uploaded restore archive. Axum's per-route default
-/// is 2 MiB, which rejects any realistic backup (state.redb + history.db
-/// + plugin configs together easily clear that). 500 MiB is roomy enough
-/// for years of history on a home installation; operators with larger
-/// archives can edit this constant.
+/// is 2 MiB, which rejects any realistic backup — state.redb plus
+/// history.db plus plugin configs together easily clear that. 500 MiB is
+/// roomy enough for years of history on a home installation; operators
+/// with larger archives can edit this constant.
 const RESTORE_BODY_LIMIT_BYTES: usize = 500 * 1024 * 1024;
 use hc_auth::JwtService;
 use hc_core::{CalendarHandle, EventBus};
