@@ -2,10 +2,18 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, patch, post, put},
     Router,
 };
+
+/// Maximum size of an uploaded restore archive. Axum's per-route default
+/// is 2 MiB, which rejects any realistic backup (state.redb + history.db
+/// + plugin configs together easily clear that). 500 MiB is roomy enough
+/// for years of history on a home installation; operators with larger
+/// archives can edit this constant.
+const RESTORE_BODY_LIMIT_BYTES: usize = 500 * 1024 * 1024;
 use hc_auth::JwtService;
 use hc_core::{CalendarHandle, EventBus};
 use hc_mqtt_client::PublishHandle;
@@ -929,7 +937,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/system/status", get(handlers::system_status))
         .route("/system/battery_settings", get(handlers::battery_settings))
         .route("/system/backup", post(backup::backup_handler))
-        .route("/system/restore", post(backup::restore_handler))
+        .route(
+            "/system/restore",
+            post(backup::restore_handler)
+                .layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/system/log-level",
             get(handlers::get_log_level).put(handlers::set_log_level),
