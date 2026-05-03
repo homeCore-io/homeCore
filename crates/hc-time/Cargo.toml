@@ -1,0 +1,11 @@
+[package]
+name    = "hc-time"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Configured-timezone helpers for HomeCore (display layer; storage stays UTC)."
+
+[dependencies]
+chrono             = { workspace = true }
+chrono-tz          = { workspace = true }
+tracing-subscriber = { workspace = true }

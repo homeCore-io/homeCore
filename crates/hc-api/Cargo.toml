@@ -15,6 +15,7 @@ utoipa     = { workspace = true }
 hc-types   = { path = "../hc-types" }
 hc-state   = { path = "../hc-state" }
 hc-core    = { version = "0.1.0", path = "../hc-core" }
+hc-time    = { path = "../hc-time" }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 hc-auth = { version = "0.1.0", path = "../hc-auth" }

@@ -542,6 +542,14 @@ impl Default for SchedulerSection {
 struct LocationSection {
     latitude: f64,
     longitude: f64,
+    /// IANA zone name (e.g. `"America/New_York"`). Drives every
+    /// user-facing timestamp — log file/stderr output, console-style
+    /// API endpoints, mode-manager "what time is it locally" checks.
+    /// Storage stays UTC. Falls back to UTC when unset or unparseable;
+    /// the parse error is logged at startup so a typo is visible
+    /// without reading the source.
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 impl Default for LocationSection {
@@ -549,6 +557,7 @@ impl Default for LocationSection {
         Self {
             latitude: 38.9072,
             longitude: -77.0369,
+            timezone: None,
         }
     }
 }
@@ -808,6 +817,20 @@ async fn main() -> Result<()> {
     // background file-writer thread stays alive.
     // We also wire in a BroadcastLayer so the log-streaming WebSocket endpoint
     // can replay recent lines and subscribe to live log events.
+    //
+    // hc_time::init MUST run before init_with_broadcast — the very first log
+    // line is formatted by the configured-tz timer, and OnceLock-set after
+    // that point is silently lost. Parse failures fall through to the
+    // default UTC (no panic) and emit a warning via eprintln! since logging
+    // isn't up yet.
+    if let Some(name) = config.location.timezone.as_deref() {
+        match hc_time::parse_iana(name) {
+            Ok(tz) => hc_time::init(tz),
+            Err(e) => eprintln!(
+                "[location].timezone unparseable ({e}); falling back to UTC for log/display formatting"
+            ),
+        }
+    }
     let (_logging_handle, log_tx, log_ring, log_level_handle) =
         hc_logging::init_with_broadcast(&config.logging, config.logging.stream.ring_buffer_size)?;
 

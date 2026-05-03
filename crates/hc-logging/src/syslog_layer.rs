@@ -100,7 +100,7 @@ impl SyslogLayer {
         let pri = self.pri(level);
         // RFC 3164 timestamp has no timezone indicator; use local or UTC per config.
         let ts = if self.use_local_time {
-            chrono::Local::now().format("%b %e %H:%M:%S").to_string()
+            hc_time::now_local().format("%b %e %H:%M:%S").to_string()
         } else {
             chrono::Utc::now().format("%b %e %H:%M:%S").to_string()
         };
@@ -116,7 +116,7 @@ impl SyslogLayer {
         let pri = self.pri(level);
         // RFC 5424 uses RFC 3339; include offset for local, Z for UTC.
         let ts = if self.use_local_time {
-            chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+            hc_time::now_local().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
         } else {
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         };

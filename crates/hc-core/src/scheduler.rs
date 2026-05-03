@@ -16,7 +16,7 @@
 
 use crate::calendar_store::CalendarHandle;
 use crate::EventBus;
-use chrono::{Datelike, Local, NaiveTime, Offset, Timelike};
+use chrono::{Datelike, NaiveTime, Offset, Timelike};
 use cron::Schedule;
 use dashmap::DashMap;
 use hc_types::event::Event;
@@ -88,7 +88,7 @@ impl Scheduler {
 
         // ── Main polling loop ───────────────────────────────────────────────
         loop {
-            let now = Local::now();
+            let now = hc_time::now_local();
             let current_time = now.time().with_second(0).unwrap_or(now.time());
             let current_day = now.weekday();
 
@@ -294,7 +294,7 @@ impl Scheduler {
     /// Checks `(now - catchup_window_minutes, now]` in local wall-clock time.
     /// Both `SunEvent` and `TimeOfDay` triggers are considered.
     async fn fire_catchup(&self) {
-        let now = Local::now();
+        let now = hc_time::now_local();
         // Strip seconds and nanoseconds from both endpoints so in_catchup_window
         // comparisons are at minute granularity (matches how trigger times are stored).
         let now_time =
@@ -416,7 +416,7 @@ fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime
 /// Parses the expression, then asks the schedule for its next occurrence after
 /// one minute ago.  If that next occurrence falls within the current minute
 /// (same hour + minute) the rule fires.
-fn cron_fires_now(expression: &str, now: &chrono::DateTime<Local>, rule_name: &str) -> bool {
+fn cron_fires_now(expression: &str, now: &chrono::DateTime<chrono_tz::Tz>, rule_name: &str) -> bool {
     match Schedule::from_str(expression) {
         Ok(schedule) => {
             let prev = *now - chrono::Duration::minutes(1);
@@ -437,8 +437,8 @@ fn cron_fires_now(expression: &str, now: &chrono::DateTime<Local>, rule_name: &s
 /// Returns `true` if the cron expression fired at least once in `(window_start, now]`.
 fn cron_fired_in_window(
     expression: &str,
-    window_start: &chrono::DateTime<Local>,
-    now: &chrono::DateTime<Local>,
+    window_start: &chrono::DateTime<chrono_tz::Tz>,
+    now: &chrono::DateTime<chrono_tz::Tz>,
     rule_name: &str,
 ) -> bool {
     match Schedule::from_str(expression) {
@@ -458,7 +458,7 @@ fn cron_fired_in_window(
 ///
 /// Intentionally ignores seconds and sub-second precision: the scheduler ticks
 /// once per minute, so a minute-level comparison is both correct and sufficient.
-/// Using `==` after `with_second(0)` would fail because `Local::now().time()` carries
+/// Using `==` after `with_second(0)` would fail because `hc_time::now_local().time()` carries
 /// non-zero nanoseconds that `with_second` preserves, while `solar_event_time` and
 /// TOML-parsed times use `from_hms_opt` which produces zero nanoseconds.
 fn times_match(trigger_time: NaiveTime, current_time: NaiveTime) -> bool {
@@ -492,7 +492,7 @@ pub(crate) fn solar_event_time(
         SunEventType::SolarNoon => {
             // Solar noon is just 12:00 adjusted for longitude (UTC result).
             let noon_min = 720.0 - 4.0 * lon - equation_of_time(day_of_year);
-            let utc_offset_min = Local::now().offset().fix().local_minus_utc() as f64 / 60.0;
+            let utc_offset_min = hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
             let total_min = (noon_min + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
             let h = (total_min / 60.0).floor() as u32;
             let m = (total_min % 60.0).abs() as u32;
@@ -525,8 +525,8 @@ pub(crate) fn solar_event_time(
     };
 
     // event_minutes is UTC; convert to local wall-clock time so it can be
-    // compared directly against Local::now().time() in the scheduler.
-    let utc_offset_min = Local::now().offset().fix().local_minus_utc() as f64 / 60.0;
+    // compared directly against hc_time::now_local().time() in the scheduler.
+    let utc_offset_min = hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
     let total_minutes = (event_minutes + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
     let h = (total_minutes / 60.0) as u32;
     let m = (total_minutes % 60.0) as u32;

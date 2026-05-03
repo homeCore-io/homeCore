@@ -86,14 +86,14 @@ impl HcTimer {
 
 impl FormatTime for HcTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        // Route through hc-time so "local" honors the configured
+        // [location].timezone, not the process's TZ env / /etc/localtime.
+        // Plain chrono::Local::now() reads the latter and shows UTC
+        // inside containers regardless of where the operator lives.
         if self.utc {
-            write!(w, "{}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"))
+            hc_time::UtcTime.format_time(w)
         } else {
-            write!(
-                w,
-                "{}",
-                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
-            )
+            hc_time::ConfiguredTzTime.format_time(w)
         }
     }
 }

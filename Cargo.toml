@@ -24,6 +24,7 @@ members = [
     "crates/hc-notify",
     "crates/hc-logging",
     "crates/hc-influx",
+    "crates/hc-time",
 ]
 
 [workspace.dependencies]
@@ -38,6 +39,7 @@ serde             = { version = "1", features = ["derive"] }
 serde_json        = "1"
 uuid              = { version = "1", features = ["v4", "serde"] }
 chrono            = { version = "0.4", features = ["serde"] }
+chrono-tz         = "0.9"
 anyhow            = "1"
 thiserror         = "1"
 tracing           = "0.1"
@@ -80,6 +82,7 @@ hc-topic-map   = { path = "crates/hc-topic-map" }
 hc-notify      = { path = "crates/hc-notify" }
 hc-logging     = { path = "crates/hc-logging" }
 hc-influx      = { path = "crates/hc-influx" }
+hc-time        = { path = "crates/hc-time" }
 ipnet              = { workspace = true }
 tokio              = { workspace = true }
 serde              = { workspace = true }

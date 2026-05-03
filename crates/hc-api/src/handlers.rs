@@ -4289,7 +4289,7 @@ async fn eval_condition_dry_detail(
             }
         }
         Condition::TimeWindow { start, end } => {
-            let now = chrono::Local::now().time();
+            let now = hc_time::now_local().time();
             let passed = if start <= end {
                 now >= *start && now <= *end
             } else {

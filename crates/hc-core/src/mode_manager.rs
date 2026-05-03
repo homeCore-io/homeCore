@@ -29,7 +29,8 @@
 //! the watcher and a clean reload — no separate redb storage needed.
 
 use anyhow::{Context, Result};
-use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono_tz::Tz;
 use hc_types::device::{extract_change_from_command_payload, DeviceChange};
 use hc_types::event::Event;
 use hc_types::rule::SunEventType;
@@ -211,7 +212,7 @@ fn solar_mode_is_on(
 ) -> Option<bool> {
     let on_t = solar_event_time(lat, lon, today, on_ev, on_off)?;
     let off_t = solar_event_time(lat, lon, today, off_ev, off_off)?;
-    let now = Local::now().time();
+    let now = hc_time::now_local().time();
     // Overnight window (sunset → sunrise): on_t is later in the day than off_t.
     Some(if on_t > off_t {
         now >= on_t || now < off_t
@@ -228,9 +229,10 @@ fn next_solar_transition(
     modes: &[ModeConfig],
     lat: f64,
     lon: f64,
-) -> Option<(chrono::DateTime<Local>, String, bool)> {
-    let now = Local::now();
-    let mut candidates: Vec<(chrono::DateTime<Local>, String, bool)> = Vec::new();
+) -> Option<(chrono::DateTime<Tz>, String, bool)> {
+    let tz = hc_time::configured_tz();
+    let now = hc_time::now_local();
+    let mut candidates: Vec<(chrono::DateTime<Tz>, String, bool)> = Vec::new();
 
     for mode in modes {
         if mode.kind != ModeKind::Solar {
@@ -248,7 +250,7 @@ fn next_solar_transition(
             ] {
                 if let Some(t) = solar_event_time(lat, lon, date, ev, offset) {
                     let naive = NaiveDateTime::new(date, t);
-                    if let Some(local_dt) = Local.from_local_datetime(&naive).latest() {
+                    if let Some(local_dt) = tz.from_local_datetime(&naive).latest() {
                         if local_dt > now {
                             candidates.push((local_dt, mode.id.clone(), new_on));
                         }
@@ -369,10 +371,6 @@ impl ModeManager {
                     // "today" times — replaces the previous midnight-only
                     // refresh.
                     //
-                    // TODO(TZ-1): apply_initial_states currently uses
-                    // chrono::Local::now() (process TZ). Once TZ-1 lands,
-                    // route through [location].timezone for correctness in
-                    // containerized deployments.
                     self.apply_initial_states(&modes).await;
                 }
 
@@ -415,11 +413,11 @@ impl ModeManager {
     fn compute_sleep(
         &self,
         modes: &[ModeConfig],
-    ) -> (Duration, Option<(chrono::DateTime<Local>, String, bool)>) {
+    ) -> (Duration, Option<(chrono::DateTime<Tz>, String, bool)>) {
         let next = next_solar_transition(modes, self.location.latitude, self.location.longitude);
         let duration = next
             .as_ref()
-            .and_then(|(dt, _, _)| (*dt - Local::now()).to_std().ok())
+            .and_then(|(dt, _, _)| (*dt - hc_time::now_local()).to_std().ok())
             .unwrap_or(Duration::from_secs(3600));
         (duration, next)
     }
@@ -432,7 +430,7 @@ impl ModeManager {
     /// candidate `next_solar_transition` surfaced, every mode ends up in the
     /// correct state for the current moment.
     async fn apply_initial_states(&self, modes: &[ModeConfig]) {
-        let today = Local::now().date_naive();
+        let today = hc_time::now_local().date_naive();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
 
@@ -473,7 +471,7 @@ impl ModeManager {
 
     /// Persist the device state for a mode and publish `DeviceStateChanged`.
     async fn write_mode_state(&self, mode: &ModeConfig, on: bool, change: Option<DeviceChange>) {
-        let today = Local::now().date_naive();
+        let today = hc_time::now_local().date_naive();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
 
@@ -661,7 +659,7 @@ impl ModeManager {
         }
 
         // New or changed modes → recompute and apply state.
-        let today = Local::now().date_naive();
+        let today = hc_time::now_local().date_naive();
         let lat = self.location.latitude;
         let lon = self.location.longitude;
 

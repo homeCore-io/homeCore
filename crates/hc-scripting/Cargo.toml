@@ -11,3 +11,4 @@ tracing    = { workspace = true }
 serde_json = { workspace = true }
 chrono     = { workspace = true }
 hc-types   = { path = "../hc-types" }
+hc-time    = { path = "../hc-time" }
