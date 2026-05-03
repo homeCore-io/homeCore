@@ -208,6 +208,7 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         "plugins_active":    plugins_active,
         "state_db_bytes":    state_db_bytes,
         "history_db_bytes":  history_db_bytes,
+        "timezone":          hc_time::configured_tz().to_string(),
     }))
 }
 
