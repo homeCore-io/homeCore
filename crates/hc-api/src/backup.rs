@@ -426,8 +426,7 @@ mod tests {
     fn backup_archive_includes_plugin_configs() {
         let dir = tempdir().unwrap();
         let hue = write_plugin_config(dir.path(), "plugin.hue", "bridge_ip = \"10.0.0.5\"\n");
-        let yolink =
-            write_plugin_config(dir.path(), "plugin.yolink", "uaid = \"abc\"\n");
+        let yolink = write_plugin_config(dir.path(), "plugin.yolink", "uaid = \"abc\"\n");
         let paths = make_paths(dir.path(), vec![hue, yolink]);
 
         let bytes = build_zip(&paths).expect("build_zip");
@@ -456,16 +455,15 @@ mod tests {
         let src_dir = tempdir().unwrap();
         let dst_dir = tempdir().unwrap();
 
-        let src_hue = write_plugin_config(
-            src_dir.path(),
-            "plugin.hue",
-            "bridge_ip = \"10.0.0.5\"\n",
-        );
+        let src_hue =
+            write_plugin_config(src_dir.path(), "plugin.hue", "bridge_ip = \"10.0.0.5\"\n");
         let src_paths = make_paths(src_dir.path(), vec![src_hue]);
         let bytes = build_zip(&src_paths).expect("build_zip");
 
         // Dest host has a *different* path for the same plugin id.
-        let dst_hue_path = dst_dir.path().join("opt/homecore/plugins/hc-hue/config.toml");
+        let dst_hue_path = dst_dir
+            .path()
+            .join("opt/homecore/plugins/hc-hue/config.toml");
         let dst_hue = PluginConfigEntry {
             id: "plugin.hue".to_string(),
             path: dst_hue_path.clone(),
@@ -473,13 +471,11 @@ mod tests {
         let dst_paths = make_paths(dst_dir.path(), vec![dst_hue]);
 
         let summary = extract_restore(&dst_paths, &bytes).expect("extract_restore");
-        assert!(
-            summary["restored"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml"))
-        );
+        assert!(summary["restored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml")));
 
         // File landed at the dest-host path with source-host contents.
         let written = fs::read_to_string(&dst_hue_path).unwrap();
@@ -493,11 +489,8 @@ mod tests {
         let src_dir = tempdir().unwrap();
         let dst_dir = tempdir().unwrap();
 
-        let src_hue = write_plugin_config(
-            src_dir.path(),
-            "plugin.hue",
-            "bridge_ip = \"10.0.0.5\"\n",
-        );
+        let src_hue =
+            write_plugin_config(src_dir.path(), "plugin.hue", "bridge_ip = \"10.0.0.5\"\n");
         let src_paths = make_paths(src_dir.path(), vec![src_hue]);
         let bytes = build_zip(&src_paths).expect("build_zip");
 
@@ -513,13 +506,11 @@ mod tests {
                 .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml")),
             "plugin entry should be skipped when not registered on dest host: {summary}"
         );
-        assert!(
-            !summary["restored"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml"))
-        );
+        assert!(!summary["restored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml")));
     }
 
     #[test]
@@ -529,13 +520,7 @@ mod tests {
         let bytes = build_zip(&paths).expect("build_zip");
         let zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let names: Vec<String> = (0..zip.len())
-            .map(|i| {
-                zip.clone()
-                    .by_index(i)
-                    .unwrap()
-                    .name()
-                    .to_string()
-            })
+            .map(|i| zip.clone().by_index(i).unwrap().name().to_string())
             .collect();
         assert!(!names.iter().any(|n| n.starts_with("plugins/")));
     }

@@ -135,9 +135,7 @@ impl NotificationService {
                     svc.register(name, PushoverChannel::new(pc));
                 }
                 ProviderConfig::Telegram(tc) => {
-                    if tc.bot_token == TELEGRAM_PLACEHOLDER
-                        || tc.chat_id == TELEGRAM_PLACEHOLDER
-                    {
+                    if tc.bot_token == TELEGRAM_PLACEHOLDER || tc.chat_id == TELEGRAM_PLACEHOLDER {
                         anyhow::bail!(
                             "[[notify.channels]] '{name}' (type = telegram) still has \
                              placeholder values — set a real bot_token (from @BotFather) \

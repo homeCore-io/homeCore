@@ -939,8 +939,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/system/backup", post(backup::backup_handler))
         .route(
             "/system/restore",
-            post(backup::restore_handler)
-                .layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT_BYTES)),
+            post(backup::restore_handler).layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT_BYTES)),
         )
         .route(
             "/system/log-level",

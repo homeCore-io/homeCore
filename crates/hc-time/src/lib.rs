@@ -126,14 +126,8 @@ mod tests {
         let ny: Tz = "America/New_York".parse().unwrap();
         let winter = Utc.with_ymd_and_hms(2026, 1, 15, 17, 0, 0).unwrap();
         let summer = Utc.with_ymd_and_hms(2026, 7, 15, 17, 0, 0).unwrap();
-        let win = winter
-            .with_timezone(&ny)
-            .format("%:z")
-            .to_string();
-        let sum = summer
-            .with_timezone(&ny)
-            .format("%:z")
-            .to_string();
+        let win = winter.with_timezone(&ny).format("%:z").to_string();
+        let sum = summer.with_timezone(&ny).format("%:z").to_string();
         assert_eq!(win, "-05:00");
         assert_eq!(sum, "-04:00");
     }

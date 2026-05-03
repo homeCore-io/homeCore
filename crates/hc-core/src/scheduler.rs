@@ -416,7 +416,11 @@ fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime
 /// Parses the expression, then asks the schedule for its next occurrence after
 /// one minute ago.  If that next occurrence falls within the current minute
 /// (same hour + minute) the rule fires.
-fn cron_fires_now(expression: &str, now: &chrono::DateTime<chrono_tz::Tz>, rule_name: &str) -> bool {
+fn cron_fires_now(
+    expression: &str,
+    now: &chrono::DateTime<chrono_tz::Tz>,
+    rule_name: &str,
+) -> bool {
     match Schedule::from_str(expression) {
         Ok(schedule) => {
             let prev = *now - chrono::Duration::minutes(1);
@@ -492,7 +496,8 @@ pub(crate) fn solar_event_time(
         SunEventType::SolarNoon => {
             // Solar noon is just 12:00 adjusted for longitude (UTC result).
             let noon_min = 720.0 - 4.0 * lon - equation_of_time(day_of_year);
-            let utc_offset_min = hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
+            let utc_offset_min =
+                hc_time::now_local().offset().fix().local_minus_utc() as f64 / 60.0;
             let total_min = (noon_min + offset_minutes as f64 + utc_offset_min).rem_euclid(1440.0);
             let h = (total_min / 60.0).floor() as u32;
             let m = (total_min % 60.0).abs() as u32;
