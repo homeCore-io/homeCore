@@ -805,24 +805,26 @@ fn apply_partial_merge_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_partial_merge_patch, is_generic_plugin_external_change, sdk_versions_compatible};
+    use super::{
+        apply_partial_merge_patch, is_generic_plugin_external_change, sdk_versions_compatible,
+    };
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
 
     #[test]
     fn sdk_compat_pre_1_0_minor_is_breaking() {
-        assert!(sdk_versions_compatible("0.1.2", "0.1.5"));   // patch ok
-        assert!(sdk_versions_compatible("0.1.0", "0.1.0"));   // identical
-        assert!(!sdk_versions_compatible("0.1.2", "0.2.0"));  // minor breaks
-        assert!(!sdk_versions_compatible("0.1.2", "0.0.9"));  // minor breaks
+        assert!(sdk_versions_compatible("0.1.2", "0.1.5")); // patch ok
+        assert!(sdk_versions_compatible("0.1.0", "0.1.0")); // identical
+        assert!(!sdk_versions_compatible("0.1.2", "0.2.0")); // minor breaks
+        assert!(!sdk_versions_compatible("0.1.2", "0.0.9")); // minor breaks
     }
 
     #[test]
     fn sdk_compat_post_1_0_only_major_matters() {
-        assert!(sdk_versions_compatible("1.4.2", "1.7.0"));   // minor ok at 1.x
-        assert!(!sdk_versions_compatible("1.4.2", "2.0.0"));  // major breaks
-        assert!(!sdk_versions_compatible("1.4.2", "0.9.0"));  // major breaks (one is 0.x)
+        assert!(sdk_versions_compatible("1.4.2", "1.7.0")); // minor ok at 1.x
+        assert!(!sdk_versions_compatible("1.4.2", "2.0.0")); // major breaks
+        assert!(!sdk_versions_compatible("1.4.2", "0.9.0")); // major breaks (one is 0.x)
     }
 
     #[test]
