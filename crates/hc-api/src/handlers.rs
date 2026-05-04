@@ -70,13 +70,15 @@ fn managed_rule_response(mode_id: &str, rule_id: Uuid) -> axum::response::Respon
 
 fn load_mode_definitions_response(
     state: &AppState,
-) -> Result<Vec<ModeDefinition>, axum::response::Response> {
+) -> Result<Vec<ModeDefinition>, Box<axum::response::Response>> {
     load_mode_definitions(state).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -1489,7 +1491,7 @@ pub async fn get_mode_definition(
 ) -> impl IntoResponse {
     let definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match definitions
         .into_iter()
@@ -1542,7 +1544,7 @@ pub async fn put_mode_definition(
 
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let previous_rule_ids = definitions
         .iter()
@@ -1624,7 +1626,7 @@ pub async fn delete_mode_definition(
 ) -> impl IntoResponse {
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(pos) = definitions
         .iter()
@@ -1676,7 +1678,7 @@ pub async fn delete_mode(
     }
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Some(pos) = definitions
         .iter()

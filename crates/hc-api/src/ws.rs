@@ -71,7 +71,7 @@ pub async fn ws_events_handler(
     // Validate before accepting the upgrade.
     let claims = match authenticate_ws(&query, &state, addr.ip()) {
         Ok(c) => c,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let user_agent = headers
@@ -91,7 +91,7 @@ fn authenticate_ws(
     query: &EventStreamQuery,
     state: &AppState,
     remote_ip: IpAddr,
-) -> Result<Claims, Response> {
+) -> Result<Claims, Box<Response>> {
     // Canonicalize IPv4-mapped IPv6 to match whitelist entries.
     let ip = match remote_ip {
         IpAddr::V6(v6) => v6
@@ -110,21 +110,28 @@ fn authenticate_ws(
 }
 
 /// Inner validation logic, separated so it can be unit-tested without a full `AppState`.
-fn validate_ws_token(token: Option<&str>, jwt: &hc_auth::JwtService) -> Result<Claims, Response> {
+fn validate_ws_token(
+    token: Option<&str>,
+    jwt: &hc_auth::JwtService,
+) -> Result<Claims, Box<Response>> {
     let token = token.unwrap_or("");
     if token.is_empty() {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "missing token query parameter" })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "missing token query parameter" })),
+            )
+                .into_response(),
+        ));
     }
     jwt.validate(token).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid or expired token" })),
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid or expired token" })),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
