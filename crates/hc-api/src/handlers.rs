@@ -113,11 +113,15 @@ pub async fn health() -> impl IntoResponse {
 
 /// `GET /system/versions` — bill-of-materials for the running install.
 ///
-/// **Appliance install:** reads `/etc/homecore/versions.json` written by the
+/// **Appliance install:** reads `/opt/homecore/versions.json` written by the
 /// appliance build pipeline. The file records the exact `vX.Y.Z` of every
 /// bundled component (core, SDK, 10 plugins, hc-web-leptos, hc-tui) plus
 /// the appliance image's own version and build timestamp. See
 /// `claude-notes/plans/component_versioning.md` Phase A for the writer.
+/// Path follows the existing `/opt/homecore/` convention used by
+/// `Dockerfile.core` for build-time-baked files (config defaults, UI bundle,
+/// profile examples). Operator-mutable state lives separately under
+/// `$HOMECORE_HOME` (`/homecore`).
 ///
 /// **Non-appliance install:** falls back to `{"core": "<CARGO_PKG_VERSION>"}`
 /// — the binary's own compile-time version, same source as `/health`.
@@ -127,7 +131,7 @@ pub async fn health() -> impl IntoResponse {
 /// reporting. Public access also lets the login screen and pre-auth client
 /// version-check (CLIENT-VER-1, planned 0.1.3) consume it.
 pub async fn system_versions() -> impl IntoResponse {
-    const VERSIONS_PATH: &str = "/etc/homecore/versions.json";
+    const VERSIONS_PATH: &str = "/opt/homecore/versions.json";
 
     // Try the appliance-written file. If it exists and parses as JSON,
     // return it verbatim — the appliance build pipeline owns the schema.
