@@ -49,6 +49,11 @@ pub struct StateBridge {
     /// Track which plugins have already emitted a PluginRegistered event
     /// this session, so we only emit once per plugin (not once per device).
     registered_plugins: Mutex<HashSet<String>>,
+    /// Track which plugin_ids we've already inspected for SDK-version
+    /// mismatch. The check fires once per plugin per session — heartbeats
+    /// arrive every 30s and we don't want a periodic warn-spam if a
+    /// plugin is on a divergent SDK. Component versioning plan, Phase B.
+    seen_sdk_versions: Mutex<HashSet<String>>,
     /// Broadcast sender for the log stream WebSocket — used to inject plugin
     /// log lines received over MQTT into the core's log stream.
     log_tx: Option<broadcast::Sender<LogLine>>,
@@ -67,6 +72,7 @@ impl StateBridge {
             device_types: None,
             pending_command_changes: DashMap::new(),
             registered_plugins: Mutex::new(HashSet::new()),
+            seen_sdk_versions: Mutex::new(HashSet::new()),
             log_tx: None,
             log_ring: None,
         }
@@ -300,10 +306,51 @@ impl StateBridge {
         {
             let plugin_id = parts[2];
             if let Ok(hb) = serde_json::from_slice::<serde_json::Value>(payload) {
+                let sdk_version = hb["sdk_version"].as_str().map(str::to_string);
+
+                // First-heartbeat-per-plugin: log + check SDK compat.
+                // Component versioning plan, Phase B. Warn-only for v0.1.x —
+                // refusing on mismatch locks operators out of recoverable
+                // states (core upgraded, plugin not yet rebuilt).
+                {
+                    let mut seen = self.seen_sdk_versions.lock().unwrap();
+                    if seen.insert(plugin_id.to_string()) {
+                        match sdk_version.as_deref() {
+                            Some(v) => {
+                                if !sdk_versions_compatible(v, hc_types::PROTOCOL_VERSION) {
+                                    warn!(
+                                        plugin_id,
+                                        plugin_sdk_version = v,
+                                        core_compat_version = hc_types::PROTOCOL_VERSION,
+                                        "Plugin SDK version differs from core's expected SDK \
+                                         major/minor — protocol changes may not be visible. \
+                                         Rebuild the plugin against a matching SDK if rules \
+                                         or device events misbehave."
+                                    );
+                                } else {
+                                    debug!(
+                                        plugin_id,
+                                        plugin_sdk_version = v,
+                                        "Plugin SDK version matches core (compat check passed)"
+                                    );
+                                }
+                            }
+                            None => {
+                                debug!(
+                                    plugin_id,
+                                    "Plugin heartbeat carries no sdk_version field — \
+                                     plugin built against pre-Phase-B SDK (≤ 0.1.2)"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let _ = self.pub_bus.publish(Event::PluginHeartbeat {
                     timestamp: Utc::now(),
                     plugin_id: plugin_id.to_string(),
                     version: hb["version"].as_str().map(str::to_string),
+                    sdk_version,
                     uptime_secs: hb["uptime_secs"].as_u64(),
                     device_count: hb["device_count"].as_u64().map(|n| n as u32),
                 });
@@ -704,6 +751,37 @@ fn is_generic_plugin_external_change(change: &DeviceChange) -> bool {
         && change.actor_name.is_none()
 }
 
+/// Compare two SemVer-shaped strings for SDK protocol compatibility.
+///
+/// Pre-1.0 (`0.x.y`) treats MINOR as the breaking position — a 0.1.x →
+/// 0.2.x bump is a wire-protocol change, but 0.1.2 → 0.1.5 stays
+/// compatible. Once on 1.0+, MAJOR is the breaking position.
+///
+/// Returns `true` if the two versions can talk to each other safely.
+/// Unparseable versions return `true` (don't refuse on garbage — the
+/// caller already treats this as warn-only). Component versioning Phase B.
+fn sdk_versions_compatible(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Option<(u64, u64)> {
+        let mut parts = s.split('.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next()?.parse().ok()?;
+        Some((major, minor))
+    };
+    let Some((a_major, a_minor)) = parse(a) else {
+        return true;
+    };
+    let Some((b_major, b_minor)) = parse(b) else {
+        return true;
+    };
+    if a_major == 0 || b_major == 0 {
+        // 0.x: minor is the breaking position. Both must match major + minor.
+        a_major == b_major && a_minor == b_minor
+    } else {
+        // 1.0+: only major matters.
+        a_major == b_major
+    }
+}
+
 fn parse_cmd_topic(topic: &str) -> Option<&str> {
     let parts: Vec<&str> = topic.splitn(4, '/').collect();
     if parts.len() == 4 && parts[0] == "homecore" && parts[1] == "devices" && parts[3] == "cmd" {
@@ -727,10 +805,34 @@ fn apply_partial_merge_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_partial_merge_patch, is_generic_plugin_external_change};
+    use super::{apply_partial_merge_patch, is_generic_plugin_external_change, sdk_versions_compatible};
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn sdk_compat_pre_1_0_minor_is_breaking() {
+        assert!(sdk_versions_compatible("0.1.2", "0.1.5"));   // patch ok
+        assert!(sdk_versions_compatible("0.1.0", "0.1.0"));   // identical
+        assert!(!sdk_versions_compatible("0.1.2", "0.2.0"));  // minor breaks
+        assert!(!sdk_versions_compatible("0.1.2", "0.0.9"));  // minor breaks
+    }
+
+    #[test]
+    fn sdk_compat_post_1_0_only_major_matters() {
+        assert!(sdk_versions_compatible("1.4.2", "1.7.0"));   // minor ok at 1.x
+        assert!(!sdk_versions_compatible("1.4.2", "2.0.0"));  // major breaks
+        assert!(!sdk_versions_compatible("1.4.2", "0.9.0"));  // major breaks (one is 0.x)
+    }
+
+    #[test]
+    fn sdk_compat_unparseable_is_lenient() {
+        // Don't refuse on garbage — caller treats this as warn-only,
+        // and we'd rather not fire spurious warnings on malformed input.
+        assert!(sdk_versions_compatible("garbage", "0.1.2"));
+        assert!(sdk_versions_compatible("0.1.2", ""));
+        assert!(sdk_versions_compatible("", ""));
+    }
 
     #[test]
     fn partial_merge_patch_removes_null_fields() {

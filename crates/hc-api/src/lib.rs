@@ -280,6 +280,7 @@ pub fn spawn_plugin_registry_listener(
                     plugin_id,
                     timestamp,
                     version,
+                    sdk_version: _,
                     uptime_secs,
                     device_count,
                 }) => {

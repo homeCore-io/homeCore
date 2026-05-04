@@ -836,6 +836,18 @@ async fn main() -> Result<()> {
 
     info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
 
+    // Log core's own SDK protocol version at startup. Plugins emit their
+    // SDK version on heartbeat (component_versioning Phase B); state_bridge
+    // compares incoming heartbeats against this `core_compat_version` and
+    // warns on a mismatch. Single source of truth: hc-types::PROTOCOL_VERSION
+    // (this crate is the wire-format authority — every event variant + topic
+    // shape lives there). Don't substitute the binary's CARGO_PKG_VERSION;
+    // it could drift independently from hc-types under per-component SemVer.
+    info!(
+        core_compat_version = hc_types::PROTOCOL_VERSION,
+        "Core SDK protocol version (heartbeat compat baseline)"
+    );
+
     // ── 6. Embedded MQTT broker ────────────────────────────────────────────
     let broker_cfg = BrokerConfig {
         host: config.broker.host.clone(),
