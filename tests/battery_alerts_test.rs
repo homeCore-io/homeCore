@@ -13,9 +13,22 @@ use hc_types::device::DeviceChange;
 use hc_types::event::Event;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::timeout;
+
+/// Process-wide async mutex used to serialize the two `#[tokio::test]`s in
+/// this file. Both open their own `StateStore` against unique `/tmp` paths,
+/// but cargo runs integration tests in parallel within a single binary and
+/// the second concurrent SQLite open occasionally returns `SQLITE_BUSY`
+/// (code 5) before either test has had a chance to do real work. Holding
+/// this guard for the full test body removes the race without affecting
+/// what either test asserts.
+fn serialize() -> &'static tokio::sync::Mutex<()> {
+    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 fn unique_paths(tag: &str) -> (String, String) {
     let pid = std::process::id();
@@ -44,6 +57,7 @@ fn battery_state_changed(device_id: &str, pct: i64) -> Event {
 
 #[tokio::test]
 async fn battery_watcher_emits_low_then_recovered() -> Result<()> {
+    let _guard = serialize().lock().await;
     let (state_path, history_path) = unique_paths("flow");
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(&history_path);
@@ -132,6 +146,7 @@ async fn battery_watcher_emits_low_then_recovered() -> Result<()> {
 
 #[tokio::test]
 async fn battery_watcher_skips_non_battery_changes() -> Result<()> {
+    let _guard = serialize().lock().await;
     let (state_path, history_path) = unique_paths("skip");
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(&history_path);
