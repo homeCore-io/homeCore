@@ -38,7 +38,15 @@ use hc_types::event::Event;
 use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
+
+/// Server-initiated ping cadence. Closed clients are detected within ~one
+/// interval (next tick after a missed pong) instead of waiting for the next
+/// event broadcast. NAT/proxy idle timeouts are kept warm by the same path.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize, Default)]
 pub struct EventStreamQuery {
@@ -150,53 +158,87 @@ async fn handle_socket(
         "WebSocket client connected to event stream"
     );
 
+    // Ping/pong liveness. The interval's first tick fires immediately —
+    // consume it before the loop so the first ping goes out one full
+    // PING_INTERVAL after connect, not at t=0.
+    let mut ping_ticker = interval(PING_INTERVAL);
+    ping_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ping_ticker.tick().await;
+    let mut outstanding_ping = false;
+
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                // Skip noisy heartbeats unless the client explicitly asked for them.
-                if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
-                    continue;
-                }
+        tokio::select! {
+            // Drain client->server frames first so a busy event bus can't
+            // starve a pending Close.
+            biased;
 
-                // Apply device_id filter.
-                if let Some(ref wanted_device) = device_filter {
-                    if !event_device_id(&event)
-                        .map(|d| d == wanted_device)
-                        .unwrap_or(false)
-                    {
-                        continue;
+            recv = socket.recv() => {
+                match recv {
+                    None => break,
+                    Some(Err(_)) => break,
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Pong(_))) => {
+                        outstanding_ping = false;
                     }
+                    // Text/Binary/Ping from the client are ignored — this
+                    // endpoint is a one-way push. axum auto-pongs incoming Ping.
+                    Some(Ok(_)) => {}
                 }
+            }
 
-                // Apply event type filter.
-                if let Some(ref types) = type_filter {
-                    if !types.iter().any(|t| t == event_type_name(&event)) {
-                        continue;
-                    }
-                }
-
-                let json = match serde_json::to_string(&event) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to serialize event");
-                        continue;
-                    }
-                };
-                if socket.send(Message::Text(json)).await.is_err() {
-                    debug!(
-                        ip = %remote_ip,
-                        user = %claims.sub,
-                        client_id = client_id.as_deref().unwrap_or("-"),
-                        user_agent = user_agent.as_deref().unwrap_or("-"),
-                        "WebSocket client disconnected"
-                    );
+            _ = ping_ticker.tick() => {
+                if outstanding_ping {
+                    // Previous ping never got a pong — assume the socket is dead.
                     break;
                 }
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+                outstanding_ping = true;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!("WS event stream lagged by {n} events");
+
+            event = rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        // Skip noisy heartbeats unless the client explicitly asked for them.
+                        if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
+                            continue;
+                        }
+
+                        // Apply device_id filter.
+                        if let Some(ref wanted_device) = device_filter {
+                            if !event_device_id(&event)
+                                .map(|d| d == wanted_device)
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
+                        }
+
+                        // Apply event type filter.
+                        if let Some(ref types) = type_filter {
+                            if !types.iter().any(|t| t == event_type_name(&event)) {
+                                continue;
+                            }
+                        }
+
+                        let json = match serde_json::to_string(&event) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to serialize event");
+                                continue;
+                            }
+                        };
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WS event stream lagged by {n} events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
 
