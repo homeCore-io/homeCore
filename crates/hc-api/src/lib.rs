@@ -698,6 +698,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
     // Public routes — no auth required (auth is handled inside the handler).
     let public = Router::new()
         .route("/health", get(handlers::health))
+        // Bill-of-materials for the install — public for symmetry with
+        // /health and to support pre-auth client-version comparison
+        // (CLIENT-VER-1 in 0.1.3 plan). Reads /etc/homecore/versions.json
+        // when present, falls back to {"core": <CARGO_PKG_VERSION>}.
+        .route("/system/versions", get(handlers::system_versions))
         .route("/metrics", get(metrics::metrics_handler))
         .route(
             "/auth/login",

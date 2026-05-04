@@ -109,6 +109,45 @@ pub async fn health() -> impl IntoResponse {
     })
 }
 
+// ---------- System versions ----------
+
+/// `GET /system/versions` — bill-of-materials for the running install.
+///
+/// **Appliance install:** reads `/etc/homecore/versions.json` written by the
+/// appliance build pipeline. The file records the exact `vX.Y.Z` of every
+/// bundled component (core, SDK, 10 plugins, hc-web-leptos, hc-tui) plus
+/// the appliance image's own version and build timestamp. See
+/// `claude-notes/plans/component_versioning.md` Phase A for the writer.
+///
+/// **Non-appliance install:** falls back to `{"core": "<CARGO_PKG_VERSION>"}`
+/// — the binary's own compile-time version, same source as `/health`.
+///
+/// Public (no auth required). Version info is not sensitive — it's the same
+/// shape `/health` already exposes, just expanded for multi-component
+/// reporting. Public access also lets the login screen and pre-auth client
+/// version-check (CLIENT-VER-1, planned 0.1.3) consume it.
+pub async fn system_versions() -> impl IntoResponse {
+    const VERSIONS_PATH: &str = "/etc/homecore/versions.json";
+
+    // Try the appliance-written file. If it exists and parses as JSON,
+    // return it verbatim — the appliance build pipeline owns the schema.
+    if let Ok(bytes) = std::fs::read(VERSIONS_PATH) {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            return Json(json);
+        }
+        // File exists but isn't valid JSON — fall through to the binary's
+        // own version rather than 500-ing. Operator can fix the file.
+        tracing::warn!(
+            path = VERSIONS_PATH,
+            "versions.json present but not valid JSON; falling back to core version"
+        );
+    }
+
+    Json(serde_json::json!({
+        "core": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 // ---------- System status ----------
 
 // ---------- Log Level ----------
