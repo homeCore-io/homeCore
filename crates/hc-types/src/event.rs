@@ -72,6 +72,14 @@ pub enum Event {
         plugin_id: String,
         /// Self-reported plugin version.
         version: Option<String>,
+        /// SDK version the plugin was built against — value of
+        /// `plugin-sdk-rs`'s `CARGO_PKG_VERSION` at compile time.
+        /// Optional for backward compat: heartbeats from plugins built
+        /// against pre-Phase-B SDKs (≤ 0.1.2) won't carry this field.
+        /// `state_bridge` reads it on first heartbeat per plugin per
+        /// session and warns if MAJOR/MINOR diverge from the version
+        /// core was built with. Component versioning plan, Phase B.
+        sdk_version: Option<String>,
         /// Plugin uptime in seconds.
         uptime_secs: Option<u64>,
         /// Number of devices managed by this plugin.

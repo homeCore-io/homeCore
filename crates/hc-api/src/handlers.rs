@@ -70,13 +70,15 @@ fn managed_rule_response(mode_id: &str, rule_id: Uuid) -> axum::response::Respon
 
 fn load_mode_definitions_response(
     state: &AppState,
-) -> Result<Vec<ModeDefinition>, axum::response::Response> {
+) -> Result<Vec<ModeDefinition>, Box<axum::response::Response>> {
     load_mode_definitions(state).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -105,6 +107,49 @@ pub async fn health() -> impl IntoResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
     })
+}
+
+// ---------- System versions ----------
+
+/// `GET /system/versions` — bill-of-materials for the running install.
+///
+/// **Appliance install:** reads `/opt/homecore/versions.json` written by the
+/// appliance build pipeline. The file records the exact `vX.Y.Z` of every
+/// bundled component (core, SDK, 10 plugins, hc-web-leptos, hc-tui) plus
+/// the appliance image's own version and build timestamp. See
+/// `claude-notes/plans/component_versioning.md` Phase A for the writer.
+/// Path follows the existing `/opt/homecore/` convention used by
+/// `Dockerfile.core` for build-time-baked files (config defaults, UI bundle,
+/// profile examples). Operator-mutable state lives separately under
+/// `$HOMECORE_HOME` (`/homecore`).
+///
+/// **Non-appliance install:** falls back to `{"core": "<CARGO_PKG_VERSION>"}`
+/// — the binary's own compile-time version, same source as `/health`.
+///
+/// Public (no auth required). Version info is not sensitive — it's the same
+/// shape `/health` already exposes, just expanded for multi-component
+/// reporting. Public access also lets the login screen and pre-auth client
+/// version-check (CLIENT-VER-1, planned 0.1.3) consume it.
+pub async fn system_versions() -> impl IntoResponse {
+    const VERSIONS_PATH: &str = "/opt/homecore/versions.json";
+
+    // Try the appliance-written file. If it exists and parses as JSON,
+    // return it verbatim — the appliance build pipeline owns the schema.
+    if let Ok(bytes) = std::fs::read(VERSIONS_PATH) {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            return Json(json);
+        }
+        // File exists but isn't valid JSON — fall through to the binary's
+        // own version rather than 500-ing. Operator can fix the file.
+        tracing::warn!(
+            path = VERSIONS_PATH,
+            "versions.json present but not valid JSON; falling back to core version"
+        );
+    }
+
+    Json(serde_json::json!({
+        "core": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 // ---------- System status ----------
@@ -1489,7 +1534,7 @@ pub async fn get_mode_definition(
 ) -> impl IntoResponse {
     let definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match definitions
         .into_iter()
@@ -1542,7 +1587,7 @@ pub async fn put_mode_definition(
 
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let previous_rule_ids = definitions
         .iter()
@@ -1624,7 +1669,7 @@ pub async fn delete_mode_definition(
 ) -> impl IntoResponse {
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(pos) = definitions
         .iter()
@@ -1676,7 +1721,7 @@ pub async fn delete_mode(
     }
     let mut definitions = match load_mode_definitions_response(&s) {
         Ok(definitions) => definitions,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Some(pos) = definitions
         .iter()
