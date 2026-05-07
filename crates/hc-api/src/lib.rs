@@ -198,6 +198,14 @@ pub struct AppState {
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
     pub log_level_handle: Option<hc_logging::LogLevelHandle>,
+    /// Version reported by `/health`, `/system/status`, and the
+    /// `/system/versions` non-appliance fallback. Defaults to this
+    /// crate's `CARGO_PKG_VERSION`, which is fine for tests but is
+    /// hc-api's version, not the binary's. Production `main.rs` MUST
+    /// override via `with_homecore_version(env!("CARGO_PKG_VERSION"))`
+    /// — that's homecore's binary version. See HEALTH-VERSION-SOURCE-1
+    /// in `release_0_1_4.md` for the fragility this works around.
+    pub homecore_version: &'static str,
     /// Active streaming requests. Concurrency enforcement +
     /// plugin-offline / timeout injection hang off this.
     pub streaming_registry: streaming::StreamingRegistry,
@@ -533,6 +541,7 @@ impl AppState {
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             management_rpc: None,
             log_level_handle: None,
+            homecore_version: env!("CARGO_PKG_VERSION"),
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
@@ -678,6 +687,15 @@ impl AppState {
 
     pub fn with_management_rpc(mut self, rpc: management_rpc::ManagementRpc) -> Self {
         self.management_rpc = Some(rpc);
+        self
+    }
+
+    /// Override the version reported by `/health`, `/system/status`, and
+    /// the `/system/versions` fallback with the binary crate's
+    /// `CARGO_PKG_VERSION`. Production `main.rs` calls this; tests don't
+    /// need to.
+    pub fn with_homecore_version(mut self, version: &'static str) -> Self {
+        self.homecore_version = version;
         self
     }
 
