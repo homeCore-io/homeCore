@@ -1,6 +1,6 @@
 [package]
 name    = "hc-time"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Configured-timezone helpers for HomeCore (display layer; storage stays UTC)."

@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "hc-api"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "hc-api-types"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "hc-auth",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "hc-auth"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "hc-broker"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "hc-types",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "hc-cli"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "hc-core"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "hc-influx"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "hc-logging"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "hc-mqtt-client"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "hc-notify"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "hc-scripting"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "hc-state"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "hc-time"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "hc-topic-map"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "hc-types",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "hc-types"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "ron",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "hc-web-admin"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "axum",
  "tower-http",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
