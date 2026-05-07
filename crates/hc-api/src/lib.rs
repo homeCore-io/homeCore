@@ -984,6 +984,9 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // role check is in the handler itself, the route_layer below
         // already enforces authentication.
         .route("/ws/connections", get(handlers::list_ws_connections))
+        // REST log-tail (OPS-1 piece 2). Same auth as /logs/stream;
+        // CLI-friendly companion for `curl | jq` workflows.
+        .route("/logs", get(logs::list_logs))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

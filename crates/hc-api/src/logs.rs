@@ -235,6 +235,94 @@ async fn handle_socket(
         .inc();
 }
 
+// ── REST log-tail endpoint (OPS-1 piece 2) ──────────────────────────────────
+//
+// `/api/v1/logs/stream` is WebSocket-only — friendly to browsers, hostile to
+// `curl | jq` scripting. This REST companion serves the same ring-buffer
+// contents synchronously so CLI tooling (and one-off troubleshooting from
+// the operator's laptop) doesn't need a WS client.
+
+const DEFAULT_TAIL_LIMIT: usize = 100;
+const MAX_TAIL_LIMIT: usize = 1000;
+
+#[derive(Deserialize)]
+pub struct LogTailQuery {
+    /// Minimum level (`error|warn|info|debug|trace`). Default: `info`.
+    #[serde(default = "default_level")]
+    pub level: String,
+    /// Optional target prefix filter (matches `starts_with`, same as
+    /// `/logs/stream`). Example: `target=hc_api::ws`.
+    pub target: Option<String>,
+    /// Optional RFC3339 timestamp; only lines newer than this are
+    /// returned. Useful for incremental polling.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Maximum number of lines (default 100, cap 1000). Returns the
+    /// most recent matching entries.
+    pub limit: Option<usize>,
+}
+
+/// `GET /api/v1/logs` — REST tail of the same ring buffer the
+/// `/logs/stream` WebSocket reads from. Same filter semantics
+/// (`level`, `target` prefix); plus `since` for incremental polling
+/// and a `limit` cap.
+///
+/// Returns:
+/// ```text
+/// {
+///   "count": <usize>,
+///   "lines": [LogLine, ...]   // chronological, oldest first
+/// }
+/// ```
+///
+/// Same auth as `/logs/stream` (JWT or whitelist). 503 when the
+/// log-stream feature isn't enabled in config.
+pub async fn list_logs(
+    State(state): State<AppState>,
+    Query(params): Query<LogTailQuery>,
+) -> Response {
+    let log_stream = match &state.log_stream {
+        Some(ls) => ls.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "log streaming not enabled" })),
+            )
+                .into_response();
+        }
+    };
+
+    let min_level = parse_level(&params.level);
+    let target = params.target.as_deref();
+    let since = params.since;
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_TAIL_LIMIT)
+        .min(MAX_TAIL_LIMIT);
+
+    // Snapshot the ring under the lock, then filter outside the lock
+    // so we don't block live writers.
+    let snapshot: Vec<LogLine> = {
+        let ring = log_stream.ring.lock().unwrap();
+        ring.iter().cloned().collect()
+    };
+
+    let filtered: Vec<LogLine> = snapshot
+        .into_iter()
+        .filter(|l| passes_filter(l, min_level, target))
+        .filter(|l| since.map(|t| l.timestamp > t).unwrap_or(true))
+        .collect();
+
+    // "Last N matching" — take from the tail of the chronological list.
+    let start = filtered.len().saturating_sub(limit);
+    let lines: Vec<LogLine> = filtered.into_iter().skip(start).collect();
+
+    Json(json!({
+        "count": lines.len(),
+        "lines": lines,
+    }))
+    .into_response()
+}
+
 fn passes_filter(line: &LogLine, min_level: u8, target: Option<&str>) -> bool {
     if level_to_u8(&line.level) < min_level {
         return false;
