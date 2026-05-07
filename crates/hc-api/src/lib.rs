@@ -206,6 +206,11 @@ pub struct AppState {
     /// — that's homecore's binary version. See HEALTH-VERSION-SOURCE-1
     /// in `release_0_1_4.md` for the fragility this works around.
     pub homecore_version: &'static str,
+    /// Live registry of WebSocket connections (events_stream +
+    /// logs_stream). Backs `GET /api/v1/ws/connections` so an operator
+    /// can distinguish "one looping client" from "many churning
+    /// clients" during a reconnect storm. OPS-1 piece 3.
+    pub ws_connections: ws::WsConnections,
     /// Active streaming requests. Concurrency enforcement +
     /// plugin-offline / timeout injection hang off this.
     pub streaming_registry: streaming::StreamingRegistry,
@@ -542,6 +547,7 @@ impl AppState {
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
+            ws_connections: ws::new_ws_connections(),
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
@@ -974,6 +980,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_system_config).put(handlers::put_system_config),
         )
         .route("/system/restart", post(handlers::system_restart))
+        // WebSocket connection registry (OPS-1 piece 3). Admin-only;
+        // role check is in the handler itself, the route_layer below
+        // already enforces authentication.
+        .route("/ws/connections", get(handlers::list_ws_connections))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

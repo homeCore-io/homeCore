@@ -6,13 +6,14 @@
 //!   target=hc_core      Optional target prefix filter
 //!   history=50          Lines of ring-buffer history to send first (max 500)
 
+use crate::ws::{register_connection, WsConnections};
 use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -20,7 +21,7 @@ use hc_types::LogLine;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::VecDeque;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::debug;
@@ -40,6 +41,10 @@ pub struct LogStreamQuery {
     pub target: Option<String>,
     #[serde(default = "default_history")]
     pub history: usize,
+    /// Optional per-tab fingerprint, mirrors `/events/stream`. Surfaces
+    /// in the active-connection registry (OPS-1 piece 3) so an operator
+    /// can tell apart simultaneous logs/stream subscribers.
+    pub client_id: Option<String>,
 }
 
 fn default_level() -> String {
@@ -54,6 +59,7 @@ pub async fn log_stream_handler(
     Query(params): Query<LogStreamQuery>,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     // Authenticate — same pattern as /events/stream.
     let ip = match addr.ip() {
@@ -67,7 +73,11 @@ pub async fn log_stream_handler(
     let is_whitelisted =
         !state.whitelist.is_empty() && state.whitelist.iter().any(|net| net.contains(&ip));
 
-    if !is_whitelisted {
+    // `user` for the active-connection registry. Whitelisted callers
+    // are recorded as "whitelist"; JWT callers as the validated subject.
+    let user = if is_whitelisted {
+        "whitelist".to_string()
+    } else {
         let token = params.token.as_deref().unwrap_or("");
         if token.is_empty() {
             return (
@@ -76,14 +86,17 @@ pub async fn log_stream_handler(
             )
                 .into_response();
         }
-        if state.jwt.validate(token).is_err() {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid or expired token" })),
-            )
-                .into_response();
+        match state.jwt.validate(token) {
+            Ok(claims) => claims.sub,
+            Err(_) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "invalid or expired token" })),
+                )
+                    .into_response();
+            }
         }
-    }
+    };
 
     // Check that the log stream feature is enabled.
     let log_stream = match &state.log_stream {
@@ -100,19 +113,54 @@ pub async fn log_stream_handler(
     let min_level = parse_level(&params.level);
     let target_filter = params.target.clone();
     let history_count = params.history.min(500);
+    let client_id = params.client_id.clone();
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let connections = state.ws_connections.clone();
 
     ws.on_upgrade(move |socket| {
-        handle_socket(socket, log_stream, min_level, target_filter, history_count)
+        handle_socket(
+            socket,
+            log_stream,
+            min_level,
+            target_filter,
+            history_count,
+            connections,
+            client_id,
+            ip,
+            user,
+            user_agent,
+        )
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     mut socket: WebSocket,
     state: LogStreamState,
     min_level: u8,
     target_filter: Option<String>,
     history_count: usize,
+    connections: WsConnections,
+    client_id: Option<String>,
+    ip: IpAddr,
+    user: String,
+    user_agent: Option<String>,
 ) {
+    // Register in the active-connection map; guard auto-removes on
+    // every return path (early `return` during history flush, normal
+    // loop break, or panic). OPS-1 piece 3.
+    let _registry_guard = register_connection(
+        &connections,
+        "logs_stream",
+        client_id,
+        ip,
+        user,
+        user_agent,
+    );
+
     // Send ring-buffer history first.
     let history: Vec<LogLine> = {
         let ring = state.ring.lock().unwrap();

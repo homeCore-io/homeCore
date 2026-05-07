@@ -35,13 +35,115 @@ use axum::{
 };
 use hc_auth::Claims;
 use hc_types::event::Event;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
+
+// ── Active WS connection registry (OPS-1 piece 3) ───────────────────────────
+//
+// Tracks every live WebSocket connection (events_stream + logs_stream) so the
+// `GET /api/v1/ws/connections` admin endpoint can answer "is this reconnect
+// storm one looping client or many churning clients?" — the question that
+// took ~30 min to answer manually during the 0.1.2 deploy debugging.
+//
+// Std-Mutex (not tokio::sync::Mutex) so the Drop-guard cleanup can run from
+// sync context. The map is locked exactly once on connect (insert), once on
+// disconnect (remove), and once per `/ws/connections` request — write
+// contention is minimal.
+
+/// One entry in the live-connection registry. JSON-serialisable for the
+/// admin endpoint.
+#[derive(Clone, Debug, Serialize)]
+pub struct WsConnection {
+    /// Server-generated UUID; stable for the lifetime of this connection.
+    pub connection_id: String,
+    /// `events_stream` or `logs_stream` — distinguishes the two endpoints.
+    pub endpoint: &'static str,
+    /// Per-tab fingerprint from `?client_id=` (Leptos sets this; CLI
+    /// callers that don't pass one show as `None`).
+    pub client_id: Option<String>,
+    /// Source IP (canonicalised, IPv4-mapped IPv6 stripped).
+    pub ip: String,
+    /// Authenticated user (claims.sub, or `whitelist` for IP-whitelist
+    /// callers).
+    pub user: String,
+    pub user_agent: Option<String>,
+    pub connected_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Shared map of `connection_id` → `WsConnection`. Held in `AppState`.
+pub type WsConnections = Arc<Mutex<HashMap<String, WsConnection>>>;
+
+/// Build the empty registry used by `AppState::new_with_plugins_and_raw_bus`.
+pub fn new_ws_connections() -> WsConnections {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// RAII guard that deregisters a connection from the registry when dropped.
+/// Holding this guard across the WS event-loop means the entry stays live
+/// until the loop returns, regardless of which break path took us out
+/// (clean Close, ping timeout, send failure, etc.). See OPS-1 piece 1 for
+/// the seven categorised reasons.
+pub struct WsConnectionGuard {
+    connections: WsConnections,
+    id: String,
+}
+
+impl Drop for WsConnectionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.connections.lock() {
+            map.remove(&self.id);
+        }
+    }
+}
+
+/// Register a fresh connection in the registry and return the guard. The
+/// caller holds the guard for the lifetime of the connection; dropping it
+/// cleans up.
+#[allow(clippy::too_many_arguments)] // builder-style alternative would obscure the call site
+pub fn register_connection(
+    connections: &WsConnections,
+    endpoint: &'static str,
+    client_id: Option<String>,
+    ip: IpAddr,
+    user: String,
+    user_agent: Option<String>,
+) -> WsConnectionGuard {
+    let id = uuid::Uuid::new_v4().to_string();
+    let entry = WsConnection {
+        connection_id: id.clone(),
+        endpoint,
+        client_id,
+        ip: ip.to_string(),
+        user,
+        user_agent,
+        connected_at: chrono::Utc::now(),
+    };
+    if let Ok(mut map) = connections.lock() {
+        map.insert(id.clone(), entry);
+    }
+    WsConnectionGuard {
+        connections: Arc::clone(connections),
+        id,
+    }
+}
+
+/// Snapshot of every live connection, sorted newest-first by
+/// `connected_at`. Used by the `/api/v1/ws/connections` handler.
+pub fn snapshot_connections(connections: &WsConnections) -> Vec<WsConnection> {
+    let Ok(map) = connections.lock() else {
+        return Vec::new();
+    };
+    let mut out: Vec<WsConnection> = map.values().cloned().collect();
+    out.sort_by(|a, b| b.connected_at.cmp(&a.connected_at));
+    out
+}
 
 /// Server-initiated ping cadence. Closed clients are detected within ~one
 /// interval (next tick after a missed pong) instead of waiting for the next
@@ -163,6 +265,18 @@ async fn handle_socket(
         types = ?type_filter,
         device = ?device_filter,
         "WebSocket client connected to event stream"
+    );
+
+    // Register in the active-connection map for the lifetime of this
+    // function. Guard auto-removes via Drop when handle_socket returns,
+    // regardless of which break path we take. OPS-1 piece 3.
+    let _registry_guard = register_connection(
+        &state.ws_connections,
+        "events_stream",
+        client_id.clone(),
+        remote_ip,
+        claims.sub.clone(),
+        user_agent.clone(),
     );
 
     // Ping/pong liveness. The interval's first tick fires immediately —

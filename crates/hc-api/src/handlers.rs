@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
@@ -266,6 +266,35 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         "history_db_bytes":  history_db_bytes,
         "timezone":          hc_time::configured_tz().to_string(),
     }))
+}
+
+// ---------- WebSocket connections (OPS-1 piece 3) ----------
+
+/// `GET /api/v1/ws/connections` — list every live WebSocket connection
+/// (events_stream + logs_stream). Admin-only. Surfaces during reconnect-
+/// storm investigations to distinguish "one looping client" from "many
+/// churning clients" — exactly the question that took ~30 min to answer
+/// manually during the 0.1.2 deploy debugging.
+///
+/// Sorted newest-connection-first so an operator scrolling sees the
+/// freshly-spawned ones at the top.
+pub async fn list_ws_connections(
+    State(s): State<AppState>,
+    Extension(claims): Extension<hc_auth::Claims>,
+) -> impl IntoResponse {
+    if !matches!(claims.role, hc_auth::user::Role::Admin) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "admin role required"})),
+        )
+            .into_response();
+    }
+    let list = crate::ws::snapshot_connections(&s.ws_connections);
+    Json(json!({
+        "count": list.len(),
+        "connections": list,
+    }))
+    .into_response()
 }
 
 // ---------- Devices ----------
