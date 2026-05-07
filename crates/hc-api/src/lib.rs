@@ -198,6 +198,19 @@ pub struct AppState {
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
     pub log_level_handle: Option<hc_logging::LogLevelHandle>,
+    /// Version reported by `/health`, `/system/status`, and the
+    /// `/system/versions` non-appliance fallback. Defaults to this
+    /// crate's `CARGO_PKG_VERSION`, which is fine for tests but is
+    /// hc-api's version, not the binary's. Production `main.rs` MUST
+    /// override via `with_homecore_version(env!("CARGO_PKG_VERSION"))`
+    /// — that's homecore's binary version. See HEALTH-VERSION-SOURCE-1
+    /// in `release_0_1_4.md` for the fragility this works around.
+    pub homecore_version: &'static str,
+    /// Live registry of WebSocket connections (events_stream +
+    /// logs_stream). Backs `GET /api/v1/ws/connections` so an operator
+    /// can distinguish "one looping client" from "many churning
+    /// clients" during a reconnect storm. OPS-1 piece 3.
+    pub ws_connections: ws::WsConnections,
     /// Active streaming requests. Concurrency enforcement +
     /// plugin-offline / timeout injection hang off this.
     pub streaming_registry: streaming::StreamingRegistry,
@@ -533,6 +546,8 @@ impl AppState {
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             management_rpc: None,
             log_level_handle: None,
+            homecore_version: env!("CARGO_PKG_VERSION"),
+            ws_connections: ws::new_ws_connections(),
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
@@ -678,6 +693,15 @@ impl AppState {
 
     pub fn with_management_rpc(mut self, rpc: management_rpc::ManagementRpc) -> Self {
         self.management_rpc = Some(rpc);
+        self
+    }
+
+    /// Override the version reported by `/health`, `/system/status`, and
+    /// the `/system/versions` fallback with the binary crate's
+    /// `CARGO_PKG_VERSION`. Production `main.rs` calls this; tests don't
+    /// need to.
+    pub fn with_homecore_version(mut self, version: &'static str) -> Self {
+        self.homecore_version = version;
         self
     }
 
@@ -956,6 +980,13 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_system_config).put(handlers::put_system_config),
         )
         .route("/system/restart", post(handlers::system_restart))
+        // WebSocket connection registry (OPS-1 piece 3). Admin-only;
+        // role check is in the handler itself, the route_layer below
+        // already enforces authentication.
+        .route("/ws/connections", get(handlers::list_ws_connections))
+        // REST log-tail (OPS-1 piece 2). Same auth as /logs/stream;
+        // CLI-friendly companion for `curl | jq` workflows.
+        .route("/logs", get(logs::list_logs))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

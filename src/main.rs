@@ -1377,6 +1377,13 @@ async fn main() -> Result<()> {
     .with_dashboard_store(dashboard_store, dashboard_data)
     .with_battery_config(battery_tx)
     .with_homecore_config_path(config_path.clone())
+    // Inject the binary crate's CARGO_PKG_VERSION so /health,
+    // /system/status, and /system/versions all report the homecore
+    // version, not hc-api's. Without this override, AppState defaults
+    // to hc-api's version — which caused the v0.1.4 hotfix
+    // (operator-visible v0.1.2 inside a v0.1.3 image because hc-api
+    // was at 0.1.2). See HEALTH-VERSION-SOURCE-1.
+    .with_homecore_version(env!("CARGO_PKG_VERSION"))
     .with_shutdown_tx(shutdown_tx.clone());
 
     let app_state = if let Some(cal) = calendar_handle {

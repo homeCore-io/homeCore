@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
@@ -102,10 +102,14 @@ fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
 
 // ---------- Health ----------
 
-pub async fn health() -> impl IntoResponse {
+pub async fn health(State(s): State<AppState>) -> impl IntoResponse {
     Json(hc_api_types::health::HealthResponse {
         status: "ok".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        // Read from AppState rather than `env!()` so this reports the
+        // binary crate's version (homecore), not the hosting handler
+        // crate's version (hc-api). Production `main.rs` injects via
+        // `with_homecore_version`. See HEALTH-VERSION-SOURCE-1.
+        version: s.homecore_version.into(),
     })
 }
 
@@ -130,7 +134,7 @@ pub async fn health() -> impl IntoResponse {
 /// shape `/health` already exposes, just expanded for multi-component
 /// reporting. Public access also lets the login screen and pre-auth client
 /// version-check (CLIENT-VER-1, planned 0.1.3) consume it.
-pub async fn system_versions() -> impl IntoResponse {
+pub async fn system_versions(State(s): State<AppState>) -> impl IntoResponse {
     const VERSIONS_PATH: &str = "/opt/homecore/versions.json";
 
     // Try the appliance-written file. If it exists and parses as JSON,
@@ -147,8 +151,12 @@ pub async fn system_versions() -> impl IntoResponse {
         );
     }
 
+    // Fallback: report the binary crate's version (injected via
+    // `with_homecore_version`) rather than `env!(CARGO_PKG_VERSION)`
+    // which would resolve to hc-api's version. See
+    // HEALTH-VERSION-SOURCE-1.
     Json(serde_json::json!({
-        "core": env!("CARGO_PKG_VERSION"),
+        "core": s.homecore_version,
     }))
 }
 
@@ -244,7 +252,10 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
     };
 
     Json(json!({
-        "version":           env!("CARGO_PKG_VERSION"),
+        // Read from AppState rather than `env!()` so this reports the
+        // binary crate's version (homecore), not hc-api's. See
+        // HEALTH-VERSION-SOURCE-1.
+        "version":           s.homecore_version,
         "uptime_seconds":    uptime_secs,
         "started_at":        s.started_at,
         "rules_total":       rules_total,
@@ -255,6 +266,35 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         "history_db_bytes":  history_db_bytes,
         "timezone":          hc_time::configured_tz().to_string(),
     }))
+}
+
+// ---------- WebSocket connections (OPS-1 piece 3) ----------
+
+/// `GET /api/v1/ws/connections` — list every live WebSocket connection
+/// (events_stream + logs_stream). Admin-only. Surfaces during reconnect-
+/// storm investigations to distinguish "one looping client" from "many
+/// churning clients" — exactly the question that took ~30 min to answer
+/// manually during the 0.1.2 deploy debugging.
+///
+/// Sorted newest-connection-first so an operator scrolling sees the
+/// freshly-spawned ones at the top.
+pub async fn list_ws_connections(
+    State(s): State<AppState>,
+    Extension(claims): Extension<hc_auth::Claims>,
+) -> impl IntoResponse {
+    if !matches!(claims.role, hc_auth::user::Role::Admin) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "admin role required"})),
+        )
+            .into_response();
+    }
+    let list = crate::ws::snapshot_connections(&s.ws_connections);
+    Json(json!({
+        "count": list.len(),
+        "connections": list,
+    }))
+    .into_response()
 }
 
 // ---------- Devices ----------

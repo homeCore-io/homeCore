@@ -46,6 +46,19 @@ pub struct MetricsCollector {
     pub scene_activations_total: IntCounter,
     /// All internal events broken down by type label.
     pub events_total: IntCounterVec,
+    /// WebSocket connect events, labelled by `endpoint`
+    /// (`events_stream` or `logs_stream`). OPS-1 piece 4.
+    pub ws_connects_total: IntCounterVec,
+    /// WebSocket disconnect events, labelled by `endpoint` and the
+    /// disconnect `reason` (one of the seven categories from OPS-1
+    /// piece 1: `client_close`, `socket_closed`, `recv_error`,
+    /// `pong_timeout`, `ping_send_failed`, `event_send_failed`,
+    /// `bus_closed`). The reason label is what makes a disconnect
+    /// storm alertable — `rate(homecore_ws_disconnects_total
+    /// {reason="pong_timeout"}[5m])` flags a network/proxy issue
+    /// distinct from `reason="client_close"` (operator-driven tabs
+    /// closing).
+    pub ws_disconnects_total: IntCounterVec,
 
     // ── Gauges (refreshed on every /metrics scrape) ──────────────────────────
     /// Current number of registered devices (including virtual).
@@ -105,6 +118,24 @@ impl MetricsCollector {
         )?;
         registry.register(Box::new(events_total.clone()))?;
 
+        let ws_connects_total = IntCounterVec::new(
+            Opts::new(
+                "homecore_ws_connects_total",
+                "Total WebSocket connections accepted, labelled by endpoint",
+            ),
+            &["endpoint"],
+        )?;
+        registry.register(Box::new(ws_connects_total.clone()))?;
+
+        let ws_disconnects_total = IntCounterVec::new(
+            Opts::new(
+                "homecore_ws_disconnects_total",
+                "Total WebSocket disconnects, labelled by endpoint and reason",
+            ),
+            &["endpoint", "reason"],
+        )?;
+        registry.register(Box::new(ws_disconnects_total.clone()))?;
+
         let devices_total = reg_gauge!(
             "homecore_devices_total",
             "Current number of registered devices (including timers, switches, modes)"
@@ -132,6 +163,8 @@ impl MetricsCollector {
             device_state_changes_total,
             scene_activations_total,
             events_total,
+            ws_connects_total,
+            ws_disconnects_total,
             devices_total,
             rules_total,
             rules_enabled_total,
