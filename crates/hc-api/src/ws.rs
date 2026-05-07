@@ -278,6 +278,13 @@ async fn handle_socket(
         claims.sub.clone(),
         user_agent.clone(),
     );
+    // Bump connect counter (OPS-1 piece 4). Disconnect counter is
+    // incremented after the loop with the categorised `reason`.
+    state
+        .metrics
+        .ws_connects_total
+        .with_label_values(&["events_stream"])
+        .inc();
 
     // Ping/pong liveness. The interval's first tick fires immediately —
     // consume it before the loop so the first ping goes out one full
@@ -376,6 +383,12 @@ async fn handle_socket(
             }
         }
     };
+
+    state
+        .metrics
+        .ws_disconnects_total
+        .with_label_values(&["events_stream", reason])
+        .inc();
 
     info!(
         ip = %remote_ip,

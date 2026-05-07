@@ -6,6 +6,7 @@
 //!   target=hc_core      Optional target prefix filter
 //!   history=50          Lines of ring-buffer history to send first (max 500)
 
+use crate::metrics::MetricsCollector;
 use crate::ws::{register_connection, WsConnections};
 use crate::AppState;
 use axum::{
@@ -119,6 +120,7 @@ pub async fn log_stream_handler(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let connections = state.ws_connections.clone();
+    let metrics = state.metrics.clone();
 
     ws.on_upgrade(move |socket| {
         handle_socket(
@@ -132,6 +134,7 @@ pub async fn log_stream_handler(
             ip,
             user,
             user_agent,
+            metrics,
         )
     })
 }
@@ -148,10 +151,10 @@ async fn handle_socket(
     ip: IpAddr,
     user: String,
     user_agent: Option<String>,
+    metrics: Arc<MetricsCollector>,
 ) {
     // Register in the active-connection map; guard auto-removes on
-    // every return path (early `return` during history flush, normal
-    // loop break, or panic). OPS-1 piece 3.
+    // every return path. OPS-1 piece 3.
     let _registry_guard = register_connection(
         &connections,
         "logs_stream",
@@ -160,55 +163,76 @@ async fn handle_socket(
         user,
         user_agent,
     );
+    // Bump connect counter (OPS-1 piece 4); disconnect counter is
+    // incremented after the labelled block below with the categorised
+    // reason — same scheme as `/events/stream`.
+    metrics
+        .ws_connects_total
+        .with_label_values(&["logs_stream"])
+        .inc();
 
-    // Send ring-buffer history first.
-    let history: Vec<LogLine> = {
-        let ring = state.ring.lock().unwrap();
-        let start = ring.len().saturating_sub(history_count);
-        ring.iter().skip(start).cloned().collect()
-    };
-
-    for line in history {
-        if !passes_filter(&line, min_level, target_filter.as_deref()) {
-            continue;
-        }
-        if let Ok(json) = serde_json::to_string(&line) {
-            if socket.send(Message::Text(json)).await.is_err() {
-                return;
+    // Send ring-buffer history first, then the live tail. Each break
+    // path sets a `reason` label that flows through to the disconnect
+    // counter and any future log-line we add.
+    //
+    //   history_send_failed — couldn't write a queued line to the socket
+    //   event_send_failed   — couldn't write a live broadcast line
+    //   bus_closed          — log broadcast channel closed (server shutdown)
+    //   socket_closed       — recv returned None (client went away)
+    let reason: &'static str = 'sock: {
+        // History flush.
+        let history: Vec<LogLine> = {
+            let ring = state.ring.lock().unwrap();
+            let start = ring.len().saturating_sub(history_count);
+            ring.iter().skip(start).cloned().collect()
+        };
+        for line in history {
+            if !passes_filter(&line, min_level, target_filter.as_deref()) {
+                continue;
             }
-        }
-    }
-
-    // Stream live events.
-    let mut rx = state.tx.subscribe();
-    loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Ok(line) => {
-                        if !passes_filter(&line, min_level, target_filter.as_deref()) {
-                            continue;
-                        }
-                        match serde_json::to_string(&line) {
-                            Ok(json) => {
-                                if socket.send(Message::Text(json)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => debug!(error = %e, "log_stream: serialise error"),
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!("log_stream: lagged by {n} events");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+            if let Ok(json) = serde_json::to_string(&line) {
+                if socket.send(Message::Text(json)).await.is_err() {
+                    break 'sock "history_send_failed";
                 }
             }
-            result = socket.recv() => {
-                if result.is_none() { break; }  // client disconnected
+        }
+
+        // Live tail.
+        let mut rx = state.tx.subscribe();
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(line) => {
+                            if !passes_filter(&line, min_level, target_filter.as_deref()) {
+                                continue;
+                            }
+                            match serde_json::to_string(&line) {
+                                Ok(json) => {
+                                    if socket.send(Message::Text(json)).await.is_err() {
+                                        break 'sock "event_send_failed";
+                                    }
+                                }
+                                Err(e) => debug!(error = %e, "log_stream: serialise error"),
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            debug!("log_stream: lagged by {n} events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break 'sock "bus_closed",
+                    }
+                }
+                result = socket.recv() => {
+                    if result.is_none() { break 'sock "socket_closed"; }
+                }
             }
         }
-    }
+    };
+
+    metrics
+        .ws_disconnects_total
+        .with_label_values(&["logs_stream", reason])
+        .inc();
 }
 
 fn passes_filter(line: &LogLine, min_level: u8, target: Option<&str>) -> bool {
