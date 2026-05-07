@@ -173,7 +173,21 @@ async fn handle_socket(
     ping_ticker.tick().await;
     let mut outstanding_ping = false;
 
-    loop {
+    // Disconnect-reason categories (OPS-1 piece 1). Carried out of the
+    // event loop and stamped onto the disconnect log so a reconnect
+    // storm is diagnosable from the log alone — distinguishing a clean
+    // client-initiated close from a network drop, a stalled pong, or
+    // a server-side bus closure. Stable strings; clients/dashboards
+    // can match on them.
+    //
+    //   client_close      — Close frame received from the client
+    //   socket_closed     — recv returned None (FIN without Close frame)
+    //   recv_error        — recv returned Err (transport-level)
+    //   pong_timeout      — server ping sent, no pong by next tick
+    //   ping_send_failed  — couldn't send the periodic ping (write err)
+    //   event_send_failed — couldn't push an event payload (write err)
+    //   bus_closed        — broadcast channel closed (server shutdown)
+    let reason: &'static str = loop {
         tokio::select! {
             // Drain client->server frames first so a busy event bus can't
             // starve a pending Close.
@@ -181,9 +195,9 @@ async fn handle_socket(
 
             recv = socket.recv() => {
                 match recv {
-                    None => break,
-                    Some(Err(_)) => break,
-                    Some(Ok(Message::Close(_))) => break,
+                    None => break "socket_closed",
+                    Some(Err(_)) => break "recv_error",
+                    Some(Ok(Message::Close(_))) => break "client_close",
                     Some(Ok(Message::Pong(_))) => {
                         outstanding_ping = false;
                     }
@@ -196,10 +210,10 @@ async fn handle_socket(
             _ = ping_ticker.tick() => {
                 if outstanding_ping {
                     // Previous ping never got a pong — assume the socket is dead.
-                    break;
+                    break "pong_timeout";
                 }
                 if socket.send(Message::Ping(Vec::new())).await.is_err() {
-                    break;
+                    break "ping_send_failed";
                 }
                 outstanding_ping = true;
             }
@@ -237,23 +251,24 @@ async fn handle_socket(
                             }
                         };
                         if socket.send(Message::Text(json)).await.is_err() {
-                            break;
+                            break "event_send_failed";
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WS event stream lagged by {n} events");
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => break "bus_closed",
                 }
             }
         }
-    }
+    };
 
     info!(
         ip = %remote_ip,
         user = %claims.sub,
         client_id = client_id.as_deref().unwrap_or("-"),
         user_agent = user_agent.as_deref().unwrap_or("-"),
+        reason = reason,
         "WebSocket client disconnected"
     );
 }
