@@ -13,6 +13,11 @@ on:
         description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
         type: boolean
         default: true
+  # Fired by hc-web-leptos's CI when develop is green, so a leptos-only
+  # change rebuilds hc-core:dev with the new WASM bundled. Without this
+  # the dev appliance carries stale UI until a separate core commit lands.
+  repository_dispatch:
+    types: [webui-updated]
 
 # contents: write — reusable workflow's release job creates a GH Release.
 # packages: write — reusable workflow's docker-publish job pushes to ghcr.io.
@@ -23,6 +28,10 @@ permissions:
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    # Inherit org-level secrets (CROSS_REPO_DISPATCH_PAT etc.) so the
+    # reusable workflow's dispatch-appliance job can cascade to the
+    # docker repo on develop pushes.
+    secrets: inherit
     with:
       binary_name: homecore
       config_example: config/homecore.toml.example
