@@ -17,6 +17,10 @@ use plugin_sdk_rs::DevicePublisher;
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
+/// Prefix shared by every device_id this plugin publishes
+/// (`hue_{bridge_id}_{kind}_{rid}` — see `BridgeTarget` in `hue::models`).
+const HUE_DEVICE_ID_PREFIX: &str = "hue_";
+
 /// Request sent by the management `refresh_devices` (or
 /// `cleanup_stale_devices`) action. Carries an optional progress
 /// sink so the streaming action can forward bridge-by-bridge events
@@ -142,7 +146,13 @@ impl Bridge {
     /// unreachable bridge.
     async fn reconcile_published_ids(&self, all_bridges_succeeded: bool) {
         if !all_bridges_succeeded {
-            debug!("Skipping cross-restart reconcile — not all bridges responded");
+            // Skipping is the safe choice, but a bridge that fails every sync
+            // means stale devices are never cleaned up and nothing says so.
+            warn!(
+                "Skipping cross-restart reconcile — not all bridges responded. \
+                 Devices dropped from config stay registered in homeCore until a \
+                 sync in which every bridge succeeds."
+            );
             return;
         }
         let live = self.registry.all_device_ids();
@@ -151,6 +161,7 @@ impl Bridge {
                 if !report.stale_unregistered.is_empty() {
                     info!(
                         count = report.stale_unregistered.len(),
+                        devices = ?report.stale_unregistered,
                         "Cleaned up stale Hue devices via SDK reconcile"
                     );
                 }
@@ -1412,6 +1423,44 @@ impl Bridge {
             return Ok(());
         }
 
+        // A device_id carrying our own `hue_` prefix that reaches this point is
+        // one we published in an earlier run but no longer sync — e.g. a grouped
+        // light whose `publish_grouped_lights` config was turned off while its
+        // registration stayed retained in homeCore.  Such a device still accepts
+        // commands from rules and the UI, and every one of them lands here.
+        // Dropping it as "not ours" makes the command vanish with no error
+        // anywhere, so say so loudly.
+        if Self::is_own_device_id(device_id) {
+            warn!(
+                device_id,
+                "Command for an unmanaged Hue device — it is still registered in \
+                 homeCore but this plugin has no binding for it, so the command was \
+                 dropped.  Check publish_grouped_lights / publish_bridge_home, or \
+                 remove the stale device."
+            );
+            // Deliberately not `observe_command_result` — that publishes a state
+            // patch, which would refresh this device's `last_seen` and disguise the
+            // very staleness that marks it as unmanaged.  Emit the event only.
+            let payload = translator::command_result_event(translator::CommandResult {
+                plugin_id: self.publisher.plugin_id(),
+                device_id,
+                operation: "unrouted",
+                success: false,
+                error: Some("device not managed by this plugin"),
+                error_code: Some("unmanaged_device"),
+                latency_ms: 0,
+                retry_count: 0,
+            });
+            if let Err(e) = self
+                .publisher
+                .publish_event("plugin_command_result", &payload)
+                .await
+            {
+                warn!(device_id, error = %e, "Failed to publish unrouted-command event");
+            }
+            return Ok(());
+        }
+
         // Ignore commands for devices this plugin doesn't own.  With the
         // SDK wildcard subscription (homecore/devices/+/cmd), commands for
         // other plugins' devices arrive here too — silently skip them.
@@ -1599,6 +1648,13 @@ impl Bridge {
         {
             warn!(device_id, operation, error = %e, "Failed to publish command result event");
         }
+    }
+
+    /// Whether `device_id` is one this plugin publishes.  True even for devices
+    /// it no longer has a registry binding for — that gap is exactly what makes
+    /// an unroutable command worth reporting rather than silently dropping.
+    fn is_own_device_id(device_id: &str) -> bool {
+        device_id.starts_with(HUE_DEVICE_ID_PREFIX)
     }
 
     fn classify_command_error(error: Option<&str>) -> Option<&'static str> {
@@ -1841,6 +1897,21 @@ mod tests {
             motion_sensitivity: None,
         };
         assert!(Bridge::validate_accessory_command("motion", &cmd).is_err());
+    }
+
+    #[test]
+    fn recognizes_own_device_ids_even_without_a_binding() {
+        // A grouped light dropped from config keeps its registration in
+        // homeCore and still routes commands here.  It must be recognized as
+        // ours so the command is reported rather than silently discarded.
+        assert!(Bridge::is_own_device_id(
+            "hue_001788fffe6841b3_group_f891081e"
+        ));
+        assert!(Bridge::is_own_device_id(
+            "hue_001788fffe6841b3_light_03113f8a"
+        ));
+        assert!(!Bridge::is_own_device_id("lutron_72"));
+        assert!(!Bridge::is_own_device_id("caseta_10"));
     }
 
     #[test]
