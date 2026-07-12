@@ -1,0 +1,39 @@
+name: Canary (latest stable Rust)
+
+# Early warning for the pinned toolchain.
+#
+# CI compiles with rust-ci.yml's pinned rust_version, which matches the
+# rust:1.95-alpine digest the Dockerfiles build from — so CI green means the
+# artifact we actually ship builds. The cost of pinning is that we stop
+# hearing about new lints and deprecations until someone bumps the pin, and
+# then they all arrive at once.
+#
+# This job buys that warning back: same checks, run against the latest stable
+# on a schedule. It is deliberately NOT part of CI — a red canary means
+# "stable moved", not "develop is broken", and it must never gate a merge.
+# When it goes red, read it as a preview of what bumping the pin will demand.
+#
+# Scheduled workflows only ever fire on the default branch, so we pass
+# ref: develop explicitly to check the branch work actually lands on.
+
+on:
+  schedule:
+    # Mondays 06:17 UTC. Off-the-hour to dodge the top-of-hour scheduling
+    # backlog GitHub applies to cron runs.
+    - cron: '17 6 * * 1'
+  workflow_dispatch: {}
+
+# rust-ci.yml's job requests issues:write, and a called workflow can never
+# hold more than its caller — without this the run dies at startup with no
+# jobs. (The tracking-issue steps themselves are gated on `push`, so they
+# stay dormant here.)
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
+    with:
+      rust_version: "stable"
+      ref: develop
