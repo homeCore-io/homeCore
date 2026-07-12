@@ -141,7 +141,7 @@ pub fn snapshot_connections(connections: &WsConnections) -> Vec<WsConnection> {
         return Vec::new();
     };
     let mut out: Vec<WsConnection> = map.values().cloned().collect();
-    out.sort_by(|a, b| b.connected_at.cmp(&a.connected_at));
+    out.sort_by_key(|c| std::cmp::Reverse(c.connected_at));
     out
 }
 
