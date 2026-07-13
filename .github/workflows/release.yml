@@ -44,7 +44,25 @@ jobs:
       image_name: hc-core
       dockerfile_name: Dockerfile.core
       bundle_webui: true
-      webui_ref: develop  # while hc-web-leptos still on develop
+      # The web UI is not built by its own repo — it is cloned and built here,
+      # so whatever ref this names is what ends up inside the image.
+      #
+      # On a tag push, pin it to the identical tag: hc-web-leptos is versioned in
+      # lockstep with core (both carry v0.1.3/4/5), so v0.1.6 of core bundles
+      # v0.1.6 of the UI. Without this a *released* image bundled whatever
+      # hc-web-leptos@develop happened to be at that instant, which meant the
+      # image could not be rebuilt from core's tag — the UI inside it was
+      # unrecorded. Rebuilding v0.1.5 today would quietly produce a different
+      # artifact than v0.1.5 did.
+      #
+      # Everything else (develop pushes, workflow_dispatch, the webui-updated
+      # dispatch) keeps tracking develop, which is the point of a dev image.
+      #
+      # This makes the ordering explicit: tag hc-web-leptos before tagging core.
+      # If the matching tag is missing the release fails at checkout rather than
+      # silently falling back to develop — a release that bundles an unrecorded
+      # UI is the thing this exists to prevent.
+      webui_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
       docker_repo_ref: develop  # while homeCore-io/docker still on develop
       # Forwards the workflow_dispatch input to the reusable workflow.
       # On tag push (no inputs), the `|| false` fallback ensures
