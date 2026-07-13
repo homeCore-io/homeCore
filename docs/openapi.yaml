@@ -2,15 +2,30 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.0"
+  version: "0.1.5"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
 
-    **Authentication:** all endpoints except `POST /auth/login` and `GET /health`
-    require a `Bearer` JWT in the `Authorization` header.  The WebSocket stream
-    endpoint instead accepts the token via `?token=` query parameter (browsers
-    cannot set headers during a WebSocket upgrade).
+    **Authentication.** Most endpoints require a `Bearer` JWT in the
+    `Authorization` header. An API key (`POST /auth/api-keys`) may be used in
+    its place. WebSocket endpoints (`/events/stream`, `/logs/stream`) take the
+    token as a `?token=` query parameter instead, because browsers cannot set
+    headers during a WebSocket upgrade.
+
+    Public — no credential at all: `POST /auth/login`, `POST /auth/refresh`,
+    `GET /health`, `GET /system/versions`, and `GET /metrics`. `/metrics` is
+    instead gated on source IP via `[metrics].whitelist`, which is **empty by
+    default**, so every caller gets `403` until it is configured.
+
+    A local-network IP whitelist (`[auth].whitelist`) can bypass authentication
+    entirely; a Bearer token always takes priority when one is present.
+
+    **Authorization** is by scope, not role. Handlers declare a required scope
+    such as `devices:read` or `automations:write`, and roles map onto sets of
+    scopes — so "which role can call this" is a property of the scope, and each
+    operation below names the scope it needs. A few endpoints instead check for
+    the admin role directly; those say so.
   license:
     name: MIT
 
@@ -35,8 +50,12 @@ tags:
     description: Plugin registration and health
   - name: webhooks
     description: Inbound webhook triggers for automations
+  - name: dashboards
+    description: Dashboard definitions, templates, and per-user defaults
   - name: system
-    description: Health probe
+    description: |
+      Health, status, versions, config, backup/restore, logs, metrics,
+      WebSocket connections, and the audit log.
 
 # =============================================================================
 # Paths
@@ -247,6 +266,162 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/DeviceState"
+    patch:
+      operationId: bulkPatchDevices
+      summary: Bulk update device metadata
+      description: |
+        Updates metadata on several devices at once. Currently the only
+        supported field is `area`.
+        Requires the `devices:write` scope (`DevicesWrite` guard).
+        Selection is by explicit id list only — there is no filter form. `ids`
+        is required; a body without an `ids` array is rejected with 422.
+        Non-string elements inside `ids` are silently ignored.
+        `area` is optional. Send a string to assign an area, or `null` to clear
+        it. If the `area` key is omitted entirely, every listed device is
+        re-saved unchanged and still counted in `updated` — no other bulk field
+        is implemented yet.
+        Unknown device ids are not an error: they are reported in `not_found`
+        and the rest of the batch still applies.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  description: Device IDs to update
+                  items:
+                    type: string
+                area:
+                  type: string
+                  nullable: true
+                  description: Area to assign to every listed device; `null` clears the area
+            example:
+              ids:
+                - light.living_room_main
+                - light.living_room_lamp
+              area: living_room
+      responses:
+        "200":
+          description: Bulk update applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated, not_found]
+                properties:
+                  updated:
+                    type: integer
+                    description: Number of devices successfully written
+                  not_found:
+                    type: array
+                    description: IDs from the request that do not exist in the registry
+                    items:
+                      type: string
+              example:
+                updated: 2
+                not_found: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: |
+            `ids` array missing, or `area` is neither a string nor `null`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: bulkDeleteDevices
+      summary: Bulk delete devices (cascades into rule files)
+      description: |
+        Deletes several devices from the registry in one call. Destructive and
+        not reversible via the API.
+        Requires the `devices:write` scope (`DevicesWrite` guard).
+        Selection is by explicit id list only — there is no filter form. `ids`
+        is required; a body without an `ids` array is rejected with 422.
+        **Cascade into rules.** For every device actually deleted, HomeCore
+        rewrites the rule files on disk: each direct reference to the deleted
+        device in a rule's trigger, conditions, or actions is replaced with the
+        placeholder `DELETED:<device_id>`, the rule's `enabled` flag is forced
+        to `false`, and the rule's `error` field is set to
+        `references deleted device: <device_id>`. The rewritten rule file is
+        written back in place. References buried inside Rhai script strings are
+        NOT rewritten. The names of every rule disabled this way are returned in
+        `affected_rules` (deduplicated across the batch).
+        Unknown device ids are not an error: they are reported in `not_found`
+        and the rest of the batch still applies. A successful delete of one or
+        more devices emits a `device.bulk_deleted` audit entry.
+        Note the response reports a *count* in `deleted` — unlike single
+        `DELETE /devices/{id}`, which returns `{"deleted": true, ...}`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  description: Device IDs to delete
+                  items:
+                    type: string
+            example:
+              ids:
+                - light.living_room_main
+                - sensor.old_thermostat
+      responses:
+        "200":
+          description: Bulk delete applied, with the rule-file cascade summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, not_found, affected_rules]
+                properties:
+                  deleted:
+                    type: integer
+                    description: Number of devices removed from the registry
+                  not_found:
+                    type: array
+                    description: IDs from the request that did not exist
+                    items:
+                      type: string
+                  affected_rules:
+                    type: array
+                    description: |
+                      Names of rules that referenced a deleted device. Each was
+                      rewritten with a `DELETED:<device_id>` placeholder and
+                      disabled.
+                    items:
+                      type: string
+              example:
+                deleted: 2
+                not_found: []
+                affected_rules:
+                  - Evening lights
+                  - Away mode
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: "`ids` array missing from the request body"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /devices/{id}:
     get:
@@ -312,6 +487,58 @@ paths:
                 $ref: "#/components/schemas/DeviceState"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteDevice
+      summary: Delete a device (cascades into automations)
+      description: |
+        Removes the device from the registry.
+
+        **This cascades into rule files.** Every automation that references the
+        device has the reference rewritten to `DELETED:{device_id}`, is set
+        `enabled: false`, and gets `error: "references deleted device: {id}"`.
+        The RON file is rewritten in place. References inside Rhai script strings
+        are *not* rewritten. The names of the rules touched come back in
+        `affected_rules`, so check it before assuming the delete was harmless —
+        an empty list means no automation was disturbed.
+
+        Note the shape differs from bulk delete: this returns `deleted: true`
+        (boolean), whereas `DELETE /devices` returns `deleted: <count>`.
+
+        Requires the `devices:write` scope.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Device deleted; any automations it broke are listed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, affected_rules]
+                properties:
+                  deleted:
+                    type: boolean
+                    examples: [true]
+                  affected_rules:
+                    type: array
+                    description: Names of automations disabled by this delete. Empty when none referenced it.
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Device store or rule-file store failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /devices/{id}/state:
     patch:
@@ -518,6 +745,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Rule"
+    patch:
+      operationId: bulkPatchAutomations
+      summary: Bulk enable/disable automation rules
+      description: |
+        Enables or disables many rules at once and persists each changed rule
+        back to its RON file.
+        Requires the `automations:write` scope (`AutomationsWrite` guard).
+        Target selection, in priority order:
+          1. `ids` in the body — explicit list of rule UUIDs (the `?tag=` query
+             param is ignored when `ids` is present).
+          2. `?tag=<tag>` — every rule carrying that tag.
+          3. Neither — **every rule in the system**.
+        Rules generated from mode definitions are always skipped, even when
+        explicitly listed in `ids`.
+        `enabled` is optional: if omitted, the selected rules are re-serialized
+        and returned unchanged.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tag
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Apply only to rules carrying this tag. Ignored when `ids` is present
+            in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  description: |
+                    Explicit rule UUIDs to update. Overrides `?tag=`. Omit to
+                    select by tag, or to select all rules.
+                  items:
+                    type: string
+                    format: uuid
+                enabled:
+                  type: boolean
+                  description: New enabled state for every selected rule
+            example:
+              ids:
+                - 6f2f1a3e-6b1f-4f0c-9a7e-3b6b0a2d1c44
+              enabled: false
+      responses:
+        "200":
+          description: Bulk patch applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated, rules]
+                properties:
+                  updated:
+                    type: integer
+                    description: Number of rules selected and written
+                  rules:
+                    type: array
+                    description: The updated rules, in their post-patch form
+                    items:
+                      $ref: "#/components/schemas/Rule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: A selected rule failed to compile against the device registry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Rule engine not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /automations/import:
     post:
@@ -1137,6 +1447,84 @@ paths:
           description: Plugin deregistered
         "404":
           $ref: "#/components/responses/NotFound"
+    get:
+      operationId: getPlugin
+      summary: Get a single plugin's registration and health
+      description: |
+        Returns the plugin's registration record — status, heartbeat, restart
+        count, version, `device_count`, and its capability manifest if it has
+        published one.
+
+        `device_count` is the number of devices the plugin itself believes it
+        manages. Comparing it against how many devices homeCore holds for the
+        plugin is how orphaned devices are found — see
+        `GET /devices/orphaned`.
+
+        Requires the `plugins:read` scope.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Plugin registration record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchPlugin
+      summary: Enable/disable a plugin or change its log level
+      description: |
+        Both fields are optional; send either or both.
+
+        `enabled` is persisted to `homecore.toml`, so it survives a restart, and
+        the supervisor starts or stops the plugin process to match. `log_level`
+        is pushed to the running plugin over the management channel and is **not**
+        persisted — it reverts on restart.
+
+        Both changes are written to the audit log.
+
+        Requires the `plugins:write` scope.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: Persisted to homecore.toml; starts or stops the plugin process.
+                log_level:
+                  type: string
+                  description: Pushed to the live plugin. Not persisted.
+                  examples: ["debug"]
+      responses:
+        "200":
+          description: The updated plugin record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /plugins/matter/commission:
     post:
@@ -1291,6 +1679,4475 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
 
+  # ---------------------------------------------------------------------------
+  # Auth — token refresh, API keys
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Audit
+  # ---------------------------------------------------------------------------
+  /audit:
+    get:
+      operationId: listAudit
+      summary: Query the audit log
+      description: |
+        Requires the `audit:read` scope (held by the `Admin`, `Observer`,
+        `DeviceOperator`, `RuleEditor`, and `ServiceOperator` roles; not by
+        `User` or `ReadOnly`). Callers authenticated over the local admin UDS
+        bypass the scope check.
+
+        All query parameters are optional filters and are ANDed together.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: actor_id
+          in: query
+          description: Filter by the acting user / API-key owner UUID
+          schema:
+            type: string
+            format: uuid
+        - name: actor_type
+          in: query
+          schema:
+            type: string
+            enum: [user, api_key, local_admin, ip_whitelist, system, anonymous]
+        - name: event_type
+          in: query
+          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `login.success`
+          schema:
+            type: string
+        - name: target_kind
+          in: query
+          description: Kind of the affected object, e.g. `api_key`, `user`
+          schema:
+            type: string
+        - name: target_id
+          in: query
+          description: Identifier of the affected object
+          schema:
+            type: string
+        - name: result
+          in: query
+          schema:
+            type: string
+            enum: [success, denied, error]
+        - name: from
+          in: query
+          description: RFC3339 timestamp lower bound (inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339 timestamp upper bound (inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Array of audit entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [ts, actor_type, actor_label, event_type, result]
+                  properties:
+                    id:
+                      type: [integer, "null"]
+                      format: int64
+                      description: Row id assigned by the store on insert
+                    ts:
+                      type: string
+                      format: date-time
+                    actor_type:
+                      type: string
+                      enum: [user, api_key, local_admin, ip_whitelist, system, anonymous]
+                    actor_id:
+                      type: [string, "null"]
+                      format: uuid
+                    actor_label:
+                      type: string
+                    event_type:
+                      type: string
+                    scope_used:
+                      type: [string, "null"]
+                    target_kind:
+                      type: [string, "null"]
+                    target_id:
+                      type: [string, "null"]
+                    correlation_id:
+                      type: [string, "null"]
+                    ip:
+                      type: [string, "null"]
+                    user_agent:
+                      type: [string, "null"]
+                    result:
+                      type: string
+                      enum: [success, denied, error]
+                    detail:
+                      description: Free-form JSON detail; shape varies by `event_type`
+        "400":
+          description: Unknown `actor_type` or `result`, or unparseable `from` / `to`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller lacks the `audit:read` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Audit store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Auth — token refresh
+  # ---------------------------------------------------------------------------
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: Exchange a refresh token for a new access + refresh pair
+      description: |
+        Public endpoint — no Bearer token required; the refresh token in the
+        body is the credential.
+
+        Refresh tokens are single-use and rotating: the presented token is
+        marked used and a new one is returned. Presenting an already-used
+        token is treated as theft and revokes the entire token chain.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          description: New access token and rotated refresh token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, token_type, expires_in, refresh_token, refresh_expires_in, user]
+                properties:
+                  token:
+                    type: string
+                    description: 'Signed JWT — include as `Authorization: Bearer <token>`'
+                  token_type:
+                    type: string
+                    enum: [Bearer]
+                  expires_in:
+                    type: integer
+                    description: Access-token lifetime in seconds
+                  refresh_token:
+                    type: string
+                    description: Replacement refresh token; the presented one is now invalid
+                  refresh_expires_in:
+                    type: integer
+                    description: Refresh-token lifetime in seconds
+                  user:
+                    $ref: "#/components/schemas/UserInfo"
+        "401":
+          description: |
+            Malformed, unknown, revoked, or expired refresh token; reuse of an
+            already-used token (which also revokes the whole chain); or the
+            owning user no longer exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Store unavailable, or the token could not be rotated / re-signed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Auth — API keys
+  # ---------------------------------------------------------------------------
+  /auth/api-keys:
+    get:
+      operationId: listApiKeys
+      summary: List API keys
+      description: |
+        Any authenticated user may call this. Callers holding the
+        `api_keys:admin` scope (the `Admin` role) — and callers on the local
+        admin UDS — receive every key system-wide; everyone else receives only
+        the keys they own. Secrets are never returned.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of API-key summaries (no secret material)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, label, prefix, owner_uid, scopes, created_at, allowed_cidrs]
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    label:
+                      type: string
+                    prefix:
+                      type: string
+                      description: Lookup prefix for display as `hc_sk_<prefix>...`
+                    owner_uid:
+                      type: string
+                      format: uuid
+                    scopes:
+                      type: array
+                      items:
+                        type: string
+                    created_at:
+                      type: string
+                      format: date-time
+                    last_used_at:
+                      type: [string, "null"]
+                      format: date-time
+                    expires_at:
+                      type: [string, "null"]
+                      format: date-time
+                      description: Null means the key never expires
+                    allowed_cidrs:
+                      type: array
+                      items:
+                        type: string
+                      description: Empty means no IP restriction
+                    revoked_at:
+                      type: [string, "null"]
+                      format: date-time
+        "400":
+          description: Caller identity could not be resolved to a uid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createApiKey
+      summary: Issue a new API key
+      description: |
+        Any authenticated user may issue a key for themselves; the requested
+        `scopes` must be a subset of the caller's own scopes. Issuing a key for
+        another user (`owner_uid` different from the caller) requires the
+        `api_keys:admin` scope, held only by the `Admin` role — in that case
+        the requested scopes must be a subset of the *owner's* role scopes.
+
+        The plaintext `token` is returned exactly once, in this response.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, scopes]
+              properties:
+                label:
+                  type: string
+                  description: Human-readable label; must not be blank
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                  description: Must be a subset of the key owner's scopes
+                expires_in_days:
+                  type: [integer, "null"]
+                  description: Lifetime in days; omitted or null means no expiry
+                allowed_cidrs:
+                  type: array
+                  items:
+                    type: string
+                  description: CIDR ranges the key may be used from; empty (default) means no IP restriction
+                owner_uid:
+                  type: [string, "null"]
+                  format: uuid
+                  description: |
+                    Target owner. Defaults to the caller; requires the
+                    `api_keys:admin` scope if different. Required when issuing
+                    over the local admin UDS.
+      responses:
+        "201":
+          description: Key created — `token` is shown only here
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, label, token, owner_uid, scopes, created_at]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  label:
+                    type: string
+                  token:
+                    type: string
+                    description: Plaintext secret; never retrievable again
+                  owner_uid:
+                    type: string
+                    format: uuid
+                  scopes:
+                    type: array
+                    items:
+                      type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                  expires_at:
+                    type: [string, "null"]
+                    format: date-time
+        "400":
+          description: |
+            `owner_uid` omitted when issuing over the admin UDS, or the caller
+            identity could not be resolved to a uid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `api_keys:admin` scope required to issue keys for other users, or a
+            requested scope is not held by the key owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Owner user not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Blank `label`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Key generation failed or store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/api-keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke an API key
+      description: |
+        The key's owner may revoke it. Revoking someone else's key requires the
+        `api_keys:admin` scope (the `Admin` role) or the local admin UDS.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: API key UUID
+      responses:
+        "204":
+          description: Key revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Not the key owner and lacking the `api_keys:admin` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateApiKey
+      summary: Update API-key metadata (does not rotate the secret)
+      description: |
+        The key's owner may update it. Updating someone else's key requires the
+        `api_keys:admin` scope (the `Admin` role) or the local admin UDS.
+
+        Omitted fields are left unchanged. New `scopes` must be a subset of the
+        key owner's current role scopes.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: API key UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  description: Must not be blank if present
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                expires_in_days:
+                  type: integer
+                  description: Sets a new expiry N days from now. Omitting it leaves the existing expiry unchanged (it cannot be cleared here).
+                allowed_cidrs:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Updated API-key summary (no secret material)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, label, prefix, owner_uid, scopes, created_at, allowed_cidrs]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  label:
+                    type: string
+                  prefix:
+                    type: string
+                  owner_uid:
+                    type: string
+                    format: uuid
+                  scopes:
+                    type: array
+                    items:
+                      type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                  last_used_at:
+                    type: [string, "null"]
+                    format: date-time
+                  expires_at:
+                    type: [string, "null"]
+                    format: date-time
+                  allowed_cidrs:
+                    type: array
+                    items:
+                      type: string
+                  revoked_at:
+                    type: [string, "null"]
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Not the key owner and lacking the `api_keys:admin` scope, or a
+            requested scope is not held by the key owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: API key not found, or the key's owner user no longer exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Blank `label`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/api-keys/{id}/rotate:
+    post:
+      operationId: rotateApiKey
+      summary: Rotate an API key's secret
+      description: |
+        Replaces the secret material on an existing key. Owner, scopes, label,
+        CIDRs, and expiry are preserved. The new plaintext `token` is returned
+        exactly once — same contract as create.
+
+        The key's owner may rotate it. Rotating someone else's key requires the
+        `api_keys:admin` scope (the `Admin` role) or the local admin UDS.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: API key UUID
+      responses:
+        "200":
+          description: Key rotated — `token` is the new secret, shown only here
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, label, token, owner_uid, scopes, created_at]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  label:
+                    type: string
+                  token:
+                    type: string
+                    description: New plaintext secret; never retrievable again
+                  owner_uid:
+                    type: string
+                    format: uuid
+                  scopes:
+                    type: array
+                    items:
+                      type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                    description: Original creation time — rotation does not reset it
+                  expires_at:
+                    type: [string, "null"]
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Not the key owner and lacking the `api_keys:admin` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Key generation failed or store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Automations — groups, history, clone, RON, stale refs
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Rule groups
+  # ---------------------------------------------------------------------------
+  /automations/groups:
+    get:
+      operationId: listRuleGroups
+      summary: List all rule groups
+      description: |
+        Rule groups are named bundles of rule IDs that can be enabled or disabled as a unit.
+        They are purely organisational and do not affect rule evaluation order or priority;
+        a rule may belong to multiple groups.
+
+        Requires the `automations:read` permission.
+        Returns an empty array when the group store is not configured.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of rule groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, rule_ids]
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    name:
+                      type: string
+                    description:
+                      type: string
+                      description: Omitted when unset
+                    rule_ids:
+                      type: array
+                      items:
+                        type: string
+                        format: uuid
+                      description: Ordered list of rule UUIDs belonging to this group
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      operationId: createRuleGroup
+      summary: Create a rule group
+      description: |
+        Creates a group and persists it to `{rules_dir}/groups.json`.
+        The server always assigns a fresh UUID — any `id` sent in the body is overwritten.
+        Note that `id` is still structurally required by the deserializer: a body without an
+        `id` field is rejected with 422, so send any placeholder UUID.
+
+        Requires the `automations:write` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name]
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                  description: Required by the deserializer but ignored — replaced with a server-generated UUID
+                name:
+                  type: string
+                description:
+                  type: string
+                rule_ids:
+                  type: array
+                  default: []
+                  items:
+                    type: string
+                    format: uuid
+            example:
+              id: 00000000-0000-0000-0000-000000000000
+              name: Vacation
+              description: Rules to pause while on vacation
+              rule_ids: []
+      responses:
+        "201":
+          description: Created group with server-assigned UUID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, rule_ids]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Body failed to deserialize into a rule group (e.g. missing `id` or `name`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Group store not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/groups/{id}:
+    get:
+      operationId: getRuleGroup
+      summary: Get a single rule group
+      description: Requires the `automations:read` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Rule group UUID
+      responses:
+        "200":
+          description: Rule group
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, rule_ids]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: patchRuleGroup
+      summary: Update rule group metadata
+      description: |
+        Updates `name`, `description` and/or `rule_ids`. Every field is optional; omitted
+        fields are left unchanged. This only edits group membership — it does not enable or
+        disable any rule (use `POST /automations/groups/{id}/{action}` for that).
+
+        Requires the `automations:write` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Rule group UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                rule_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: Replaces the existing list wholesale
+            example:
+              name: Vacation
+              rule_ids:
+                - 3f1b0b7e-5e9a-4a6b-9d3f-1c2e4a5b6c7d
+      responses:
+        "200":
+          description: Updated group
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, rule_ids]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteRuleGroup
+      summary: Delete a rule group
+      description: |
+        Removes the group and re-persists `groups.json`. The rules that belonged to the
+        group are left untouched.
+
+        Requires the `automations:write` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Rule group UUID
+      responses:
+        "200":
+          description: Group deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+                    enum: [true]
+              example:
+                deleted: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /automations/groups/{id}/{action}:
+    post:
+      operationId: setRuleGroupEnabled
+      summary: Enable or disable every rule in a group
+      description: |
+        Applies `enabled = true` (`action = enable`) or `enabled = false` (`action = disable`)
+        to every rule listed in the group's `rule_ids`, and writes each changed rule back to
+        its `.ron` file. Any other `action` value is rejected with 400.
+
+        Requires the `automations:write` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Rule group UUID
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [enable, disable]
+          description: "`enable` sets `enabled = true` on every rule in the group; `disable` sets it to `false`"
+      responses:
+        "200":
+          description: Rules updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, updated, rules]
+                properties:
+                  enabled:
+                    type: boolean
+                    description: The value applied to each rule (true for `enable`, false for `disable`)
+                  updated:
+                    type: integer
+                    description: Number of rules whose `enabled` flag was set
+                  rules:
+                    type: array
+                    description: The updated rules
+                    items:
+                      $ref: "#/components/schemas/Rule"
+        "400":
+          description: "Unknown action — only `enable` and `disable` are accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Rule engine not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Automation maintenance
+  # ---------------------------------------------------------------------------
+  /automations/stale-refs:
+    get:
+      operationId: listStaleAutomationRefs
+      summary: List rules that reference device IDs no longer in the device registry
+      description: |
+        Walks every rule's trigger, conditions and actions, collects the device IDs they
+        reference, and reports the ones that are not registered in the device store.
+        Useful for finding automations broken by a device rename or deletion.
+        IDs already rewritten to the `DELETED:` placeholder by device deletion are excluded.
+        Rules with no stale references are omitted from the result.
+
+        Requires the `automations:read` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Rules holding stale device references (empty array when all references resolve)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [rule_id, rule_name, stale_device_ids]
+                  properties:
+                    rule_id:
+                      type: string
+                      format: uuid
+                    rule_name:
+                      type: string
+                    stale_device_ids:
+                      type: array
+                      description: Sorted, de-duplicated device IDs referenced by the rule but absent from the device store
+                      items:
+                        type: string
+              example:
+                - rule_id: 3f1b0b7e-5e9a-4a6b-9d3f-1c2e4a5b6c7d
+                  rule_name: Porch light at sunset
+                  stale_device_ids:
+                    - light.porch_old
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Failed to list devices from the device store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Rule engine not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/{id}/clone:
+    post:
+      operationId: cloneAutomation
+      summary: Duplicate an automation rule
+      description: |
+        Copies the rule under a new UUID. The clone's `name` becomes `Copy of <original name>`,
+        its `enabled` flag is forced to `false` (so it cannot double-fire before the operator
+        reviews it), and any `error` on the original is cleared. The clone is written to a new
+        `.ron` file and registered with the running rule engine. No request body.
+
+        Requires the `automations:write` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "201":
+          description: The newly created (disabled) clone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: The clone was written to disk but failed to compile for the rule engine
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to write the clone's rule file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Rule engine not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/{id}/history:
+    get:
+      operationId: getAutomationHistory
+      summary: Recent evaluation (firing) records for a rule
+      description: |
+        Returns the in-memory ring buffer of the rule's most recent evaluation attempts —
+        at most 20 records, oldest first, newest last. A record is written on **every**
+        attempt the trigger matched, not only successful firings, so this is the primary way
+        to see *why* a rule did or did not run.
+
+        `outcome` is a tagged union discriminated by `type`:
+          * `fired` — all conditions passed and the actions were dispatched.
+          * `condition_failed` — a condition failed; `at_index` is the zero-based index of the
+            failing condition and `reason` is its one-line explanation. Evaluation short-circuits,
+            so `conditions[]` stops at the failure.
+          * `cooldown` — skipped because the rule fired within `cooldown_secs`; `remaining_secs`
+            is the time left.
+          * `paused` — the rule is currently paused via a `PauseRule` action.
+          * `required_expression_failed` — the rule's `required_expression` evaluated to `false`.
+          * `trigger_gate_failed` — the rule's `trigger_condition` evaluated to `false`.
+          * `skipped` — dropped by the `run_mode` concurrency policy (Single or Queued); see `reason`.
+
+        Requires the `automations:read` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "200":
+          description: Up to 20 firing records, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [timestamp, trigger_type, trigger_context, outcome, conditions, actions, eval_ms]
+                  properties:
+                    timestamp:
+                      type: string
+                      format: date-time
+                    trigger_type:
+                      type: string
+                      description: Trigger variant name that produced this attempt
+                    trigger_context:
+                      type: object
+                      description: Context captured from the triggering event. Optional members are omitted when unset.
+                      properties:
+                        device_id:
+                          type: string
+                          nullable: true
+                        attribute:
+                          type: string
+                          nullable: true
+                        value:
+                          description: Any JSON value
+                          nullable: true
+                        prev_value:
+                          description: Any JSON value
+                          nullable: true
+                        event_type:
+                          type: string
+                          nullable: true
+                        change_kind:
+                          type: string
+                          enum: [homecore, physical, external, unknown]
+                        change_source:
+                          type: string
+                          description: "e.g. `api`, `rule`, `scene`, `script`"
+                        change_actor_id:
+                          type: string
+                        change_actor_name:
+                          type: string
+                        correlation_id:
+                          type: string
+                        extra:
+                          description: Auxiliary context (for webhook triggers, the query-parameter map)
+                        trigger_label:
+                          type: string
+                          description: User-defined label from the rule's `trigger_label`
+                    outcome:
+                      type: object
+                      description: Tagged union keyed on `type`
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - fired
+                            - condition_failed
+                            - cooldown
+                            - paused
+                            - required_expression_failed
+                            - trigger_gate_failed
+                            - skipped
+                        at_index:
+                          type: integer
+                          description: "`condition_failed` only — zero-based index of the failing condition"
+                        reason:
+                          type: string
+                          description: "`condition_failed` and `skipped` only"
+                        remaining_secs:
+                          type: integer
+                          description: "`cooldown` only — seconds left before the rule may fire again"
+                    conditions:
+                      type: array
+                      description: Per-condition results, in order; stops at the first failure
+                      items:
+                        type: object
+                        required: [condition_type, passed, reason]
+                        properties:
+                          condition_type:
+                            type: string
+                            description: "Condition variant name (e.g. `DeviceState`, `TimeWindow`)"
+                          passed:
+                            type: boolean
+                          actual:
+                            description: Value read at evaluation time (any JSON value); omitted when not applicable
+                          expected:
+                            description: Expected value or constraint from the rule definition (any JSON value); omitted when not applicable
+                          reason:
+                            type: string
+                            description: "One-line summary, e.g. `open == false (actual: true) → FAIL`"
+                    actions:
+                      type: array
+                      description: Per-action results (top-level actions only)
+                      items:
+                        type: object
+                        required: [index, action_type, description, outcome, duration_ms]
+                        properties:
+                          index:
+                            type: integer
+                            description: Zero-based index in the top-level action list
+                          action_type:
+                            type: string
+                            description: "Action variant name (e.g. `SetDeviceState`, `Delay`)"
+                          description:
+                            type: string
+                            description: Human-readable summary of what the action targeted
+                          outcome:
+                            type: object
+                            description: Tagged union keyed on `status`
+                            required: [status]
+                            properties:
+                              status:
+                                type: string
+                                enum: [ok, error, skipped]
+                              message:
+                                type: string
+                                description: "`error` only"
+                          duration_ms:
+                            type: integer
+                            description: Elapsed milliseconds for this action, including nested work
+                    eval_ms:
+                      type: integer
+                      description: Milliseconds spent evaluating conditions
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Fire history not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/{id}/ron:
+    get:
+      operationId: getAutomationRon
+      summary: Get a rule's on-disk RON source
+      description: |
+        Returns the literal contents of the rule's `.ron` file as `text/plain`, preserving
+        field order and any embedded comments. Intended for read-only clients (e.g. `hc-tui`)
+        that want to display the authoring artifact without round-tripping through JSON.
+        Rules that exist only in the in-memory store, with no `.ron` file backing them,
+        return 404.
+
+        Requires the `automations:read` permission.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      responses:
+        "200":
+          description: The rule's RON file contents
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The rule has no `.ron` file backing it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to locate or read the rule file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Rule file store not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Devices — schema, orphan detection; scenes import/export; dashboards
+  # ---------------------------------------------------------------------------
+  /devices/{id}/schema:
+    get:
+      operationId: getDeviceSchema
+      summary: Get the capability schema for a device
+      description: |
+        Returns the registered capability schema for the device — a map of
+        attribute name → attribute descriptor. Frontends use this to render
+        controls without device-specific knowledge.
+
+        Requires the `devices:read` scope (`DevicesRead` guard).
+
+        The schema is stored separately from device state: a device that exists
+        in the registry but whose plugin never registered a schema returns 404
+        (`{"error": "schema not found"}`).
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Device capability schema
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attributes]
+                properties:
+                  attributes:
+                    type: object
+                    description: Map of attribute name → attribute descriptor
+                    additionalProperties:
+                      type: object
+                      required: [kind]
+                      properties:
+                        kind:
+                          type: string
+                          enum:
+                            - bool
+                            - integer
+                            - float
+                            - string
+                            - enum
+                            - color_xy
+                            - color_rgb
+                            - color_temp
+                            - json
+                          description: Data kind — determines which UI control to render
+                        writable:
+                          type: boolean
+                          default: true
+                          description: Whether this attribute accepts write commands
+                        display_name:
+                          type: string
+                        unit:
+                          type: string
+                          description: Physical unit label, for example `%`, `K`, `°C`
+                        min:
+                          type: number
+                        max:
+                          type: number
+                        step:
+                          type: number
+                        options:
+                          type: array
+                          description: Fixed option list for the `enum` kind
+                          items:
+                            type: string
+              example:
+                attributes:
+                  on:
+                    kind: bool
+                    writable: true
+                  brightness:
+                    kind: integer
+                    writable: true
+                    min: 0
+                    max: 255
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scenes/export:
+    get:
+      operationId: exportScenes
+      summary: Export all scenes as a JSON array (suitable for re-import)
+      description: |
+        Returns every native scene stored in the state store, ready to POST
+        back to `/scenes/import`.
+
+        Requires the `scenes:read` scope (`ScenesRead` guard).
+
+        Only native scenes are exported — plugin-provided scene devices
+        (`device_type` = `scene`) are not part of this payload.
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All scenes as a JSON array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Scene"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /scenes/import:
+    post:
+      operationId: importScenes
+      summary: Import scenes from a JSON array (assigns fresh UUIDs to each)
+      description: |
+        Accepts a JSON array of scenes. Every scene is stored with a
+        server-generated UUID — the `id` supplied in the body is overwritten and
+        never reused. Import therefore always creates new scenes; it never
+        overwrites existing ones by id.
+
+        Requires the `scenes:write` scope (`ScenesWrite` guard).
+
+        The body is deserialized into the full `Scene` type, so `id`, `name`,
+        and `states` must all be present on every element (there are no serde
+        defaults) even though `id` is discarded.
+      tags: [scenes]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/Scene"
+      responses:
+        "201":
+          description: Scenes imported
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported]
+                properties:
+                  imported:
+                    type: integer
+                    description: Number of scenes stored
+              example:
+                imported: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Body is not a valid array of scenes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dashboards/reload:
+    post:
+      operationId: reloadDashboards
+      summary: Reload dashboards from disk (admin only)
+      description: |
+        Re-reads `data/dashboards.json` from disk and atomically replaces the
+        in-memory dashboard set and per-user default map. Use after editing the
+        dashboard file out of band.
+
+        Admin role required — the handler uses the `AuthUser` extractor and
+        rejects non-admin callers with 403 (`{"error": "admin role required"}`).
+        No scope guard is involved.
+
+        Returns 501 when the server was started without a dashboard store
+        configured.
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Dashboards reloaded from disk
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, dashboards_total, user_defaults_total]
+                properties:
+                  status:
+                    type: string
+                    enum: [reloaded]
+                  dashboards_total:
+                    type: integer
+                    description: Number of dashboards after reload
+                  user_defaults_total:
+                    type: integer
+                    description: Number of per-user default dashboard entries after reload
+              example:
+                status: reloaded
+                dashboards_total: 7
+                user_defaults_total: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Dashboard file could not be read or parsed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: Dashboards unavailable — no dashboard store configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+# =============================================================================
+
+  /devices/orphaned:
+    get:
+      operationId: listOrphanedDevices
+      summary: Devices homeCore holds that no plugin manages
+      description: |
+        An **orphaned** device is one homeCore still holds a registration and
+        retained state for, but which the owning plugin no longer manages — a Hue
+        grouped light after `publish_grouped_lights` is turned off, for example.
+
+        Nothing else in the system notices. Plugins subscribe to command topics
+        per-device, so a command published for an orphan has no subscriber and is
+        dropped by the broker, while its state stays frozen at whatever it last
+        was. Rule conditions keep reading that frozen value as truth: a toggle
+        pair (`on == false` → turn on / `on == true` → turn off) built on it
+        wedges permanently — one rule can never pass, the other always does, and
+        the engine records `fired` either way.
+
+        **Detection is a count comparison, not a staleness threshold.** Every
+        management-capable plugin self-reports how many devices it manages
+        (`device_count`); if homeCore holds more devices for that plugin than the
+        plugin claims, the difference is exactly `orphan_count`. Thresholding on
+        `last_seen` age is tempting and wrong — plugins that publish only on
+        change leave healthy devices cold for months (a wall switch nobody flips
+        is not orphaned), so it fires on precisely the quiet devices operators
+        care least about.
+
+        Identifying *which* devices are orphaned is necessarily a heuristic,
+        because plugins report a count and not an id list: the `orphan_count`
+        least-recently-seen devices for that plugin are returned as `suspects`.
+        In practice orphans sit months behind their siblings and the ranking is
+        unambiguous, but confirm before deleting — removal is
+        `DELETE /devices/{id}`, which cascades into rules.
+
+        Only `active` plugins with `supports_management` are checked: a stopped
+        plugin legitimately reports zero devices while homeCore still holds them,
+        and a plugin that never reports `device_count` would otherwise appear
+        entirely orphaned. A plugin claiming *more* devices than homeCore holds is
+        mid-registration, not orphaned, and is skipped.
+
+        Requires the `devices:read` scope.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Orphan report, one entry per plugin with a count mismatch
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_orphans, plugins]
+                properties:
+                  total_orphans:
+                    type: integer
+                    description: Sum of `orphan_count` across all plugins. `0` means healthy.
+                    examples: [11]
+                  plugins:
+                    type: array
+                    description: Only plugins with a mismatch appear. Empty when nothing is orphaned.
+                    items:
+                      type: object
+                      required:
+                        [
+                          plugin_id,
+                          status,
+                          plugin_reports,
+                          core_holds,
+                          orphan_count,
+                          suspects,
+                        ]
+                      properties:
+                        plugin_id:
+                          type: string
+                          examples: ["plugin.ecowitt"]
+                        status:
+                          type: string
+                          description: Always `active` — other states are not checked.
+                          examples: ["active"]
+                        plugin_reports:
+                          type: integer
+                          description: Devices the plugin says it manages (`device_count`).
+                          examples: [1]
+                        core_holds:
+                          type: integer
+                          description: Devices homeCore holds for this plugin.
+                          examples: [12]
+                        orphan_count:
+                          type: integer
+                          description: "`core_holds - plugin_reports`. Exact."
+                          examples: [11]
+                        suspects:
+                          type: array
+                          description: |
+                            The `orphan_count` least-recently-seen devices for this
+                            plugin — the likely orphans. Heuristic ranking; confirm
+                            before deleting.
+                          items:
+                            type: object
+                            properties:
+                              device_id:
+                                type: string
+                              name:
+                                type: string
+                              device_type:
+                                type: string
+                                nullable: true
+                              last_seen:
+                                type: string
+                                format: date-time
+                              stale_secs:
+                                type: integer
+                                description: Seconds since `last_seen`, clamped at 0.
+                                examples: [6048000]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Device store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Plugins — capabilities, management protocol, config, lifecycle
+  # ---------------------------------------------------------------------------
+  /plugins/{id}/capabilities:
+    get:
+      operationId: getPluginCapabilities
+      summary: Get a plugin's advertised capability manifest
+      description: |
+        Returns the capability manifest the plugin published (retained) on
+        `homecore/plugins/{id}/capabilities`. The manifest is held in the
+        in-memory plugin registry and is `null` until the plugin publishes it —
+        a plugin that never publishes capabilities yields `404`, even if it is
+        registered and online.
+
+        Each advertised action drives `POST /plugins/{id}/command`: `stream`
+        selects the SSE flow, `concurrency: single` makes a second in-flight
+        invocation return `409`, `requires_role: admin` adds a role check on
+        top of the scope check, and `timeout_ms` arms a core-injected
+        `timeout` terminal event on the stream.
+
+        Requires the `plugins:read` scope (`PluginsRead` guard).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: The plugin's capability manifest (`hc_types::Capabilities`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [spec, plugin_id]
+                properties:
+                  spec:
+                    type: string
+                    description: Manifest schema version. v1 is `"1"`.
+                    example: "1"
+                  plugin_id:
+                    type: string
+                    description: Must match the plugin's MQTT client id.
+                  actions:
+                    type: array
+                    description: Declared actions. May be empty; omitted field defaults to `[]`.
+                    items:
+                      type: object
+                      required: [id, label]
+                      properties:
+                        id:
+                          type: string
+                          description: Action identifier — the value sent as `action` to `POST /plugins/{id}/command`.
+                        label:
+                          type: string
+                        description:
+                          type: string
+                        params:
+                          type: object
+                          description: JSON-schema-style param map (subset keywords only).
+                        result:
+                          type: object
+                          description: |
+                            Advisory shape of the `complete.data` payload (streaming actions)
+                            or of the synchronous reply (non-streaming actions).
+                        stream:
+                          type: boolean
+                          default: false
+                          description: When true, results arrive over the SSE stream endpoint rather than in the POST response.
+                        cancelable:
+                          type: boolean
+                          default: false
+                        concurrency:
+                          type: string
+                          enum: [multi, single]
+                          default: multi
+                          description: |
+                            `single` — a second invocation while one is in flight is rejected with `409` plus the active `request_id`.
+                        item_key:
+                          type: string
+                          description: Names the dedup key inside `item.data` when the action emits `item` events. Required when `item_operations` is set.
+                        item_operations:
+                          type: array
+                          items:
+                            type: string
+                            enum: [add, update, remove]
+                        requires_role:
+                          type: string
+                          enum: [admin, user, read_only]
+                          default: user
+                        timeout_ms:
+                          type: integer
+                          format: int64
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            Plugin unknown, or registered but has not published a capability
+            manifest (`{"error": "capabilities not published"}`). The handler
+            does not distinguish the two cases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/{id}/command:
+    post:
+      operationId: postPluginCommand
+      summary: Invoke a plugin-defined management action
+      description: |
+        Forwards a plugin-specific action over the MQTT management RPC
+        (`homecore/plugins/{id}/manage/cmd`, reply on
+        `homecore/plugins/{id}/manage/response`). Every field of the request
+        body except `action` is forwarded verbatim as command params, alongside
+        an `action` field and a core-minted `request_id` (UUID v4).
+
+        The action is looked up in the plugin's capability manifest (see
+        `GET /plugins/{id}/capabilities`). Unknown actions are still dispatched,
+        using the pre-capabilities defaults (role `user`, `concurrency: multi`,
+        non-streaming, no timeout).
+
+        **Non-streaming actions** (`stream: false`, the default): the handler
+        blocks up to 5 s for the plugin's RPC reply and returns it verbatim with
+        `200`. A reply whose `status` is `"error"` is surfaced as `504` with the
+        reply's `error` string. No response is returned as `504` as well.
+
+        **Streaming actions** (`stream: true`): core reserves a streaming slot
+        keyed by the minted `request_id` before publishing, arms the manifest
+        `timeout_ms` (if set), and still returns the plugin's synchronous
+        acknowledgement with `200`. Progress and results arrive on
+        `GET /plugins/{id}/command/{request_id}/stream`, which is keyed by the
+        `request_id` echoed in this response. If the action declares
+        `concurrency: single` and one is already in flight, this call is
+        rejected with `409` and the active `request_id`.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard). Actions whose
+        manifest entry declares `requires_role: admin` additionally require the
+        caller's role to be `admin`.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  description: |
+                    Action id. Matched against `actions[].id` in the plugin's
+                    capability manifest; unknown ids are forwarded anyway.
+                  example: rescan_devices
+              additionalProperties: true
+              description: All other top-level fields are forwarded to the plugin as command params.
+      responses:
+        "200":
+          description: |
+            The plugin's management RPC reply, returned verbatim. Correlation
+            requires `request_id`; for streaming actions this is the id to open
+            the SSE stream with.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id]
+                properties:
+                  request_id:
+                    type: string
+                    format: uuid
+                    description: Core-minted correlation id, echoed by the plugin.
+                  # UNVERIFIED: beyond `request_id` (used for RPC correlation) and
+                  # `status` (only `"error"` is interpreted by core, and it maps to 504),
+                  # the reply body is entirely plugin-defined — core does not reshape it.
+                  status:
+                    type: string
+                additionalProperties: true
+        "400":
+          description: Body is missing the `action` field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Missing the `plugins:write` scope, or the action's manifest entry
+            declares `requires_role: admin` and the caller is not an admin
+            (body then also carries `"requires_role": "admin"`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  requires_role:
+                    type: string
+                    enum: [admin]
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The action is streaming with `concurrency: single` and an invocation
+            is already in flight. The active request's id and MQTT event topic
+            are returned so the caller can attach to the existing stream.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, active_request_id, stream_topic]
+                properties:
+                  status:
+                    type: string
+                    enum: [busy]
+                  active_request_id:
+                    type: string
+                    format: uuid
+                  stream_topic:
+                    type: string
+                    example: homecore/plugins/hc-yolink/commands/6f1b.../events
+        "503":
+          description: Management RPC is not configured on this core instance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: |
+            The plugin did not reply within 5 seconds, or replied with
+            `status: "error"` (the reply's `error` string is passed through).
+            A reserved streaming slot is released before this is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/{id}/command/{request_id}/stream:
+    get:
+      operationId: getPluginCommandStream
+      summary: Stream events for a streaming plugin action (SSE)
+      description: |
+        Server-Sent Events bridge for a streaming action started by
+        `POST /plugins/{id}/command`. Forwards every message published on
+        `homecore/plugins/{id}/commands/{request_id}/events` as an SSE event
+        with the event name `stream` and the raw plugin payload as `data`.
+
+        On connect, core first replays the cached events for this `request_id`
+        (so late subscribers see the history up to the cache limit), then
+        switches to live bus events, deduplicating by the payload's `ts` field.
+        The connection is closed by the server as soon as a terminal stage is
+        seen: `complete`, `error`, `canceled`, or `timeout`. If the cache
+        already ends in a terminal stage, the stream closes immediately after
+        the replay. Core itself injects terminal events in two cases: a
+        `timeout` stage when the manifest's `timeout_ms` elapses, and an `error`
+        stage with `data.reason = "plugin_offline"` when the plugin goes
+        offline with the request still outstanding. SSE keep-alive comments are
+        sent on idle.
+
+        **Auth is enforced inside the handler, not by the Bearer middleware** —
+        `EventSource` cannot set request headers. A whitelisted source IP is
+        accepted; otherwise a JWT is read from `Authorization: Bearer <jwt>` or,
+        failing that, from the `token` query parameter. The token must carry the
+        `plugins:read` scope.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The `request_id` returned by `POST /plugins/{id}/command`
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            JWT, for browser `EventSource` clients that cannot set an
+            `Authorization` header. Ignored when a Bearer header is present or
+            when the source IP is whitelisted.
+      responses:
+        "200":
+          description: |
+            SSE stream. Each event has the name `stream`; `data` is the plugin's
+            JSON event payload. Payload fields are plugin-defined; core relies
+            on `stage` (terminal values `complete` / `error` / `canceled` /
+            `timeout`) and `ts` (used for replay deduplication). Core-injected
+            terminal events carry `stage`, `request_id`, `ts`, `message`, and —
+            for plugin-offline — `data.reason`.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: stream
+                data: {"stage":"progress","request_id":"6f1b...","ts":"2026-07-12T10:32:00Z","data":{"found":3}}
+
+                event: stream
+                data: {"stage":"complete","request_id":"6f1b...","ts":"2026-07-12T10:32:04Z","data":{"devices":12}}
+        "401":
+          description: No token supplied (neither Bearer header nor `?token=`), or the token is invalid/expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token lacks the `plugins:read` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        # NOTE: no 404 — the handler never validates that the plugin or the
+        # request_id exists. An unknown pair simply yields an empty stream that
+        # stays open until the client disconnects.
+
+  /plugins/{id}/config:
+    get:
+      operationId: getPluginConfig
+      summary: Read a plugin's configuration
+      description: |
+        Returns the plugin's configuration.
+
+        For locally managed plugins with a known `config_path`, the TOML config
+        file is read from disk and returned as `raw` (the exact file text) plus,
+        when it parses, `config` (the same document as JSON).
+
+        For remote plugins, core issues a `get_config` management RPC over MQTT
+        and returns the plugin's reply (its `data` field when present, else the
+        whole reply) under `config`, with `format: "remote"`.
+
+        **Secrets are NOT redacted.** The handler returns the config file
+        verbatim — API keys, passwords, and tokens present in the file are
+        included in the response. Treat this endpoint as privileged output.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard) — note this is
+        a *write* scope even though the operation only reads, precisely because
+        the payload exposes secrets.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Plugin configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plugin_id, format]
+                properties:
+                  plugin_id:
+                    type: string
+                  format:
+                    type: string
+                    enum: [toml, remote]
+                    description: "`toml` for local config-file plugins, `remote` for plugins answered over the management RPC."
+                  raw:
+                    type: string
+                    description: Verbatim TOML file contents. Local plugins only. Not redacted.
+                  config:
+                    type: object
+                    description: |
+                      Parsed config. For local plugins, the TOML document converted to
+                      JSON — present only when the file parses as TOML. For remote
+                      plugins, the plugin's RPC reply payload.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Plugin not found, or plugin is managed but has no config path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Plugin is not locally managed and the management RPC is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: The remote plugin did not answer the `get_config` RPC (5 s timeout) or replied with an error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    put:
+      operationId: putPluginConfig
+      summary: Replace a plugin's configuration
+      description: |
+        Overwrites the plugin's configuration.
+
+        For locally managed plugins with a known `config_path`, the config file
+        is **fully replaced** (not merged). Supply either `raw` — a TOML string
+        written to the file byte-for-byte — or `config` — a JSON object
+        serialized to pretty TOML. `raw` takes precedence when both are given.
+        Writing the file does not itself restart the plugin; use
+        `POST /plugins/{id}/restart` to apply it.
+
+        For remote plugins, core issues a `set_config` management RPC over MQTT,
+        sending the body's `config` field when present, otherwise the entire
+        request body.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: |
+                For local plugins, exactly one of `raw` or `config` is required
+                (`raw` wins if both are present). For remote plugins, `config`
+                is sent if present, otherwise the whole body is sent as the
+                config.
+              properties:
+                raw:
+                  type: string
+                  description: Complete TOML document, written to the plugin's config file verbatim. Local plugins only.
+                config:
+                  type: object
+                  description: Config as JSON; converted to TOML for local plugins, forwarded as-is for remote plugins.
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Configuration written (local) or accepted by the plugin (remote)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, plugin_id]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  plugin_id:
+                    type: string
+        "400":
+          description: |
+            Neither `raw` nor `config` supplied, or `config` could not be
+            converted to TOML. Local plugins only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Plugin not found, or plugin is managed but has no config path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to write the config file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Plugin is not locally managed and the management RPC is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: The remote plugin did not answer the `set_config` RPC (5 s timeout) or replied with an error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/{id}/devices:
+    delete:
+      operationId: deletePluginDevices
+      summary: Delete every device registered by a plugin
+      description: |
+        Bulk-wipes every device in the registry whose `plugin_id` equals `{id}`.
+        The plugin itself stays registered and running — only its devices are
+        removed. A live plugin will normally re-register the devices it still
+        cares about on its next sync cycle, so this is a cleanup tool for zombie
+        devices left behind by config churn or renamed device ids.
+
+        Each device is removed through the same `delete_device` path used by the
+        single-device and bulk-device endpoints, so the **cascade applies**: any
+        rule file referencing a deleted device is patched (its device references
+        nullified) and, if the deleted device was the rule's trigger device, the
+        rule is disabled. The names of every rule touched are returned in
+        `affected_rules`.
+
+        Deleting devices for a plugin that has none is not an error: the
+        response is `200` with `deleted: 0` and an extra `note` field.
+
+        Requires the `devices:write` scope (`DevicesWrite` guard) — not
+        `plugins:write`, because the destructive effect is on the device
+        registry.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: |
+            Devices deleted. Also returned (with `deleted: 0` and a `note`) when
+            the plugin had no devices — the handler does not 404 for an unknown
+            plugin id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, device_ids, affected_rules]
+                properties:
+                  deleted:
+                    type: integer
+                    description: Number of devices actually removed. May be lower than `device_ids.length` if a device vanished between listing and deletion.
+                  device_ids:
+                    type: array
+                    description: Ids of every device that matched the plugin at the time of listing.
+                    items:
+                      type: string
+                  affected_rules:
+                    type: array
+                    description: Names of rules whose device references were nullified (and which may have been disabled) as a result.
+                    items:
+                      type: string
+                  note:
+                    type: string
+                    description: Present only when no devices matched the plugin id.
+                    example: no devices found with plugin_id = 'plugin.zigbee'
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: |
+            Failed to list devices, or a delete failed part-way. In the latter
+            case the body also carries `deleted_so_far` and the deletions
+            already performed are not rolled back.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  deleted_so_far:
+                    type: integer
+
+  /plugins/{id}/restart:
+    post:
+      operationId: restartPlugin
+      summary: Restart a locally managed plugin process
+      description: |
+        Sends a `Restart` command to the plugin's local supervisor task. Only
+        works for plugins core spawns and supervises itself; plugins that merely
+        connect over MQTT have no command channel and yield `404`.
+
+        The response is returned as soon as the command is queued on the
+        supervisor channel — it does not confirm the process actually restarted.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Restart command queued for the plugin supervisor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, action]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  action:
+                    type: string
+                    enum: [restart]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Plugin not found, or not managed locally (no supervisor command channel)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The plugin supervisor channel is closed ("plugin supervisor not responding")
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/{id}/start:
+    post:
+      operationId: startPlugin
+      summary: Start a locally managed plugin process
+      description: |
+        Sends a `Start` command to the plugin's local supervisor task. Only
+        works for plugins core spawns and supervises itself; plugins that merely
+        connect over MQTT have no command channel and yield `404`.
+
+        The response is returned as soon as the command is queued on the
+        supervisor channel — it does not confirm the process actually started.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Start command queued for the plugin supervisor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, action]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  action:
+                    type: string
+                    enum: [start]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Plugin not found, or not managed locally (no supervisor command channel)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The plugin supervisor channel is closed ("plugin supervisor not responding")
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /plugins/{id}/stop:
+    post:
+      operationId: stopPlugin
+      summary: Stop a locally managed plugin process
+      description: |
+        Sends a `Stop` command to the plugin's local supervisor task. Only works
+        for plugins core spawns and supervises itself; plugins that merely
+        connect over MQTT have no command channel and yield `404`.
+
+        The response is returned as soon as the command is queued on the
+        supervisor channel — it does not confirm the process actually stopped.
+        Stopping a plugin does not deregister it or remove its devices.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Stop command queued for the plugin supervisor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, action]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  action:
+                    type: string
+                    enum: [stop]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Plugin not found, or not managed locally (no supervisor command channel)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The plugin supervisor channel is closed ("plugin supervisor not responding")
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Calendars, glue devices, modes, virtual switches
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Calendars
+  # ---------------------------------------------------------------------------
+  /calendars:
+    get:
+      operationId: listCalendars
+      summary: List loaded calendars
+      description: |
+        Lists every `.ics` calendar currently loaded into the live calendar store,
+        with event counts and fetch metadata.  Calendars back `CalendarEvent`
+        rule triggers/conditions.
+
+        Requires scope `automations:read`.
+
+        If no calendar directory is configured the handler returns `200` with an
+        empty array (it does **not** return 503, unlike the other calendar routes).
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of loaded calendars
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, event_count, upcoming_count, source_url, fetched_at, loaded_at]
+                  properties:
+                    id:
+                      type: string
+                      description: Stem of the `.ics` filename (e.g. `us_holidays`)
+                    event_count:
+                      type: integer
+                      description: Total expanded events within the expansion window
+                    upcoming_count:
+                      type: integer
+                      description: Events whose start is in the future
+                    source_url:
+                      type: string
+                      nullable: true
+                      description: Set only when the calendar was fetched via `POST /calendars/fetch`
+                    fetched_at:
+                      type: string
+                      format: date-time
+                      nullable: true
+                    loaded_at:
+                      type: string
+                      format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /calendars/fetch:
+    post:
+      operationId: fetchCalendar
+      summary: Fetch an ICS calendar from a URL
+      description: |
+        Downloads an ICS file from `url`, saves it (plus a `.meta.json` sidecar)
+        into the configured calendar directory, expands its events, and upserts it
+        into the live store.  Emits a `calendar.fetched` audit entry.
+
+        Requires scope `automations:write`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  description: HTTP(S) URL of the `.ics` file
+                name:
+                  type: string
+                  nullable: true
+                  description: Calendar id / filename stem.  Derived by the store when omitted.
+                refresh_hours:
+                  type: integer
+                  nullable: true
+                  description: Auto-refresh interval persisted to the `.meta.json` sidecar
+      responses:
+        "200":
+          description: Calendar fetched and loaded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [calendar_id, event_count, saved_path]
+                properties:
+                  calendar_id:
+                    type: string
+                  event_count:
+                    type: integer
+                  saved_path:
+                    type: string
+                    description: Absolute path of the written `.ics` file
+        "400":
+          description: Fetch, parse, or save failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Calendar store not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /calendars/upload:
+    post:
+      operationId: uploadCalendar
+      summary: Upload ICS calendar content
+      description: |
+        Uploads calendar content as **`application/json`** — not multipart.  The
+        raw ICS text is passed in the `content` field.  The body must contain the
+        literal `BEGIN:VCALENDAR` or the request is rejected with 400.
+
+        The file is written as `<name>.ics` in the calendar directory (characters
+        outside `[A-Za-z0-9-_]` in `name` are replaced with `_`; the default name
+        is `uploaded_calendar`), a `.meta.json` sidecar with no source URL is
+        written, and the whole calendar directory is reloaded.  Emits a
+        `calendar.uploaded` audit entry.  An existing calendar with the same name
+        is silently overwritten.
+
+        Requires scope `automations:write`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: Full ICS file text (must contain `BEGIN:VCALENDAR`)
+                name:
+                  type: string
+                  nullable: true
+                  description: Calendar id / filename stem.  Defaults to `uploaded_calendar`.
+      responses:
+        "200":
+          description: Calendar written and store reloaded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [calendar_id, event_count]
+                properties:
+                  calendar_id:
+                    type: string
+                  event_count:
+                    type: integer
+        "400":
+          description: Content does not look like an ICS file (missing `BEGIN:VCALENDAR`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Failed to write the `.ics` file or reload the calendar directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Calendar store not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /calendars/{id}:
+    delete:
+      operationId: deleteCalendar
+      summary: Delete a calendar
+      description: |
+        Removes the calendar's `.ics` and `.meta.json` files from disk and drops it
+        from the live store.  Automation rules whose trigger is `CalendarEvent` with
+        this `calendar_id` are **not** modified or disabled — they are only reported
+        back in `referencing_rules` as a warning.  Emits a `calendar.deleted` audit entry.
+
+        Requires scope `automations:write`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Calendar identifier (the `.ics` filename stem)
+      responses:
+        "200":
+          description: Calendar deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, referencing_rules]
+                properties:
+                  deleted:
+                    type: string
+                    description: The deleted calendar id
+                  referencing_rules:
+                    type: array
+                    description: Rules still referencing this calendar (left untouched)
+                    items:
+                      type: object
+                      required: [rule_id, rule_name]
+                      properties:
+                        rule_id:
+                          type: string
+                          format: uuid
+                        rule_name:
+                          type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Failed to delete the `.ics` file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Calendar store not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /calendars/{id}/events:
+    get:
+      operationId: listCalendarEvents
+      summary: List events from a calendar
+      description: |
+        Returns expanded event occurrences from a single calendar, filtered to
+        `from <= start <= to` and truncated to `limit`.  Events are pre-sorted by
+        start time in the store.
+
+        Requires scope `automations:read`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Calendar identifier (the `.ics` filename stem)
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive lower bound on event start.  Defaults to now.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive upper bound on event start.  Defaults to now + 400 days.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+          description: Max events to return.  Default 100, clamped to 1000.
+      responses:
+        "200":
+          description: Matching events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [calendar_id, events, total]
+                properties:
+                  calendar_id:
+                    type: string
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      required: [uid, summary, start, is_all_day]
+                      properties:
+                        uid:
+                          type: string
+                        summary:
+                          type: string
+                        start:
+                          type: string
+                          format: date-time
+                        is_all_day:
+                          type: boolean
+                  total:
+                    type: integer
+                    description: Number of events in `events` (post-filter, post-limit) — not the calendar total
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Calendar store not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Glue devices (virtual helper devices)
+  # ---------------------------------------------------------------------------
+  /glue:
+    get:
+      operationId: listGlue
+      summary: List all glue (virtual helper) devices
+      description: |
+        Returns every device whose `plugin_id` is `core.glue`, `core.timer`, or
+        `core.switch`.  For running timers, `attributes.remaining_secs` is
+        recomputed on the fly from `started_at` + `duration_secs`.
+
+        Requires scope `devices:read`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of glue devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Store read failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createGlue
+      summary: Create a glue (virtual helper) device
+      description: |
+        Creates a virtual device with `plugin_id` `core.glue`.  The `id` is prefixed
+        automatically with the type's prefix if not already present
+        (`switch` → `switch_`, `timer` → `timer_`, `counter` → `counter_`,
+        `number` → `number_`, `select` → `select_`, `text` → `text_`,
+        `button` → `button_`, `datetime` → `datetime_`, `group` → `group_`,
+        `threshold` → `threshold_`, `schedule` → `schedule_`).
+
+        Type-specific default attributes seeded from `config`:
+
+        | type | attributes (`config` keys used) |
+        |---|---|
+        | `switch` | `on` = false |
+        | `timer` | `state` = "idle", `duration_secs` = 0, `remaining_secs` = 0, `repeat` = false |
+        | `counter` | `count` = 0, `step` (default 1), optional `min`, `max` |
+        | `number` | `value` (0.0), `min` (0.0), `max` (100.0), `step` (1.0), optional `unit` |
+        | `select` | `options` (default `[]`), `selected` = first option or `""` |
+        | `text` | `value` = "", optional `max_length` |
+        | `button` | `last_pressed` = null |
+        | `datetime` | `value` = "", `has_date` (true), `has_time` (true) |
+        | `group` | `on` = false, `member_ids` (from `config.members`), `attribute` ("on"), `mode` ("any"), `active_count` = 0, `member_count` = 0 |
+        | `threshold` | `above` = false, `source_device_id` (""), `source_attribute` ("value"), `threshold` (0.0), `hysteresis` (0.0) |
+        | `schedule` | `active` = false, `blocks` (default `[]`) |
+
+        Requires scope `devices:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, id, name]
+              properties:
+                type:
+                  type: string
+                  enum: [switch, timer, counter, number, select, text, button, datetime, group, threshold, schedule]
+                  description: Glue device type
+                id:
+                  type: string
+                  description: Device id slug — the type prefix is added if missing
+                name:
+                  type: string
+                  description: Display name
+                config:
+                  type: object
+                  additionalProperties: true
+                  description: Type-specific initial attributes (see table above).  Defaults to `{}`.
+      responses:
+        "201":
+          description: Created glue device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "400":
+          description: Unknown glue type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A device with the resolved id already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Store write failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /glue/{id}:
+    delete:
+      operationId: deleteGlue
+      summary: Delete a glue device
+      description: |
+        Deletes the device from the registry by id.  The handler does not verify
+        that the device is actually a glue device — any device id in the registry
+        will be deleted.  Unlike `DELETE /devices/{id}` this performs **no** rule
+        cascade.
+
+        Requires scope `devices:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Device deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Store delete failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Modes (solar + named boolean modes)
+  # ---------------------------------------------------------------------------
+  /modes:
+    get:
+      operationId: listModes
+      summary: List all modes with live state and criteria definitions
+      description: |
+        Loads every mode from `config/modes.toml` and joins it with the mode's live
+        device state (device id == mode id) and its criteria definition from
+        `config/mode_definitions.json`.  `state` and `definition` are `null` when the
+        mode has no device in the registry / no criteria definition.
+
+        Requires scope `devices:read`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of modes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [config, state, definition]
+                  properties:
+                    config:
+                      type: object
+                      required: [id, name, kind]
+                      description: Entry from `modes.toml`.  Solar fields are omitted when unset/zero.
+                      properties:
+                        id:
+                          type: string
+                          description: Must start with `mode_`
+                        name:
+                          type: string
+                        kind:
+                          type: string
+                          enum: [solar, manual]
+                        on_event:
+                          type: string
+                          nullable: true
+                          description: Solar-only sun event that turns the mode on
+                        off_event:
+                          type: string
+                          nullable: true
+                          description: Solar-only sun event that turns the mode off
+                        on_offset_minutes:
+                          type: integer
+                        off_offset_minutes:
+                          type: integer
+                    state:
+                      oneOf:
+                        - $ref: "#/components/schemas/DeviceState"
+                        - type: "null"
+                    definition:
+                      nullable: true
+                      type: object
+                      required: [mode_id, criteria]
+                      properties:
+                        mode_id:
+                          type: string
+                        criteria:
+                          type: object
+                          required: [on_condition, off_behavior, reevaluate_every_n_minutes]
+                          properties:
+                            on_condition:
+                              $ref: "#/components/schemas/Condition"
+                            off_behavior:
+                              type: string
+                              enum: [inverse, explicit]
+                            off_condition:
+                              oneOf:
+                                - $ref: "#/components/schemas/Condition"
+                                - type: "null"
+                            reevaluate_every_n_minutes:
+                              type: integer
+                        generated_rule_ids:
+                          type: array
+                          items:
+                            type: string
+                            format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Failed to read `modes.toml` or `mode_definitions.json`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Modes not configured (no `modes.toml` path in app state)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createMode
+      summary: Create a mode
+      description: |
+        Appends a new mode to `config/modes.toml`.  `id` must start with `mode_`.
+        The created config is always written with no solar events and zero offsets
+        (`on_event`/`off_event` cannot be supplied through this endpoint), so a
+        `kind: solar` mode created here has no sun events attached.
+
+        Optionally accepts `criteria_definition` to make this a criteria-driven mode.
+        Supplying it **additionally requires the `automations:write` scope** (403
+        otherwise) and causes managed automation rules to be generated and installed.
+        If any step of the criteria install fails, the mode is rolled back out of
+        `modes.toml`.
+
+        Requires scope `devices:write` (plus `automations:write` when
+        `criteria_definition` is present).
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name, kind]
+              properties:
+                id:
+                  type: string
+                  description: Must start with `mode_`
+                name:
+                  type: string
+                kind:
+                  type: string
+                  enum: [solar, manual]
+                criteria_definition:
+                  nullable: true
+                  type: object
+                  required: [on_condition]
+                  properties:
+                    on_condition:
+                      $ref: "#/components/schemas/Condition"
+                    off_behavior:
+                      type: string
+                      enum: [inverse, explicit]
+                      default: inverse
+                    off_condition:
+                      oneOf:
+                        - $ref: "#/components/schemas/Condition"
+                        - type: "null"
+                      description: Required when `off_behavior` is `explicit` (validated server-side)
+                    reevaluate_every_n_minutes:
+                      type: integer
+                      default: 1
+      responses:
+        "201":
+          description: Created mode config (the `modes.toml` entry, not the device state)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, kind]
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [solar, manual]
+        "400":
+          description: "`id` does not start with `mode_`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Missing scope `devices:write`, or `criteria_definition` was supplied
+            without the `automations:write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Mode could not be appended to `modes.toml` (e.g. duplicate id)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Criteria definition failed validation, rule build, or rule install (mode is rolled back)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to load or persist mode definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Modes not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /modes/{id}:
+    get:
+      operationId: getMode
+      summary: Get one mode with live state and criteria definition
+      description: |
+        Same shape as one element of `GET /modes`.  `state` is `null` when no device
+        exists for the mode id; `definition` is `null` when the mode is not
+        criteria-driven.
+
+        Requires scope `devices:read`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier (e.g. `mode_night`)
+      responses:
+        "200":
+          description: Mode config + state + definition
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [config, state, definition]
+                properties:
+                  config:
+                    type: object
+                    required: [id, name, kind]
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                      kind:
+                        type: string
+                        enum: [solar, manual]
+                      on_event:
+                        type: string
+                        nullable: true
+                      off_event:
+                        type: string
+                        nullable: true
+                      on_offset_minutes:
+                        type: integer
+                      off_offset_minutes:
+                        type: integer
+                  state:
+                    oneOf:
+                      - $ref: "#/components/schemas/DeviceState"
+                      - type: "null"
+                  definition:
+                    nullable: true
+                    type: object
+                    required: [mode_id, criteria]
+                    properties:
+                      mode_id:
+                        type: string
+                      criteria:
+                        type: object
+                        required: [on_condition, off_behavior, reevaluate_every_n_minutes]
+                        properties:
+                          on_condition:
+                            $ref: "#/components/schemas/Condition"
+                          off_behavior:
+                            type: string
+                            enum: [inverse, explicit]
+                          off_condition:
+                            oneOf:
+                              - $ref: "#/components/schemas/Condition"
+                              - type: "null"
+                          reevaluate_every_n_minutes:
+                            type: integer
+                      generated_rule_ids:
+                        type: array
+                        items:
+                          type: string
+                          format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Failed to read `modes.toml` or `mode_definitions.json`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Modes not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteMode
+      summary: Delete a mode
+      description: |
+        Removes the mode from `modes.toml`, deletes its criteria definition and any
+        managed rules it generated, and removes its device from the registry
+        (device-removal failure is logged, not surfaced).  The built-in solar modes
+        `mode_night` and `mode_day` cannot be deleted (400).
+
+        Requires scope `devices:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier (e.g. `mode_vacation`)
+      responses:
+        # The handler returns 204 with an empty JSON object body attached.
+        "204":
+          description: Mode deleted
+        "400":
+          description: "`mode_night` / `mode_day` are built-in and cannot be deleted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Failed to remove managed rules or persist mode definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Modes not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /modes/{id}/definition:
+    get:
+      operationId: getModeDefinition
+      summary: Get a mode's criteria definition
+      description: |
+        Returns the criteria definition (from `config/mode_definitions.json`) that
+        drives a criteria-based mode, including the ids of the automation rules
+        generated from it.
+
+        Requires scope `automations:read` (note: this differs from the other
+        `/modes` routes, which are guarded by `devices:*`).
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier
+      responses:
+        "200":
+          description: Mode criteria definition
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mode_id, criteria, generated_rule_ids]
+                properties:
+                  mode_id:
+                    type: string
+                  criteria:
+                    type: object
+                    required: [on_condition, off_behavior, reevaluate_every_n_minutes]
+                    properties:
+                      on_condition:
+                        $ref: "#/components/schemas/Condition"
+                      off_behavior:
+                        type: string
+                        enum: [inverse, explicit]
+                      off_condition:
+                        oneOf:
+                          - $ref: "#/components/schemas/Condition"
+                          - type: "null"
+                      reevaluate_every_n_minutes:
+                        type: integer
+                  generated_rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Failed to read `mode_definitions.json`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: putModeDefinition
+      summary: Create or replace a mode's criteria definition
+      description: |
+        Installs a criteria definition on an existing mode.  The definition is
+        validated, translated into managed automation rules, and those rules are
+        installed (replacing the previously generated ones).  The stored definition
+        is returned with its refreshed `generated_rule_ids`.
+
+        Returns `201` when the mode had no definition before, `200` when replacing.
+
+        Requires scope `automations:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier (must already exist in `modes.toml`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [on_condition]
+              properties:
+                on_condition:
+                  $ref: "#/components/schemas/Condition"
+                off_behavior:
+                  type: string
+                  enum: [inverse, explicit]
+                  default: inverse
+                off_condition:
+                  oneOf:
+                    - $ref: "#/components/schemas/Condition"
+                    - type: "null"
+                  description: Required when `off_behavior` is `explicit` (validated server-side)
+                reevaluate_every_n_minutes:
+                  type: integer
+                  default: 1
+      responses:
+        "200":
+          description: Existing definition replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mode_id, criteria, generated_rule_ids]
+                properties:
+                  mode_id:
+                    type: string
+                  criteria:
+                    type: object
+                    required: [on_condition, off_behavior, reevaluate_every_n_minutes]
+                    properties:
+                      on_condition:
+                        $ref: "#/components/schemas/Condition"
+                      off_behavior:
+                        type: string
+                        enum: [inverse, explicit]
+                      off_condition:
+                        oneOf:
+                          - $ref: "#/components/schemas/Condition"
+                          - type: "null"
+                      reevaluate_every_n_minutes:
+                        type: integer
+                  generated_rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "201":
+          description: Definition created (mode had none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mode_id, criteria, generated_rule_ids]
+                properties:
+                  mode_id:
+                    type: string
+                  criteria:
+                    type: object
+                    required: [on_condition, off_behavior, reevaluate_every_n_minutes]
+                    properties:
+                      on_condition:
+                        $ref: "#/components/schemas/Condition"
+                      off_behavior:
+                        type: string
+                        enum: [inverse, explicit]
+                      off_condition:
+                        oneOf:
+                          - $ref: "#/components/schemas/Condition"
+                          - type: "null"
+                      reevaluate_every_n_minutes:
+                        type: integer
+                  generated_rule_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Definition failed validation, rule build, or rule install
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to read or persist `mode_definitions.json`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Modes not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteModeDefinition
+      summary: Delete a mode's criteria definition
+      description: |
+        Removes the criteria definition and uninstalls every automation rule it
+        generated.  The mode itself remains in `modes.toml`.
+
+        Requires scope `automations:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier
+      responses:
+        "204":
+          description: Definition and generated rules removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Failed to remove managed rules or persist `mode_definitions.json`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Switches (virtual on/off switch devices)
+  # ---------------------------------------------------------------------------
+  /switches:
+    get:
+      operationId: listSwitches
+      summary: List virtual switch devices
+      description: |
+        Returns devices with `plugin_id` `core.switch`, plus `core.glue` devices whose
+        `device_type` is `switch`.  Switch devices are also visible via `GET /devices`.
+        Legacy devices without a `device_type` get one inferred from their `plugin_id`
+        or id prefix before being returned.
+
+        Requires scope `devices:read`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of switch devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Store read failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createSwitch
+      summary: Create a virtual switch device
+      description: |
+        Creates a virtual switch: `device_id` is `switch_<id>` (the `switch_` prefix is
+        added if missing), `plugin_id` is `core.glue`, `available` is `true`, and
+        `attributes.on` starts as `false`.
+
+        Note the created `device_type` is `virtual_switch` here, whereas
+        `POST /glue` with `type: switch` creates the same kind of device with
+        `device_type` `switch`.
+
+        Requires scope `devices:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  description: Slug used to form the device id — `vacation_mode` → `switch_vacation_mode`
+                label:
+                  type: string
+                  nullable: true
+                  description: Display name.  Defaults to the resolved device id.
+      responses:
+        "201":
+          description: Created switch device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A device with the resolved id already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Store write failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # System — status, config, backup/restore, logs, metrics, timers
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Logs
+  # ---------------------------------------------------------------------------
+  /logs:
+    get:
+      operationId: listLogs
+      summary: REST tail of the in-memory log ring buffer
+      description: |
+        CLI-friendly companion to the `/logs/stream` WebSocket — serves the same
+        ring-buffer contents synchronously so `curl | jq` workflows don't need a
+        WS client.
+
+        Requires authentication (Bearer JWT, API key, or a whitelisted source
+        IP).  No additional scope is enforced — any authenticated caller may
+        read the tail.
+
+        Returns `503` when log streaming is not enabled in `homecore.toml`
+        (the ring buffer only exists when the feature is configured).
+      tags: [system]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: level
+          in: query
+          description: |
+            Minimum severity to include. Lines below this level are filtered
+            out.  An unrecognised value is treated as `info`.
+          schema:
+            type: string
+            enum: [error, warn, info, debug, trace]
+            default: info
+        - name: target
+          in: query
+          description: Tracing target prefix filter (`starts_with` match, e.g. `hc_api::ws`)
+          schema:
+            type: string
+        - name: since
+          in: query
+          description: RFC3339 timestamp — only lines strictly newer than this are returned (for incremental polling)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Maximum number of lines to return, taken from the most recent matches (default 100, capped at 1000)
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        "200":
+          description: Matching log lines, chronological (oldest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, lines]
+                properties:
+                  count:
+                    type: integer
+                    description: Number of lines in `lines`
+                  lines:
+                    type: array
+                    items:
+                      type: object
+                      required: [timestamp, level, target, message]
+                      properties:
+                        timestamp:
+                          type: string
+                          format: date-time
+                        level:
+                          type: string
+                          description: Uppercase level name (e.g. `INFO`, `WARN`)
+                        target:
+                          type: string
+                          description: Tracing target (module path), e.g. `hc_core::rules`
+                        message:
+                          type: string
+                        fields:
+                          type: object
+                          additionalProperties: true
+                          description: Structured tracing fields; omitted when null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Log streaming not enabled in config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /logs/stream:
+    get:
+      operationId: streamLogs
+      summary: Live WebSocket log stream
+      tags: [system]
+      description: |
+        Upgrade to WebSocket.  Each message is a JSON-encoded log line
+        (`timestamp`, `level`, `target`, `message`, optional `fields`) — the
+        same shape `GET /logs` returns inside `lines`.
+
+        **Authentication:** pass the JWT as `?token=<jwt>` — browsers cannot
+        set `Authorization` headers during a WebSocket upgrade.  The server
+        validates the token before accepting the upgrade and returns HTTP 401
+        if it is missing or invalid.  Callers from a whitelisted source IP
+        (`[server].whitelist`) skip the token check entirely.
+
+        **Behaviour:** the server first flushes up to `history` lines of
+        ring-buffer backlog (subject to the same filters), then streams the
+        live tail.
+
+        **Filtering (optional):**
+        - `level` — minimum severity (default `info`)
+        - `target` — tracing target prefix (`starts_with` match)
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: JWT — required because browsers cannot set Authorization headers for WebSocket. Optional only for whitelisted source IPs.
+          schema:
+            type: string
+        - name: level
+          in: query
+          description: Minimum severity (unrecognised values are treated as `info`)
+          schema:
+            type: string
+            enum: [error, warn, info, debug, trace]
+            default: info
+        - name: target
+          in: query
+          description: Tracing target prefix filter (`starts_with` match)
+          schema:
+            type: string
+        - name: history
+          in: query
+          description: Lines of ring-buffer backlog to send before the live tail (default 50, capped server-side at 500)
+          schema:
+            type: integer
+            default: 50
+            maximum: 500
+        - name: client_id
+          in: query
+          description: Optional per-tab fingerprint; surfaces in `GET /ws/connections`
+          schema:
+            type: string
+      responses:
+        "101":
+          description: Switching Protocols — WebSocket upgrade accepted
+        "401":
+          description: Missing or invalid token — upgrade rejected
+        "503":
+          description: Log streaming not enabled in config
+
+  # ---------------------------------------------------------------------------
+  # Metrics
+  # ---------------------------------------------------------------------------
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics exposition — IP-gated, no JWT
+      tags: [system]
+      description: |
+        Prometheus text exposition format 0.0.4.
+
+        **No JWT / Bearer auth.**  Access is controlled purely by source IP via
+        `[metrics].whitelist` in `homecore.toml`, because Prometheus scrapers
+        cannot easily set `Authorization` headers.  The whitelist is *separate*
+        from the auth whitelist.  It is **empty by default, which means every
+        caller receives 403** — operators must explicitly list the scrape
+        source(s).  IPv4-mapped IPv6 addresses are canonicalised before the
+        check.
+
+        Gauges (`homecore_devices_total`, `homecore_rules_total`,
+        `homecore_rules_enabled_total`, `homecore_plugins_total`,
+        `homecore_uptime_seconds`) are refreshed from live state on every
+        scrape.  Counters (`homecore_rule_fires_total`,
+        `homecore_device_state_changes_total`,
+        `homecore_scene_activations_total`, `homecore_events_total{type}`,
+        `homecore_ws_connects_total{endpoint}`,
+        `homecore_ws_disconnects_total{endpoint,reason}`) accumulate since
+        process start.
+      responses:
+        "200":
+          description: Prometheus exposition text
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP homecore_uptime_seconds Seconds elapsed since the HomeCore process started
+                # TYPE homecore_uptime_seconds gauge
+                homecore_uptime_seconds 3600
+        "403":
+          description: Source IP not in `[metrics].whitelist` (plain-text body `metrics access denied`)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Metrics encoding failed (plain-text body)
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  # ---------------------------------------------------------------------------
+  # WebSocket connection registry
+  # ---------------------------------------------------------------------------
+  /ws/connections:
+    get:
+      operationId: listWsConnections
+      summary: List live WebSocket connections (admin only)
+      description: |
+        Every live WebSocket connection across `/events/stream` and
+        `/logs/stream`, newest connection first.  Intended for reconnect-storm
+        investigations — it distinguishes "one looping client" from "many
+        churning clients".
+
+        **Admin role required** (enforced in the handler; non-admins get 403).
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Snapshot of the connection registry
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, connections]
+                properties:
+                  count:
+                    type: integer
+                  connections:
+                    type: array
+                    description: Sorted by `connected_at`, newest first
+                    items:
+                      type: object
+                      required: [connection_id, endpoint, ip, user, connected_at]
+                      properties:
+                        connection_id:
+                          type: string
+                          format: uuid
+                          description: Server-generated, stable for the lifetime of the connection
+                        endpoint:
+                          type: string
+                          enum: [events_stream, logs_stream]
+                        client_id:
+                          type: string
+                          nullable: true
+                          description: Per-tab fingerprint from `?client_id=`; null when the caller did not send one
+                        ip:
+                          type: string
+                          description: Source IP (canonicalised — IPv4-mapped IPv6 stripped)
+                        user:
+                          type: string
+                          description: Authenticated subject, or `whitelist` for IP-whitelist callers
+                        user_agent:
+                          type: string
+                          nullable: true
+                        connected_at:
+                          type: string
+                          format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ---------------------------------------------------------------------------
+  # Timers (timer devices are also visible via /devices)
+  # ---------------------------------------------------------------------------
+  /timers:
+    get:
+      operationId: listTimers
+      summary: List virtual countdown timer devices
+      description: |
+        Returns every device with `plugin_id = "core.timer"`, plus `core.glue`
+        devices whose `device_type` is `timer`.  For running timers,
+        `remaining_secs` is recomputed on read from `started_at` +
+        `duration_secs`, so the countdown is always accurate.
+
+        Requires the `devices:read` scope.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of timer devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing the `devices:read` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: State store error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createTimer
+      summary: Create a virtual countdown timer device
+      description: |
+        Creates a timer device owned by the `core.glue` plugin with
+        `device_type = "timer"` and initial attributes
+        `state: "idle"`, `duration_secs: 0`, `remaining_secs: 0`,
+        `repeat: false`.
+
+        The `timer_` prefix is enforced: `id = "garage_close"` yields the
+        device id `timer_garage_close`; an id that already starts with
+        `timer_` is used verbatim.  When `label` is omitted the display name
+        defaults to the device id.
+
+        Requires the `devices:write` scope.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  description: Slug used to form the device_id (`timer_` prefix added if absent)
+                label:
+                  type: string
+                  description: Display name; defaults to the resulting device_id
+      responses:
+        "201":
+          description: Timer created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing the `devices:write` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A device with this timer id already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: State store error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /timers/{id}:
+    get:
+      operationId: getTimer
+      summary: Get a single timer device
+      description: |
+        The `timer_` prefix is optional in the path — `garage_close` and
+        `timer_garage_close` both resolve to the device `timer_garage_close`.
+        `remaining_secs` is recomputed on read for running timers.
+
+        Requires the `devices:read` scope.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Timer id, with or without the `timer_` prefix
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Timer device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing the `devices:read` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: State store error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # System
+  # ---------------------------------------------------------------------------
+  /system/status:
+    get:
+      operationId: getSystemStatus
+      summary: Runtime status — uptime, counts, database sizes
+      description: |
+        Requires authentication (Bearer JWT, API key, or whitelisted source
+        IP).  No additional scope is enforced.
+
+        `state_db_bytes` / `history_db_bytes` are `0` when backup paths are not
+        configured; rule counts are `0` when no rule engine handle is attached.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current system status
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - version
+                  - uptime_seconds
+                  - started_at
+                  - rules_total
+                  - rules_enabled
+                  - devices_total
+                  - plugins_active
+                  - state_db_bytes
+                  - history_db_bytes
+                  - timezone
+                properties:
+                  version:
+                    type: string
+                    description: HomeCore binary version
+                  uptime_seconds:
+                    type: integer
+                  started_at:
+                    type: string
+                    format: date-time
+                  rules_total:
+                    type: integer
+                  rules_enabled:
+                    type: integer
+                  devices_total:
+                    type: integer
+                  plugins_active:
+                    type: integer
+                    description: Plugins whose status is `active`
+                  state_db_bytes:
+                    type: integer
+                    description: Size of state.redb on disk (0 if backup paths unconfigured)
+                  history_db_bytes:
+                    type: integer
+                    description: Size of history.db on disk (0 if backup paths unconfigured)
+                  timezone:
+                    type: string
+                    description: Configured IANA timezone (e.g. `America/New_York`)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /system/versions:
+    get:
+      operationId: getSystemVersions
+      summary: Component bill-of-materials — no auth required
+      description: |
+        **Public — no authentication required** (registered on the public
+        router alongside `/health` and `/metrics`).  Version info is not
+        sensitive, and pre-auth clients (login screen, client-version check)
+        consume it.
+
+        **Appliance install:** returns the contents of
+        `/opt/homecore/versions.json` verbatim — the appliance build pipeline
+        owns that schema (core, SDK, plugins, UI, TUI, image version, build
+        timestamp).
+
+        **Non-appliance install** (or when the file is missing / not valid
+        JSON): falls back to `{"core": "<binary version>"}`.
+      tags: [system]
+      responses:
+        "200":
+          description: Version map — free-form object, shape depends on the install
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              example:
+                core: "0.1.4"
+
+  /system/config:
+    get:
+      operationId: getSystemConfig
+      summary: Read homecore.toml (raw text + parsed JSON)
+      description: |
+        **Admin role required.**  Returns both the raw file text (for the raw
+        editor) and a parsed JSON view (for structured per-section forms).
+        `parsed` is `null` if the file does not parse as TOML.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current config
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [raw, parsed, path]
+                properties:
+                  raw:
+                    type: string
+                    description: Full file contents
+                  parsed:
+                    type: object
+                    additionalProperties: true
+                    nullable: true
+                    description: TOML parsed to JSON; null when the file does not parse
+                  path:
+                    type: string
+                    description: Absolute path to homecore.toml on the server
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Failed to read the config file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Config path not available — hc-core started without `--config`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: putSystemConfig
+      summary: Write homecore.toml (patch, raw, or array-of-tables)
+      description: |
+        **Admin role required.**  Exactly one of `patch`, `raw`, or
+        `array_of_tables` must be present — supplying more than one, or none,
+        is a 422.
+
+        - `patch` — `{ "patch": { "<section>": { "<field>": <value> } } }`.
+          Surgical edit via `toml_edit`; comments, ordering, and untouched
+          sections are preserved.  Use for per-section Save buttons.
+        - `raw` — `{ "raw": "<full file text>" }`.  Full-file replace.
+        - `array_of_tables` —
+          `{ "array_of_tables": { "section": "<name>", "items": [ ... ] } }`.
+          Replaces an entire `[[section]]` array.
+
+        The result is validated as parseable TOML before an atomic write.
+        `restart_required` is always `true` in the response.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Exactly one of `patch`, `raw`, `array_of_tables`
+              properties:
+                patch:
+                  type: object
+                  additionalProperties: true
+                  description: Map of section name to the fields to set within it
+                raw:
+                  type: string
+                  description: Complete replacement file text
+                array_of_tables:
+                  type: object
+                  required: [section, items]
+                  properties:
+                    section:
+                      type: string
+                      description: Array-of-tables section name (e.g. `plugins`)
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        additionalProperties: true
+      responses:
+        "200":
+          description: Config written
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [raw, restart_required]
+                properties:
+                  raw:
+                    type: string
+                    description: The new file contents as written
+                  restart_required:
+                    type: boolean
+                    description: Always true — this endpoint edits static config
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: |
+            More than one write mode supplied; no write mode supplied; `raw` not
+            a string; `array_of_tables` missing `section`/`items`; patch
+            application failed; or the result is not valid TOML.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to read or write the config file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Config path not available — hc-core started without `--config`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /system/log-level:
+    get:
+      operationId: getLogLevel
+      summary: Current runtime log level
+      description: |
+        Requires authentication; no additional scope is enforced on the read.
+        Returns 503 when the binary was started without a dynamic log-level
+        handle.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current level
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [level]
+                properties:
+                  level:
+                    type: string
+                    description: Active tracing filter level
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Dynamic log level not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: setLogLevel
+      summary: Change the runtime log level
+      description: |
+        Applies immediately, without a restart.  Requires the `plugins:write`
+        scope (admin role).  An invalid level string is rejected with 400.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [level]
+              properties:
+                level:
+                  type: string
+                  description: New tracing filter (e.g. `debug`, `hc_core=trace,info`)
+      responses:
+        "200":
+          description: Level changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, level]
+                properties:
+                  ok:
+                    type: boolean
+                  level:
+                    type: string
+        "400":
+          description: Missing `level` field, or the filter string was rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing the `plugins:write` scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Dynamic log level not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /system/battery_settings:
+    get:
+      operationId: getBatterySettings
+      summary: Battery watcher thresholds
+      description: |
+        Requires authentication; no additional scope is enforced.  When the
+        battery watcher is not enabled the handler returns the defaults
+        (`threshold_pct: 20`, `recover_band_pct: 5`, `notify_channel: null`,
+        `notify_on_recovered: false`) rather than an error — the response
+        shape is identical either way.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current battery watcher configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [threshold_pct, recover_band_pct, notify_on_recovered]
+                properties:
+                  threshold_pct:
+                    type: number
+                    description: Battery percentage at or below which the low latch engages (default 20)
+                  recover_band_pct:
+                    type: number
+                    description: Recovery fires at `threshold_pct + recover_band_pct` (default 5)
+                  notify_channel:
+                    type: string
+                    nullable: true
+                    description: hc-notify channel fired on each low edge; null disables the shortcut
+                  notify_on_recovered:
+                    type: boolean
+                    description: When true (and `notify_channel` is set), recovery edges also notify
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /system/restart:
+    post:
+      operationId: restartSystem
+      summary: Request a graceful restart
+      description: |
+        **Admin role required.**  Triggers the same graceful-shutdown broadcast
+        the signal handler uses; the runtime supervisor (systemd / docker) is
+        expected to respawn the process.  The response is returned first — the
+        shutdown broadcast is delayed ~250 ms so the body can flush.  Takes no
+        request body.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Shutdown requested
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, message]
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Shutdown channel not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /system/backup:
+    post:
+      operationId: createBackup
+      summary: Download a zip backup of state, config, and rules
+      description: |
+        **Admin role required.**  Takes no request body.
+
+        Streams `application/zip` with
+        `Content-Disposition: attachment; filename="homecore-backup-<YYYYMMDDTHHMMSSZ>.zip"`.
+
+        Archive contents:
+        - `state.redb` — device registry, rules, scenes, areas, users
+        - `history.db` — time-series history (SQLite)
+        - `config/homecore.toml`, `config/modes.toml`,
+          `config/mode_definitions.json` (each optional)
+        - `rules/*.ron` (and legacy `*.toml`)
+        - `plugins/<plugin_id>/config.toml` for each registered plugin
+          (optional per plugin)
+
+        Plugin configs are keyed by plugin id, not absolute path, so a backup
+        taken on host A restores correctly on host B.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Zip archive
+          headers:
+            Content-Disposition:
+              description: '`attachment; filename="homecore-backup-<timestamp>.zip"`'
+              schema:
+                type: string
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Archive creation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Backup paths not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /system/restore:
+    post:
+      operationId: restoreBackup
+      summary: Restore from a backup zip (raw zip body)
+      description: |
+        **Admin role required.**  The body is the **raw zip archive bytes** —
+        not multipart, not JSON, not base64.  The handler reads the request
+        body directly (`body: Bytes`) and parses it as a ZIP.
+
+        The route raises axum's body limit to **500 MiB**; larger uploads are
+        rejected by the framework before the handler runs.
+
+        Each archive entry is mapped back to its canonical location
+        (`state.redb`, `history.db`, `config/*`, `rules/*`, and
+        `plugins/<id>/config.toml` — the last resolved against the *running
+        host's* plugin table, so an id this host doesn't run is skipped).
+        Unrecognised or unsafe paths are reported in `skipped`, never written.
+
+        **A server restart is required afterwards** for changes to take effect.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: Raw zip archive bytes, as produced by `POST /system/backup`
+        content:
+          application/zip:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Restore complete
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [restored, skipped, message]
+                properties:
+                  restored:
+                    type: array
+                    description: Archive paths written to disk
+                    items:
+                      type: string
+                  skipped:
+                    type: array
+                    description: Archive paths ignored (unknown location, unsafe path, or plugin id not registered on this host)
+                    items:
+                      type: string
+                  message:
+                    type: string
+        "400":
+          description: Empty request body, or the body is not a valid ZIP archive / a file could not be written
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        # Returned by axum's DefaultBodyLimit layer (500 MiB) before the handler runs.
+        "413":
+          description: Uploaded archive exceeds the 500 MiB body limit
+        "500":
+          description: Restore task panicked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Backup paths not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
 # =============================================================================
 # Components
 # =============================================================================
@@ -1396,7 +6253,7 @@ components:
       properties:
         token:
           type: string
-          description: Signed JWT — include as `Authorization: Bearer <token>` on subsequent requests
+          description: 'Signed JWT — include as `Authorization: Bearer <token>` on subsequent requests'
         token_type:
           type: string
           enum: [Bearer]
@@ -1669,7 +6526,7 @@ components:
         attributes:
           type: object
           additionalProperties: true
-          description: Current device attribute values (e.g. `{"on": true, "brightness": 180}`)
+          description: 'Current device attribute values (e.g. `{"on": true, "brightness": 180}`)'
         capabilities:
           type: object
           description: JSON Schema describing the device's attributes

@@ -1100,6 +1100,82 @@ curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKE
 
 ---
 
+## Orphaned devices (`GET /devices/orphaned`)
+
+An **orphaned** device is one HomeCore still holds a registration and retained
+state for, but whose owning plugin no longer manages it — a Hue grouped light
+after `publish_grouped_lights` is turned off, say, or an Ecowitt sensor the
+plugin stopped publishing.
+
+This is nastier than a deleted device, because **nothing fails**:
+
+- Plugins subscribe to command topics **per-device** (`homecore/devices/{id}/cmd`),
+  only for devices they registered. There is no wildcard subscription. So a
+  command published for an orphan has **no subscriber** and the broker drops it.
+  The plugin never sees it; no error is raised anywhere; the rule engine still
+  records the action as `fired: success`.
+- Its state is **frozen** at whatever it last was — forever — and rule conditions
+  keep reading that frozen value as truth.
+
+The two combine into a silent deadlock. A toggle pair built on a frozen
+attribute wedges permanently:
+
+```
+Btn1 "On"  — condition: light.on == false  → turn on    ← can NEVER pass
+Btn1 "Off" — condition: light.on == true   → turn off   ← ALWAYS passes
+```
+
+If the orphan's `on` is frozen `true`, the "On" rule can never fire and the
+"Off" rule fires on every press — while its command evaporates at the broker.
+The button appears dead, and every layer reports success. One such keypad ran
+this way from May to July: `GET /automations/{id}/history` showed the "On" rule
+`condition_failed` **9 times out of 9**, never once firing.
+
+### Finding them
+
+```sh
+curl -s http://localhost:8080/api/v1/devices/orphaned -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Detection is a **count comparison, not a staleness threshold**. Every
+management-capable plugin self-reports `device_count`; if core holds more
+devices for that plugin than the plugin claims, the difference is exactly the
+orphan count.
+
+Thresholding on `last_seen` age is the obvious approach and it is **wrong**:
+plugins that publish only on change leave healthy devices cold for months (a
+wall switch nobody flips is not orphaned), so an age rule fires on precisely
+the quiet devices operators care least about, and the noise gets it ignored.
+
+Identifying *which* devices are orphaned is necessarily heuristic — plugins
+report a count, not an id list — so the `orphan_count` least-recently-seen
+devices come back as `suspects`. In practice orphans sit months behind their
+siblings and the ranking is unambiguous.
+
+The same check by hand, useful when the endpoint isn't deployed yet:
+
+```sh
+# per plugin: what it claims vs what core holds
+paste <(curl -s .../plugins  | jq -r '.[] | "\(.plugin_id)\t\(.device_count)"') \
+      <(curl -s .../devices  | jq -r 'group_by(.plugin_id)[] | "\(.[0].plugin_id)\t\(length)"')
+```
+
+### Why `reconcile_devices` does not clean them up
+
+The SDK's cross-restart reconcile computes `stale = known − live`, where `known`
+comes from its persisted `.published-device-ids.json` (a sibling of the plugin's
+`config.toml`). Devices registered **before that persistence mechanism existed**
+were never written to that file, so `known == live` and the stale set is empty.
+
+Such devices are **structurally invisible** to reconcile — the "cleanup stale
+devices" plugin action will never remove them, and logs nothing when it doesn't.
+The only fix is an explicit `DELETE /devices/{id}`.
+
+Check `affected_rules` in the delete response before assuming it was harmless;
+an empty list means no automation referenced the orphan.
+
+---
+
 ## Working with rules during development
 
 Rules are the core of HomeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
@@ -3673,8 +3749,26 @@ When Claude (or you) adds a new feature, here is where each piece typically goes
 1. Write the handler function in `crates/hc-api/src/handlers.rs` (or `auth_handlers.rs` for auth routes).
 2. Register the route in `crates/hc-api/src/lib.rs` — in `public` if no auth needed, `protected` otherwise.
 3. If it needs a new `StateStore` method, add it to the appropriate `*_store.rs` file and expose it from `StateStore` in `crates/hc-state/src/lib.rs`.
-4. Run `cargo check -p hc-api` to verify it compiles.
-5. Test it manually with `curl`.
+4. **Document it in `docs/openapi.yaml`.** Path, methods, params, request/response
+   shapes, status codes, and the scope the guard requires. This step used to be
+   missing from this checklist, and the spec drifted to documenting 39 of 89
+   routes before anyone noticed — a spec that lags the server is worse than none,
+   because people trust it. Verify parity afterwards:
+
+   ```bash
+   # every route registered in the router
+   perl -0777 -ne 'while (/\.route\(\s*"([^"]+)"/gs) { print "$1\n" }' \
+     crates/hc-api/src/lib.rs | sed -E 's/:([a-zA-Z_]+)/{\1}/g' | sort -u
+
+   # every path documented in the spec (and confirms the YAML still parses)
+   yq eval '.paths | keys | .[]' docs/openapi.yaml | sort -u
+   ```
+
+   The two lists should be identical. `yq` doubles as the syntax check — the
+   spec was silently unparseable for a while (an unquoted `description:` value
+   containing `": "` reads as a nested mapping), so *always* run it.
+5. Run `cargo check -p hc-api` to verify it compiles.
+6. Test it manually with `curl`.
 
 ---
 
