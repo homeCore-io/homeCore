@@ -1423,13 +1423,18 @@ impl Bridge {
             return Ok(());
         }
 
-        // A device_id carrying our own `hue_` prefix that reaches this point is
-        // one we published in an earlier run but no longer sync — e.g. a grouped
-        // light whose `publish_grouped_lights` config was turned off while its
-        // registration stayed retained in homeCore.  Such a device still accepts
-        // commands from rules and the UI, and every one of them lands here.
+        // A device_id carrying our own `hue_` prefix but with no registry binding
+        // — we published it at some point and have since stopped managing it.
         // Dropping it as "not ours" makes the command vanish with no error
         // anywhere, so say so loudly.
+        //
+        // This fires only when the subscription outlives the binding, i.e. the
+        // device was registered earlier in *this* process and later pruned (a
+        // group deleted from the bridge mid-run).  It does NOT catch a device
+        // orphaned across a restart: the SDK subscribes per-device, so we never
+        // subscribe to that device's cmd topic at all and the broker drops the
+        // command before it reaches us.  Core detects that case instead —
+        // see `GET /api/v1/devices/orphaned`.
         if Self::is_own_device_id(device_id) {
             warn!(
                 device_id,
@@ -1461,9 +1466,9 @@ impl Bridge {
             return Ok(());
         }
 
-        // Ignore commands for devices this plugin doesn't own.  With the
-        // SDK wildcard subscription (homecore/devices/+/cmd), commands for
-        // other plugins' devices arrive here too — silently skip them.
+        // Defensive only.  The SDK subscribes per-device
+        // (`homecore/devices/{id}/cmd`) for devices we registered — there is no
+        // wildcard subscription, so another plugin's command never reaches us.
         debug!(device_id, "Ignoring command for non-Hue device");
 
         Ok(())
