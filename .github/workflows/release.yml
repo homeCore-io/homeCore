@@ -63,7 +63,21 @@ jobs:
       # silently falling back to develop — a release that bundles an unrecorded
       # UI is the thing this exists to prevent.
       webui_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
-      docker_repo_ref: develop  # while homeCore-io/docker still on develop
+      # The Dockerfile and entrypoints that build the published image come from
+      # homeCore-io/docker at this ref, so it is part of the build recipe — not
+      # just orchestration. Hardcoding `develop` meant a *tagged* image was built
+      # from whatever that branch happened to be at the time, so the image could
+      # not be rebuilt from the component's tag alone: its recipe was unrecorded.
+      #
+      # On a tag push, pin to the identical tag. homeCore-io/docker is versioned
+      # in lockstep (it carries v0.1.0-v0.1.5), so tagging this component v0.1.6
+      # builds against docker v0.1.6. Everything else keeps tracking develop,
+      # which is what a dev image wants.
+      #
+      # Ordering is now explicit: tag homeCore-io/docker before tagging this
+      # component. If the tag is missing the release fails — hc-scripts'
+      # pre-flight names the cause — rather than silently building from develop.
+      docker_repo_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
       # Forwards the workflow_dispatch input to the reusable workflow.
       # On tag push (no inputs), the `|| false` fallback ensures
       # full multi-arch — the reusable defaults `fast` to false too,
