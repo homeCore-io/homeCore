@@ -6179,6 +6179,11 @@ pub async fn patch_automation(
 pub struct BulkPatchQuery {
     /// Apply only to rules that have this tag.  Ignored when `ids` is present in the body.
     pub tag: Option<String>,
+    /// Opt in to patching *every* rule.  Required to hit all rules; without it,
+    /// a request carrying no selector is rejected rather than assumed to mean
+    /// "all".
+    #[serde(default)]
+    pub all: bool,
 }
 
 #[derive(Deserialize)]
@@ -6189,12 +6194,18 @@ pub struct BulkPatchBody {
     pub enabled: Option<bool>,
 }
 
-/// `PATCH /api/v1/automations[?tag=<tag>]`
+/// `PATCH /api/v1/automations?tag=<tag>|all=true`
 ///
-/// Bulk enable/disable rules, selecting targets in priority order:
-/// 1. `ids` field in body — explicit list of rule UUIDs (ignores `?tag=`)
-/// 2. `?tag=<tag>` query param — all rules with that tag
-/// 3. No selector — all rules
+/// Bulk enable/disable rules.  Exactly one selector is required:
+/// 1. `ids` field in body — explicit list of rule UUIDs (takes precedence)
+/// 2. `?tag=<tag>` — all rules carrying that tag
+/// 3. `?all=true` — every rule, stated deliberately
+///
+/// A request with no selector is a **400**.  It used to mean "all rules", so
+/// `PATCH /automations {"enabled": false}` — a plausible typo, or a client that
+/// forgot to send `ids` — silently disabled every automation in the house.  The
+/// blast radius of the default was the whole system, so the default is now to
+/// refuse.
 ///
 /// Returns `{ "updated": N, "rules": [...] }`.
 pub async fn bulk_patch_automations(
@@ -6203,6 +6214,18 @@ pub async fn bulk_patch_automations(
     Query(params): Query<BulkPatchQuery>,
     Json(patch): Json<BulkPatchBody>,
 ) -> impl IntoResponse {
+    // Refuse a request that names no target.  Hitting every rule must be said
+    // out loud, not arrived at by omission.
+    if patch.ids.is_none() && params.tag.is_none() && !params.all {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "no selector — send `ids` in the body, or ?tag=<tag>, or ?all=true to patch every rule"
+            })),
+        )
+            .into_response();
+    }
+
     let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -6234,7 +6257,9 @@ pub async fn bulk_patch_automations(
             } else if let Some(ref tag) = params.tag {
                 rule.tags.contains(tag)
             } else {
-                true
+                // Only reachable with ?all=true — the no-selector case was
+                // rejected above.
+                params.all
             };
             if selected && !managed_rule_ids.contains(&rule.id) {
                 if let Some(enabled) = patch.enabled {
@@ -7630,11 +7655,11 @@ pub async fn system_restart(
 mod tests {
     use super::*;
     use crate::auth_middleware::{
-        whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite, DevicesRead,
-        DevicesWrite,
+        whitelist_claims, AreasRead, AreasWrite, AuthUser, AutomationsWrite, DashboardsWrite,
+        DevicesRead, DevicesWrite,
     };
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
-    use axum::extract::{Path, State};
+    use axum::extract::{Path, Query, State};
     use axum::response::IntoResponse;
     use chrono::Utc;
     use hc_auth::{Claims, JwtService, Role};
@@ -7966,6 +7991,56 @@ token = "TOKEN-TWO"
                 }
             ]
         })
+    }
+
+    #[tokio::test]
+    async fn bulk_patch_without_a_selector_is_refused() {
+        let state = mk_state().await;
+
+        // This exact request used to mean "every rule in the system", so a
+        // client that forgot to send `ids` disabled every automation in the
+        // house and got a 200 for it.
+        let resp = bulk_patch_automations(
+            State(state.clone()),
+            AutomationsWrite(whitelist_claims()),
+            Query(BulkPatchQuery {
+                tag: None,
+                all: false,
+            }),
+            Json(BulkPatchBody {
+                ids: None,
+                enabled: Some(false),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bulk_patch_all_true_is_allowed_through() {
+        let state = mk_state().await;
+
+        // Hitting every rule is still possible — it just has to be said out
+        // loud. Past the selector guard this state has no rule engine, so any
+        // status other than 400 proves the guard let it through.
+        let resp = bulk_patch_automations(
+            State(state.clone()),
+            AutomationsWrite(whitelist_claims()),
+            Query(BulkPatchQuery {
+                tag: None,
+                all: true,
+            }),
+            Json(BulkPatchBody {
+                ids: None,
+                enabled: Some(false),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

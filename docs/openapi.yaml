@@ -752,11 +752,18 @@ paths:
         Enables or disables many rules at once and persists each changed rule
         back to its RON file.
         Requires the `automations:write` scope (`AutomationsWrite` guard).
-        Target selection, in priority order:
-          1. `ids` in the body — explicit list of rule UUIDs (the `?tag=` query
-             param is ignored when `ids` is present).
+
+        **A selector is required.** Exactly one of:
+          1. `ids` in the body — explicit list of rule UUIDs (takes precedence
+             over `?tag=`).
           2. `?tag=<tag>` — every rule carrying that tag.
-          3. Neither — **every rule in the system**.
+          3. `?all=true` — every rule in the system, stated deliberately.
+
+        A request with no selector is rejected with **400**. It previously meant
+        "every rule", so `PATCH /automations {"enabled": false}` — a plausible
+        typo, or a client that forgot to send `ids` — silently disabled every
+        automation in the house. Hitting everything now has to be said out loud.
+
         Rules generated from mode definitions are always skipped, even when
         explicitly listed in `ids`.
         `enabled` is optional: if omitted, the selected rules are re-serialized
@@ -773,6 +780,15 @@ paths:
           description: |
             Apply only to rules carrying this tag. Ignored when `ids` is present
             in the body.
+        - name: all
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            Opt in to patching **every rule in the system**. Required to do so —
+            omitting all three selectors is a 400, not an implicit "all".
       requestBody:
         required: true
         content:
@@ -783,8 +799,8 @@ paths:
                 ids:
                   type: array
                   description: |
-                    Explicit rule UUIDs to update. Overrides `?tag=`. Omit to
-                    select by tag, or to select all rules.
+                    Explicit rule UUIDs to update. Takes precedence over `?tag=`.
+                    Omit to select by tag, or pass `?all=true` for every rule.
                   items:
                     type: string
                     format: uuid
@@ -812,6 +828,14 @@ paths:
                     description: The updated rules, in their post-patch form
                     items:
                       $ref: "#/components/schemas/Rule"
+        "400":
+          description: |
+            No selector given. Send `ids`, `?tag=`, or `?all=true` — patching
+            every rule is never inferred from an omission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -6307,11 +6331,33 @@ components:
 
     Role:
       type: string
-      enum: [Admin, User, ReadOnly]
+      enum:
+        - admin
+        - user
+        - read_only
+        - observer
+        - device_operator
+        - rule_editor
+        - service_operator
       description: |
-        - `Admin` — full access including user management
-        - `User` — read/write devices, automations, scenes, areas, webhooks, events
-        - `ReadOnly` — GET-only access to devices, automations, scenes, events
+        Serialized snake_case. A role is a named bundle of scopes; the scopes are
+        what handlers actually check, so the per-operation descriptions name the
+        scope rather than the role.
+
+        - `admin` — full access, including user and plugin management
+        - `user` — read/write devices, automations, scenes, areas, webhooks, events
+        - `read_only` — minimal read view: devices, automations, dashboards,
+          scenes, areas. Cannot see plugins or the audit log.
+        - `observer` — `read_only` plus `plugins:read` and `audit:read`. Good
+          default for dashboards and observability services.
+        - `device_operator` — `observer` plus `devices:write`: can command
+          devices but cannot author automations, scenes, or areas. The shape a
+          wall panel or kiosk wants.
+        - `rule_editor` — `observer` plus authoring automations, scenes, and
+          areas. Cannot command devices.
+        - `service_operator` — `user` plus `audit:read`. Typical envelope for a
+          service account that commands devices and wants audit visibility over
+          its own actions.
 
     ChangePasswordRequest:
       type: object

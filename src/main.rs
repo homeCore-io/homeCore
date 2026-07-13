@@ -568,12 +568,21 @@ impl Default for LocationSection {
 /// metrics endpoint is gated by network identity instead. The whitelist
 /// defaults to empty, which means **no IPs are allowed** — operators must
 /// explicitly list the scrape source(s) before metrics become reachable.
+///
+/// This is deliberate and is not going to be auto-discovered from the host's
+/// interfaces. Metrics expose device counts, rule counts, and plugin health;
+/// defaulting them open to whatever subnet the machine happens to sit on would
+/// widen the attack surface silently, and "it worked without me configuring it"
+/// is exactly how an endpoint ends up exposed on a network nobody audited.
+/// Opening it stays an explicit act.
 #[derive(Deserialize, Default)]
 struct MetricsSection {
     /// IP addresses or CIDR ranges allowed to scrape `/api/v1/metrics`.
     /// Both IPv4 and IPv6 are supported.
     /// Example: `whitelist = ["127.0.0.1/32", "10.0.0.0/24"]`.
-    /// Empty (default) means the endpoint returns 403 to every caller.
+    ///
+    /// Empty (the default) means the endpoint returns 403 to every caller. It
+    /// says so at startup, and the 403 body names the exact CIDR line to add.
     #[serde(default)]
     whitelist: Vec<String>,
 }
@@ -1301,7 +1310,12 @@ async fn main() -> Result<()> {
     }).collect();
 
     if metrics_whitelist.is_empty() {
-        info!("/api/v1/metrics is locked down (no metrics.whitelist configured)");
+        info!(
+            "/api/v1/metrics is closed to every caller — [metrics].whitelist is not configured. \
+             This is the default and is deliberate: the endpoint is opened explicitly, never \
+             auto-discovered from the host's network. To allow a scraper, set e.g. \
+             `[metrics] whitelist = [\"10.0.0.5/32\"]` in homecore.toml and restart."
+        );
     } else {
         info!(
             count = metrics_whitelist.len(),
