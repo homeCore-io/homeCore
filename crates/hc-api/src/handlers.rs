@@ -1028,7 +1028,11 @@ pub async fn create_switch(
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
-    dev.device_type = Some("virtual_switch".to_string());
+    // Must be "switch", not "virtual_switch": that is what `GLUE_TYPES` writes,
+    // what the `core.switch` → `core.glue` migration backfills, and what
+    // `list_switches` filters on.  Writing "virtual_switch" here created
+    // switches that GET /switches could never return.
+    dev.device_type = Some("switch".to_string());
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
@@ -5303,6 +5307,183 @@ pub async fn patch_plugin(
     (StatusCode::OK, Json(json!(new_rec))).into_response()
 }
 
+/// Written in place of every secret by `GET /plugins/{id}/config`.
+///
+/// `PUT` restores the stored value wherever it sees this, so a config editor can
+/// fetch a document, edit an unrelated field, and save it back without wiping
+/// out credentials it was never shown.  The admin UI does exactly that: it loads
+/// `raw` into a text area and PUTs the text straight back.
+const REDACTED_SECRET: &str = "__redacted__";
+
+/// Whether a TOML/JSON key holds a credential, as opposed to merely pointing at
+/// one.  `password` and `app_key` are secrets; `key_path`, `token_url`, and
+/// `refresh_token_expiry_days` are not, and redacting those would corrupt the
+/// config to no benefit — so the exclusions are checked first.
+fn is_secret_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    if k.ends_with("path") || k.ends_with("_url") || k.ends_with("_type") || k.contains("expiry") {
+        return false;
+    }
+    const SECRET_PARTS: &[&str] = &[
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "hash",
+        "api_key",
+        "apikey",
+        "app_key",
+        "appkey",
+        "access_key",
+        "private_key",
+        "user_key",
+        "auth_key",
+    ];
+    SECRET_PARTS.iter().any(|p| k.contains(p))
+        || matches!(k.as_str(), "key" | "pat" | "pin" | "passphrase")
+}
+
+/// Section label for each line of a TOML document.  `[[array]]` tables carry an
+/// occurrence suffix so repeated tables (e.g. several `[[notify.channels]]`,
+/// each with its own `token`) stay distinct instead of collapsing together.
+fn toml_line_sections(src: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("[[") && t.ends_with("]]") {
+            let name = t.trim_matches(|c| c == '[' || c == ']').to_string();
+            let n = seen.entry(name.clone()).or_insert(0);
+            current = format!("{name}#{n}");
+            *n += 1;
+        } else if t.starts_with('[') && t.ends_with(']') {
+            current = t.trim_matches(|c| c == '[' || c == ']').to_string();
+        }
+        sections.push(current.clone());
+    }
+    sections
+}
+
+/// Split a TOML line into `(indent, key, value)` if it is a plain `key = value`
+/// assignment.  Comment lines and table headers yield `None`.
+fn toml_assignment(line: &str) -> Option<(&str, &str, &str)> {
+    let body = line.trim_start();
+    if body.starts_with('#') || body.starts_with('[') {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let indent = &line[..line.len() - body.len()];
+    Some((indent, line[..eq].trim(), line[eq + 1..].trim()))
+}
+
+/// Redact secrets in raw TOML text, preserving comments and layout — the admin
+/// UI shows this verbatim in an editor, so re-serializing the parsed document
+/// (and losing every comment) would not do.
+fn redact_toml_text(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        match toml_assignment(line) {
+            Some((indent, key, _)) if is_secret_key(key) => {
+                out.push_str(&format!("{indent}{key} = \"{REDACTED_SECRET}\"\n"));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Put the stored secret back wherever the client echoed the placeholder.
+/// Without this, saving a config fetched from the API would overwrite every
+/// credential in it with `__redacted__`.
+fn restore_toml_secrets(incoming: &str, current: &str) -> String {
+    let cur_sections = toml_line_sections(current);
+    let mut stored: HashMap<(String, String), String> = HashMap::new();
+    for (i, line) in current.lines().enumerate() {
+        if let Some((_, key, value)) = toml_assignment(line) {
+            if is_secret_key(key) {
+                stored.insert(
+                    (cur_sections[i].clone(), key.to_string()),
+                    value.to_string(),
+                );
+            }
+        }
+    }
+
+    let in_sections = toml_line_sections(incoming);
+    let mut out = String::with_capacity(incoming.len());
+    for (i, line) in incoming.lines().enumerate() {
+        if let Some((indent, key, value)) = toml_assignment(line) {
+            if is_secret_key(key) && value.trim_matches('"') == REDACTED_SECRET {
+                if let Some(original) = stored.get(&(in_sections[i].clone(), key.to_string())) {
+                    out.push_str(&format!("{indent}{key} = {original}\n"));
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Redact secret leaves anywhere in a parsed config tree.
+fn redact_json_secrets(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_secret_key(k) && !v.is_object() && !v.is_array() {
+                    *v = Value::String(REDACTED_SECRET.to_string());
+                } else {
+                    redact_json_secrets(v);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_json_secrets),
+        _ => {}
+    }
+}
+
+/// Structural counterpart to [`restore_toml_secrets`], for the `config` (JSON)
+/// form of the body.  Arrays are matched positionally.
+fn restore_json_secrets(incoming: &mut Value, current: &Value) {
+    match (incoming, current) {
+        (Value::Object(inc), Value::Object(cur)) => {
+            for (k, v) in inc.iter_mut() {
+                if v.as_str() == Some(REDACTED_SECRET) {
+                    if let Some(original) = cur.get(k) {
+                        *v = original.clone();
+                    }
+                } else if let Some(c) = cur.get(k) {
+                    restore_json_secrets(v, c);
+                }
+            }
+        }
+        (Value::Array(inc), Value::Array(cur)) => {
+            for (i, v) in inc.iter_mut().enumerate() {
+                if let Some(c) = cur.get(i) {
+                    restore_json_secrets(v, c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Does this tree still carry a redaction placeholder anywhere?
+fn has_redaction(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s == REDACTED_SECRET,
+        Value::Object(map) => map.values().any(has_redaction),
+        Value::Array(items) => items.iter().any(has_redaction),
+        _ => false,
+    }
+}
+
 pub async fn get_plugin_config(
     State(s): State<AppState>,
     _: PluginsWrite,
@@ -5321,12 +5502,24 @@ pub async fn get_plugin_config(
     };
 
     // Local plugin: read config file directly.
+    //
+    // Secrets are replaced with REDACTED_SECRET — this response used to hand
+    // back every plugin credential (Hue app_key, YoLink client_secret, MQTT
+    // passwords) in clear text to anyone with plugins:write. PUT restores them,
+    // so an editor can still round-trip the document safely.
     if let Some(ref path) = config_path {
         if let Ok(content) = std::fs::read_to_string(path) {
-            let mut resp = json!({ "plugin_id": id, "format": "toml", "raw": content });
+            let mut resp = json!({
+                "plugin_id": id,
+                "format":    "toml",
+                "raw":       redact_toml_text(&content),
+                "redacted":  true,
+            });
             // Also include parsed JSON for clients that want structured access.
             if let Ok(parsed) = content.parse::<toml::Value>() {
-                resp["config"] = serde_json::to_value(parsed).unwrap_or_default();
+                let mut cfg = serde_json::to_value(parsed).unwrap_or_default();
+                redact_json_secrets(&mut cfg);
+                resp["config"] = cfg;
             }
             return (StatusCode::OK, Json(resp)).into_response();
         }
@@ -5335,7 +5528,20 @@ pub async fn get_plugin_config(
     // Remote plugin: use MQTT management RPC.
     if let Some(ref rpc) = s.management_rpc {
         match rpc.get_config(&id).await {
-            Ok(resp) => (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "remote", "config": resp.get("data").cloned().unwrap_or(resp) }))).into_response(),
+            Ok(resp) => {
+                let mut cfg = resp.get("data").cloned().unwrap_or(resp);
+                redact_json_secrets(&mut cfg);
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "plugin_id": id,
+                        "format":    "remote",
+                        "config":    cfg,
+                        "redacted":  true,
+                    })),
+                )
+                    .into_response()
+            }
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
         }
     } else if !managed {
@@ -5373,11 +5579,24 @@ pub async fn put_plugin_config(
 
     // Local plugin: write config file directly.
     if let Some(ref path) = config_path {
+        // GET redacts secrets, so a client that fetched this config never saw
+        // them. Restore the stored value wherever it echoed the placeholder back
+        // — otherwise round-tripping a config through the editor would silently
+        // overwrite every credential in it with "__redacted__".
+        let current = std::fs::read_to_string(path).unwrap_or_default();
+
         // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
         let toml_str = if let Some(raw) = body["raw"].as_str() {
-            raw.to_string()
+            restore_toml_secrets(raw, &current)
         } else if let Some(config) = body.get("config") {
-            let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
+            let mut config = config.clone();
+            if has_redaction(&config) {
+                if let Ok(parsed) = current.parse::<toml::Value>() {
+                    let current_json = serde_json::to_value(parsed).unwrap_or_default();
+                    restore_json_secrets(&mut config, &current_json);
+                }
+            }
+            let toml_val: toml::Value = match serde_json::from_value(config) {
                 Ok(v) => v,
                 Err(e) => {
                     return (
@@ -5410,7 +5629,15 @@ pub async fn put_plugin_config(
 
     // Remote plugin: use MQTT management RPC.
     if let Some(ref rpc) = s.management_rpc {
-        let config = body.get("config").cloned().unwrap_or(body.clone());
+        let mut config = body.get("config").cloned().unwrap_or(body.clone());
+        // Same restore as the local path — fetch what the plugin currently holds
+        // and put the real secrets back before pushing the document to it.
+        if has_redaction(&config) {
+            if let Ok(current) = rpc.get_config(&id).await {
+                let current = current.get("data").cloned().unwrap_or(current);
+                restore_json_secrets(&mut config, &current);
+            }
+        }
         match rpc.set_config(&id, config).await {
             Ok(_) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
@@ -7403,7 +7630,8 @@ pub async fn system_restart(
 mod tests {
     use super::*;
     use crate::auth_middleware::{
-        whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite,
+        whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite, DevicesRead,
+        DevicesWrite,
     };
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
     use axum::extract::{Path, State};
@@ -7444,6 +7672,128 @@ mod tests {
         );
         AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
             .with_dashboard_store(dashboard_store, DashboardStoreData::default())
+    }
+
+    // A config with the shapes that actually occur: a secret at top level, one
+    // inside a table, decoy keys that merely *reference* a secret, and repeated
+    // [[array]] tables each carrying their own distinct token.
+    const SAMPLE_CONFIG: &str = r#"# Hue plugin
+app_key = "REAL-HUE-APP-KEY"
+verify_tls = true
+
+[mqtt]
+host = "10.0.0.1"
+password = "REAL-MQTT-PASSWORD"
+key_path = "/etc/homecore/broker.key"   # a path, not a secret
+token_url = "https://example.test/oauth"
+refresh_token_expiry_days = 30
+
+[[notify.channels]]
+kind = "pushover"
+token = "TOKEN-ONE"
+
+[[notify.channels]]
+kind = "telegram"
+token = "TOKEN-TWO"
+"#;
+
+    #[test]
+    fn secret_keys_exclude_things_that_merely_point_at_secrets() {
+        for k in [
+            "password",
+            "app_key",
+            "client_secret",
+            "api_token",
+            "user_key",
+            "password_hash",
+        ] {
+            assert!(is_secret_key(k), "{k} should be treated as a secret");
+        }
+        // Redacting any of these would corrupt the config and protect nothing.
+        for k in [
+            "key_path",
+            "cert_path",
+            "capath",
+            "token_url",
+            "token_type",
+            "refresh_token_expiry_days",
+            "host",
+            "kind",
+        ] {
+            assert!(!is_secret_key(k), "{k} must NOT be redacted");
+        }
+    }
+
+    #[test]
+    fn redaction_hides_secrets_but_keeps_the_document_intact() {
+        let out = redact_toml_text(SAMPLE_CONFIG);
+        for secret in [
+            "REAL-HUE-APP-KEY",
+            "REAL-MQTT-PASSWORD",
+            "TOKEN-ONE",
+            "TOKEN-TWO",
+        ] {
+            assert!(!out.contains(secret), "{secret} leaked through redaction");
+        }
+        // Comments, layout, and non-secret values survive — the admin UI shows
+        // this text verbatim in an editor.
+        assert!(out.contains("# Hue plugin"));
+        assert!(out.contains("/etc/homecore/broker.key"));
+        assert!(out.contains("https://example.test/oauth"));
+        assert!(out.contains("refresh_token_expiry_days = 30"));
+        assert!(out.contains("[[notify.channels]]"));
+    }
+
+    #[test]
+    fn saving_a_redacted_config_does_not_destroy_the_secrets() {
+        // Exactly what the admin UI does: GET the config, edit one visible
+        // field, PUT the text back. Every secret it never saw must survive.
+        let shown = redact_toml_text(SAMPLE_CONFIG);
+        let edited = shown.replace("host = \"10.0.0.1\"", "host = \"10.0.0.9\"");
+        let written = restore_toml_secrets(&edited, SAMPLE_CONFIG);
+
+        assert!(written.contains("app_key = \"REAL-HUE-APP-KEY\""));
+        assert!(written.contains("password = \"REAL-MQTT-PASSWORD\""));
+        assert!(written.contains("host = \"10.0.0.9\""), "edit was lost");
+        assert!(
+            !written.contains(REDACTED_SECRET),
+            "placeholder was written to disk"
+        );
+    }
+
+    #[test]
+    fn repeated_array_tables_keep_their_own_secrets() {
+        // Both channels have a key literally named `token`. Keyed on name alone
+        // they would collapse and one channel would inherit the other's secret.
+        let written = restore_toml_secrets(&redact_toml_text(SAMPLE_CONFIG), SAMPLE_CONFIG);
+        let one = written.find("TOKEN-ONE").expect("first token restored");
+        let two = written.find("TOKEN-TWO").expect("second token restored");
+        assert!(one < two, "the two channels' tokens were swapped");
+        assert_eq!(written.matches("TOKEN-ONE").count(), 1);
+        assert_eq!(written.matches("TOKEN-TWO").count(), 1);
+    }
+
+    #[test]
+    fn json_config_round_trips_secrets_too() {
+        let current = json!({
+            "app_key": "REAL-KEY",
+            "mqtt": { "password": "REAL-PW", "host": "10.0.0.1" },
+        });
+        let mut shown = current.clone();
+        redact_json_secrets(&mut shown);
+        assert_eq!(shown["app_key"], json!(REDACTED_SECRET));
+        assert_eq!(shown["mqtt"]["password"], json!(REDACTED_SECRET));
+        assert_eq!(shown["mqtt"]["host"], json!("10.0.0.1"));
+
+        assert!(has_redaction(&shown));
+        let mut incoming = shown.clone();
+        incoming["mqtt"]["host"] = json!("10.0.0.9");
+        restore_json_secrets(&mut incoming, &current);
+
+        assert_eq!(incoming["app_key"], json!("REAL-KEY"));
+        assert_eq!(incoming["mqtt"]["password"], json!("REAL-PW"));
+        assert_eq!(incoming["mqtt"]["host"], json!("10.0.0.9"));
+        assert!(!has_redaction(&incoming));
     }
 
     fn device_seen_days_ago(id: &str, days: i64) -> DeviceState {
@@ -7616,6 +7966,38 @@ mod tests {
                 }
             ]
         })
+    }
+
+    #[tokio::test]
+    async fn a_created_switch_is_actually_listed() {
+        let state = mk_state().await;
+
+        let resp = create_switch(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Json(CreateSwitchBody {
+                id: "vacation_mode".into(),
+                label: Some("Vacation Mode".into()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = list_switches(State(state.clone()), DevicesRead(whitelist_claims()))
+            .await
+            .into_response();
+        let switches: Vec<DeviceState> = parse_json(resp).await;
+
+        // Regression: create_switch wrote device_type "virtual_switch", which
+        // list_switches filters out — so POST /switches created a device that
+        // GET /switches could never return. It existed, and was invisible.
+        assert_eq!(
+            switches.len(),
+            1,
+            "the switch we just created is missing from GET /switches"
+        );
+        assert_eq!(switches[0].device_id, "switch_vacation_mode");
     }
 
     #[tokio::test]

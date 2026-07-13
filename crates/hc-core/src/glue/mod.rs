@@ -319,6 +319,17 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
             changed = true;
         }
 
+        // Heal switches written by `POST /switches` before it was fixed: it set
+        // device_type = "virtual_switch", which matches neither the glue
+        // convention nor the `list_switches` filter, so those switches existed
+        // in the store but `GET /switches` could never return them.  Scoped to
+        // core.glue on purpose — "virtual_switch" is a legitimate device_type
+        // for a plugin-supplied device (see hc-topic-map's device_types).
+        if dev.plugin_id == "core.glue" && dev.device_type.as_deref() == Some("virtual_switch") {
+            dev.device_type = Some("switch".to_string());
+            changed = true;
+        }
+
         // Backfill missing device_type from device_id prefix
         if dev.device_type.is_none()
             && (dev.plugin_id == "core.glue" || dev.plugin_id == "core.timer")

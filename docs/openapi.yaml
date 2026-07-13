@@ -3653,13 +3653,21 @@ paths:
         and returns the plugin's reply (its `data` field when present, else the
         whole reply) under `config`, with `format: "remote"`.
 
-        **Secrets are NOT redacted.** The handler returns the config file
-        verbatim — API keys, passwords, and tokens present in the file are
-        included in the response. Treat this endpoint as privileged output.
+        **Secrets are redacted.** Values whose key names a credential —
+        `password`, `app_key`, `client_secret`, `token`, and similar — come back
+        as the string `__redacted__`, in both `raw` and `config`. Keys that
+        merely *point at* a secret (`key_path`, `token_url`,
+        `refresh_token_expiry_days`) are left alone, since redacting those would
+        corrupt the config and protect nothing.
 
-        Requires the `plugins:write` scope (`PluginsWrite` guard) — note this is
-        a *write* scope even though the operation only reads, precisely because
-        the payload exposes secrets.
+        `PUT` restores the stored value wherever it sees `__redacted__`, so a
+        config editor can fetch this document, change an unrelated field, and
+        save it back without destroying credentials it was never shown. Do not
+        strip the placeholders before sending them back — leave them in place.
+
+        Requires the `plugins:write` scope (`PluginsWrite` guard) — a *write*
+        scope even though the operation only reads, kept as-is because this
+        response is still privileged output.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -3682,7 +3690,14 @@ paths:
                     description: "`toml` for local config-file plugins, `remote` for plugins answered over the management RPC."
                   raw:
                     type: string
-                    description: Verbatim TOML file contents. Local plugins only. Not redacted.
+                    description: |
+                      The TOML file text, with secret values replaced by
+                      `__redacted__`. Comments and layout are preserved, so this
+                      can be shown in an editor and PUT back verbatim. Local
+                      plugins only.
+                  redacted:
+                    type: boolean
+                    description: Always `true` — secrets in this response have been replaced.
                   config:
                     type: object
                     description: |
@@ -3729,6 +3744,13 @@ paths:
         sending the body's `config` field when present, otherwise the entire
         request body.
 
+        **Redacted secrets are restored, not written.** `GET` returns
+        credentials as `__redacted__`; any value still equal to that placeholder
+        is replaced with the currently stored secret before the config is
+        written or pushed. This is what makes fetch → edit → save safe for a
+        client that was never shown the real values. Leave the placeholders
+        exactly as they came; a literal `__redacted__` is never persisted.
+
         Requires the `plugins:write` scope (`PluginsWrite` guard).
       tags: [plugins]
       security:
@@ -3749,7 +3771,10 @@ paths:
               properties:
                 raw:
                   type: string
-                  description: Complete TOML document, written to the plugin's config file verbatim. Local plugins only.
+                  description: |
+                    Complete TOML document, written to the plugin's config file.
+                    Any value left as `__redacted__` is swapped back to the
+                    stored secret first. Local plugins only.
                 config:
                   type: object
                   description: Config as JSON; converted to TOML for local plugins, forwarded as-is for remote plugins.
@@ -5165,9 +5190,11 @@ paths:
         added if missing), `plugin_id` is `core.glue`, `available` is `true`, and
         `attributes.on` starts as `false`.
 
-        Note the created `device_type` is `virtual_switch` here, whereas
-        `POST /glue` with `type: switch` creates the same kind of device with
-        `device_type` `switch`.
+        `device_type` is `switch`, matching what `POST /glue` with
+        `type: switch` produces and what `GET /switches` filters on. (It was
+        previously written as `virtual_switch`, which `GET /switches` filters
+        out — switches created this way existed in the store but could never be
+        listed. Any such device is repaired on the next startup.)
 
         Requires scope `devices:write`.
       tags: [devices]
