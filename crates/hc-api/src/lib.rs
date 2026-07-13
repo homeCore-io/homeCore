@@ -785,6 +785,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .patch(handlers::bulk_patch_devices)
                 .delete(handlers::bulk_delete_devices),
         )
+        // Must stay ahead of `/devices/:id` so "orphaned" is not read as an id.
+        .route("/devices/orphaned", get(handlers::orphaned_devices))
         .route(
             "/devices/:id",
             get(handlers::get_device)

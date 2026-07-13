@@ -6169,6 +6169,131 @@ pub async fn clone_automation(
 
 /// `GET /api/v1/automations/stale-refs`
 ///
+/// Pick the likely orphans among one plugin's devices, given how many that
+/// plugin says it manages.  `devices` is reordered (oldest `last_seen` first).
+///
+/// `None` when the counts agree, or when the plugin claims more devices than
+/// homeCore holds — that is a plugin mid-registration, not an orphan.
+fn orphan_suspects<'a>(
+    devices: &mut Vec<&'a DeviceState>,
+    plugin_reports: usize,
+) -> Option<Vec<&'a DeviceState>> {
+    let core_holds = devices.len();
+    if core_holds <= plugin_reports {
+        return None;
+    }
+    // Orphans are the devices the plugin stopped republishing, so they fall to
+    // the back of the pack as its live devices keep being refreshed.
+    devices.sort_by_key(|d| d.last_seen);
+    Some(
+        devices
+            .iter()
+            .take(core_holds - plugin_reports)
+            .copied()
+            .collect(),
+    )
+}
+
+/// `GET /api/v1/devices/orphaned`
+///
+/// An *orphaned* device is one homeCore still holds a registration and retained
+/// state for, but which the owning plugin no longer manages — e.g. a Hue grouped
+/// light after `publish_grouped_lights` is turned off.  Nothing else in the
+/// system notices: the plugin subscribes to command topics per-device, so
+/// commands published for an orphan have no subscriber and are dropped by the
+/// broker, while its state stays frozen at whatever it last was and rule
+/// conditions keep reading that as truth.  A toggle pair
+/// (`on == false` → turn on / `on == true` → turn off) built on a frozen
+/// attribute wedges permanently: one rule can never pass, the other always
+/// does, and the rule engine records `fired: success` either way.
+///
+/// Detection is a **count comparison, not a staleness threshold**.  Every
+/// management-capable plugin self-reports how many devices it manages
+/// (`device_count`); if homeCore holds more devices for that plugin than the
+/// plugin claims, the difference is exactly the orphan count.  A `last_seen`-age
+/// rule was the obvious approach and is wrong: plugins that publish only on
+/// change leave healthy devices untouched for months (a Caseta switch nobody
+/// flips is not orphaned), so it produces false positives on precisely the
+/// quiet devices operators care least about.
+///
+/// Identifying *which* devices are orphaned is necessarily a heuristic — the
+/// plugin reports a count, not an id list — so the least-recently-seen
+/// `orphan_count` devices are returned as `suspects`.  On real data the orphans
+/// are frozen months behind their siblings and the ranking is unambiguous, but
+/// callers should confirm before deleting.
+///
+/// Only `active` plugins with `supports_management` are checked: a stopped
+/// plugin legitimately reports zero devices while homeCore still holds them,
+/// and a plugin that never reports `device_count` would otherwise look
+/// entirely orphaned.
+pub async fn orphaned_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let plugins = s.plugins.read().await;
+    let now = chrono::Utc::now();
+    let mut report = Vec::new();
+    let mut total_orphans: usize = 0;
+
+    for plugin in plugins.values() {
+        if plugin.status != "active" || !plugin.supports_management {
+            continue;
+        }
+
+        let mut owned: Vec<_> = devices
+            .iter()
+            .filter(|d| d.plugin_id == plugin.plugin_id)
+            .collect();
+
+        let core_holds = owned.len();
+        let plugin_reports = plugin.device_count as usize;
+        let Some(orphans) = orphan_suspects(&mut owned, plugin_reports) else {
+            continue;
+        };
+        let orphan_count = orphans.len();
+        total_orphans += orphan_count;
+
+        let suspects: Vec<_> = orphans
+            .iter()
+            .map(|d| {
+                json!({
+                    "device_id":  d.device_id,
+                    "name":       d.name,
+                    "device_type": d.device_type,
+                    "last_seen":  d.last_seen,
+                    "stale_secs": (now - d.last_seen).num_seconds().max(0),
+                })
+            })
+            .collect();
+
+        report.push(json!({
+            "plugin_id":      plugin.plugin_id,
+            "status":         plugin.status,
+            "plugin_reports": plugin_reports,
+            "core_holds":     core_holds,
+            "orphan_count":   orphan_count,
+            "suspects":       suspects,
+        }));
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "total_orphans": total_orphans,
+            "plugins":       report,
+        })),
+    )
+        .into_response()
+}
+
 /// Returns rules that reference device IDs not currently registered in the
 /// device store.  Useful for finding automations broken by device
 /// renames or deletions.
@@ -7319,6 +7444,45 @@ mod tests {
         );
         AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
             .with_dashboard_store(dashboard_store, DashboardStoreData::default())
+    }
+
+    fn device_seen_days_ago(id: &str, days: i64) -> DeviceState {
+        let mut d = DeviceState::new(id, id, "plugin.test");
+        d.last_seen = Utc::now() - chrono::Duration::days(days);
+        d
+    }
+
+    #[test]
+    fn orphan_suspects_is_silent_when_counts_agree() {
+        let a = device_seen_days_ago("fresh", 0);
+        let b = device_seen_days_ago("quiet", 90);
+        let mut owned = vec![&a, &b];
+        // A device untouched for 90 days is NOT an orphan while the plugin still
+        // claims it — plugins that publish only on change leave healthy devices
+        // cold for months. Staleness alone must never raise a flag.
+        assert!(orphan_suspects(&mut owned, 2).is_none());
+    }
+
+    #[test]
+    fn orphan_suspects_returns_the_least_recently_seen() {
+        let live_a = device_seen_days_ago("live_a", 0);
+        let live_b = device_seen_days_ago("live_b", 0);
+        let ghost_old = device_seen_days_ago("ghost_old", 100);
+        let ghost_older = device_seen_days_ago("ghost_older", 120);
+        let mut owned = vec![&live_a, &ghost_old, &live_b, &ghost_older];
+
+        // Plugin manages 2, core holds 4 → the 2 coldest are the orphans.
+        let found = orphan_suspects(&mut owned, 2).expect("orphans");
+        let ids: Vec<&str> = found.iter().map(|d| d.device_id.as_str()).collect();
+        assert_eq!(ids, vec!["ghost_older", "ghost_old"]);
+    }
+
+    #[test]
+    fn orphan_suspects_ignores_a_plugin_still_registering() {
+        let a = device_seen_days_ago("a", 0);
+        let mut owned = vec![&a];
+        // Plugin claims 5 but core only knows 1 — mid-registration, not orphaned.
+        assert!(orphan_suspects(&mut owned, 5).is_none());
     }
 
     async fn seed_device(state: &AppState, id: &str, area: Option<&str>) {
