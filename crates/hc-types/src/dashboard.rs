@@ -57,6 +57,17 @@ pub enum DashboardWidgetType {
     /// Climate, Security, Media, Energy, Activity) derived from the
     /// live device map. The default dashboard pins this at the top.
     HouseStatusHero,
+    /// A card contributed by a plugin.
+    ///
+    /// The card's identity lives in `config` (`plugin_id` + `widget_id`), not in
+    /// this enum, so core stays out of the business of knowing what cards exist.
+    /// A `Custom(String)` variant would have been the obvious alternative, but it
+    /// would drop the `Copy` derive above and ripple through every use site for
+    /// no gain — core never needs to inspect the name, only to store it.
+    ///
+    /// `config` is validated only for the two keys core does care about; the rest
+    /// is opaque and belongs to the plugin and the UI that renders it.
+    PluginWidget,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

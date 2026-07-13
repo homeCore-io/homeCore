@@ -3471,6 +3471,16 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
+        // A plugin-contributed card. Core validates only the two keys that
+        // identify it and treats the rest as opaque — it has no business knowing
+        // what a given plugin's card needs, and guessing would make every new
+        // card a core release.
+        hc_types::dashboard::DashboardWidgetType::PluginWidget => {
+            let map = config_object(widget)?;
+            require_string(map, "plugin_id", &widget.id)?;
+            require_string(map, "widget_id", &widget.id)?;
+            Ok(())
+        }
     }
 }
 
