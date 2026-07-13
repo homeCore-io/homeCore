@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# The default workflow token is read-only, and a called workflow can never hold
+# more than its caller. rust-ci.yml opens/closes a tracking issue when develop
+# goes red, so without issues:write granted here the whole run fails at startup
+# with no jobs and no annotation.
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   ci:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
