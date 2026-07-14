@@ -9,7 +9,7 @@ use axum::{
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
 use hc_topic_map::canonical_device_type_name;
-use hc_types::dashboard::{DashboardDefinition, DashboardResponse, DashboardVisibility};
+use hc_types::dashboard::{DashboardDefinition, DashboardResponse};
 use hc_types::device::{with_command_change_metadata, Area, DeviceChange, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
@@ -2782,13 +2782,15 @@ pub async fn delete_automation(
 
 // ---------- Dashboards ----------
 
-fn dashboard_visible_to(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
-    claims.is_admin()
-        || dashboard.owner_user_id == claims.uid
-        || matches!(
-            dashboard.visibility,
-            DashboardVisibility::Shared | DashboardVisibility::Public
-        )
+/// Everyone who can log in can SEE every dashboard.
+///
+/// This replaces a `visibility` field (private | shared | public) that gated
+/// exactly this filter. Access control for a house is not a CMS problem — the
+/// answer to "who may look at the kitchen dashboard" is "the people who live
+/// here", and they all have accounts. Who may CHANGE one is a real question, and
+/// [`dashboard_mutable_by`] still answers it: the owner, or an admin.
+fn dashboard_visible_to(_claims: &hc_auth::Claims, _dashboard: &DashboardDefinition) -> bool {
+    true
 }
 
 fn dashboard_mutable_by(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
@@ -2850,7 +2852,6 @@ fn default_dashboard_layout(
                         *w
                     },
                     h: *h,
-                    section_id: None,
                 },
             )
             .collect(),
@@ -2865,38 +2866,18 @@ fn default_dashboard_layout(
 }
 
 fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
-    use hc_types::dashboard::{
-        DashboardBreakpoint, DashboardDefinition, DashboardRefreshPolicy, DashboardSection,
-        DashboardVisibility, DashboardWidget, DashboardWidgetType,
-    };
+    use hc_types::dashboard::{DashboardBreakpoint, DashboardDefinition, DashboardWidget};
 
     let now = chrono::Utc::now();
-    let widget = |id: &str,
-                  r#type: DashboardWidgetType,
-                  title: &str,
-                  subtitle: Option<&str>,
-                  refresh_policy: DashboardRefreshPolicy,
-                  config: Value| DashboardWidget {
-        id: id.to_string(),
-        r#type,
-        title: title.to_string(),
-        subtitle: subtitle.map(str::to_string),
-        refresh_policy,
-        config,
+    let widget = |id: &str, r#type: &str, title: &str, subtitle: Option<&str>, config: Value| {
+        DashboardWidget {
+            id: id.to_string(),
+            r#type: r#type.to_string(),
+            title: title.to_string(),
+            subtitle: subtitle.map(str::to_string),
+            config,
+        }
     };
-    let section =
-        |id: &str, breakpoint: DashboardBreakpoint, title: &str, order: i32, y: i32, min_h: i32| {
-            DashboardSection {
-                id: id.to_string(),
-                breakpoint,
-                title: title.to_string(),
-                order,
-                y,
-                layout_policy: hc_types::dashboard::DashboardSectionLayoutPolicy::Grid,
-                min_h,
-                hidden: false,
-            }
-        };
 
     vec![
         DashboardDefinition {
@@ -2907,64 +2888,44 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     .to_string(),
             ),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
             tags: vec!["starter".into(), "home".into(), "overview".into()],
             icon: "home".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![
-                section("mobile-overview", DashboardBreakpoint::Mobile, "Overview", 0, 0, 4),
-                section("mobile-devices", DashboardBreakpoint::Mobile, "Devices", 1, 4, 6),
-                section("mobile-activity", DashboardBreakpoint::Mobile, "Activity", 2, 10, 3),
-                section("tablet-overview", DashboardBreakpoint::Tablet, "Overview", 0, 0, 2),
-                section("tablet-devices", DashboardBreakpoint::Tablet, "Devices", 1, 2, 3),
-                section("tablet-activity", DashboardBreakpoint::Tablet, "Activity", 2, 5, 2),
-                section("desktop-overview", DashboardBreakpoint::Desktop, "Overview", 0, 0, 2),
-                section("desktop-devices", DashboardBreakpoint::Desktop, "Devices", 1, 2, 3),
-                section("desktop-activity", DashboardBreakpoint::Desktop, "Activity", 2, 5, 2),
-                section("tv-overview", DashboardBreakpoint::Tv, "Overview", 0, 0, 2),
-                section("tv-devices", DashboardBreakpoint::Tv, "Devices", 1, 2, 3),
-                section("tv-activity", DashboardBreakpoint::Tv, "Activity", 2, 5, 2),
-            ],
             widgets: vec![
                 widget(
                     "intro",
-                    DashboardWidgetType::Markdown,
+                    "markdown",
                     "Dashboard Workbench",
                     Some("Starter sample with the newer card treatments"),
-                    DashboardRefreshPolicy::Manual,
                     json!({"markdown": "Use this dashboard as a clean composer sandbox. It includes a summary card, a compact device list, a richer device grid, and a recent events feed."}),
                 ),
                 widget(
                     "summary",
-                    DashboardWidgetType::StatSummary,
+                    "stat_summary",
                     "Home Summary",
                     Some("Quick system counts"),
-                    DashboardRefreshPolicy::Live,
                     json!({"metrics": ["devices", "on", "offline"]}),
                 ),
                 widget(
                     "list",
-                    DashboardWidgetType::DeviceList,
+                    "device_list",
                     "Device List",
                     Some("Compact device inventory"),
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 8}),
                 ),
                 widget(
                     "grid",
-                    DashboardWidgetType::DeviceGrid,
+                    "device_grid",
                     "Device Grid",
                     Some("Richer tile sample"),
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 6}),
                 ),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Recent Events",
                     Some("Activity sample"),
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 6}),
                 ),
             ],
@@ -2975,11 +2936,11 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 150.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 0, y: 2, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 4, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 0, y: 7, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 10, w: 1, h: 3, section_id: Some("mobile-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 1, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 0, y: 2, w: 1, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 4, w: 1, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 0, y: 7, w: 1, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 10, w: 1, h: 3 },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -2988,11 +2949,11 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 150.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tablet-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tablet-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tablet-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tablet-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tablet-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2 },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -3001,11 +2962,11 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 150.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("desktop-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("desktop-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("desktop-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("desktop-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("desktop-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2 },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -3014,11 +2975,11 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 180.0,
                     gap: 16.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tv-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tv-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tv-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tv-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tv-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3 },
+                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2 },
                     ],
                 },
             ],
@@ -3028,51 +2989,44 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Home Overview".to_string(),
             description: Some("General whole-home dashboard.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
             tags: vec!["home".into(), "overview".into()],
             icon: "dashboard".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![],
             widgets: vec![
                 widget(
                     "summary",
-                    DashboardWidgetType::StatSummary,
+                    "stat_summary",
                     "Summary",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"metrics": ["devices", "on", "offline", "media_playing"]}),
                 ),
                 widget(
                     "modes",
-                    DashboardWidgetType::ModeChips,
+                    "mode_chips",
                     "Modes",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({}),
                 ),
                 widget(
                     "scenes",
-                    DashboardWidgetType::SceneRow,
+                    "scene_row",
                     "Scenes",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({}),
                 ),
                 widget(
                     "grid",
-                    DashboardWidgetType::DeviceGrid,
+                    "device_grid",
                     "Devices",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 12}),
                 ),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Recent Events",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 10}),
                 ),
             ],
@@ -3089,43 +3043,37 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Security".to_string(),
             description: Some("Entry points, alerts, and camera placeholders.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
             tags: vec!["security".into()],
             icon: "shield".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![],
             widgets: vec![
                 widget(
                     "summary",
-                    DashboardWidgetType::StatSummary,
+                    "stat_summary",
                     "Security Summary",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"metrics": ["doors_open", "motion_active", "offline"]}),
                 ),
                 widget(
                     "devices",
-                    DashboardWidgetType::DeviceList,
+                    "device_list",
                     "Security Devices",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "door,motion,lock,camera", "show_offline": true, "limit": 16}),
                 ),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Alerts",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 12, "types": ["device_state_changed", "system_alert"], "group_by": "device"}),
                 ),
                 widget(
                     "notes",
-                    DashboardWidgetType::Markdown,
+                    "markdown",
                     "Camera Setup",
                     None,
-                    DashboardRefreshPolicy::Passive,
                     json!({"markdown": "Add camera widgets after configuring approved sources and embed policy."}),
                 ),
             ],
@@ -3141,43 +3089,37 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Living Room".to_string(),
             description: Some("A room-focused dashboard with devices and media.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
             tags: vec!["room".into(), "living_room".into()],
             icon: "chair".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![],
             widgets: vec![
                 widget(
                     "devices",
-                    DashboardWidgetType::DeviceGrid,
+                    "device_grid",
                     "Living Room Devices",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "area", "area_name": "Living Room", "show_offline": false, "limit": 8}),
                 ),
                 widget(
                     "media",
-                    DashboardWidgetType::MediaPlayer,
+                    "media_player",
                     "Media",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "living", "show_offline": false, "limit": 2}),
                 ),
                 widget(
                     "scenes",
-                    DashboardWidgetType::SceneRow,
+                    "scene_row",
                     "Scenes",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({}),
                 ),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Room Activity",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 8, "area_name": "Living Room"}),
                 ),
             ],
@@ -3228,27 +3170,6 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     }
     if dashboard.layouts.is_empty() {
         return Err("dashboard must define at least one layout".into());
-    }
-
-    let mut section_ids = HashSet::new();
-    let mut section_breakpoints = HashMap::new();
-    for section in &dashboard.sections {
-        if section.id.trim().is_empty() {
-            return Err("section id cannot be empty".into());
-        }
-        if section.title.trim().is_empty() {
-            return Err(format!("section '{}' title cannot be empty", section.id));
-        }
-        if section.y < 0 {
-            return Err(format!("section '{}' must have non-negative y", section.id));
-        }
-        if section.min_h <= 0 {
-            return Err(format!("section '{}' must have min_h > 0", section.id));
-        }
-        if !section_ids.insert(section.id.as_str()) {
-            return Err(format!("duplicate section id '{}'", section.id));
-        }
-        section_breakpoints.insert(section.id.as_str(), section.breakpoint);
     }
 
     let mut widget_ids = HashSet::new();
@@ -3302,20 +3223,6 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     "layout {:?} has duplicate placement for widget '{}'",
                     layout.breakpoint, placement.widget_id
                 ));
-            }
-            if let Some(section_id) = placement.section_id.as_deref() {
-                if !section_ids.contains(section_id) {
-                    return Err(format!(
-                        "layout {:?} references unknown section '{}'",
-                        layout.breakpoint, section_id
-                    ));
-                }
-                if section_breakpoints.get(section_id).copied() != Some(layout.breakpoint) {
-                    return Err(format!(
-                        "layout {:?} references section '{}' from a different breakpoint",
-                        layout.breakpoint, section_id
-                    ));
-                }
             }
             if placement.x < 0 || placement.y < 0 {
                 return Err(format!(
@@ -3461,15 +3368,18 @@ fn validate_selection_widget_config(
     Ok(())
 }
 
+/// Validates the config of the widget types core happens to know about.
+///
+/// An UNKNOWN type is accepted, not rejected. That is the point of `type` being
+/// a string: the client's registry decides what can be drawn, and core stays out
+/// of the business of knowing which cards exist. Rejecting unknown types is what
+/// forced every new card — including plugin cards — through a core release.
 fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Result<(), String> {
-    match widget.r#type {
-        hc_types::dashboard::DashboardWidgetType::DeviceGrid
-        | hc_types::dashboard::DashboardWidgetType::DeviceList
-        | hc_types::dashboard::DashboardWidgetType::DeviceTile
-        | hc_types::dashboard::DashboardWidgetType::MediaPlayer => {
+    match widget.r#type.as_str() {
+        "device_grid" | "device_list" | "device_tile" | "media_player" => {
             validate_selection_widget_config(widget, false)
         }
-        hc_types::dashboard::DashboardWidgetType::StatSummary => {
+        "stat_summary" => {
             let map = config_object(widget)?;
             let metrics = map
                 .get("metrics")
@@ -3483,7 +3393,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::EventFeed => {
+        "event_feed" => {
             let map = config_object(widget)?;
             optional_i64_min(map, "limit", 1, &widget.id)?;
             optional_string_list(map, "types", &widget.id)?;
@@ -3515,7 +3425,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::CameraVideo => {
+        "camera_video" => {
             let map = config_object(widget)?;
             let source_type = require_string(map, "source_type", &widget.id)?;
             match source_type.as_str() {
@@ -3531,7 +3441,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             optional_i64_min(map, "refresh_secs", 1, &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::WebEmbed => {
+        "web_embed" => {
             let map = config_object(widget)?;
             require_string(map, "url", &widget.id)?;
             if let Some(value) = map.get("sandbox_profile") {
@@ -3553,7 +3463,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::Markdown => {
+        "markdown" => {
             let map = config_object(widget)?;
             if let Some(value) = map.get("markdown") {
                 if value.as_str().is_none() {
@@ -3570,7 +3480,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::HistoryChart => {
+        "history_chart" => {
             let map = config_object(widget)?;
             require_string(map, "device_id", &widget.id)?;
             require_string(map, "attribute", &widget.id)?;
@@ -3578,20 +3488,19 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             optional_i64_min(map, "timeframe_hours", 1, &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::DashboardLink => {
+        "dashboard_link" => {
             let map = config_object(widget)?;
             optional_string_list(map, "dashboard_ids", &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::ModeChips
-        | hc_types::dashboard::DashboardWidgetType::SceneRow => {
+        "mode_chips" | "scene_row" => {
             let _ = config_object(widget)?;
             Ok(())
         }
         // Hero is rendered client-side from the live device map. Config is
         // optional (defaults to all 6 systems); accept any object shape and
         // let the renderer ignore unknown fields.
-        hc_types::dashboard::DashboardWidgetType::HouseStatusHero => {
+        "house_status_hero" => {
             if !widget.config.is_object() && !widget.config.is_null() {
                 return Err(format!("widget '{}' config must be an object", widget.id));
             }
@@ -3601,12 +3510,22 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
         // identify it and treats the rest as opaque — it has no business knowing
         // what a given plugin's card needs, and guessing would make every new
         // card a core release.
-        hc_types::dashboard::DashboardWidgetType::PluginWidget => {
+        "plugin_widget" => {
             let map = config_object(widget)?;
             require_string(map, "plugin_id", &widget.id)?;
             require_string(map, "widget_id", &widget.id)?;
             Ok(())
         }
+        // An unknown card is NOT an error.
+        //
+        // This is the whole reason `type` stopped being an enum. Core has no
+        // business knowing which cards exist — it stores the type verbatim and
+        // the client's registry decides what can be drawn. Rejecting here would
+        // put every new card, including every plugin card, behind a core
+        // release, and it is what let core and the Dart client drift until
+        // `house_status_hero` — shipped on core's OWN default dashboard — was a
+        // type the client had never heard of.
+        _ => Ok(()),
     }
 }
 
@@ -3917,7 +3836,6 @@ pub async fn duplicate_dashboard(
         let mut duplicate = existing.clone();
         duplicate.id = format!("dashboard_{}", Uuid::new_v4().simple());
         duplicate.owner_user_id = user.0.uid.clone();
-        duplicate.visibility = DashboardVisibility::Private;
         duplicate.name = dashboard_copy_name(&existing.name, &existing_names);
         duplicate.created_at = now;
         duplicate.updated_at = now;
@@ -4005,7 +3923,6 @@ pub async fn import_dashboard(
         let now = chrono::Utc::now();
         dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
         dashboard.owner_user_id = user.0.uid.clone();
-        dashboard.visibility = DashboardVisibility::Private;
         dashboard.name = if existing_names.contains(&dashboard.name) {
             dashboard_copy_name(&dashboard.name, &existing_names)
         } else {
@@ -7801,9 +7718,8 @@ mod tests {
     use hc_auth::{Claims, JwtService, Role};
     use hc_core::EventBus;
     use hc_types::dashboard::{
-        DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardRefreshPolicy,
-        DashboardResponse, DashboardVisibility, DashboardWidget, DashboardWidgetPlacement,
-        DashboardWidgetType,
+        DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardResponse,
+        DashboardWidget, DashboardWidgetPlacement,
     };
     use hc_types::device::DeviceState;
     use http_body_util::BodyExt;
@@ -8031,12 +7947,10 @@ token = "TOKEN-TWO"
             name: "Home".to_string(),
             description: Some("Test dashboard".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
             tags: vec!["home".to_string()],
             icon: "dashboard".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            sections: vec![],
             layouts: vec![DashboardLayout {
                 breakpoint: DashboardBreakpoint::Desktop,
                 columns: 12,
@@ -8048,15 +7962,13 @@ token = "TOKEN-TWO"
                     y: 0,
                     w: 12,
                     h: 1,
-                    section_id: None,
                 }],
             }],
             widgets: vec![DashboardWidget {
                 id: "summary".to_string(),
-                r#type: DashboardWidgetType::StatSummary,
+                r#type: "stat_summary".to_string(),
                 title: "Summary".to_string(),
                 subtitle: None,
-                refresh_policy: DashboardRefreshPolicy::Live,
                 config: json!({"metrics":["devices"]}),
             }],
         }
@@ -8522,7 +8434,6 @@ token = "TOKEN-TWO"
         let created: DashboardResponse = parse_json(resp).await;
         assert_eq!(created.dashboard.id, "starter_web");
         assert_eq!(created.dashboard.owner_user_id, "web_user");
-        assert_eq!(created.dashboard.visibility, DashboardVisibility::Private);
         assert_eq!(created.dashboard.layouts.len(), 2);
         assert_eq!(created.dashboard.widgets.len(), 3);
         assert!(!created.is_default);
@@ -8609,17 +8520,22 @@ token = "TOKEN-TWO"
         assert!(listed.is_empty());
     }
 
+    /// Everyone who can log in sees every dashboard.
+    ///
+    /// This REPLACES `list_dashboards_filters_by_visibility`, and the change is
+    /// deliberate rather than incidental. `visibility` (private | shared |
+    /// public) existed to gate exactly this list. Access control for a house is
+    /// not a CMS problem: the answer to "who may look at the kitchen dashboard"
+    /// is "the people who live here", and they all have accounts.
+    ///
+    /// Who may CHANGE one is a real question, and it is still answered — see
+    /// `non_owner_cannot_update_shared_dashboard` below, which is the test that
+    /// actually protects anything.
     #[tokio::test]
-    async fn list_dashboards_filters_by_visibility() {
+    async fn every_user_sees_every_dashboard() {
         let state = mk_state().await;
-        seed_dashboard(&state, sample_dashboard("private_mine", "user_a")).await;
-        seed_dashboard(&state, sample_dashboard("private_other", "user_b")).await;
-        let mut shared = sample_dashboard("shared_other", "user_b");
-        shared.visibility = DashboardVisibility::Shared;
-        seed_dashboard(&state, shared).await;
-        let mut public = sample_dashboard("public_other", "user_b");
-        public.visibility = DashboardVisibility::Public;
-        seed_dashboard(&state, public).await;
+        seed_dashboard(&state, sample_dashboard("mine", "user_a")).await;
+        seed_dashboard(&state, sample_dashboard("someone_elses", "user_b")).await;
 
         let resp = list_dashboards(
             State(state),
@@ -8631,17 +8547,14 @@ token = "TOKEN-TWO"
         assert_eq!(resp.status(), StatusCode::OK);
         let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
         let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
-        assert!(ids.contains("private_mine"));
-        assert!(ids.contains("shared_other"));
-        assert!(ids.contains("public_other"));
-        assert!(!ids.contains("private_other"));
+        assert!(ids.contains("mine"));
+        assert!(ids.contains("someone_elses"));
     }
 
     #[tokio::test]
     async fn non_owner_cannot_update_shared_dashboard() {
         let state = mk_state().await;
         let mut dashboard = sample_dashboard("shared_1", "owner");
-        dashboard.visibility = DashboardVisibility::Shared;
         seed_dashboard(&state, dashboard.clone()).await;
 
         dashboard.name = "Renamed".to_string();
@@ -8733,10 +8646,9 @@ token = "TOKEN-TWO"
         let mut dashboard = sample_dashboard("bad_1", "owner");
         dashboard.widgets.push(DashboardWidget {
             id: "summary".to_string(),
-            r#type: DashboardWidgetType::Markdown,
+            r#type: "markdown".to_string(),
             title: "Duplicate".to_string(),
             subtitle: None,
-            refresh_policy: DashboardRefreshPolicy::Passive,
             config: json!({"markdown":"hello"}),
         });
 
@@ -8759,10 +8671,9 @@ token = "TOKEN-TWO"
         let mut dashboard = sample_dashboard("bad_cfg", "owner");
         dashboard.widgets[0] = DashboardWidget {
             id: "camera".to_string(),
-            r#type: DashboardWidgetType::CameraVideo,
+            r#type: "camera_video".to_string(),
             title: "Camera".to_string(),
             subtitle: None,
-            refresh_policy: DashboardRefreshPolicy::Passive,
             config: json!({"source_type":"bogus","url":"https://example.com/cam"}),
         };
         dashboard.layouts[0].placements[0].widget_id = "camera".to_string();

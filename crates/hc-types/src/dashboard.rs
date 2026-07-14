@@ -4,14 +4,6 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DashboardVisibility {
-    Private,
-    Shared,
-    Public,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum DashboardBreakpoint {
     Mobile,
     Tablet,
@@ -19,57 +11,14 @@ pub enum DashboardBreakpoint {
     Tv,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DashboardRefreshPolicy {
-    Live,
-    Poll,
-    Manual,
-    Passive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DashboardSectionLayoutPolicy {
-    #[default]
-    Grid,
-    Stack,
-    Row,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DashboardWidgetType {
-    DeviceGrid,
-    DeviceList,
-    DeviceTile,
-    StatSummary,
-    ModeChips,
-    SceneRow,
-    EventFeed,
-    HistoryChart,
-    MediaPlayer,
-    CameraVideo,
-    WebEmbed,
-    Markdown,
-    DashboardLink,
-    /// Full-width "House Status" hero — 4-6 system tiles (Lighting,
-    /// Climate, Security, Media, Energy, Activity) derived from the
-    /// live device map. The default dashboard pins this at the top.
-    HouseStatusHero,
-    /// A card contributed by a plugin.
-    ///
-    /// The card's identity lives in `config` (`plugin_id` + `widget_id`), not in
-    /// this enum, so core stays out of the business of knowing what cards exist.
-    /// A `Custom(String)` variant would have been the obvious alternative, but it
-    /// would drop the `Copy` derive above and ripple through every use site for
-    /// no gain — core never needs to inspect the name, only to store it.
-    ///
-    /// `config` is validated only for the two keys core does care about; the rest
-    /// is opaque and belongs to the plugin and the UI that renders it.
-    PluginWidget,
-}
-
+/// Where a card sits, in grid units.
+///
+/// This is the ONLY layout axis. There used to be a second one — `sections`,
+/// each with its own `y`, `order`, `min_h` and `layout_policy` — sitting on top
+/// of placements that already carry `x`/`y`/`w`/`h`. Two systems describing the
+/// same thing is how a dashboard document becomes something you need a diagram
+/// to understand, and no client ever used the section axis for anything a
+/// placement could not express.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DashboardWidgetPlacement {
     pub widget_id: String,
@@ -77,27 +26,6 @@ pub struct DashboardWidgetPlacement {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub section_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DashboardSection {
-    pub id: String,
-    pub breakpoint: DashboardBreakpoint,
-    pub title: String,
-    pub order: i32,
-    pub y: i32,
-    #[serde(default)]
-    pub layout_policy: DashboardSectionLayoutPolicy,
-    #[serde(default = "default_section_min_h")]
-    pub min_h: i32,
-    #[serde(default)]
-    pub hidden: bool,
-}
-
-fn default_section_min_h() -> i32 {
-    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,14 +38,29 @@ pub struct DashboardLayout {
     pub placements: Vec<DashboardWidgetPlacement>,
 }
 
+/// A card.
+///
+/// `type` is a plain string — `device_grid`, `camera_video`, a plugin's own —
+/// and NOT an enum.
+///
+/// It was a `Copy` enum of 15 variants that every client had to mirror by hand,
+/// and the mirror had already cracked: core grew `HouseStatusHero`, shipped it
+/// on the default dashboard, and the Dart client's enum never learned about it —
+/// so the client coerced an unknown type to `markdown` and would have SAVED it
+/// back as one, silently destroying the card. An enum core never needs to
+/// inspect is an enum core should not be keeping.
+///
+/// Core now stores the type verbatim, validates the config of the types it
+/// happens to know, and accepts the rest. The client's registry decides what can
+/// actually be drawn. A dashboard authored against a newer core round-trips
+/// through an older one untouched, which is precisely what the enum prevented.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DashboardWidget {
     pub id: String,
-    pub r#type: DashboardWidgetType,
+    pub r#type: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    pub refresh_policy: DashboardRefreshPolicy,
     #[serde(default)]
     pub config: Value,
 }
@@ -129,7 +72,6 @@ pub struct DashboardDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub owner_user_id: String,
-    pub visibility: DashboardVisibility,
     #[serde(default)]
     pub tags: Vec<String>,
     pub icon: String,
@@ -137,8 +79,6 @@ pub struct DashboardDefinition {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub updated_at: DateTime<Utc>,
-    #[serde(default)]
-    pub sections: Vec<DashboardSection>,
     #[serde(default)]
     pub layouts: Vec<DashboardLayout>,
     #[serde(default)]
@@ -152,3 +92,21 @@ pub struct DashboardResponse {
     #[serde(default)]
     pub is_default: bool,
 }
+
+// Removed, deliberately:
+//
+//   sections / DashboardSection / DashboardSectionLayoutPolicy
+//       A second layout axis competing with `placements`. See above.
+//
+//   refresh_policy / DashboardRefreshPolicy  (live | poll | manual | passive)
+//       Dead. Every client subscribes to the WebSocket event stream and renders
+//       live; nothing ever polled, and nothing honoured `manual`.
+//
+//   visibility / DashboardVisibility  (private | shared | public)
+//       Access control for a house, where the answer is always "the people who
+//       live here". It gated nothing — no handler ever read it.
+//
+// Serde ignores unknown fields by default, so dashboards already stored in redb
+// still load; they simply drop the fields nothing was reading. `type` was
+// already serialised as a snake_case string, so it deserialises straight into
+// the String above with no migration.
