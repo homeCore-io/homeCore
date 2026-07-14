@@ -190,13 +190,14 @@ fn type_of(schema: &Schema, defs: &schemars::Map<String, Schema>) -> String {
 
     // `Option<SomeEnum>` becomes an anyOf of [ref, null].
     if let Some(subs) = o.subschemas.as_ref() {
-        for list in [&subs.any_of, &subs.one_of, &subs.all_of] {
-            if let Some(items) = list {
-                for item in items {
-                    let named = type_of_object(item, defs);
-                    if named != "null" && named != "any" {
-                        return named;
-                    }
+        for items in [&subs.any_of, &subs.one_of, &subs.all_of]
+            .into_iter()
+            .flatten()
+        {
+            for item in items {
+                let named = type_of_object(item, defs);
+                if named != "null" && named != "any" {
+                    return named;
                 }
             }
         }
