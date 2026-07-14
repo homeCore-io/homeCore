@@ -8550,6 +8550,48 @@ token = "TOKEN-TWO"
     /// Who may CHANGE one is a real question, and it is still answered — see
     /// `non_owner_cannot_update_shared_dashboard` below, which is the test that
     /// actually protects anything.
+    /// `/automations/vocabulary` must not be swallowed by `/automations/:id`.
+    ///
+    /// It very nearly is. Against a core that does NOT have this route, the path
+    /// falls through to `/automations/:id`, fails to parse "vocabulary" as a
+    /// Uuid, and answers 400 — not 404. (That is what a live older core actually
+    /// does, and it is why the client treats *any* failure as "could not ask"
+    /// rather than looking for a 404.)
+    ///
+    /// So the static route winning here is load-bearing, not incidental: get it
+    /// wrong and the endpoint is dead on arrival while every test that calls the
+    /// handler directly still passes.
+    #[tokio::test]
+    async fn the_vocabulary_route_is_not_shadowed_by_the_id_route() {
+        use tower::ServiceExt;
+
+        let state = mk_state().await;
+        let app = crate::router(state, None);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/automations/vocabulary")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Unauthenticated here, so 200 or 401 — either proves the route matched.
+        // A 400 would mean `:id` swallowed it and tried to parse a Uuid.
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "/automations/vocabulary was swallowed by /automations/:id"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/automations/vocabulary is not routed at all"
+        );
+    }
+
     #[tokio::test]
     async fn every_user_sees_every_dashboard() {
         let state = mk_state().await;
