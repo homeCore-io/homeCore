@@ -28,6 +28,10 @@ members = [
 ]
 
 [workspace.dependencies]
+# HTTP client. Used by hc-core (CallService / RunScript http_get) and by hc-api's
+# media-art proxy. rustls rather than native-tls so the musl/alpine images build
+# without OpenSSL.
+reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio             = { version = "1", features = ["full"] }
 rumqttd           = "0.20"
 rumqttc           = "0.25"

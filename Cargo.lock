@@ -1337,6 +1337,7 @@ dependencies = [
  "jsonwebtoken",
  "nix",
  "prometheus",
+ "reqwest 0.12.28",
  "ron",
  "serde",
  "serde_json",

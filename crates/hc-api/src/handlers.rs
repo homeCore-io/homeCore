@@ -397,6 +397,132 @@ pub async fn get_device(
     }
 }
 
+/// Attribute keys a plugin may publish artwork under, in preference order.
+///
+/// `art_url` is the canonical media-contract name; `media_image_url` is what
+/// hc-sonos has published all along. Both are accepted so the plugin needs no
+/// change and new plugins get a name that reads right.
+const ART_URL_KEYS: [&str; 2] = ["art_url", "media_image_url"];
+
+/// Artwork is fetched from devices on the LAN, which is fast; a stuck speaker
+/// must not tie up a connection.
+const ART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Album art is a few hundred KB at most. The cap stops a misbehaving or
+/// impersonated device from streaming us something enormous.
+const ART_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// `GET /devices/:id/media/art` — proxies a media player's artwork.
+///
+/// Plugins publish artwork as an absolute URL pointing at the device itself
+/// (hc-sonos gives `http://10.0.10.28:1400/getaa?...`, the speaker's own LAN
+/// address). A browser usually cannot load that: it is unreachable from outside
+/// the LAN, and on an HTTPS page it is blocked outright as mixed content. So the
+/// art is published but unusable by the very frontends it exists for.
+///
+/// Core fetches it server-side and streams it back same-origin, which settles
+/// mixed content, remote access and CORS in one move.
+///
+/// **Why this is not an SSRF gadget:** the URL is read from *the device's own
+/// state*, never from the caller. A client can only ask us to fetch a URL that a
+/// plugin already published for that device. The scheme check below is a
+/// belt-and-braces guard against a compromised plugin publishing `file://` or
+/// similar.
+pub async fn device_media_art(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let err = |code: StatusCode, msg: &str| -> axum::response::Response {
+        (code, Json(json!({ "error": msg }))).into_response()
+    };
+
+    let device = match s.store.get_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "device not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let Some(url) = ART_URL_KEYS
+        .iter()
+        .find_map(|k| device.attributes.get(*k).and_then(Value::as_str))
+        .filter(|u| !u.is_empty())
+    else {
+        // Nothing playing, or a track with no artwork. Not an error — the UI
+        // simply falls back to a placeholder.
+        return err(StatusCode::NOT_FOUND, "no artwork for this device");
+    };
+
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "device published an unusable art url",
+            )
+        }
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return err(StatusCode::BAD_GATEWAY, "art url scheme not allowed");
+    }
+
+    let client = match reqwest::Client::builder().timeout(ART_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let upstream = match client.get(parsed).send().await {
+        Ok(r) => r,
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "could not reach the device for artwork",
+            )
+        }
+    };
+    if !upstream.status().is_success() {
+        return err(StatusCode::BAD_GATEWAY, "device returned no artwork");
+    }
+
+    // Trust the upstream's type only if it actually claims to be an image;
+    // otherwise a compromised device could have us serve HTML or a script under
+    // our own origin.
+    let content_type = upstream
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|t| t.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match upstream.bytes().await {
+        Ok(b) => b,
+        Err(_) => return err(StatusCode::BAD_GATEWAY, "artwork download failed"),
+    };
+    if bytes.len() > ART_MAX_BYTES {
+        return err(StatusCode::BAD_GATEWAY, "artwork too large");
+    }
+
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&content_type) {
+        headers.insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    // Art changes with the track, so this must not be cached for long — but a
+    // wall panel re-rendering the now-playing card should not refetch every
+    // frame either.
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=60"),
+    );
+    // Never let a proxied blob be sniffed into something executable.
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+
+    (StatusCode::OK, headers, bytes).into_response()
+}
+
 pub async fn get_device_schema(
     State(s): State<AppState>,
     _: DevicesRead,

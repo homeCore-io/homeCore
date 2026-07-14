@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 axum       = { workspace = true }
 tokio      = { workspace = true }
+# Outbound fetch for the media-art proxy (see handlers::device_media_art).
+reqwest    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }

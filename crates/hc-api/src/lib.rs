@@ -796,6 +796,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
         .route("/devices/:id/schema", get(handlers::get_device_schema))
+        // Artwork lives on the device (a Sonos speaker serves it from its own
+        // LAN address), which a browser generally cannot reach. Core fetches it
+        // and hands it back same-origin.
+        .route("/devices/:id/media/art", get(handlers::device_media_art))
         // Timers (timer devices are also visible via /devices)
         .route(
             "/timers",
