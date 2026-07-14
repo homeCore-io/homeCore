@@ -54,6 +54,8 @@ jsonschema        = "0.18"
 toml              = "0.8"
 ron               = "0.8"
 utoipa            = { version = "4", features = ["axum_extras"] }
+# Derives the rule vocabulary from the rule types. See hc-types' `schema` feature.
+schemars          = { version = "0.8", features = ["chrono", "uuid1"] }
 argon2            = { version = "0.5", features = ["password-hash"] }
 rand              = { version = "0.8", features = ["std_rng"] }
 async-trait       = "0.1"

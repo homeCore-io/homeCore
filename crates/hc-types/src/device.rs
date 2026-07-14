@@ -11,6 +11,7 @@ fn now_utc() -> DateTime<Utc> {
 }
 
 /// High-level origin classification for the most recent device change.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceChangeKind {

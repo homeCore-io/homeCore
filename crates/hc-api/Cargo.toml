@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 anyhow     = { workspace = true }
 tracing    = { workspace = true }
 utoipa     = { workspace = true }
-hc-types   = { path = "../hc-types" }
+hc-types   = { path = "../hc-types", features = ["schema"] }
 hc-state   = { path = "../hc-state" }
 hc-core    = { version = "0.1.0", path = "../hc-core" }
 hc-time    = { path = "../hc-time" }

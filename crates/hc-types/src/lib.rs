@@ -22,6 +22,11 @@ pub mod plugin_capabilities;
 pub mod rule;
 pub mod schema;
 
+/// The rule vocabulary, derived from the rule types rather than written down.
+/// See [`vocabulary`] for why that distinction is the whole point.
+#[cfg(feature = "schema")]
+pub mod vocabulary;
+
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};
 pub use schema::{AttributeKind, AttributeSchema, DeviceSchema};

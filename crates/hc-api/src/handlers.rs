@@ -2543,6 +2543,25 @@ pub async fn get_automation(
 /// clients like `hc-tui` that want to display rules without
 /// re-serializing through JSON. Auto-generated rules backed only by
 /// the in-memory store (no `.ron` file) return 404.
+/// The rule vocabulary — every variant, every field — derived from the types.
+///
+/// A rule editor needs to know what a rule can contain, and every client so far
+/// has kept that table BY HAND. A hand-written mirror of a Rust enum always
+/// cracks: core grew `HouseStatusHero`, shipped it on its own default dashboard,
+/// and the Dart client's mirror had never heard of it — so it coerced the card
+/// to `markdown` and would have saved it back as one.
+///
+/// The tripwire meant to catch that was hand-written too: the client asserted
+/// its OWN table had 18 triggers in it. That measures the mirror, not the thing
+/// being mirrored, and it passes happily while core grows a 19th.
+///
+/// So core now says what it knows, mechanically, and a client can check itself
+/// against the real thing. No auth beyond read: it is a description of the
+/// software, not of the house.
+pub async fn get_rule_vocabulary(_: State<AppState>, _: AutomationsRead) -> impl IntoResponse {
+    Json(hc_types::vocabulary::Vocabulary::derive())
+}
+
 pub async fn get_automation_ron(
     State(s): State<AppState>,
     _: AutomationsRead,
