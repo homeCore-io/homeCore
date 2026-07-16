@@ -5574,14 +5574,42 @@ fn restore_json_secrets(incoming: &mut Value, current: &Value) {
             }
         }
         (Value::Array(inc), Value::Array(cur)) => {
+            // Match elements by a stable identity field when present, falling
+            // back to positional. Pure positional matching corrupts secrets the
+            // moment an array element is removed or reordered: dropping
+            // `bridges[0]` would shift every following bridge up one slot, so
+            // core would restore each remaining bridge's redacted `app_key` from
+            // the WRONG stored element. Identity matching keeps `bridges[i]`
+            // pinned to its own stored entry regardless of position.
             for (i, v) in inc.iter_mut().enumerate() {
-                if let Some(c) = cur.get(i) {
+                let matched = array_identity_match(v, cur).or_else(|| cur.get(i));
+                if let Some(c) = matched {
                     restore_json_secrets(v, c);
                 }
             }
         }
         _ => {}
     }
+}
+
+/// Find the element of `current` that refers to the same logical entity as
+/// `incoming`, by the first identity field they share a value on. Returns
+/// `None` for non-objects or when no identity field matches (caller then falls
+/// back to positional). Weak keys (name/host) come last so a strong id wins.
+fn array_identity_match<'a>(incoming: &Value, current: &'a [Value]) -> Option<&'a Value> {
+    const ID_KEYS: [&str; 6] = ["id", "bridge_id", "uuid", "serial", "name", "host"];
+    let inc = incoming.as_object()?;
+    for key in ID_KEYS {
+        let Some(want) = inc.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(found) = current.iter().find(|c| {
+            c.as_object().and_then(|co| co.get(key)).and_then(Value::as_str) == Some(want)
+        }) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Does this tree still carry a redaction placeholder anywhere?
@@ -7764,6 +7792,39 @@ pub async fn system_restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_json_secrets_realigns_after_array_element_removed() {
+        // Current stored config: two bridges, each with a real key.
+        let current = serde_json::json!({
+            "bridges": [
+                { "bridge_id": "aaa", "app_key": "KEY_A" },
+                { "bridge_id": "bbb", "app_key": "KEY_B" },
+            ]
+        });
+        // Client removed bridges[0] and echoed the survivor's key as redacted.
+        // Positionally, incoming[0] (bbb) would line up with current[0] (aaa)
+        // and wrongly receive KEY_A — identity matching must keep KEY_B.
+        let mut incoming = serde_json::json!({
+            "bridges": [
+                { "bridge_id": "bbb", "app_key": "__redacted__" },
+            ]
+        });
+        restore_json_secrets(&mut incoming, &current);
+        assert_eq!(incoming["bridges"][0]["app_key"], "KEY_B");
+    }
+
+    #[test]
+    fn restore_json_secrets_positional_fallback_without_identity() {
+        // No id fields → fall back to positional matching (unchanged behaviour).
+        let current = serde_json::json!({ "keys": [{ "app_key": "K0" }, { "app_key": "K1" }] });
+        let mut incoming =
+            serde_json::json!({ "keys": [{ "app_key": "__redacted__" }, { "app_key": "K1b" }] });
+        restore_json_secrets(&mut incoming, &current);
+        assert_eq!(incoming["keys"][0]["app_key"], "K0");
+        assert_eq!(incoming["keys"][1]["app_key"], "K1b");
+    }
+
     use crate::auth_middleware::{
         whitelist_claims, AreasRead, AreasWrite, AuthUser, AutomationsWrite, DashboardsWrite,
         DevicesRead, DevicesWrite,
