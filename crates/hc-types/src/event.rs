@@ -100,6 +100,12 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
         capabilities: crate::plugin_capabilities::Capabilities,
+        /// The manifest's `config_schema` field (JSON Schema for the plugin's
+        /// operator config), if present. Carried alongside — rather than inside —
+        /// the frozen `Capabilities` type so the config editor can render a typed
+        /// form. `None` when the plugin published no schema (→ raw-TOML fallback).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_schema: Option<serde_json::Value>,
     },
     /// A device's human-readable name was changed at the source (plugin or user).
     DeviceNameChanged {

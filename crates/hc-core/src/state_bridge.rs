@@ -286,10 +286,17 @@ impl StateBridge {
             }
             match serde_json::from_slice::<hc_types::Capabilities>(payload) {
                 Ok(caps) => {
+                    // `config_schema` rides on the manifest JSON but is not part of
+                    // the frozen `Capabilities` type; pull it from the raw payload.
+                    let config_schema = serde_json::from_slice::<serde_json::Value>(payload)
+                        .ok()
+                        .and_then(|v| v.get("config_schema").cloned())
+                        .filter(|v| !v.is_null());
                     let _ = self.pub_bus.publish(Event::PluginCapabilities {
                         timestamp: Utc::now(),
                         plugin_id: plugin_id.to_string(),
                         capabilities: caps,
+                        config_schema,
                     });
                 }
                 Err(e) => warn!(

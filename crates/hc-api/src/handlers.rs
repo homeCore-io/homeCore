@@ -4866,8 +4866,21 @@ pub async fn deregister_plugin(
     _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let mut map = s.plugins.write().await;
-    if map.remove(&id).is_some() {
+    let removed = {
+        let mut map = s.plugins.write().await;
+        map.remove(&id).is_some()
+    };
+    if removed {
+        // Drop the plugin's learned state and clear its retained state topic —
+        // otherwise a stale doc lingers in redb and on the broker.
+        if let Err(e) = s.store.plugin_state_delete(&id).await {
+            tracing::warn!(plugin_id = %id, error = %e, "Failed to delete plugin learned state");
+        }
+        if let Some(ref publish) = s.publish {
+            let _ = publish
+                .publish_retained(&format!("homecore/plugins/{id}/state"), Vec::new())
+                .await;
+        }
         StatusCode::NO_CONTENT.into_response()
     } else {
         (
@@ -5009,6 +5022,31 @@ pub async fn get_plugin_capabilities(
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "capabilities not published" })),
+        )
+            .into_response(),
+    }
+}
+
+/// The plugin's operator-config JSON Schema, published on its capability
+/// manifest. The config editor renders a typed form from this; a 404 means the
+/// plugin published no schema and the editor should fall back to raw TOML. This
+/// is non-secret shape information (no config values), so `plugins:read` is
+/// sufficient — same as capabilities.
+pub async fn get_plugin_config_schema(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id).and_then(|r| r.config_schema.as_ref()) {
+        Some(schema) => (
+            StatusCode::OK,
+            Json(json!({ "plugin_id": id, "schema": schema })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config schema published for this plugin" })),
         )
             .into_response(),
     }

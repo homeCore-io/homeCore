@@ -587,6 +587,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 version: Some("0.1.0-test".into()),
                 supports_management: true,
                 capabilities: Some(hc_captest::capabilities_manifest()),
+                config_schema: None,
             },
         );
     }

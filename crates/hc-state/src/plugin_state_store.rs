@@ -75,6 +75,20 @@ impl PluginStateStore {
         Ok(merged)
     }
 
+    /// All plugin ids that have persisted learned state. Used at startup to
+    /// re-publish each doc as a retained MQTT message (the broker's retained
+    /// store is in-memory; redb is the durable source).
+    pub fn list_ids(&self) -> Result<Vec<String>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PLUGIN_STATE)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (k, _) = entry?;
+            out.push(k.value().to_string());
+        }
+        Ok(out)
+    }
+
     /// Drop a plugin's learned state entirely (e.g. on deregistration). Returns
     /// whether an entry existed.
     pub fn delete(&self, plugin_id: &str) -> Result<bool> {
@@ -153,6 +167,17 @@ mod tests {
         let s = store();
         let merged = s.merge("plugin.new", &json!({ "token": "t" })).unwrap();
         assert_eq!(merged, json!({ "token": "t" }));
+    }
+
+    #[test]
+    fn list_ids_returns_all_stored_plugins() {
+        let s = store();
+        assert!(s.list_ids().unwrap().is_empty());
+        s.put("plugin.hue", &json!({ "a": 1 })).unwrap();
+        s.put("plugin.yolink", &json!({ "b": 2 })).unwrap();
+        let mut ids = s.list_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["plugin.hue", "plugin.yolink"]);
     }
 
     #[test]

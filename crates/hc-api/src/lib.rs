@@ -121,6 +121,12 @@ pub struct PluginRecord {
     /// publishes, or if the published manifest failed to decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<hc_types::Capabilities>,
+    /// JSON Schema for the plugin's operator config, carried on the capability
+    /// manifest. Drives the config editor's typed form; `None` → raw-TOML
+    /// fallback. Not shown in the plugin list — served at
+    /// `GET /plugins/:id/config/schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<serde_json::Value>,
 }
 
 /// Shared state injected into every handler via axum's `State` extractor.
@@ -283,6 +289,7 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
                         });
                     rec.status = "active".into();
                     rec.registered_at = timestamp;
@@ -321,6 +328,7 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
                         });
                     rec.last_heartbeat = Some(timestamp);
                     rec.supports_management = true;
@@ -341,6 +349,7 @@ pub fn spawn_plugin_registry_listener(
                     plugin_id,
                     timestamp,
                     capabilities,
+                    config_schema,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -362,8 +371,73 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
                         });
                     rec.capabilities = Some(capabilities);
+                    if config_schema.is_some() {
+                        rec.config_schema = config_schema;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Parse `homecore/plugins/<id>/state/set` → `<id>`, or `None` if the topic is
+/// not a plugin state-write.
+fn parse_plugin_state_set_topic(topic: &str) -> Option<&str> {
+    match topic.split('/').collect::<Vec<_>>().as_slice() {
+        ["homecore", "plugins", id, "state", "set"] => Some(*id),
+        _ => None,
+    }
+}
+
+/// Core of the write-back path: a plugin published a learned-state delta to
+/// `homecore/plugins/<id>/state/set`. Merge it into durable storage and return
+/// the `(retained topic, serialized doc)` to re-publish as the authoritative
+/// `homecore/plugins/<id>/state`. `Ok(None)` when the topic isn't a state-write.
+pub async fn ingest_plugin_state_set(
+    store: &StateStore,
+    topic: &str,
+    payload: &[u8],
+) -> Result<Option<(String, Vec<u8>)>> {
+    let Some(id) = parse_plugin_state_set_topic(topic) else {
+        return Ok(None);
+    };
+    let delta: serde_json::Value = serde_json::from_slice(payload)
+        .with_context(|| format!("parse state/set payload for {id}"))?;
+    let merged = store.plugin_state_merge(id, &delta).await?;
+    let bytes = serde_json::to_vec(&merged)?;
+    Ok(Some((format!("homecore/plugins/{id}/state"), bytes)))
+}
+
+/// Subscribe to the raw MQTT bus and persist plugin learned-state writes
+/// (`homecore/plugins/<id>/state/set`) to redb, re-publishing the merged result
+/// as the retained `homecore/plugins/<id>/state`. This is the plugin→core half
+/// of the D8 learned-state channel (the core→plugin half is the retained topic,
+/// restored at boot in `main.rs`).
+///
+/// Spawn on the **raw / internal** bus (the one carrying `Event::MqttMessage`).
+pub fn spawn_plugin_state_listener(raw_bus: EventBus, store: StateStore, publish: PublishHandle) {
+    let mut rx = raw_bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(hc_types::event::Event::MqttMessage { topic, payload, .. }) => {
+                    match ingest_plugin_state_set(&store, &topic, &payload).await {
+                        Ok(Some((out_topic, bytes))) => {
+                            if let Err(e) = publish.publish_retained(&out_topic, bytes).await {
+                                warn!(topic = %out_topic, error = %e, "Failed to re-publish plugin state");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(topic = %topic, error = %e, "Failed to ingest plugin state/set")
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -947,6 +1021,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugins/:id/config",
             get(handlers::get_plugin_config).put(handlers::put_plugin_config),
         )
+        .route(
+            "/plugins/:id/config/schema",
+            get(handlers::get_plugin_config_schema),
+        )
         .route("/plugins/:id/command", post(handlers::post_plugin_command))
         .route(
             "/plugins/:id/capabilities",
@@ -1168,4 +1246,91 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
         "Admin UDS listener bound"
     );
     Ok(listener)
+}
+
+#[cfg(test)]
+mod plugin_state_tests {
+    use super::*;
+
+    #[test]
+    fn parse_state_set_topic_matches_only_state_set() {
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/state/set"),
+            Some("plugin.hue")
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/state"),
+            None
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/cmd"),
+            None
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/devices/x/state/set"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_merges_and_returns_retained_republish() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Non-matching topic → Ok(None).
+        assert!(
+            ingest_plugin_state_set(&store, "homecore/plugins/p/state", b"{}")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // First write establishes the doc; returns the retained republish target.
+        let (topic, bytes) = ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            br#"{"app_key":"k1"}"#,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(topic, "homecore/plugins/plugin.hue/state");
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc, serde_json::json!({ "app_key": "k1" }));
+
+        // Second write shallow-merges (adds a key, keeps the first).
+        let (_t, bytes2) = ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            br#"{"published_ids":["a","b"]}"#,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let doc2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+        assert_eq!(
+            doc2,
+            serde_json::json!({ "app_key": "k1", "published_ids": ["a", "b"] })
+        );
+
+        // Persisted durably.
+        assert_eq!(
+            store.plugin_state_get("plugin.hue").await.unwrap().unwrap(),
+            doc2
+        );
+
+        // Bad payload on a matching topic → Err (the listener logs and drops it).
+        assert!(ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            b"not json"
+        )
+        .await
+        .is_err());
+    }
 }

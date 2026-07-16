@@ -977,6 +977,15 @@ async fn main() -> Result<()> {
     // because broadcast channels don't replay history on late subscribe.
     hc_api::spawn_plugin_registry_listener(pub_bus.clone(), plugin_registry.clone());
 
+    // Persist plugin learned-state writes (homecore/plugins/<id>/state/set) to
+    // redb and re-publish the merged doc as the retained authoritative state.
+    // Subscribes to the raw MQTT bus (internal_bus carries Event::MqttMessage).
+    hc_api::spawn_plugin_state_listener(
+        internal_bus.clone(),
+        store.clone(),
+        publish_handle.clone(),
+    );
+
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
     let rules = {
@@ -1187,6 +1196,24 @@ async fn main() -> Result<()> {
             tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
         }
 
+        // Restore each plugin's durable learned-state as a retained MQTT message
+        // so a (re)connecting plugin loads it on subscribe. The broker's retained
+        // store is in-memory (lost on restart); redb is the durable source.
+        match store.plugin_state_list_ids().await {
+            Ok(ids) => {
+                for id in ids {
+                    if let Ok(Some(doc)) = store.plugin_state_get(&id).await {
+                        let bytes = serde_json::to_vec(&doc).unwrap_or_default();
+                        let topic = format!("homecore/plugins/{id}/state");
+                        if let Err(e) = publish_handle.publish_retained(&topic, bytes).await {
+                            tracing::warn!(plugin_id = %id, error = %e, "Failed to restore retained plugin state");
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Could not list plugin learned-state at boot"),
+        }
+
         // ── Plugin config centralization (Phase 0) ──────────────────────────
         // Move each plugin's config to a core-owned central location
         // (`{base}/config/plugins/<id>.toml`) so a fetch+uncompress upgrade of a
@@ -1238,6 +1265,7 @@ async fn main() -> Result<()> {
                         version: None,
                         supports_management: false,
                         capabilities: None,
+                        config_schema: None,
                     });
             }
         }

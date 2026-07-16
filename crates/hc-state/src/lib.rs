@@ -190,6 +190,12 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.delete(&id)).await?
     }
 
+    /// All plugin ids with persisted learned state (for boot-time re-publish).
+    pub async fn plugin_state_list_ids(&self) -> Result<Vec<String>> {
+        let store = Arc::clone(&self.plugin_state);
+        tokio::task::spawn_blocking(move || store.list_ids()).await?
+    }
+
     // --- Battery latch ---
 
     /// Apply a new battery reading. Returns `Some(edge)` when the latch
