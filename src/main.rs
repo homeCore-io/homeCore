@@ -94,7 +94,7 @@ async fn try_start(
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
     let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
-    let bridges = cfg.effective_bridges(&discovered);
+    let mut bridges = cfg.effective_bridges(&discovered);
 
     if bridges.is_empty() {
         error!("No Hue bridges configured or discovered; set [[bridges]] in config/config.toml");
@@ -133,8 +133,18 @@ async fn try_start(
     // to the runtime over this channel; the bridge runtime adds them to
     // its apis vec and refreshes without restart.
     let (new_bridge_tx, new_bridge_rx) = mpsc::channel::<hue::models::BridgeTarget>(8);
-    let pairing_handle =
-        pairing::PairingHandle::new(config_path.to_string(), cfg.clone(), new_bridge_tx);
+
+    // Shared view of core's durable learned-state doc (bridge app_keys). Filled
+    // by the SDK state handler below; read at startup to reconnect bridges with
+    // their persisted keys, and updated by pairing when a new key is learned.
+    let learned_state: pairing::LearnedState = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let state_writer = client.state_writer();
+    let pairing_handle = pairing::PairingHandle::new(
+        cfg.clone(),
+        new_bridge_tx,
+        learned_state.clone(),
+        state_writer.clone(),
+    );
 
     // Enable management protocol (heartbeat + remote config/log commands +
     // capability manifest).
@@ -147,6 +157,14 @@ async fn try_start(
         )
         .await?
         .with_capabilities(capabilities_manifest());
+    // Receive core's durable learned-state (bridge app_keys) — retained on
+    // connect, then on change. Just stash it; startup + pairing read the cell.
+    {
+        let ls = learned_state.clone();
+        mgmt = mgmt.with_state_handler(move |doc| {
+            *ls.lock().unwrap() = Some(doc);
+        });
+    }
     // Publish the operator-config JSON Schema so the config editor can render a
     // typed form (rides on the capability manifest).
     if let Some(schema) = config::config_schema() {
@@ -196,6 +214,21 @@ async fn try_start(
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+    // Wait briefly for core's retained learned-state to arrive (delivered on
+    // connect by the state handler), then merge persisted app_keys/inventory into
+    // the bridge targets. Config app_keys remain the fallback, so existing
+    // installs are unaffected. Best-effort — times out to config-only.
+    for _ in 0..20 {
+        if learned_state.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if let Some(learned) = learned_state.lock().unwrap().clone() {
+        config::apply_learned_bridges(&mut bridges, &learned);
+        info!("Applied core learned-state to bridge targets");
+    }
+
     // Register bridge devices via DevicePublisher (PluginClient is consumed).
     for bridge in &bridges {
         let bridge_device_id = bridge.device_id();
@@ -231,7 +264,13 @@ async fn try_start(
         "Hue bridges registered with HomeCore"
     );
 
-    let bridge_runtime = Bridge::new(cfg.clone(), config_path.to_string(), bridges, publisher);
+    let bridge_runtime = Bridge::new(
+        cfg.clone(),
+        bridges,
+        publisher,
+        learned_state.clone(),
+        state_writer,
+    );
     bridge_runtime.run(cmd_rx, refresh_rx, new_bridge_rx).await
 }
 

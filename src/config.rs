@@ -36,39 +36,9 @@ impl HuePluginConfig {
         toml::from_str(&text).context("parsing config TOML")
     }
 
-    /// Write the current config back to disk (overwrites the file).
-    pub fn save(&self, path: &str) -> Result<()> {
-        let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(path, text).with_context(|| format!("writing config to {path}"))
-    }
-
-    /// Add or update the app_key for the bridge identified by `target`.
-    /// Matches on bridge_id first, then host.
-    pub fn upsert_bridge_app_key(&mut self, target: &BridgeTarget, app_key: &str) {
-        if let Some(entry) = self
-            .bridges
-            .iter_mut()
-            .find(|b| b.bridge_id == target.bridge_id || b.host == target.host)
-        {
-            entry.app_key = app_key.to_string();
-            // Ensure identifying fields are populated from the resolved target.
-            if entry.bridge_id.is_empty() {
-                entry.bridge_id = target.bridge_id.clone();
-            }
-            if entry.host.is_empty() {
-                entry.host = target.host.clone();
-            }
-        } else {
-            self.bridges.push(BridgeConfig {
-                name: target.name.clone(),
-                bridge_id: target.bridge_id.clone(),
-                host: target.host.clone(),
-                app_key: app_key.to_string(),
-                verify_tls: target.verify_tls,
-                allow_self_signed: target.allow_self_signed,
-            });
-        }
-    }
+    // Paired-bridge app_keys are no longer written back to the config file
+    // (D8): they're plugin-learned secrets that live in core's learned state.
+    // See `build_bridge_state_delta` + `pairing::persist_app_key`.
 
     pub fn effective_bridges(&self, discovered: &[DiscoveredBridge]) -> Vec<BridgeTarget> {
         if !self.bridges.is_empty() {
@@ -204,6 +174,83 @@ pub enum IlluminanceDisplay {
     Raw,
 }
 
+/// Merge learned-state bridge records (`{ "bridges": { "<id>": {app_key, host,
+/// name} } }`, owned by core) into the effective target list: fill/override
+/// `app_key` for bridges already targeted, and append learned bridges not present
+/// (paired in a prior session). A config-provided `app_key` remains the fallback
+/// when learned state has none. This is the D8 read side — learned secrets live in
+/// core, operator inventory in the config file.
+pub fn apply_learned_bridges(targets: &mut Vec<BridgeTarget>, learned: &serde_json::Value) {
+    let Some(bridges) = learned.get("bridges").and_then(|b| b.as_object()) else {
+        return;
+    };
+    // Hue reports bridge_id in a different case than config often stores it
+    // (uppercase from the API vs lowercase in config.toml), so match
+    // case-insensitively — same as `pairing::is_already_configured`.
+    for t in targets.iter_mut() {
+        if let Some(key) = bridges
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(&t.bridge_id))
+            .and_then(|(_, r)| r.get("app_key"))
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.is_empty())
+        {
+            t.app_key = Some(key.to_string());
+        }
+    }
+    for (bridge_id, rec) in bridges {
+        if targets
+            .iter()
+            .any(|t| t.bridge_id.eq_ignore_ascii_case(bridge_id))
+        {
+            continue;
+        }
+        let host = rec.get("host").and_then(|v| v.as_str()).unwrap_or("");
+        if host.is_empty() {
+            continue;
+        }
+        targets.push(BridgeTarget {
+            name: rec
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(bridge_id)
+                .to_string(),
+            bridge_id: bridge_id.clone(),
+            host: host.to_string(),
+            app_key: rec
+                .get("app_key")
+                .and_then(|v| v.as_str())
+                .filter(|k| !k.is_empty())
+                .map(String::from),
+            verify_tls: true,
+            allow_self_signed: true,
+        });
+    }
+}
+
+/// Build the learned-state write for a newly-paired bridge. Returns the full
+/// `{ "bridges": { ... } }` document (core's merge is shallow at the top level,
+/// so we send the whole `bridges` map to avoid dropping sibling bridges).
+pub fn build_bridge_state_delta(
+    current: &serde_json::Value,
+    target: &BridgeTarget,
+    app_key: &str,
+) -> serde_json::Value {
+    let mut bridges = current
+        .get("bridges")
+        .and_then(|b| b.as_object().cloned())
+        .unwrap_or_default();
+    bridges.insert(
+        target.bridge_id.clone(),
+        serde_json::json!({
+            "app_key": app_key,
+            "host": target.host,
+            "name": target.name,
+        }),
+    );
+    serde_json::json!({ "bridges": bridges })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BridgeConfig {
@@ -323,6 +370,54 @@ mod tests {
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].host, "10.0.0.10");
         assert_eq!(effective[0].bridge_id, "bridge-1");
+    }
+
+    #[test]
+    fn apply_learned_bridges_fills_key_and_appends_missing() {
+        use crate::hue::models::BridgeTarget;
+        let mut targets = vec![BridgeTarget {
+            name: "main".into(),
+            bridge_id: "bridge-1".into(),
+            host: "10.0.0.10".into(),
+            app_key: None, // no config key
+            verify_tls: true,
+            allow_self_signed: true,
+        }];
+        let learned = serde_json::json!({
+            "bridges": {
+                // Uppercase id (as the Hue API reports it) vs lowercase target —
+                // must still match and fill the key, not append a duplicate.
+                "BRIDGE-1": { "app_key": "K1", "host": "10.0.0.10", "name": "main" },
+                "bridge-2": { "app_key": "K2", "host": "10.0.0.20", "name": "spare" }
+            }
+        });
+        apply_learned_bridges(&mut targets, &learned);
+        // Existing target gets its learned key (case-insensitive match).
+        assert_eq!(targets[0].app_key.as_deref(), Some("K1"));
+        // A prior-session bridge is appended from learned state.
+        assert_eq!(targets.len(), 2);
+        let spare = targets.iter().find(|t| t.bridge_id == "bridge-2").unwrap();
+        assert_eq!(spare.host, "10.0.0.20");
+        assert_eq!(spare.app_key.as_deref(), Some("K2"));
+    }
+
+    #[test]
+    fn build_bridge_state_delta_preserves_sibling_bridges() {
+        use crate::hue::models::BridgeTarget;
+        let current = serde_json::json!({ "bridges": { "b1": { "app_key": "K1" } } });
+        let target = BridgeTarget {
+            name: "two".into(),
+            bridge_id: "b2".into(),
+            host: "10.0.0.20".into(),
+            app_key: None,
+            verify_tls: true,
+            allow_self_signed: true,
+        };
+        let delta = build_bridge_state_delta(&current, &target, "K2");
+        // Full bridges map (core merges shallow) — b1 kept, b2 added.
+        assert_eq!(delta["bridges"]["b1"]["app_key"], "K1");
+        assert_eq!(delta["bridges"]["b2"]["app_key"], "K2");
+        assert_eq!(delta["bridges"]["b2"]["host"], "10.0.0.20");
     }
 
     #[cfg(feature = "schema")]

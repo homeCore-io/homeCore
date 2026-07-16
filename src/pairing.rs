@@ -11,8 +11,9 @@
 //! 3. Poll the Hue `POST /api` endpoint every 2 s. The bridge replies with
 //!    `error: "link button not pressed"` until the button is pushed; once
 //!    pushed, it returns a `username` (the app key).
-//! 4. Persist the new bridge to `config/config.toml` via the existing
-//!    `HuePluginConfig::save()` + `upsert_bridge_app_key()` path.
+//! 4. Persist the new bridge's `app_key` to core's durable learned state
+//!    (`homecore/plugins/plugin.hue/state`) via `persist_app_key` — NOT the
+//!    config file, so pairing no longer self-writes the core-owned config.toml.
 //! 5. Push the populated `BridgeTarget` into the runtime through the
 //!    `new_bridge_tx` channel so it starts publishing without restart.
 //! 6. Emit `item_add({bridge_id, host, name, status: "paired"})` and
@@ -24,12 +25,17 @@
 //!   out at ~30 s, so we'll typically conclude well before the deadline.
 
 use anyhow::{Context, Result};
-use plugin_sdk_rs::{ManagementHandle, StreamContext, StreamingAction};
+use plugin_sdk_rs::{ManagementHandle, PluginStateWriter, StreamContext, StreamingAction};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
+
+/// Shared, cross-task view of core's durable learned-state doc for this plugin
+/// (`{ "bridges": { "<id>": {app_key, host, name} } }`). Filled by the SDK state
+/// handler in `main`; read + updated here when a pairing persists a new app_key.
+pub type LearnedState = Arc<std::sync::Mutex<Option<Value>>>;
 
 use crate::config::HuePluginConfig;
 use crate::hue::api::HueApiClient;
@@ -44,21 +50,28 @@ const POLL_INTERVAL_SECS: u64 = 2;
 /// and any other future config mutator must serialise through it.
 #[derive(Clone)]
 pub struct PairingHandle {
-    config_path: String,
     plugin_cfg: Arc<Mutex<HuePluginConfig>>,
     new_bridge_tx: mpsc::Sender<BridgeTarget>,
+    /// Core's durable learned-state view (shared with `main`'s state handler).
+    learned_state: LearnedState,
+    /// Writes a paired bridge's `app_key` back to core's learned state instead
+    /// of the operator config file — so pairing no longer self-writes the
+    /// core-owned config.toml (which would trip the config hot-reload watcher).
+    state_writer: PluginStateWriter,
 }
 
 impl PairingHandle {
     pub fn new(
-        config_path: String,
         plugin_cfg: HuePluginConfig,
         new_bridge_tx: mpsc::Sender<BridgeTarget>,
+        learned_state: LearnedState,
+        state_writer: PluginStateWriter,
     ) -> Self {
         Self {
-            config_path,
             plugin_cfg: Arc::new(Mutex::new(plugin_cfg)),
             new_bridge_tx,
+            learned_state,
+            state_writer,
         }
     }
 }
@@ -203,20 +216,25 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
     ctx.progress(
         Some(80),
         Some("configured"),
-        Some("Bridge paired; persisting to config and starting up"),
+        Some("Bridge paired; saving the key and starting up"),
     )
     .await?;
 
-    // Persist app_key to config.toml. Failure here is a hard error — the
-    // user's session will work for the rest of this run, but a restart
-    // would lose the pairing, which is worse than failing loudly now.
+    // Persist app_key to core's durable learned state (NOT the config file).
+    // Failure here is a hard error — the session works for the rest of this run,
+    // but a restart would lose the pairing, which is worse than failing loudly.
     let mut paired_target = target.clone();
     paired_target.app_key = Some(app_key.clone());
     if let Err(e) = persist_app_key(&handle, &paired_target, &app_key).await {
         return ctx
-            .error(format!("paired bridge but failed to save config: {e}"))
+            .error(format!("paired bridge but failed to persist key: {e}"))
             .await;
     }
+    info!(
+        bridge_id = %paired_target.bridge_id,
+        host = %paired_target.host,
+        "Bridge app_key persisted to core learned state (not config.toml)"
+    );
 
     // Hand the populated target to the runtime so it starts publishing
     // immediately. Best-effort — if the runtime channel is full or
@@ -317,6 +335,12 @@ async fn resolve_target(
     // No host given — discover and pick a bridge that isn't already
     // listed in config (no point re-pairing one we already have keys for).
     let cfg_snapshot = handle.plugin_cfg.lock().await.clone();
+    let learned = handle
+        .learned_state
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| json!({}));
     let discovered = discovery::discover_bridges(&cfg_snapshot.hue)
         .await
         .context("discovery failed")?;
@@ -325,7 +349,7 @@ async fn resolve_target(
     }
     let (unpaired, paired): (Vec<_>, Vec<_>) = discovered
         .into_iter()
-        .partition(|d| !is_already_configured(&cfg_snapshot, d));
+        .partition(|d| !is_already_configured(&cfg_snapshot, &learned, d));
     match unpaired.len() {
         0 => Ok(TargetResolution::AllPaired(paired)),
         1 => {
@@ -417,11 +441,24 @@ async fn prompt_for_choice(
     }
 }
 
-fn is_already_configured(cfg: &HuePluginConfig, d: &DiscoveredBridge) -> bool {
-    cfg.bridges.iter().any(|b| {
+fn is_already_configured(cfg: &HuePluginConfig, learned: &Value, d: &DiscoveredBridge) -> bool {
+    let in_config = cfg.bridges.iter().any(|b| {
         (!b.bridge_id.is_empty() && b.bridge_id.eq_ignore_ascii_case(&d.bridge_id))
             || (!b.host.is_empty() && b.host == d.host)
-    })
+    });
+    // A bridge paired in a prior session lives in core's learned state, not the
+    // config file — treat it as already paired so it isn't offered again.
+    let in_learned = learned
+        .get("bridges")
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.iter().any(|(id, rec)| {
+                id.eq_ignore_ascii_case(&d.bridge_id)
+                    || rec.get("host").and_then(|v| v.as_str()) == Some(d.host.as_str())
+            })
+        })
+        .unwrap_or(false);
+    in_config || in_learned
 }
 
 /// Poll `pair_bridge` every `POLL_INTERVAL_SECS` until the user presses
@@ -460,20 +497,32 @@ async fn poll_for_app_key(ctx: &StreamContext, api: &HueApiClient) -> Result<Opt
     }
 }
 
-/// Lock + load + mutate + write. Ensures concurrent pairings on
-/// different bridges don't race the toml file.
+/// Persist a newly-paired bridge's `app_key` to **core's learned state** (D8),
+/// NOT the operator config file. The app_key is plugin-learned secret state, so
+/// it belongs in core's durable store (`homecore/plugins/plugin.hue/state`), and
+/// writing it here no longer mutates the core-owned config.toml — so pairing no
+/// longer trips the config hot-reload watcher into restarting the plugin.
+///
+/// `pair_bridge` is `Concurrency::Single`, so no two pairings run at once; the
+/// brief non-async lock on the shared learned-state view is just to keep it
+/// consistent with the SDK state handler.
 async fn persist_app_key(
     handle: &PairingHandle,
     target: &BridgeTarget,
     app_key: &str,
 ) -> Result<()> {
-    let mut guard = handle.plugin_cfg.lock().await;
-    // Reload from disk in case the user edited config.toml between
-    // plugin start and now. This is best-effort — if the file's
-    // unreadable, we still have the in-memory copy.
-    if let Ok(fresh) = HuePluginConfig::load(&handle.config_path) {
-        *guard = fresh;
-    }
-    guard.upsert_bridge_app_key(target, app_key);
-    guard.save(&handle.config_path)
+    let delta = {
+        let mut cell = handle.learned_state.lock().unwrap();
+        let current = cell.clone().unwrap_or_else(|| json!({}));
+        let delta = crate::config::build_bridge_state_delta(&current, target, app_key);
+        // Keep the local view in sync so a follow-up read (or the next pairing)
+        // sees this bridge before core echoes the retained doc back.
+        *cell = Some(delta.clone());
+        delta
+    };
+    handle
+        .state_writer
+        .persist(&delta)
+        .await
+        .context("persisting app_key to core learned state")
 }

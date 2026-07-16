@@ -100,21 +100,26 @@ struct EventstreamMetrics {
 
 pub struct Bridge {
     cfg: HuePluginConfig,
-    config_path: String,
     publisher: DevicePublisher,
     sync_cfg: SyncConfig,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
     command_started_at: Option<Instant>,
     metrics: EventstreamMetrics,
+    /// Core's durable learned-state view + writer, for persisting app_keys
+    /// discovered by the device-command-triggered pairing path (D8) — the same
+    /// channel the streaming `pair_bridge` action uses.
+    learned_state: crate::pairing::LearnedState,
+    state_writer: plugin_sdk_rs::PluginStateWriter,
 }
 
 impl Bridge {
     pub fn new(
         cfg: HuePluginConfig,
-        config_path: String,
         bridges: Vec<BridgeTarget>,
         publisher: DevicePublisher,
+        learned_state: crate::pairing::LearnedState,
+        state_writer: plugin_sdk_rs::PluginStateWriter,
     ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         let sync_cfg = SyncConfig {
@@ -128,13 +133,14 @@ impl Bridge {
         };
         Self {
             cfg,
-            config_path,
             publisher,
             sync_cfg,
             apis,
             registry: HueRegistry::default(),
             command_started_at: None,
             metrics: EventstreamMetrics::default(),
+            learned_state,
+            state_writer,
         }
     }
 
@@ -535,13 +541,25 @@ impl Bridge {
                         match api.pair_bridge("homecore#hc_hue").await {
                             Ok(app_key) => {
                                 paired = true;
-                                // Persist the new app_key to config so it survives restarts.
-                                self.cfg.upsert_bridge_app_key(api.target(), &app_key);
-                                match self.cfg.save(&self.config_path) {
+                                // Persist the new app_key to core's durable learned
+                                // state (D8) — NOT the config file — so it survives
+                                // restarts without self-writing the core-owned config.
+                                let delta = {
+                                    let mut cell = self.learned_state.lock().unwrap();
+                                    let current =
+                                        cell.clone().unwrap_or_else(|| serde_json::json!({}));
+                                    let delta = crate::config::build_bridge_state_delta(
+                                        &current,
+                                        api.target(),
+                                        &app_key,
+                                    );
+                                    *cell = Some(delta.clone());
+                                    delta
+                                };
+                                match self.state_writer.persist(&delta).await {
                                     Ok(()) => info!(
                                         bridge_id = %api.target().bridge_id,
-                                        config = %self.config_path,
-                                        "Bridge app_key saved to config"
+                                        "Bridge app_key persisted to core learned state"
                                     ),
                                     Err(e) => warn!(
                                         bridge_id = %api.target().bridge_id,
@@ -1866,9 +1884,10 @@ mod tests {
         };
         Bridge::new(
             HuePluginConfig::default(),
-            "config/config.toml".to_string(),
             vec![bridge],
             publisher,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+            plugin_sdk_rs::PluginStateWriter::test_instance("plugin.hue"),
         )
     }
 
