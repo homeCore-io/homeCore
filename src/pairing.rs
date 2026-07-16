@@ -442,10 +442,11 @@ async fn prompt_for_choice(
 }
 
 fn is_already_configured(cfg: &HuePluginConfig, learned: &Value, d: &DiscoveredBridge) -> bool {
-    let in_config = cfg.bridges.iter().any(|b| {
-        (!b.bridge_id.is_empty() && b.bridge_id.eq_ignore_ascii_case(&d.bridge_id))
-            || (!b.host.is_empty() && b.host == d.host)
-    });
+    use crate::config::same_bridge;
+    let in_config = cfg
+        .bridges
+        .iter()
+        .any(|b| same_bridge(&b.bridge_id, &b.host, &d.bridge_id, &d.host));
     // A bridge paired in a prior session lives in core's learned state, not the
     // config file — treat it as already paired so it isn't offered again.
     let in_learned = learned
@@ -453,8 +454,8 @@ fn is_already_configured(cfg: &HuePluginConfig, learned: &Value, d: &DiscoveredB
         .and_then(|m| m.as_object())
         .map(|m| {
             m.iter().any(|(id, rec)| {
-                id.eq_ignore_ascii_case(&d.bridge_id)
-                    || rec.get("host").and_then(|v| v.as_str()) == Some(d.host.as_str())
+                let host = rec.get("host").and_then(|v| v.as_str()).unwrap_or("");
+                same_bridge(id, host, &d.bridge_id, &d.host)
             })
         })
         .unwrap_or(false);

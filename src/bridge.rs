@@ -368,24 +368,45 @@ impl Bridge {
                 new = new_bridge_rx.recv() => {
                     match new {
                         Some(target) => {
-                            info!(
-                                bridge_id = %target.bridge_id,
-                                host = %target.host,
-                                "New bridge added at runtime via pair action"
-                            );
-                            let api = HueApiClient::new(target.clone());
-                            self.apis.push(api.clone());
-                            // Spawn eventstream task for the new bridge if enabled.
-                            if self.cfg.hue.eventstream_enabled && api.has_app_key() {
-                                let api_for_es = api.clone();
-                                let tx = event_tx.clone();
-                                let reconnect_secs = self.cfg.hue.eventstream_reconnect_secs;
-                                tokio::spawn(async move {
-                                    let _ = api_for_es.run_eventstream(tx, reconnect_secs).await;
-                                });
-                            }
-                            if let Err(e) = self.refresh(&api).await {
-                                warn!(error = %e, "Initial refresh of newly-paired bridge failed");
+                            // Dedup: re-pairing an already-running bridge (possibly
+                            // with a different-case bridge_id, or targeted by host)
+                            // must not add a second runtime bridge / device. Its new
+                            // app_key is already persisted to learned state and takes
+                            // effect on the next restart. Distinct new bridges (no
+                            // match by id or host) are still added — multi-bridge.
+                            let already_running = self.apis.iter().any(|a| {
+                                let t = a.target();
+                                crate::config::same_bridge(
+                                    &t.bridge_id, &t.host, &target.bridge_id, &target.host,
+                                )
+                            });
+                            if already_running {
+                                info!(
+                                    bridge_id = %target.bridge_id,
+                                    host = %target.host,
+                                    "Re-paired an already-running bridge; keeping the existing \
+                                     runtime entry (new key persisted to learned state)"
+                                );
+                            } else {
+                                info!(
+                                    bridge_id = %target.bridge_id,
+                                    host = %target.host,
+                                    "New bridge added at runtime via pair action"
+                                );
+                                let api = HueApiClient::new(target.clone());
+                                self.apis.push(api.clone());
+                                // Spawn eventstream task for the new bridge if enabled.
+                                if self.cfg.hue.eventstream_enabled && api.has_app_key() {
+                                    let api_for_es = api.clone();
+                                    let tx = event_tx.clone();
+                                    let reconnect_secs = self.cfg.hue.eventstream_reconnect_secs;
+                                    tokio::spawn(async move {
+                                        let _ = api_for_es.run_eventstream(tx, reconnect_secs).await;
+                                    });
+                                }
+                                if let Err(e) = self.refresh(&api).await {
+                                    warn!(error = %e, "Initial refresh of newly-paired bridge failed");
+                                }
                             }
                         }
                         None => {

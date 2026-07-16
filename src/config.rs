@@ -228,6 +228,16 @@ pub fn apply_learned_bridges(targets: &mut Vec<BridgeTarget>, learned: &serde_js
     }
 }
 
+/// Whether two bridge identities refer to the same physical bridge: same
+/// `bridge_id` (case-insensitive — Hue's API reports uppercase, config stores
+/// lowercase) or the same non-empty host. Used to dedup a re-paired bridge
+/// against the ones already running, without collapsing distinct bridges (which
+/// differ in both id and host), so multiple bridges stay supported.
+pub fn same_bridge(id_a: &str, host_a: &str, id_b: &str, host_b: &str) -> bool {
+    (!id_a.is_empty() && id_a.eq_ignore_ascii_case(id_b))
+        || (!host_a.is_empty() && host_a == host_b)
+}
+
 /// Build the learned-state write for a newly-paired bridge. Returns the full
 /// `{ "bridges": { ... } }` document (core's merge is shallow at the top level,
 /// so we send the whole `bridges` map to avoid dropping sibling bridges).
@@ -399,6 +409,29 @@ mod tests {
         let spare = targets.iter().find(|t| t.bridge_id == "bridge-2").unwrap();
         assert_eq!(spare.host, "10.0.0.20");
         assert_eq!(spare.app_key.as_deref(), Some("K2"));
+    }
+
+    #[test]
+    fn same_bridge_matches_case_insensitive_id_or_host_but_not_distinct() {
+        // Re-pair: same physical bridge, id differs only in case.
+        assert!(same_bridge(
+            "001788FFFE6841B3",
+            "10.0.10.23",
+            "001788fffe6841b3",
+            "10.0.10.23"
+        ));
+        // Same host, empty/unknown id on one side.
+        assert!(same_bridge("", "10.0.10.23", "abc", "10.0.10.23"));
+        // Distinct bridges (different id AND host) must NOT collapse —
+        // multi-bridge support depends on this.
+        assert!(!same_bridge(
+            "bridge-a",
+            "10.0.10.23",
+            "bridge-b",
+            "10.0.10.99"
+        ));
+        // Empty on both sides for a field never matches on that field alone.
+        assert!(!same_bridge("", "", "x", "y"));
     }
 
     #[test]
