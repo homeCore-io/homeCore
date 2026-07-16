@@ -20,6 +20,7 @@ pub mod audit_store;
 pub mod battery_store;
 pub mod device_store;
 pub mod history;
+pub mod plugin_state_store;
 pub mod refresh_token_store;
 pub mod rule_store;
 pub mod schema_store;
@@ -30,6 +31,7 @@ use audit_store::AuditStore;
 use battery_store::BatteryStore;
 use device_store::DeviceStore;
 use history::HistoryStore;
+use plugin_state_store::PluginStateStore;
 use refresh_token_store::RefreshTokenStore;
 use rule_store::RuleStore;
 use schema_store::SchemaStore;
@@ -52,6 +54,7 @@ pub struct StateStore {
     refresh_tokens: Arc<RefreshTokenStore>,
     audit: Arc<AuditStore>,
     battery: Arc<BatteryStore>,
+    plugin_state: Arc<PluginStateStore>,
 }
 
 impl StateStore {
@@ -77,53 +80,64 @@ impl StateStore {
         let history_path = history_db_path.to_string();
         let audit_path = audit_db_path.to_string();
 
-        let (devices, rules, history, schemas, users, api_keys, refresh_tokens, audit, battery) =
-            tokio::task::spawn_blocking(move || {
-                // Ensure parent directories exist before opening databases.
-                if let Some(parent) = std::path::Path::new(&state_path).parent() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create state DB directory: {}", parent.display())
-                    })?;
-                }
-                if let Some(parent) = std::path::Path::new(&history_path).parent() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!(
-                            "failed to create history DB directory: {}",
-                            parent.display()
-                        )
-                    })?;
-                }
-                if let Some(parent) = std::path::Path::new(&audit_path).parent() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create audit DB directory: {}", parent.display())
-                    })?;
-                }
+        let (
+            devices,
+            rules,
+            history,
+            schemas,
+            users,
+            api_keys,
+            refresh_tokens,
+            audit,
+            battery,
+            plugin_state,
+        ) = tokio::task::spawn_blocking(move || {
+            // Ensure parent directories exist before opening databases.
+            if let Some(parent) = std::path::Path::new(&state_path).parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create state DB directory: {}", parent.display())
+                })?;
+            }
+            if let Some(parent) = std::path::Path::new(&history_path).parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create history DB directory: {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            if let Some(parent) = std::path::Path::new(&audit_path).parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create audit DB directory: {}", parent.display())
+                })?;
+            }
 
-                // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
-                let db =
-                    Arc::new(Database::create(&state_path).context("failed to open state DB")?);
-                let devices = DeviceStore::new(Arc::clone(&db))?;
-                let rules = RuleStore::new(Arc::clone(&db))?;
-                let history = HistoryStore::open(&history_path)?;
-                let schemas = SchemaStore::new(Arc::clone(&db))?;
-                let users = UserStore::new(Arc::clone(&db))?;
-                let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
-                let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
-                let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
-                let battery = BatteryStore::new(Arc::clone(&db))?;
-                Ok::<_, anyhow::Error>((
-                    devices,
-                    rules,
-                    history,
-                    schemas,
-                    users,
-                    api_keys,
-                    refresh_tokens,
-                    audit,
-                    battery,
-                ))
-            })
-            .await??;
+            // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
+            let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
+            let devices = DeviceStore::new(Arc::clone(&db))?;
+            let rules = RuleStore::new(Arc::clone(&db))?;
+            let history = HistoryStore::open(&history_path)?;
+            let schemas = SchemaStore::new(Arc::clone(&db))?;
+            let users = UserStore::new(Arc::clone(&db))?;
+            let api_keys = ApiKeyStore::new(Arc::clone(&db))?;
+            let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
+            let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
+            let battery = BatteryStore::new(Arc::clone(&db))?;
+            let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
+            Ok::<_, anyhow::Error>((
+                devices,
+                rules,
+                history,
+                schemas,
+                users,
+                api_keys,
+                refresh_tokens,
+                audit,
+                battery,
+                plugin_state,
+            ))
+        })
+        .await??;
 
         Ok(Self {
             devices: Arc::new(devices),
@@ -135,7 +149,45 @@ impl StateStore {
             refresh_tokens: Arc::new(refresh_tokens),
             audit: Arc::new(audit),
             battery: Arc::new(battery),
+            plugin_state: Arc::new(plugin_state),
         })
+    }
+
+    // --- Plugin-learned state (D8 split, leg 2) ---
+
+    /// Full learned-state document a plugin has persisted, or `None`.
+    pub async fn plugin_state_get(&self, plugin_id: &str) -> Result<Option<serde_json::Value>> {
+        let store = Arc::clone(&self.plugin_state);
+        let id = plugin_id.to_string();
+        tokio::task::spawn_blocking(move || store.get(&id)).await?
+    }
+
+    /// Replace a plugin's entire learned-state document.
+    pub async fn plugin_state_put(&self, plugin_id: &str, state: &serde_json::Value) -> Result<()> {
+        let store = Arc::clone(&self.plugin_state);
+        let id = plugin_id.to_string();
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || store.put(&id, &state)).await?
+    }
+
+    /// Shallow-merge a delta into a plugin's learned state; returns the merged
+    /// document. See [`plugin_state_store::PluginStateStore::merge`].
+    pub async fn plugin_state_merge(
+        &self,
+        plugin_id: &str,
+        delta: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let store = Arc::clone(&self.plugin_state);
+        let id = plugin_id.to_string();
+        let delta = delta.clone();
+        tokio::task::spawn_blocking(move || store.merge(&id, &delta)).await?
+    }
+
+    /// Drop a plugin's learned state (e.g. on deregistration).
+    pub async fn plugin_state_delete(&self, plugin_id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.plugin_state);
+        let id = plugin_id.to_string();
+        tokio::task::spawn_blocking(move || store.delete(&id)).await?
     }
 
     // --- Battery latch ---
