@@ -351,7 +351,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                      multiple are found you'll be prompted to pick one. \
                      The action then waits for you to press the physical \
                      link button — once pressed, the new app key is \
-                     saved to config.toml and the bridge starts \
+                     saved securely in homeCore and the bridge starts \
                      publishing immediately."
                         .into(),
                 ),
