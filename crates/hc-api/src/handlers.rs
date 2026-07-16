@@ -4861,18 +4861,101 @@ pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl Int
     (StatusCode::OK, Json(json!(list)))
 }
 
+/// Delete every device belonging to `plugin_id`, emitting a `device_deleted`
+/// event for each so live clients drop the tile without a manual refresh (the
+/// same event shape the plugin-unregister path in state_bridge emits), and
+/// nullifying any rule references. Shared by plugin uninstall and the
+/// `/plugins/:id/devices` wipe. Returns `(deleted, device_ids, affected_rules)`.
+async fn remove_plugin_devices(
+    s: &AppState,
+    plugin_id: &str,
+) -> (usize, Vec<String>, Vec<String>) {
+    let devices_before = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(plugin_id, error = %e, "remove_plugin_devices: list_devices failed");
+            return (0, Vec::new(), Vec::new());
+        }
+    };
+    let target_ids: Vec<String> = devices_before
+        .iter()
+        .filter(|d| d.plugin_id == plugin_id)
+        .map(|d| d.device_id.clone())
+        .collect();
+
+    let mut deleted = 0usize;
+    let mut affected_rules: Vec<String> = Vec::new();
+    for id in &target_ids {
+        match s.store.delete_device(id).await {
+            Ok(true) => {
+                deleted += 1;
+                let _ = s.event_bus.publish(hc_types::event::Event::Custom {
+                    timestamp: chrono::Utc::now(),
+                    event_type: "device_deleted".to_string(),
+                    payload: json!({
+                        "device_id": id,
+                        "plugin_id": plugin_id,
+                        "source": "plugin_uninstall",
+                    }),
+                });
+                if let Some(rfs) = &s.rule_file_store {
+                    if let Ok(names) = crate::rule_file_store::nullify_device_refs(
+                        &rfs.dir,
+                        id,
+                        &devices_before,
+                    ) {
+                        for name in names {
+                            if !affected_rules.contains(&name) {
+                                affected_rules.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(false) => {} // race: gone between list and delete — not an error
+            Err(e) => {
+                tracing::warn!(device_id = %id, error = %e, "remove_plugin_devices: delete failed");
+            }
+        }
+    }
+    (deleted, target_ids, affected_rules)
+}
+
+/// `DELETE /api/v1/plugins/:id` — **full uninstall** (Phase A).
+///
+/// Was a soft "deregister" that only forgot the in-memory record, leaving the
+/// process running and its devices behind as ghosts. Now it: (1) stops the
+/// managed child, (2) unregisters all of the plugin's devices (emitting
+/// `device_deleted` so clients update live), (3) drops it from the registry and
+/// clears its learned state + retained topic.
+///
+/// NOTE (Phase A limit): a plugin still declared in `[[plugins]]` respawns on the
+/// next core restart — removing the *declaration* needs the managed-plugin store
+/// (Phase A slice 2). Returns a summary of what was torn down.
 pub async fn deregister_plugin(
     State(s): State<AppState>,
     _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // 1. Stop the managed child if we supervise it (best-effort). Stopping first
+    //    prevents the plugin re-registering devices we're about to delete.
+    let stopped = {
+        let cmds = s.plugin_commands.read().await;
+        match cmds.get(&id) {
+            Some(tx) => tx.send(crate::PluginCommand::Stop).await.is_ok(),
+            None => false,
+        }
+    };
+
+    // 2. Unregister its devices (no ghosts; emits device_deleted per device).
+    let (devices_removed, device_ids, affected_rules) = remove_plugin_devices(&s, &id).await;
+
+    // 3. Drop from the registry + clear learned state + retained topic.
     let removed = {
         let mut map = s.plugins.write().await;
         map.remove(&id).is_some()
     };
     if removed {
-        // Drop the plugin's learned state and clear its retained state topic —
-        // otherwise a stale doc lingers in redb and on the broker.
         if let Err(e) = s.store.plugin_state_delete(&id).await {
             tracing::warn!(plugin_id = %id, error = %e, "Failed to delete plugin learned state");
         }
@@ -4881,14 +4964,27 @@ pub async fn deregister_plugin(
                 .publish_retained(&format!("homecore/plugins/{id}/state"), Vec::new())
                 .await;
         }
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (
+    }
+
+    if !removed && !stopped && devices_removed == 0 {
+        return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "plugin not found" })),
         )
-            .into_response()
+            .into_response();
     }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "uninstalled": id,
+            "stopped": stopped,
+            "devices_removed": devices_removed,
+            "device_ids": device_ids,
+            "affected_rules": affected_rules,
+        })),
+    )
+        .into_response()
 }
 
 /// `DELETE /api/v1/plugins/:id/devices`
