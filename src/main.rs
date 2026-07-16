@@ -138,7 +138,7 @@ async fn try_start(
 
     // Enable management protocol (heartbeat + remote config/log commands +
     // capability manifest).
-    let mgmt = client
+    let mut mgmt = client
         .enable_management(
             60,
             Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -147,6 +147,11 @@ async fn try_start(
         )
         .await?
         .with_capabilities(capabilities_manifest());
+    // Publish the operator-config JSON Schema so the config editor can render a
+    // typed form (rides on the capability manifest).
+    if let Some(schema) = config::config_schema() {
+        mgmt = mgmt.with_config_schema(schema);
+    }
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
     let mgmt = pairing::register_actions(mgmt, pairing_handle);

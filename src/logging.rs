@@ -34,6 +34,7 @@ fn default_compress() -> bool {
 
 /// Rotation strategy for the log file.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum RotationStrategy {
     #[default]
@@ -45,6 +46,7 @@ pub enum RotationStrategy {
 
 /// `[logging]` section in `config/config.toml`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoggingConfig {
     /// Stderr log level when `RUST_LOG` is not set.
     /// Accepts any `tracing` filter directive, e.g. `"debug"` or `"hc_hue=debug,rumqttc=warn"`.

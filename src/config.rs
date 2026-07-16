@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::hue::models::{BridgeTarget, DiscoveredBridge};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HuePluginConfig {
     #[serde(default)]
     pub homecore: HomecoreConfig,
@@ -13,6 +14,19 @@ pub struct HuePluginConfig {
     pub logging: crate::logging::LoggingConfig,
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
+}
+
+/// JSON Schema of the operator config, published to core on the capability
+/// manifest so the config editor can render a typed form. `None` when built
+/// without the `schema` feature.
+#[cfg(feature = "schema")]
+pub fn config_schema() -> Option<serde_json::Value> {
+    serde_json::to_value(schemars::schema_for!(HuePluginConfig)).ok()
+}
+
+#[cfg(not(feature = "schema"))]
+pub fn config_schema() -> Option<serde_json::Value> {
+    None
 }
 
 impl HuePluginConfig {
@@ -86,6 +100,7 @@ impl HuePluginConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HomecoreConfig {
     #[serde(default = "default_broker_host")]
     pub broker_host: String,
@@ -109,6 +124,7 @@ impl Default for HomecoreConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HueConfig {
     #[serde(default = "default_true")]
     pub discovery_enabled: bool,
@@ -162,6 +178,7 @@ impl Default for HueConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HueDisplayConfig {
     #[serde(default)]
     pub temperature_unit: TemperatureUnit,
@@ -170,6 +187,7 @@ pub struct HueDisplayConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum TemperatureUnit {
     #[default]
@@ -178,6 +196,7 @@ pub enum TemperatureUnit {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum IlluminanceDisplay {
     #[default]
@@ -186,6 +205,7 @@ pub enum IlluminanceDisplay {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BridgeConfig {
     pub name: String,
     #[serde(default)]
@@ -303,6 +323,17 @@ mod tests {
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].host, "10.0.0.10");
         assert_eq!(effective[0].bridge_id, "bridge-1");
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn config_schema_describes_operator_fields() {
+        let schema = config_schema().expect("schema built with the schema feature");
+        // A JSON Schema object with the top-level config sections as properties.
+        let props = &schema["properties"];
+        assert!(props.get("hue").is_some());
+        assert!(props.get("bridges").is_some());
+        assert!(props.get("homecore").is_some());
     }
 
     #[test]
