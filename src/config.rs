@@ -261,6 +261,24 @@ pub fn build_bridge_state_delta(
     serde_json::json!({ "bridges": bridges })
 }
 
+/// Build the learned-state write that FORGETS a bridge: the full `bridges`
+/// map minus `bridge_id` (matched case-insensitively — Hue reports uppercase,
+/// config stores lowercase). Core's top-level merge replaces the `bridges` key,
+/// so sending the whole (smaller) map drops just this bridge without disturbing
+/// its siblings. The mirror of [`build_bridge_state_delta`], used by unpair to
+/// clear a removed bridge's stored `app_key` so a restart can't resurrect it.
+pub fn build_bridge_state_removal(
+    current: &serde_json::Value,
+    bridge_id: &str,
+) -> serde_json::Value {
+    let mut bridges = current
+        .get("bridges")
+        .and_then(|b| b.as_object().cloned())
+        .unwrap_or_default();
+    bridges.retain(|id, _| !id.eq_ignore_ascii_case(bridge_id));
+    serde_json::json!({ "bridges": bridges })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BridgeConfig {
@@ -355,6 +373,27 @@ fn default_eventstream_reconnect_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_bridge_state_removal_drops_only_the_named_bridge() {
+        let current = serde_json::json!({
+            "bridges": {
+                // Stored uppercase as the Hue API reports it.
+                "001788FFFE6841B3": { "app_key": "k1", "host": "10.0.0.1", "name": "a" },
+                "ecb5fafe112233": { "app_key": "k2", "host": "10.0.0.2", "name": "b" },
+            }
+        });
+
+        // Request lowercase — must still match and remove the uppercase entry.
+        let out = build_bridge_state_removal(&current, "001788fffe6841b3");
+        let bridges = out.get("bridges").unwrap().as_object().unwrap();
+
+        assert_eq!(bridges.len(), 1);
+        assert!(bridges.contains_key("ecb5fafe112233"));
+        assert!(!bridges
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("001788fffe6841b3")));
+    }
 
     #[test]
     fn falls_back_to_discovered_when_configured_bridges_unresolved() {

@@ -29,6 +29,23 @@ pub struct RefreshRequest {
     pub progress: Option<mpsc::Sender<RefreshEvent>>,
 }
 
+/// Request sent by the management `unpair_bridge` action to forget one bridge:
+/// drop it from the runtime, unregister every device it owns, and report back
+/// how many were removed. The runtime replies exactly once through `resp`.
+pub struct UnpairRequest {
+    pub bridge_id: String,
+    pub resp: tokio::sync::oneshot::Sender<UnpairOutcome>,
+}
+
+/// The result of an [`UnpairRequest`], sent back to the streaming action.
+pub struct UnpairOutcome {
+    /// Whether a matching runtime bridge was found and dropped (false if it was
+    /// only in config/learned state, or already gone).
+    pub matched: bool,
+    /// Number of homeCore devices unregistered as a result.
+    pub devices_removed: usize,
+}
+
 /// Per-bridge progress emitted during a refresh. The streaming
 /// action turns these into `ctx.progress` / `ctx.item_add` calls;
 /// nothing else listens.
@@ -189,6 +206,7 @@ impl Bridge {
         mut hc_rx: mpsc::Receiver<(String, Value)>,
         mut refresh_rx: mpsc::Receiver<RefreshRequest>,
         mut new_bridge_rx: mpsc::Receiver<crate::hue::models::BridgeTarget>,
+        mut unpair_rx: mpsc::Receiver<UnpairRequest>,
     ) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
 
@@ -413,6 +431,52 @@ impl Bridge {
                             // Sender dropped — fine.
                         }
                     }
+                }
+                req = unpair_rx.recv() => {
+                    if let Some(req) = req {
+                        let requested = req.bridge_id;
+                        // Find the runtime bridge (by id or host, case-insensitive)
+                        // and drop it so it stops syncing + eventstreaming. Its
+                        // spawned eventstream task keeps its own api clone until the
+                        // config-PUT restart that follows an unpair tears it down.
+                        let idx = self.apis.iter().position(|a| {
+                            let t = a.target();
+                            crate::config::same_bridge(&t.bridge_id, &t.host, &requested, "")
+                        });
+                        let target = match idx {
+                            Some(i) => self.apis.remove(i).target().clone(),
+                            // Not running (config-only, or already gone). Build a
+                            // target from the requested id so we can still compute
+                            // its device id and clear any lingering registry rows.
+                            None => crate::hue::models::BridgeTarget {
+                                name: String::new(),
+                                bridge_id: requested.clone(),
+                                host: String::new(),
+                                app_key: None,
+                                verify_tls: true,
+                                allow_self_signed: true,
+                            },
+                        };
+                        let bridge_device_id = target.device_id();
+                        let removed = self
+                            .registry
+                            .remove_all_for_bridge(&target.bridge_id, &bridge_device_id);
+                        let devices_removed = removed.len();
+                        info!(
+                            bridge_id = %target.bridge_id,
+                            matched = idx.is_some(),
+                            devices_removed,
+                            "Unpair: dropped bridge and removed its devices"
+                        );
+                        // Reconcile so the SDK unregisters the now-absent devices
+                        // from homeCore and persists the smaller published set.
+                        self.reconcile_published_ids(true).await;
+                        let _ = req.resp.send(UnpairOutcome {
+                            matched: idx.is_some(),
+                            devices_removed,
+                        });
+                    }
+                    // Sender dropped → this arm just won't fire again.
                 }
                 _ = heartbeat_tick.tick() => {
                     self.publisher.publish_plugin_status("active").await?;

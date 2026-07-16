@@ -84,6 +84,129 @@ pub fn register_actions(mgmt: ManagementHandle, handle: PairingHandle) -> Manage
     }))
 }
 
+/// The `unpair_bridge` side of pairing: forgets a bridge entirely. Holds the
+/// runtime channel (to drop the bridge + delete its devices) and the learned
+/// state (to clear its stored `app_key`). Symmetric with [`PairingHandle`].
+#[derive(Clone)]
+pub struct UnpairHandle {
+    unpair_tx: mpsc::Sender<crate::bridge::UnpairRequest>,
+    learned_state: LearnedState,
+    state_writer: PluginStateWriter,
+}
+
+impl UnpairHandle {
+    pub fn new(
+        unpair_tx: mpsc::Sender<crate::bridge::UnpairRequest>,
+        learned_state: LearnedState,
+        state_writer: PluginStateWriter,
+    ) -> Self {
+        Self {
+            unpair_tx,
+            learned_state,
+            state_writer,
+        }
+    }
+}
+
+/// Register the `unpair_bridge` streaming action on a `ManagementHandle`.
+pub fn register_unpair_action(mgmt: ManagementHandle, handle: UnpairHandle) -> ManagementHandle {
+    mgmt.with_streaming_action(StreamingAction::new("unpair_bridge", move |ctx, params| {
+        let h = handle.clone();
+        async move { unpair_bridge(ctx, params, h).await }
+    }))
+}
+
+/// Forget a bridge: unregister all its devices, drop its runtime connection,
+/// and clear its stored `app_key` from learned state so a restart can't bring
+/// it back. Config removal is the UI's job (config is core-owned); this handles
+/// the two things only the plugin can: its runtime + its learned state.
+async fn unpair_bridge(ctx: StreamContext, params: Value, handle: UnpairHandle) -> Result<()> {
+    let bridge_id = params
+        .get("bridge_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let bridge_id = match bridge_id {
+        Some(b) => b,
+        None => {
+            return ctx
+                .error("unpair_bridge requires a non-empty `bridge_id`".to_string())
+                .await
+        }
+    };
+
+    ctx.progress(
+        Some(10),
+        Some("removing"),
+        Some(&format!("Removing bridge {bridge_id} and its devices")),
+    )
+    .await?;
+
+    // 1. Tell the runtime to drop the bridge and unregister its devices.
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let mut devices_removed = 0usize;
+    let mut was_running = false;
+    if handle
+        .unpair_tx
+        .send(crate::bridge::UnpairRequest {
+            bridge_id: bridge_id.clone(),
+            resp: resp_tx,
+        })
+        .await
+        .is_ok()
+    {
+        if let Ok(outcome) = resp_rx.await {
+            devices_removed = outcome.devices_removed;
+            was_running = outcome.matched;
+        }
+    } else {
+        warn!("unpair: runtime channel closed; clearing learned state only");
+    }
+
+    // 2. Clear the bridge from durable learned state (drops the stored app_key),
+    //    so `apply_learned_bridges` won't resurrect it on the next restart.
+    if let Err(e) = persist_bridge_removal(&handle, &bridge_id).await {
+        return ctx
+            .error(format!(
+                "removed {devices_removed} device(s) but failed to clear the stored key: {e}"
+            ))
+            .await;
+    }
+    info!(
+        bridge_id = %bridge_id,
+        devices_removed,
+        was_running,
+        "Bridge removed: devices unregistered and app_key cleared from learned state"
+    );
+
+    ctx.complete(json!({
+        "status": "removed",
+        "bridge_id": bridge_id,
+        "devices_removed": devices_removed,
+        "was_running": was_running,
+    }))
+    .await
+}
+
+/// Write the learned-state document that forgets `bridge_id`. Mirrors
+/// [`persist_app_key`]: mutate the shared cell + persist to core so a follow-up
+/// read sees the removal before core echoes the retained doc back.
+async fn persist_bridge_removal(handle: &UnpairHandle, bridge_id: &str) -> Result<()> {
+    let delta = {
+        let mut cell = handle.learned_state.lock().unwrap();
+        let current = cell.clone().unwrap_or_else(|| json!({}));
+        let delta = crate::config::build_bridge_state_removal(&current, bridge_id);
+        *cell = Some(delta.clone());
+        delta
+    };
+    handle
+        .state_writer
+        .persist(&delta)
+        .await
+        .context("clearing bridge from core learned state")
+}
+
 async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -> Result<()> {
     ctx.progress(Some(0), Some("starting"), Some("Resolving target bridge"))
         .await?;

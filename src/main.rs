@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use bridge::{Bridge, RefreshEvent, RefreshRequest};
+use bridge::{Bridge, RefreshEvent, RefreshRequest, UnpairRequest};
 use config::HuePluginConfig;
 
 const MAX_ATTEMPTS: u32 = 3;
@@ -133,6 +133,8 @@ async fn try_start(
     // to the runtime over this channel; the bridge runtime adds them to
     // its apis vec and refreshes without restart.
     let (new_bridge_tx, new_bridge_rx) = mpsc::channel::<hue::models::BridgeTarget>(8);
+    // `unpair_bridge` action → runtime: drop a bridge and delete its devices.
+    let (unpair_tx, unpair_rx) = mpsc::channel::<UnpairRequest>(4);
 
     // Shared view of core's durable learned-state doc (bridge app_keys). Filled
     // by the SDK state handler below; read at startup to reconnect bridges with
@@ -173,6 +175,11 @@ async fn try_start(
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
     let mgmt = pairing::register_actions(mgmt, pairing_handle);
+    // …and its inverse, unpair_bridge: forget a bridge, delete its devices, and
+    // clear its stored app_key from learned state.
+    let unpair_handle =
+        pairing::UnpairHandle::new(unpair_tx, learned_state.clone(), state_writer.clone());
+    let mgmt = pairing::register_unpair_action(mgmt, unpair_handle);
 
     // Streaming refresh_devices / cleanup_stale_devices: both feed the
     // same refresh-then-reconcile path in Bridge::run, but stream
@@ -271,7 +278,9 @@ async fn try_start(
         learned_state.clone(),
         state_writer,
     );
-    bridge_runtime.run(cmd_rx, refresh_rx, new_bridge_rx).await
+    bridge_runtime
+        .run(cmd_rx, refresh_rx, new_bridge_rx, unpair_rx)
+        .await
 }
 
 /// Capability manifest for hc-hue. Plugin actions exposed to the admin
@@ -377,6 +386,37 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: Some(vec![plugin_sdk_rs::types::ItemOp::Add]),
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(90_000),
+            },
+            Action {
+                id: "unpair_bridge".into(),
+                label: "Remove bridge".into(),
+                description: Some(
+                    "Forget a paired Hue bridge: unregister all of its devices \
+                     from homeCore, clear its stored app key, and drop its \
+                     runtime connection. Works even if the bridge is offline. \
+                     The bridge can be re-paired later by pressing its link \
+                     button. Pass the `bridge_id` of the bridge to remove — the \
+                     config editor's per-bridge Remove action drives this."
+                        .into(),
+                ),
+                params: Some(serde_json::json!({
+                    "bridge_id": {
+                        "type": "string",
+                        "description": "bridge_id of the bridge to remove",
+                    },
+                })),
+                result: Some(serde_json::json!({
+                    "bridge_id": { "type": "string" },
+                    "devices_removed": { "type": "integer" },
+                    "was_running": { "type": "boolean" },
+                })),
+                stream: true,
+                cancelable: false,
+                concurrency: Concurrency::Single,
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::Admin,
+                timeout_ms: Some(60_000),
             },
         ],
     }
