@@ -40,6 +40,7 @@ pub mod group_store;
 pub mod handlers;
 pub mod logs;
 pub mod managed_modes;
+pub mod managed_plugins;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
@@ -57,6 +58,7 @@ use event_log::EventLog;
 use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
 use metrics::MetricsCollector;
+pub use managed_plugins::{ManagedPluginStore, ManagedRecord};
 pub use plugin_config_store::PluginConfigStore;
 pub use plugin_config_watcher::PluginConfigWatcher;
 use rule_file_store::RuleFileStore;
@@ -204,6 +206,10 @@ pub struct AppState {
     pub calendar_expansion_days: u32,
     /// Per-plugin command channels for start/stop/restart (local plugins only).
     pub plugin_commands: PluginCommandChannels,
+    /// Runtime-mutable managed-plugin store (`config/plugins/managed.toml`).
+    /// Uninstall tombstones ids here so they stay removed across restarts.
+    /// `None` in tests / when unconfigured.
+    pub managed_plugins: Option<Arc<ManagedPluginStore>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -622,6 +628,7 @@ impl AppState {
             calendar_dir: None,
             calendar_expansion_days: 400,
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
+            managed_plugins: None,
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
@@ -766,6 +773,11 @@ impl AppState {
 
     pub fn with_plugin_commands(mut self, channels: PluginCommandChannels) -> Self {
         self.plugin_commands = channels;
+        self
+    }
+
+    pub fn with_managed_plugins(mut self, store: Arc<ManagedPluginStore>) -> Self {
+        self.managed_plugins = Some(store);
         self
     }
 

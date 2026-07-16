@@ -4974,6 +4974,15 @@ pub async fn deregister_plugin(
             .into_response();
     }
 
+    // 4. Persist the uninstall: drop any managed record + tombstone the id so a
+    //    plugin still declared statically in homecore.toml doesn't respawn on the
+    //    next core restart.
+    if let Some(mp) = &s.managed_plugins {
+        if let Err(e) = mp.uninstall(&id) {
+            tracing::warn!(plugin_id = %id, error = %e, "Failed to record uninstall in managed store");
+        }
+    }
+
     (
         StatusCode::OK,
         Json(json!({

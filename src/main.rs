@@ -277,6 +277,35 @@ impl PluginEntry {
     }
 }
 
+/// Merge the static `[[plugins]]` set with the managed-plugin store: drop
+/// tombstoned (uninstalled) ids, then layer runtime-installed records on top
+/// (records win on id collision). This is the effective set core spawns,
+/// supervises, seeds registry records for, and hot-reload-watches.
+fn build_effective_plugins(
+    static_plugins: &[PluginEntry],
+    managed: &hc_api::ManagedPluginStore,
+) -> Vec<PluginEntry> {
+    let removed = managed.removed_ids();
+    let mut out: Vec<PluginEntry> = static_plugins
+        .iter()
+        .filter(|p| !removed.contains(&p.id))
+        .cloned()
+        .collect();
+    for rec in managed.records() {
+        if removed.contains(&rec.id) {
+            continue;
+        }
+        out.retain(|p| p.id != rec.id);
+        out.push(PluginEntry {
+            id: rec.id,
+            binary: rec.binary,
+            config: rec.config,
+            enabled: rec.enabled,
+        });
+    }
+    out
+}
+
 /// `[rules]` section of homecore.toml.
 #[derive(Deserialize, Default)]
 struct RulesSection {
@@ -1170,6 +1199,24 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── Managed-plugin store (Phase A) ────────────────────────────────────
+    // The effective plugin set = static [[plugins]] minus uninstalled
+    // (tombstoned) ids, plus runtime-installed managed records (records win on
+    // id collision). Reassigning `config.plugins` routes every downstream use —
+    // config centralization, record seeding, spawn, hot-reload watcher — through
+    // it with no other change. Uninstall tombstones an id in this store so it
+    // stays removed across restarts even while still declared in homecore.toml.
+    let managed_plugins = std::sync::Arc::new(hc_api::ManagedPluginStore::load(
+        base_dir.join("config").join("plugins"),
+    ));
+    {
+        let removed = managed_plugins.removed_ids();
+        if !removed.is_empty() {
+            info!(?removed, "Managed store: suppressing uninstalled plugin(s)");
+        }
+    }
+    config.plugins = build_effective_plugins(&config.plugins, &managed_plugins);
+
     // ── 15. Launch plugins (after MQTT is subscribed) ─────────────────────
     //
     // Wait for the internal MQTT client to confirm its homecore/# subscription
@@ -1517,6 +1564,7 @@ async fn main() -> Result<()> {
         app_state
     }
     .with_plugin_commands(plugin_commands)
+    .with_managed_plugins(managed_plugins.clone())
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
         &pub_bus_rpc,
