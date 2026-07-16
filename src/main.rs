@@ -149,6 +149,46 @@ fn resolve_opt_path(field: &mut Option<String>, base: &Path) {
     }
 }
 
+/// Phase 0 of plugin-config centralization: for each `(plugin_id, legacy_path)`,
+/// import the plugin's existing config into the core-owned [`PluginConfigStore`]
+/// (one-time byte-copy, idempotent — skipped if a central file already exists),
+/// and return the **effective** config path to hand the plugin as `argv[1]`.
+///
+/// The effective path is the central file once it exists, otherwise the legacy
+/// path verbatim — so a plugin with nothing to import behaves exactly as before.
+/// `homecore.toml` is never rewritten; its `config` field stays the import source.
+fn centralize_plugin_configs<'a>(
+    store: &hc_api::PluginConfigStore,
+    plugins: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> std::collections::HashMap<String, String> {
+    plugins
+        .into_iter()
+        .map(|(id, legacy_path)| {
+            if !store.exists(id) {
+                let legacy = Path::new(legacy_path);
+                if legacy.exists() {
+                    match store.import_legacy(id, legacy) {
+                        Ok(true) => {
+                            info!(id, "Imported plugin config → central store (one-time)")
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(
+                            id, error = %e,
+                            "Config import failed; using legacy path"
+                        ),
+                    }
+                }
+            }
+            let effective = if store.exists(id) {
+                store.path_for(id).to_string_lossy().into_owned()
+            } else {
+                legacy_path.to_string()
+            };
+            (id.to_string(), effective)
+        })
+        .collect()
+}
+
 // ── config structs ──────────────────────────────────────────────────────────
 
 /// Top-level config shape (subset — just what main.rs needs to parse).
@@ -808,6 +848,7 @@ async fn main() -> Result<()> {
     for subdir in &[
         "config/profiles",
         "config/calendars",
+        "config/plugins",
         "data",
         "logs",
         "rules",
@@ -1146,6 +1187,30 @@ async fn main() -> Result<()> {
             tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
         }
 
+        // ── Plugin config centralization (Phase 0) ──────────────────────────
+        // Move each plugin's config to a core-owned central location
+        // (`{base}/config/plugins/<id>.toml`) so a fetch+uncompress upgrade of a
+        // plugin can't clobber it, and the API/editor/file-edit all target one
+        // file. The import is a one-time byte-copy (preserves comments +
+        // secrets); homecore.toml is NOT rewritten — its `config` field stays as
+        // the import source. A plugin with nothing to import falls back to its
+        // legacy path verbatim, so this is a no-op for anything unexpected.
+        let plugin_config_store =
+            hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins"));
+        let plugin_config_paths = centralize_plugin_configs(
+            &plugin_config_store,
+            config
+                .plugins
+                .iter()
+                .map(|p| (p.id.as_str(), p.config.as_str())),
+        );
+        let effective_config = |p: &PluginEntry| {
+            plugin_config_paths
+                .get(&p.id)
+                .cloned()
+                .unwrap_or_else(|| p.config.clone())
+        };
+
         // Seed plugin records for ALL configured plugins (enabled and disabled)
         // so the API can list them before registration messages arrive.
         {
@@ -1162,7 +1227,7 @@ async fn main() -> Result<()> {
                         },
                         enabled: p.enabled,
                         managed: true,
-                        config_path: Some(p.config.clone()),
+                        config_path: Some(effective_config(p)),
                         binary_path: Some(p.binary.clone()),
                         last_heartbeat: None,
                         last_restart: None,
@@ -1189,7 +1254,7 @@ async fn main() -> Result<()> {
                 .map(|p| plugin_manager::PluginProcess {
                     id: p.id.clone(),
                     binary: PathBuf::from(&p.binary),
-                    config: PathBuf::from(&p.config),
+                    config: PathBuf::from(effective_config(p)),
                     enabled: p.enabled,
                 })
                 .collect();
@@ -1216,6 +1281,15 @@ async fn main() -> Result<()> {
         std::sync::Arc::clone(&source_rules_handle),
         std::sync::Arc::clone(&rules_handle),
         Some(purge_fn),
+    )?;
+
+    // Hot-reload plugin config: an operator editing config/plugins/<id>.toml (or
+    // an API PUT) restarts that plugin so it re-reads its config. Bound at
+    // function scope so the watcher lives for the whole run.
+    let _plugin_config_watcher = hc_api::PluginConfigWatcher::start(
+        hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins")),
+        plugin_commands.clone(),
+        config.plugins.iter().map(|p| p.id.clone()).collect(),
     )?;
 
     // ── 17. JWT service ────────────────────────────────────────────────────
@@ -1337,12 +1411,21 @@ async fn main() -> Result<()> {
         Default::default()
     });
 
+    // Back up the authoritative (central) config file for each plugin, falling
+    // back to the legacy path for anything not migrated. Migration ran during
+    // plugin startup above, so central files already exist by now.
+    let backup_config_store =
+        hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins"));
     let plugin_configs: Vec<hc_api::backup::PluginConfigEntry> = config
         .plugins
         .iter()
         .map(|p| hc_api::backup::PluginConfigEntry {
             id: p.id.clone(),
-            path: std::path::PathBuf::from(&p.config),
+            path: if backup_config_store.exists(&p.id) {
+                backup_config_store.path_for(&p.id)
+            } else {
+                std::path::PathBuf::from(&p.config)
+            },
         })
         .collect();
     let backup_paths = hc_api::backup::BackupPaths {
@@ -1575,4 +1658,67 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centralize_imports_legacy_and_returns_central_path() {
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let legacy = legacy_dir.path().join("config.toml");
+        let original = "[yolink]\nmode = \"local\"\n# keep this comment\n";
+        std::fs::write(&legacy, original).unwrap();
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        let map = centralize_plugin_configs(&store, [("plugin.yolink", legacy.to_str().unwrap())]);
+
+        // Effective path is now the central file, and it's a byte-for-byte copy.
+        let central = store.path_for("plugin.yolink");
+        assert_eq!(map["plugin.yolink"], central.to_string_lossy());
+        assert_eq!(std::fs::read_to_string(&central).unwrap(), original);
+    }
+
+    #[test]
+    fn centralize_is_idempotent_and_authoritative_after_import() {
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let legacy = legacy_dir.path().join("config.toml");
+        std::fs::write(&legacy, "v = 1\n").unwrap();
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        centralize_plugin_configs(&store, [("plugin.a", legacy.to_str().unwrap())]);
+        // A later legacy edit must not overwrite the now-authoritative central copy.
+        std::fs::write(&legacy, "v = 2\n").unwrap();
+        let map = centralize_plugin_configs(&store, [("plugin.a", legacy.to_str().unwrap())]);
+
+        assert_eq!(
+            map["plugin.a"],
+            store.path_for("plugin.a").to_string_lossy()
+        );
+        assert_eq!(store.read("plugin.a").unwrap(), "v = 1\n");
+    }
+
+    #[test]
+    fn centralize_falls_back_to_legacy_path_when_nothing_to_import() {
+        // No file at the legacy path and no central file → effective path is the
+        // legacy string verbatim, matching pre-centralization behavior exactly.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        let map = centralize_plugin_configs(
+            &store,
+            [("plugin.missing", "plugins/hc-missing/config/config.toml")],
+        );
+
+        assert_eq!(
+            map["plugin.missing"],
+            "plugins/hc-missing/config/config.toml"
+        );
+        assert!(!store.exists("plugin.missing"));
+    }
 }

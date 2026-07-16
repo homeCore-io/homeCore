@@ -60,6 +60,11 @@ plugins/hc-sonos/
 config/settings.local.json
 config/homecore.local.toml
 
+# Core-owned plugin config store (plaintext secrets — MQTT passwords,
+# vendor keys). Written by core; imported from each plugin's legacy file
+# on first run. Never commit.
+config/plugins/
+
 # Log files
 *.log
 logs/

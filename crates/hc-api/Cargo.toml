@@ -33,6 +33,7 @@ ipnet        = { workspace = true }
 toml         = { workspace = true }
 toml_edit    = "0.22"
 ron          = { workspace = true }
+notify       = { workspace = true }
 prometheus   = { workspace = true }
 zip          = { version = "2", default-features = false, features = ["deflate"] }
 hyper        = { version = "1", features = ["server", "http1"] }

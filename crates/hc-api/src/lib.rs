@@ -43,6 +43,8 @@ pub mod managed_modes;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod plugin_config_store;
+pub mod plugin_config_watcher;
 pub mod rate_limit;
 pub mod rule_file_store;
 pub mod streaming;
@@ -55,6 +57,8 @@ use event_log::EventLog;
 use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
 use metrics::MetricsCollector;
+pub use plugin_config_store::PluginConfigStore;
+pub use plugin_config_watcher::PluginConfigWatcher;
 use rule_file_store::RuleFileStore;
 
 /// Runtime command sent to a plugin supervisor task.
