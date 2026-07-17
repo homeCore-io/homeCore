@@ -131,6 +131,13 @@ async fn try_start(
         )
         .await?;
 
+    // Publish the operator-config JSON Schema so the hc-web editor renders a
+    // typed form (rides on the capability manifest).
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.  Without this, queued publishes/subscribes block
     // forever once the rumqttc internal buffer (64) fills up.

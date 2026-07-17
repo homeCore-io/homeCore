@@ -1,9 +1,23 @@
 use anyhow::Result;
 use serde::Deserialize;
 
+/// Operator-config JSON Schema, published on the capability manifest so the
+/// hc-web editor renders a typed form. `None` without the `schema` feature.
+#[cfg(feature = "schema")]
+pub fn config_schema() -> Option<serde_json::Value> {
+    serde_json::to_value(schemars::schema_for!(Config)).ok()
+}
+
+#[cfg(not(feature = "schema"))]
+pub fn config_schema() -> Option<serde_json::Value> {
+    None
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
     pub homecore: HomecoreConfig,
+    #[serde(default)]
     pub lutron: LutronConfig,
     #[serde(default)]
     pub logging: crate::logging::LoggingConfig,
@@ -28,6 +42,7 @@ impl Config {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HomecoreConfig {
     #[serde(default = "default_broker_host")]
     pub broker_host: String,
@@ -54,12 +69,14 @@ fn default_plugin_id() -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LutronConfig {
     pub host: String,
     #[serde(default = "default_lip_port")]
     pub port: u16,
     #[serde(default = "default_username")]
     pub username: String,
+    #[serde(default)]
     pub password: String,
     #[serde(default = "default_fade_secs")]
     pub default_fade_secs: f64,
@@ -67,6 +84,20 @@ pub struct LutronConfig {
     pub hold_threshold_ms: u64,
     #[serde(default = "default_reconnect_delay_secs")]
     pub reconnect_delay_secs: u64,
+}
+
+impl Default for LutronConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: default_lip_port(),
+            username: default_username(),
+            password: String::new(),
+            default_fade_secs: default_fade_secs(),
+            hold_threshold_ms: default_hold_threshold_ms(),
+            reconnect_delay_secs: default_reconnect_delay_secs(),
+        }
+    }
 }
 
 fn default_lip_port() -> u16 {
@@ -90,6 +121,7 @@ fn default_reconnect_delay_secs() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
     Dimmer,
@@ -114,6 +146,7 @@ pub enum DeviceKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceConfig {
     pub integration_id: u32,
     pub name: String,
@@ -153,6 +186,7 @@ pub struct DeviceConfig {
 /// State published:    `{ "enabled": true|false }`
 /// Commands accepted:  `{ "enable": true|false }`, `{ "execute": true }`
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TimeclockConfig {
     /// Lutron timeclock integration ID (almost always 1 for the Main Repeater).
     pub timeclock_id: u32,
@@ -175,6 +209,7 @@ impl TimeclockConfig {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SceneConfig {
     pub name: String,
     /// Integration ID of the Main Repeater — almost always 1.

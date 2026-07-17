@@ -11,6 +11,7 @@ name = "hc-lutron"
 path = "src/main.rs"
 
 [dependencies]
+schemars           = { version = "0.8", optional = true }
 plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.2.0" }
 tokio        = { version = "1", features = ["full"] }
 serde        = { version = "1", features = ["derive"] }
@@ -23,3 +24,7 @@ tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
 uuid         = { version = "1", features = ["v4"] }
+
+[features]
+default = ["schema"]
+schema = ["dep:schemars"]
