@@ -10,48 +10,25 @@ on:
   workflow_dispatch:
     inputs:
       fast:
-        description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
+        description: "Skip aarch64 to halve runtime (dev iteration; tag pushes always go multi-arch)."
         type: boolean
         default: true
-      refresh_deps:
-        description: "Run cargo update for in-org git deps (plugin-sdk-rs, hc-types, hc-logging, hc-time) before build. SDK fanout passes this so the rebuild actually carries new SDK code instead of the SHA Cargo.lock pins."
-        type: boolean
-        default: false
 
-# packages: write needed for ghcr.io push by the reusable workflow's
-# docker-publish job.
 permissions:
   contents: write
-  packages: write
 
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
-    # Inherit org-level secrets (CROSS_REPO_DISPATCH_PAT) so the reusable
-    # workflow can cascade to homeCore-io/docker on develop pushes.
+    # Inherit org secrets (REGISTRY_DISPATCH_PAT) so the reusable workflow can
+    # notify homeCore-io/registry to index this release's artifact.
     secrets: inherit
     with:
       binary_name: hc-hue
       config_example: config/config.toml.example
       rust_version: "stable"
-      publish_docker_image: false
-      # While homeCore-io/docker is still on develop. Switch to 'main'
-      # (or remove this line) once that repo's main branch carries the
-      # docker assets.
-      # The Dockerfile and entrypoints that build the published image come from
-      # homeCore-io/docker at this ref, so it is part of the build recipe — not
-      # just orchestration. Hardcoding `develop` meant a *tagged* image was built
-      # from whatever that branch happened to be at the time, so the image could
-      # not be rebuilt from the component's tag alone: its recipe was unrecorded.
-      #
-      # On a tag push, pin to the identical tag. homeCore-io/docker is versioned
-      # in lockstep (it carries v0.1.0-v0.1.5), so tagging this component v0.1.6
-      # builds against docker v0.1.6. Everything else keeps tracking develop,
-      # which is what a dev image wants.
-      #
-      # Ordering is now explicit: tag homeCore-io/docker before tagging this
-      # component. If the tag is missing the release fails — hc-scripts'
-      # pre-flight names the cause — rather than silently building from develop.
-      docker_repo_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
+      # Plugins ship as signed registry artifacts (tar.zst), not containers: on
+      # a tag release, package the binary, attach it to the GitHub Release, and
+      # notify the plugin registry to index it.
+      publish_registry: true
       fast: ${{ inputs.fast || false }}
-      refresh_deps: ${{ inputs.refresh_deps || false }}
