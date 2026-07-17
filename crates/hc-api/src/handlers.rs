@@ -5062,6 +5062,37 @@ pub async fn install_plugin(
             .into_response();
     }
 
+    // Seed a registry record so it lists immediately, then activate it in the
+    // running supervisor without a restart (falls back to next-start if the
+    // spawn channel isn't wired).
+    {
+        let mut map = s.plugins.write().await;
+        map.entry(record.id.clone()).or_insert_with(|| {
+            crate::PluginRecord::managed_seed(
+                record.id.clone(),
+                Some(record.config.clone()),
+                Some(record.binary.clone()),
+                record.enabled,
+            )
+        });
+    }
+    let activated = if record.enabled {
+        match &s.plugin_spawn {
+            Some(tx) => tx
+                .send(crate::InstalledPlugin {
+                    id: record.id.clone(),
+                    binary: record.binary.clone(),
+                    config: record.config.clone(),
+                    enabled: record.enabled,
+                })
+                .await
+                .is_ok(),
+            None => false,
+        }
+    } else {
+        false
+    };
+
     (
         StatusCode::OK,
         Json(json!({
@@ -5071,7 +5102,12 @@ pub async fn install_plugin(
             "binary": record.binary,
             "config": record.config,
             "reinstall": outcome.reinstall,
-            "note": "installed; activate on next core start (dynamic spawn is a follow-up)",
+            "activated": activated,
+            "note": if activated {
+                "installed and activated"
+            } else {
+                "installed; activate on next core start"
+            },
         })),
     )
         .into_response()

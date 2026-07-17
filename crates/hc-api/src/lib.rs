@@ -60,7 +60,7 @@ use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
 use metrics::MetricsCollector;
 pub use managed_plugins::{ManagedPluginStore, ManagedRecord};
-pub use plugin_install::InstallContext;
+pub use plugin_install::{InstallContext, InstalledPlugin};
 pub use plugin_config_store::PluginConfigStore;
 pub use plugin_config_watcher::PluginConfigWatcher;
 use rule_file_store::RuleFileStore;
@@ -131,6 +131,38 @@ pub struct PluginRecord {
     /// `GET /plugins/:id/config/schema`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<serde_json::Value>,
+}
+
+impl PluginRecord {
+    /// A seed record for a locally-managed plugin, before it registers/starts —
+    /// used when a plugin is installed at runtime so it shows in the list
+    /// immediately (supervisor status updates are update-only).
+    pub fn managed_seed(
+        plugin_id: String,
+        config_path: Option<String>,
+        binary_path: Option<String>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            plugin_id,
+            registered_at: chrono::Utc::now(),
+            status: if enabled { "starting" } else { "stopped" }.into(),
+            enabled,
+            managed: true,
+            config_path,
+            binary_path,
+            last_heartbeat: None,
+            last_restart: None,
+            restart_count: 0,
+            uptime_started: None,
+            device_count: 0,
+            log_level: None,
+            version: None,
+            supports_management: false,
+            capabilities: None,
+            config_schema: None,
+        }
+    }
 }
 
 /// Shared state injected into every handler via axum's `State` extractor.
@@ -214,6 +246,9 @@ pub struct AppState {
     pub managed_plugins: Option<Arc<ManagedPluginStore>>,
     /// Where + how to install plugins (paths + broker coords). `None` in tests.
     pub plugin_install: Option<Arc<InstallContext>>,
+    /// Sends a freshly-installed plugin to the supervisor for dynamic activation
+    /// (no restart). Wired to a listener in `main.rs`. `None` in tests.
+    pub plugin_spawn: Option<tokio::sync::mpsc::Sender<InstalledPlugin>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -634,6 +669,7 @@ impl AppState {
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             managed_plugins: None,
             plugin_install: None,
+            plugin_spawn: None,
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
@@ -788,6 +824,11 @@ impl AppState {
 
     pub fn with_plugin_install(mut self, ctx: Arc<InstallContext>) -> Self {
         self.plugin_install = Some(ctx);
+        self
+    }
+
+    pub fn with_plugin_spawn(mut self, tx: tokio::sync::mpsc::Sender<InstalledPlugin>) -> Self {
+        self.plugin_spawn = Some(tx);
         self
     }
 

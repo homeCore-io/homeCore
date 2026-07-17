@@ -284,6 +284,7 @@ impl PluginEntry {
 fn build_effective_plugins(
     static_plugins: &[PluginEntry],
     managed: &hc_api::ManagedPluginStore,
+    base: &Path,
 ) -> Vec<PluginEntry> {
     let removed = managed.removed_ids();
     let mut out: Vec<PluginEntry> = static_plugins
@@ -296,12 +297,17 @@ fn build_effective_plugins(
             continue;
         }
         out.retain(|p| p.id != rec.id);
-        out.push(PluginEntry {
+        let mut entry = PluginEntry {
             id: rec.id,
             binary: rec.binary,
             config: rec.config,
             enabled: rec.enabled,
-        });
+        };
+        // Resolve any relative record paths against base_dir exactly as static
+        // plugins are (absolute paths pass through), so activation doesn't depend
+        // on the process's CWD.
+        entry.resolve(base);
+        out.push(entry);
     }
     out
 }
@@ -1215,7 +1221,17 @@ async fn main() -> Result<()> {
             info!(?removed, "Managed store: suppressing uninstalled plugin(s)");
         }
     }
-    config.plugins = build_effective_plugins(&config.plugins, &managed_plugins);
+    config.plugins = build_effective_plugins(&config.plugins, &managed_plugins, &base_dir);
+
+    // Absolute install root, so an installed plugin's recorded binary/config
+    // paths work regardless of the process CWD (dynamic spawn + next boot).
+    let install_base = base_dir
+        .canonicalize()
+        .unwrap_or_else(|_| base_dir.clone());
+    // Channel: the install handler pushes a freshly-installed plugin here and a
+    // listener (below) spawns it into the running supervisor — no restart.
+    let (plugin_spawn_tx, mut plugin_spawn_rx) =
+        tokio::sync::mpsc::channel::<hc_api::InstalledPlugin>(8);
 
     // ── 15. Launch plugins (after MQTT is subscribed) ─────────────────────
     //
@@ -1343,6 +1359,33 @@ async fn main() -> Result<()> {
             .await;
         }
     };
+
+    // Activate freshly-installed plugins without a restart: convert each install
+    // request to a supervised process. Lives for the whole run.
+    {
+        let plugins = plugin_registry.clone();
+        let cmds = plugin_commands.clone();
+        let bus = pub_bus.clone();
+        let sd = shutdown_rx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = plugin_spawn_rx.recv().await {
+                info!(plugin_id = %req.id, "Activating installed plugin (dynamic spawn)");
+                plugin_manager::spawn_one(
+                    plugin_manager::PluginProcess {
+                        id: req.id,
+                        binary: PathBuf::from(req.binary),
+                        config: PathBuf::from(req.config),
+                        enabled: req.enabled,
+                    },
+                    plugins.clone(),
+                    cmds.clone(),
+                    bus.clone(),
+                    sd.clone(),
+                )
+                .await;
+            }
+        });
+    }
 
     // ── 16. Notification service + core.start moved up to 13b so the state
     //        bridge subscribes to internal_bus before the MQTT client begins
@@ -1566,11 +1609,12 @@ async fn main() -> Result<()> {
     .with_plugin_commands(plugin_commands)
     .with_managed_plugins(managed_plugins.clone())
     .with_plugin_install(std::sync::Arc::new(hc_api::InstallContext {
-        plugins_dir: base_dir.join("plugins"),
-        config_plugins_dir: base_dir.join("config").join("plugins"),
+        plugins_dir: install_base.join("plugins"),
+        config_plugins_dir: install_base.join("config").join("plugins"),
         broker_host: config.broker.host.clone(),
         broker_port: config.broker.port,
     }))
+    .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
         &pub_bus_rpc,

@@ -22,6 +22,18 @@ use serde::Deserialize;
 use crate::managed_plugins::ManagedRecord;
 use crate::plugin_config_store::PluginConfigStore;
 
+/// A request to spawn a just-installed plugin into the running supervisor
+/// (dynamic activation — no restart). The install handler sends this to a
+/// listener in `main.rs` that owns the supervisor handles (which live in the
+/// binary crate, out of reach of hc-api).
+#[derive(Debug, Clone)]
+pub struct InstalledPlugin {
+    pub id: String,
+    pub binary: String,
+    pub config: String,
+    pub enabled: bool,
+}
+
 /// The `plugin.toml` manifest inside an artifact.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
