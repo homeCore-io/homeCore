@@ -129,17 +129,37 @@ async fn supervise(
         set_status(&plugins, &event_bus, &entry.id, "starting").await;
         record_restart(&plugins, &entry.id).await;
 
+        // Read binary/config from the plugin's record so an upgrade (which
+        // rewrites the record + sends Restart) launches the NEW binary without
+        // having to replace this supervisor. Falls back to the spawn-time entry.
+        let (binary, config) = {
+            let map = plugins.read().await;
+            match map.get(&entry.id) {
+                Some(r) => (
+                    r.binary_path
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| entry.binary.clone()),
+                    r.config_path
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| entry.config.clone()),
+                ),
+                None => (entry.binary.clone(), entry.config.clone()),
+            }
+        };
+
         info!(
             plugin_id = %entry.id,
-            binary    = %entry.binary.display(),
-            config    = %entry.config.display(),
+            binary    = %binary.display(),
+            config    = %config.display(),
             "Launching plugin"
         );
 
         let started_at = Instant::now();
 
-        let mut child = match Command::new(&entry.binary)
-            .arg(&entry.config)
+        let mut child = match Command::new(&binary)
+            .arg(&config)
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn()

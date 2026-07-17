@@ -5151,21 +5151,38 @@ pub async fn install_plugin(
             .into_response();
     }
 
-    // Seed a registry record so it lists immediately, then activate it in the
-    // running supervisor without a restart (falls back to next-start if the
-    // spawn channel isn't wired).
+    // Seed or refresh the registry record — keeping binary/config/version current
+    // so a reinstall/upgrade points the (record-driven) supervisor at the new
+    // binary — then activate.
     {
         let mut map = s.plugins.write().await;
-        map.entry(record.id.clone()).or_insert_with(|| {
+        let entry = map.entry(record.id.clone()).or_insert_with(|| {
             crate::PluginRecord::managed_seed(
                 record.id.clone(),
                 Some(record.config.clone()),
                 Some(record.binary.clone()),
                 record.enabled,
+                Some(record.version.clone()),
             )
         });
+        entry.binary_path = Some(record.binary.clone());
+        entry.config_path = Some(record.config.clone());
+        entry.installed_version = Some(record.version.clone());
+        entry.enabled = record.enabled;
     }
-    let activated = if record.enabled {
+    // Already supervised (reinstall / upgrade) → Restart relaunches the new
+    // binary (the supervisor reads binary/config from the record). Fresh install
+    // → dynamic spawn into the supervisor.
+    let already_supervised = s.plugin_commands.read().await.contains_key(&record.id);
+    let activated = if !record.enabled {
+        false
+    } else if already_supervised {
+        let cmds = s.plugin_commands.read().await;
+        match cmds.get(&record.id) {
+            Some(tx) => tx.send(crate::PluginCommand::Restart).await.is_ok(),
+            None => false,
+        }
+    } else {
         match &s.plugin_spawn {
             Some(tx) => tx
                 .send(crate::InstalledPlugin {
@@ -5178,8 +5195,6 @@ pub async fn install_plugin(
                 .is_ok(),
             None => false,
         }
-    } else {
-        false
     };
 
     (

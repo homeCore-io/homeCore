@@ -1343,7 +1343,17 @@ async fn main() -> Result<()> {
                         supports_management: false,
                         capabilities: None,
                         config_schema: None,
+                        installed_version: None,
                     });
+            }
+            // Stamp installed_version from the managed store (registry/installed
+            // plugins) so the UI can compute "update available".
+            for rec in managed_plugins.records() {
+                if let Some(pr) = map.get_mut(&rec.id) {
+                    if !rec.version.is_empty() {
+                        pr.installed_version = Some(rec.version.clone());
+                    }
+                }
             }
         }
 

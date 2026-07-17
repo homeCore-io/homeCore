@@ -132,6 +132,10 @@ pub struct PluginRecord {
     /// `GET /plugins/:id/config/schema`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<serde_json::Value>,
+    /// Installed artifact version, for plugins added from the registry/managed
+    /// store (distinct from the SDK-reported `version`). Drives "update available".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
 }
 
 impl PluginRecord {
@@ -143,6 +147,7 @@ impl PluginRecord {
         config_path: Option<String>,
         binary_path: Option<String>,
         enabled: bool,
+        installed_version: Option<String>,
     ) -> Self {
         Self {
             plugin_id,
@@ -162,6 +167,7 @@ impl PluginRecord {
             supports_management: false,
             capabilities: None,
             config_schema: None,
+            installed_version,
         }
     }
 }
@@ -339,6 +345,7 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            installed_version: None,
                         });
                     rec.status = "active".into();
                     rec.registered_at = timestamp;
@@ -378,6 +385,7 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            installed_version: None,
                         });
                     rec.last_heartbeat = Some(timestamp);
                     rec.supports_management = true;
@@ -421,6 +429,7 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);
                     if config_schema.is_some() {
