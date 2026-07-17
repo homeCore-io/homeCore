@@ -16,6 +16,11 @@ on:
 
 permissions:
   contents: write
+  # The shared rust-release.yml still has a docker-publish job (core uses it)
+  # that declares packages: write. A reusable job can't request more than the
+  # caller grants, so this must be granted even though plugins build no image
+  # (publish_docker_image defaults false, so docker-publish never runs).
+  packages: write
 
 jobs:
   release:
