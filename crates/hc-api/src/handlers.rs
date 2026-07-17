@@ -4996,29 +4996,69 @@ pub async fn deregister_plugin(
         .into_response()
 }
 
-/// `POST /api/v1/plugins/install` — install a plugin from a local `.tar.zst`
-/// artifact (Phase B). Body: `{ "path": "/abs/path/to/artifact.tar.zst" }`.
+/// `GET /api/v1/registry/plugins` — browse the (verified, cached) registry index.
+pub async fn browse_registry(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
+    let Some(reg) = &s.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no plugin registry is configured" })),
+        )
+            .into_response();
+    };
+    match reg.index().await {
+        Ok(idx) => (StatusCode::OK, Json(json!({ "plugins": idx.plugins }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("registry unavailable: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/registry/plugins/:id` — one plugin's registry detail.
+pub async fn get_registry_plugin(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(reg) = &s.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no plugin registry is configured" })),
+        )
+            .into_response();
+    };
+    match reg.index().await {
+        Ok(idx) => match idx.plugin(&id) {
+            Some(p) => (StatusCode::OK, Json(json!(p))).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not in registry" })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("registry unavailable: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/plugins/install` — install a plugin, then activate it.
 ///
-/// Unpacks the artifact, installs the binary under `HOMECORE_HOME/plugins/`,
-/// mints an MQTT credential + seeds operator config, and records a managed
-/// entry (clearing any uninstall tombstone). Activation is on the next core
-/// start (dynamic spawn is a follow-up). The remote registry (Phase C) will hand
-/// this same pipeline a downloaded, verified artifact.
+/// Two sources: `{ "id": "...", "version": "..."? }` resolves + downloads +
+/// verifies (sha256, over a signature-verified index) from the remote registry
+/// (Phase C); `{ "path": "/abs/x.tar.zst" }` installs a local artifact (Phase B).
+/// Either way it unpacks the `.tar.zst`, installs the binary under
+/// `HOMECORE_HOME/plugins/`, mints an MQTT credential + seeds operator config,
+/// records a managed entry (clearing any uninstall tombstone), and dynamically
+/// spawns it (no restart).
 pub async fn install_plugin(
     State(s): State<AppState>,
     _: PluginsWrite,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let path = match body.get("path").and_then(Value::as_str) {
-        Some(p) if !p.trim().is_empty() => p.to_string(),
-        _ => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "error": "`path` to a local .tar.zst artifact is required" })),
-            )
-                .into_response();
-        }
-    };
     let (Some(mp), Some(ctx)) = (s.managed_plugins.clone(), s.plugin_install.clone()) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -5027,10 +5067,59 @@ pub async fn install_plugin(
             .into_response();
     };
 
+    // Resolve the artifact path: registry `{id, version?}` or local `{path}`.
+    // A downloaded temp file must outlive the blocking install that reads it.
+    let mut _download_guard: Option<tempfile::NamedTempFile> = None;
+    let archive_path = if let Some(id) = body.get("id").and_then(Value::as_str) {
+        let Some(reg) = s.registry.clone() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "no plugin registry is configured" })),
+            )
+                .into_response();
+        };
+        let version = body.get("version").and_then(Value::as_str);
+        let (art, _ver) = match reg.resolve(id, version).await {
+            Ok(x) => x,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("registry resolve failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let f = match reg.download_artifact(&art).await {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("artifact download failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let p = f.path().to_string_lossy().into_owned();
+        _download_guard = Some(f);
+        p
+    } else if let Some(p) = body
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+    {
+        p.to_string()
+    } else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "provide `id` (registry) or `path` (local artifact)" })),
+        )
+            .into_response();
+    };
+
     // Unpack + copy + write config off the async runtime.
     let ctx_inner = (*ctx).clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::plugin_install::install_from_archive(std::path::Path::new(&path), &ctx_inner)
+        crate::plugin_install::install_from_archive(std::path::Path::new(&archive_path), &ctx_inner)
     })
     .await;
 

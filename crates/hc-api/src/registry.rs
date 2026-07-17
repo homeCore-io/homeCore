@@ -10,7 +10,9 @@
 //! — so there is no JSON-canonicalization ambiguity. Each artifact also carries
 //! a `sha256` and a `key_id`, so per-publisher trust is an additive change later.
 
-use anyhow::{Context, Result};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// One downloadable build of a plugin version, for a specific OS/arch.
@@ -120,6 +122,116 @@ pub fn verify_detached(bytes: &[u8], signature: &[u8], public_key_b64: &str) -> 
         .map_err(|_| anyhow::anyhow!("signature verification failed"))
 }
 
+/// Hex sha256 of some bytes (artifact integrity).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// A client for a remote (or local) signed registry index. Caches the verified
+/// index for a short TTL so browse + install don't refetch on every call.
+pub struct RegistryClient {
+    url: String,
+    public_key: String,
+    http: reqwest::Client,
+    cache: tokio::sync::RwLock<Option<(RegistryIndex, Instant)>>,
+    ttl: Duration,
+}
+
+impl RegistryClient {
+    pub fn new(url: String, public_key: String) -> Self {
+        Self {
+            url,
+            public_key,
+            http: reqwest::Client::new(),
+            cache: tokio::sync::RwLock::new(None),
+            ttl: Duration::from_secs(300),
+        }
+    }
+
+    /// The verified index, cached for `ttl`; fetches + verifies on a miss.
+    pub async fn index(&self) -> Result<RegistryIndex> {
+        if let Some((idx, at)) = self.cache.read().await.as_ref() {
+            if at.elapsed() < self.ttl {
+                return Ok(idx.clone());
+            }
+        }
+        let idx = self.fetch_index().await?;
+        *self.cache.write().await = Some((idx.clone(), Instant::now()));
+        Ok(idx)
+    }
+
+    async fn fetch_index(&self) -> Result<RegistryIndex> {
+        let bytes = fetch_bytes(&self.http, &self.url)
+            .await
+            .with_context(|| format!("fetching registry index {}", self.url))?;
+        let sig_raw = fetch_bytes(&self.http, &format!("{}.sig", self.url))
+            .await
+            .context("fetching registry index signature (.sig)")?;
+        // The .sig is base64 of the 64-byte detached signature.
+        let sig = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            String::from_utf8_lossy(&sig_raw).trim(),
+        )
+        .context("decoding index signature (base64)")?;
+        verify_and_parse(&bytes, &sig, &self.public_key)
+    }
+
+    /// Resolve `(artifact, resolved_version)` for `id` (latest, or a specific
+    /// version) matching this host's os/arch.
+    pub async fn resolve(&self, id: &str, version: Option<&str>) -> Result<(ArtifactRef, String)> {
+        let idx = self.index().await?;
+        let plugin = idx
+            .plugin(id)
+            .ok_or_else(|| anyhow!("plugin `{id}` is not in the registry"))?;
+        let pv = match version {
+            Some(v) => plugin
+                .version(v)
+                .ok_or_else(|| anyhow!("version `{v}` of `{id}` not found"))?,
+            None => plugin
+                .latest()
+                .ok_or_else(|| anyhow!("`{id}` has no published versions"))?,
+        };
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let art = pv.artifact_for(os, arch).ok_or_else(|| {
+            anyhow!("no `{id}` {} artifact for {os}/{arch}", pv.version)
+        })?;
+        Ok((art.clone(), pv.version.clone()))
+    }
+
+    /// Download an artifact to a temp file and verify its sha256. Returns the
+    /// temp file (kept alive by the caller until the install reads it).
+    pub async fn download_artifact(&self, art: &ArtifactRef) -> Result<tempfile::NamedTempFile> {
+        let bytes = fetch_bytes(&self.http, &art.url)
+            .await
+            .with_context(|| format!("downloading artifact {}", art.url))?;
+        let got = sha256_hex(&bytes);
+        if !got.eq_ignore_ascii_case(art.sha256.trim()) {
+            bail!(
+                "artifact sha256 mismatch: expected {}, got {got}",
+                art.sha256
+            );
+        }
+        let mut f = tempfile::NamedTempFile::new().context("creating temp artifact file")?;
+        std::io::Write::write_all(&mut f, &bytes).context("writing downloaded artifact")?;
+        Ok(f)
+    }
+}
+
+/// Fetch bytes from an `http(s)://` URL, a `file://` URL, or a plain local path.
+async fn fetch_bytes(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).with_context(|| format!("reading {path}"));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let resp = http.get(url).send().await?.error_for_status()?;
+        return Ok(resp.bytes().await?.to_vec());
+    }
+    std::fs::read(url).with_context(|| format!("reading {url}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +280,54 @@ mod tests {
         let sig = sk.sign(&bytes).to_bytes();
         let (_, other_pk) = keypair(9);
         assert!(verify_and_parse(&bytes, &sig, &other_pk).is_err());
+    }
+
+    #[tokio::test]
+    async fn client_fetches_verifies_resolves_and_downloads() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // A real artifact + its sha256.
+        let artifact_bytes = b"fake .tar.zst contents".to_vec();
+        let artifact_path = tmp.path().join("hc-demo.tar.zst");
+        std::fs::write(&artifact_path, &artifact_bytes).unwrap();
+        let sha = sha256_hex(&artifact_bytes);
+
+        // index.json referencing it for THIS host's os/arch, then sign it.
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let index_json = format!(
+            r#"{{"schema":"1","plugins":[{{"id":"plugin.demo","name":"Demo","versions":[{{"version":"1.0.0","artifacts":[{{"os":"{os}","arch":"{arch}","url":"file://{}","sha256":"{sha}"}}]}}]}}]}}"#,
+            artifact_path.display()
+        );
+        let index_path = tmp.path().join("index.json");
+        std::fs::write(&index_path, &index_json).unwrap();
+        let (sk, pk) = keypair(7);
+        let sig_b64 = base64::engine::general_purpose::STANDARD
+            .encode(sk.sign(index_json.as_bytes()).to_bytes());
+        std::fs::write(tmp.path().join("index.json.sig"), sig_b64).unwrap();
+
+        let client =
+            RegistryClient::new(format!("file://{}", index_path.display()), pk);
+
+        // browse (fetch + verify)
+        let idx = client.index().await.unwrap();
+        assert_eq!(idx.plugin("plugin.demo").unwrap().name, "Demo");
+
+        // resolve for this host
+        let (art, ver) = client.resolve("plugin.demo", None).await.unwrap();
+        assert_eq!(ver, "1.0.0");
+        assert_eq!(art.sha256, sha);
+
+        // download + verify sha256
+        let f = client.download_artifact(&art).await.unwrap();
+        assert_eq!(std::fs::read(f.path()).unwrap(), artifact_bytes);
+
+        // a wrong sha256 is rejected
+        let mut bad = art.clone();
+        bad.sha256 = "deadbeef".into();
+        assert!(client.download_artifact(&bad).await.is_err());
+
+        // an unknown plugin / bad version fails resolution
+        assert!(client.resolve("plugin.nope", None).await.is_err());
+        assert!(client.resolve("plugin.demo", Some("9.9.9")).await.is_err());
     }
 }

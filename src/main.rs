@@ -230,6 +230,20 @@ struct AppConfig {
     influx: InfluxConfig,
     #[serde(default)]
     metrics: MetricsSection,
+    #[serde(default)]
+    registry: RegistrySection,
+}
+
+/// `[registry]` — the remote signed plugin registry. Both fields must be set to
+/// enable browse + registry-install; otherwise those endpoints return 503.
+#[derive(Deserialize, Default, Clone)]
+struct RegistrySection {
+    /// URL (or local path / `file://`) of the signed `index.json`.
+    #[serde(default)]
+    url: Option<String>,
+    /// Base64-encoded ed25519 public key that signs the index.
+    #[serde(default)]
+    public_key: Option<String>,
 }
 
 impl AppConfig {
@@ -1625,6 +1639,17 @@ async fn main() -> Result<()> {
     ))
     .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days)
     .with_metrics_whitelist(metrics_whitelist);
+
+    // Enable the plugin registry when `[registry]` has both a url and a pubkey.
+    let app_state = match (&config.registry.url, &config.registry.public_key) {
+        (Some(url), Some(pk)) if !url.trim().is_empty() && !pk.trim().is_empty() => {
+            info!(url = %url, "Plugin registry enabled");
+            app_state.with_registry(std::sync::Arc::new(
+                hc_api::registry::RegistryClient::new(url.clone(), pk.clone()),
+            ))
+        }
+        _ => app_state,
+    };
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store

@@ -250,6 +250,9 @@ pub struct AppState {
     /// Sends a freshly-installed plugin to the supervisor for dynamic activation
     /// (no restart). Wired to a listener in `main.rs`. `None` in tests.
     pub plugin_spawn: Option<tokio::sync::mpsc::Sender<InstalledPlugin>>,
+    /// Client for the remote signed plugin registry. `None` when `[registry]`
+    /// isn't configured (browse/registry-install then return 503).
+    pub registry: Option<Arc<registry::RegistryClient>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -671,6 +674,7 @@ impl AppState {
             managed_plugins: None,
             plugin_install: None,
             plugin_spawn: None,
+            registry: None,
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
@@ -830,6 +834,11 @@ impl AppState {
 
     pub fn with_plugin_spawn(mut self, tx: tokio::sync::mpsc::Sender<InstalledPlugin>) -> Self {
         self.plugin_spawn = Some(tx);
+        self
+    }
+
+    pub fn with_registry(mut self, client: Arc<registry::RegistryClient>) -> Self {
+        self.registry = Some(client);
         self
     }
 
@@ -1073,6 +1082,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
         .route("/plugins/install", post(handlers::install_plugin))
+        .route("/registry/plugins", get(handlers::browse_registry))
+        .route("/registry/plugins/:id", get(handlers::get_registry_plugin))
         .route(
             "/plugins/:id",
             get(handlers::get_plugin)
