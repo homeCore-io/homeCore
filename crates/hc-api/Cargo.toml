@@ -39,6 +39,8 @@ zip          = { version = "2", default-features = false, features = ["deflate"]
 tar          = "0.4"
 zstd         = "0.13"
 tempfile     = "3"
+ed25519-dalek = "2"
+base64       = "0.22"
 hyper        = { version = "1", features = ["server", "http1"] }
 hyper-util   = { version = "0.1", features = ["tokio", "server-auto"] }
 tower        = { version = "0.5", features = ["util"] }

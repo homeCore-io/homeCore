@@ -42,6 +42,7 @@ pub mod logs;
 pub mod managed_modes;
 pub mod managed_plugins;
 pub mod plugin_install;
+pub mod registry;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
