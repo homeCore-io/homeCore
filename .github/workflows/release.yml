@@ -32,7 +32,7 @@ jobs:
       binary_name: hc-lutron
       config_example: config/config.toml.example
       rust_version: "stable"
-      publish_docker_image: true
+      publish_docker_image: false
       # The Dockerfile and entrypoints that build the published image come from
       # homeCore-io/docker at this ref, so it is part of the build recipe — not
       # just orchestration. Hardcoding `develop` meant a *tagged* image was built
