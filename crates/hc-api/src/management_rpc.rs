@@ -2,7 +2,8 @@
 //!
 //! Publishes commands to `homecore/plugins/{id}/manage/cmd` and awaits
 //! responses on `homecore/plugins/{id}/manage/response` with a matching
-//! `request_id`.  5-second timeout.
+//! `request_id`.  Waits [`DEFAULT_TIMEOUT`] unless the action declares its own
+//! `timeout_ms` on the capability manifest.
 //!
 //! This enables config read/write and log level changes for remote plugins
 //! that implement the management protocol.
@@ -19,6 +20,12 @@ use uuid::Uuid;
 
 /// Pending RPC request waiting for a matching response.
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+/// Default response window for management commands that don't declare their
+/// own `timeout_ms`. Kept short because most management ops (config, log
+/// level, heartbeat) answer in milliseconds; slow plugin actions (network
+/// discovery, reboots) should declare a longer `timeout_ms` on the manifest.
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// MQTT management RPC helper.
 ///
@@ -70,7 +77,8 @@ impl ManagementRpc {
         Self { publish, pending }
     }
 
-    /// Send a management command and wait up to 5 seconds for a response.
+    /// Send a management command and wait up to [`DEFAULT_TIMEOUT`] for a
+    /// response.
     pub async fn request(
         &self,
         plugin_id: &str,
@@ -78,7 +86,7 @@ impl ManagementRpc {
         extra: Option<Value>,
     ) -> Result<Value, String> {
         let request_id = Uuid::new_v4().to_string();
-        self.request_with_id(plugin_id, action, &request_id, extra)
+        self.request_with_id(plugin_id, action, &request_id, DEFAULT_TIMEOUT, extra)
             .await
     }
 
@@ -91,6 +99,40 @@ impl ManagementRpc {
         plugin_id: &str,
         action: &str,
         request_id: &str,
+        timeout: std::time::Duration,
+        extra: Option<Value>,
+    ) -> Result<Value, String> {
+        let response = self
+            .dispatch(plugin_id, action, request_id, timeout, extra)
+            .await?;
+        // Management convention: a `status:"error"` reply is a failure the
+        // caller should observe as an `Err` (rejected config write, bad log
+        // level, …). The HTTP action layer that must NOT conflate this with a
+        // transport timeout uses `dispatch` / `send_command_raw_with_id`.
+        if response["status"].as_str() == Some("error") {
+            Err(response["error"]
+                .as_str()
+                .unwrap_or("unknown error")
+                .to_string())
+        } else {
+            Ok(response)
+        }
+    }
+
+    /// Publish a command and await the plugin's reply, returning the response
+    /// VERBATIM for any reply — including `status:"error"` business errors.
+    /// `Err` is reserved for a genuine no-response timeout or a closed channel.
+    /// This is what lets callers tell "the plugin answered with an error" apart
+    /// from "the plugin never answered": the former is a 200 with an error
+    /// payload, the latter a 504 gateway timeout — collapsing both into `Err`
+    /// (as `request_with_id` does) is why a plugin's own error used to surface
+    /// in the UI as a bogus gateway timeout.
+    async fn dispatch(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        request_id: &str,
+        timeout: std::time::Duration,
         extra: Option<Value>,
     ) -> Result<Value, String> {
         let request_id = request_id.to_string();
@@ -122,17 +164,8 @@ impl ManagementRpc {
             .map_err(|e| format!("failed to publish management command: {e}"))?;
 
         // Await response with timeout.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-            Ok(Ok(response)) => {
-                if response["status"].as_str() == Some("error") {
-                    Err(response["error"]
-                        .as_str()
-                        .unwrap_or("unknown error")
-                        .to_string())
-                } else {
-                    Ok(response)
-                }
-            }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
                 // oneshot sender dropped (shouldn't happen)
                 Err("internal error: response channel closed".into())
@@ -142,7 +175,8 @@ impl ManagementRpc {
                 let mut map = self.pending.lock().await;
                 map.remove(&request_id);
                 Err(format!(
-                    "plugin {plugin_id} did not respond within 5 seconds"
+                    "plugin {plugin_id} did not respond within {} seconds",
+                    timeout.as_secs()
                 ))
             }
         }
@@ -190,6 +224,7 @@ impl ManagementRpc {
         plugin_id: &str,
         action: &str,
         request_id: &str,
+        timeout_ms: Option<u64>,
         params: Value,
     ) -> Result<Value, String> {
         let extra = if params.is_object() {
@@ -197,7 +232,35 @@ impl ManagementRpc {
         } else {
             None
         };
-        self.request_with_id(plugin_id, action, request_id, extra)
+        let timeout = timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(DEFAULT_TIMEOUT);
+        self.request_with_id(plugin_id, action, request_id, timeout, extra)
+            .await
+    }
+
+    /// Like [`send_command_with_id`] but returns the plugin's reply verbatim
+    /// (including `status:"error"` payloads); only a genuine timeout / closed
+    /// channel yields `Err`. The HTTP action endpoint uses this so a plugin's
+    /// business error is surfaced as its payload (HTTP 200) rather than a
+    /// misleading 504 gateway timeout.
+    pub async fn send_command_raw_with_id(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        request_id: &str,
+        timeout_ms: Option<u64>,
+        params: Value,
+    ) -> Result<Value, String> {
+        let extra = if params.is_object() {
+            Some(params)
+        } else {
+            None
+        };
+        let timeout = timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(DEFAULT_TIMEOUT);
+        self.dispatch(plugin_id, action, request_id, timeout, extra)
             .await
     }
 }

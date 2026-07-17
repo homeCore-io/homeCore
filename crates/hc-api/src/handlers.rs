@@ -6264,10 +6264,20 @@ pub async fn post_plugin_command(
         }
     }
 
-    match rpc
-        .send_command_with_id(&id, &action, &request_id, params)
-        .await
-    {
+    // Streaming actions keep the convention-applying path: a `status:"error"`
+    // ack means the stream never started, so release the reserved slot and
+    // report 504. For non-streaming actions, a plugin reply of ANY status is
+    // the action's result — return it verbatim (HTTP 200). Only a genuine
+    // no-response timeout is a 504; a plugin's own business error (e.g. "no
+    // devices configured to discover") is not a gateway timeout.
+    let outcome = if is_streaming {
+        rpc.send_command_with_id(&id, &action, &request_id, timeout_ms, params)
+            .await
+    } else {
+        rpc.send_command_raw_with_id(&id, &action, &request_id, timeout_ms, params)
+            .await
+    };
+    match outcome {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
         Err(e) => {
             if is_streaming {
