@@ -92,6 +92,10 @@ impl MqttClient {
         let mut opts = MqttOptions::new(&config.client_id, &config.broker_host, config.broker_port);
         opts.set_keep_alive(std::time::Duration::from_secs(30));
         opts.set_clean_session(true);
+        // Accept large payloads (up to the broker's 256 KiB max) so big retained
+        // capability manifests (rich config schema + actions) aren't dropped on
+        // the way in — the rumqttc default incoming limit is only ~10 KiB.
+        opts.set_max_packet_size(256 * 1024, 256 * 1024);
 
         if let (Some(u), Some(p)) = (&config.username, &config.password) {
             opts.set_credentials(u, p);
