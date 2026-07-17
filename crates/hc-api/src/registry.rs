@@ -10,8 +10,6 @@
 //! — so there is no JSON-canonicalization ambiguity. Each artifact also carries
 //! a `sha256` and a `key_id`, so per-publisher trust is an additive change later.
 
-use std::time::{Duration, Instant};
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -130,14 +128,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-/// A client for a remote (or local) signed registry index. Caches the verified
-/// index for a short TTL so browse + install don't refetch on every call.
+/// A client for a remote (or local) signed registry index.
+///
+/// The index is fetched and signature-checked **fresh on every call** — never
+/// cached. A registry can gain a plugin or a new version at any time, and a
+/// stale list that only clears on a core restart is a worse failure than a
+/// cheap re-fetch: browse and install are user-initiated and infrequent.
 pub struct RegistryClient {
     url: String,
     public_key: String,
     http: reqwest::Client,
-    cache: tokio::sync::RwLock<Option<(RegistryIndex, Instant)>>,
-    ttl: Duration,
 }
 
 impl RegistryClient {
@@ -146,21 +146,13 @@ impl RegistryClient {
             url,
             public_key,
             http: reqwest::Client::new(),
-            cache: tokio::sync::RwLock::new(None),
-            ttl: Duration::from_secs(300),
         }
     }
 
-    /// The verified index, cached for `ttl`; fetches + verifies on a miss.
+    /// The verified index — always fetched and signature-checked fresh, so a
+    /// newly-published plugin or version is visible without a core restart.
     pub async fn index(&self) -> Result<RegistryIndex> {
-        if let Some((idx, at)) = self.cache.read().await.as_ref() {
-            if at.elapsed() < self.ttl {
-                return Ok(idx.clone());
-            }
-        }
-        let idx = self.fetch_index().await?;
-        *self.cache.write().await = Some((idx.clone(), Instant::now()));
-        Ok(idx)
+        self.fetch_index().await
     }
 
     async fn fetch_index(&self) -> Result<RegistryIndex> {
