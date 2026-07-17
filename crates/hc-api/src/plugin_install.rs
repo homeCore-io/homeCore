@@ -167,7 +167,10 @@ fn unpack_tar_zst(archive: &Path, dest: &Path) -> Result<()> {
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            bail!("artifact entry escapes the archive root: {}", path.display());
+            bail!(
+                "artifact entry escapes the archive root: {}",
+                path.display()
+            );
         }
         entry.unpack_in(dest)?;
     }

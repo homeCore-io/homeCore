@@ -1239,9 +1239,7 @@ async fn main() -> Result<()> {
 
     // Absolute install root, so an installed plugin's recorded binary/config
     // paths work regardless of the process CWD (dynamic spawn + next boot).
-    let install_base = base_dir
-        .canonicalize()
-        .unwrap_or_else(|_| base_dir.clone());
+    let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
     // Channel: the install handler pushes a freshly-installed plugin here and a
     // listener (below) spawns it into the running supervisor — no restart.
     let (plugin_spawn_tx, mut plugin_spawn_rx) =
@@ -1654,9 +1652,10 @@ async fn main() -> Result<()> {
     let app_state = match (&config.registry.url, &config.registry.public_key) {
         (Some(url), Some(pk)) if !url.trim().is_empty() && !pk.trim().is_empty() => {
             info!(url = %url, "Plugin registry enabled");
-            app_state.with_registry(std::sync::Arc::new(
-                hc_api::registry::RegistryClient::new(url.clone(), pk.clone()),
-            ))
+            app_state.with_registry(std::sync::Arc::new(hc_api::registry::RegistryClient::new(
+                url.clone(),
+                pk.clone(),
+            )))
         }
         _ => app_state,
     };

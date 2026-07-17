@@ -13,7 +13,9 @@ use ed25519_dalek::{Signer, SigningKey};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: registry_sign <index.json> [seed_byte]");
+    let path = args
+        .get(1)
+        .expect("usage: registry_sign <index.json> [seed_byte]");
     let seed: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
 
     let sk = SigningKey::from_bytes(&[seed; 32]);

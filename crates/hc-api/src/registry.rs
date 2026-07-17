@@ -187,9 +187,9 @@ impl RegistryClient {
                 .ok_or_else(|| anyhow!("`{id}` has no published versions"))?,
         };
         let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-        let art = pv.artifact_for(os, arch).ok_or_else(|| {
-            anyhow!("no `{id}` {} artifact for {os}/{arch}", pv.version)
-        })?;
+        let art = pv
+            .artifact_for(os, arch)
+            .ok_or_else(|| anyhow!("no `{id}` {} artifact for {os}/{arch}", pv.version))?;
         Ok((art.clone(), pv.version.clone()))
     }
 
@@ -297,8 +297,7 @@ mod tests {
             .encode(sk.sign(index_json.as_bytes()).to_bytes());
         std::fs::write(tmp.path().join("index.json.sig"), sig_b64).unwrap();
 
-        let client =
-            RegistryClient::new(format!("file://{}", index_path.display()), pk);
+        let client = RegistryClient::new(format!("file://{}", index_path.display()), pk);
 
         // browse (fetch + verify)
         let idx = client.index().await.unwrap();

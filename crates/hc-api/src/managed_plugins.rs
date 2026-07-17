@@ -175,7 +175,10 @@ mod tests {
             })
             .unwrap();
 
-        assert!(store.removed_ids().is_empty(), "install clears the tombstone");
+        assert!(
+            store.removed_ids().is_empty(),
+            "install clears the tombstone"
+        );
         let recs = store.records();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].id, "plugin.hue");

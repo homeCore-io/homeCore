@@ -4866,10 +4866,7 @@ pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl Int
 /// same event shape the plugin-unregister path in state_bridge emits), and
 /// nullifying any rule references. Shared by plugin uninstall and the
 /// `/plugins/:id/devices` wipe. Returns `(deleted, device_ids, affected_rules)`.
-async fn remove_plugin_devices(
-    s: &AppState,
-    plugin_id: &str,
-) -> (usize, Vec<String>, Vec<String>) {
+async fn remove_plugin_devices(s: &AppState, plugin_id: &str) -> (usize, Vec<String>, Vec<String>) {
     let devices_before = match s.store.list_devices().await {
         Ok(d) => d,
         Err(e) => {
@@ -4899,11 +4896,9 @@ async fn remove_plugin_devices(
                     }),
                 });
                 if let Some(rfs) = &s.rule_file_store {
-                    if let Ok(names) = crate::rule_file_store::nullify_device_refs(
-                        &rfs.dir,
-                        id,
-                        &devices_before,
-                    ) {
+                    if let Ok(names) =
+                        crate::rule_file_store::nullify_device_refs(&rfs.dir, id, &devices_before)
+                    {
                         for name in names {
                             if !affected_rules.contains(&name) {
                                 affected_rules.push(name);
@@ -5930,7 +5925,10 @@ fn array_identity_match<'a>(incoming: &Value, current: &'a [Value]) -> Option<&'
             continue;
         };
         if let Some(found) = current.iter().find(|c| {
-            c.as_object().and_then(|co| co.get(key)).and_then(Value::as_str) == Some(want)
+            c.as_object()
+                .and_then(|co| co.get(key))
+                .and_then(Value::as_str)
+                == Some(want)
         }) {
             return Some(found);
         }
