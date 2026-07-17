@@ -4996,6 +4996,87 @@ pub async fn deregister_plugin(
         .into_response()
 }
 
+/// `POST /api/v1/plugins/install` — install a plugin from a local `.tar.zst`
+/// artifact (Phase B). Body: `{ "path": "/abs/path/to/artifact.tar.zst" }`.
+///
+/// Unpacks the artifact, installs the binary under `HOMECORE_HOME/plugins/`,
+/// mints an MQTT credential + seeds operator config, and records a managed
+/// entry (clearing any uninstall tombstone). Activation is on the next core
+/// start (dynamic spawn is a follow-up). The remote registry (Phase C) will hand
+/// this same pipeline a downloaded, verified artifact.
+pub async fn install_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let path = match body.get("path").and_then(Value::as_str) {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "`path` to a local .tar.zst artifact is required" })),
+            )
+                .into_response();
+        }
+    };
+    let (Some(mp), Some(ctx)) = (s.managed_plugins.clone(), s.plugin_install.clone()) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "plugin install is not configured on this server" })),
+        )
+            .into_response();
+    };
+
+    // Unpack + copy + write config off the async runtime.
+    let ctx_inner = (*ctx).clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::plugin_install::install_from_archive(std::path::Path::new(&path), &ctx_inner)
+    })
+    .await;
+
+    let outcome = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("install failed: {e:#}") })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("install task panicked: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut record = outcome.record;
+    record.installed_at = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = mp.install(record.clone()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("installed but failed to record: {e}") })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "installed": record.id,
+            "name": record.name,
+            "version": record.version,
+            "binary": record.binary,
+            "config": record.config,
+            "reinstall": outcome.reinstall,
+            "note": "installed; activate on next core start (dynamic spawn is a follow-up)",
+        })),
+    )
+        .into_response()
+}
+
 /// `DELETE /api/v1/plugins/:id/devices`
 ///
 /// Bulk-wipe every device whose `plugin_id` matches `:id`. The plugin

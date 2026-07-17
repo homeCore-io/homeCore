@@ -36,6 +36,9 @@ ron          = { workspace = true }
 notify       = { workspace = true }
 prometheus   = { workspace = true }
 zip          = { version = "2", default-features = false, features = ["deflate"] }
+tar          = "0.4"
+zstd         = "0.13"
+tempfile     = "3"
 hyper        = { version = "1", features = ["server", "http1"] }
 hyper-util   = { version = "0.1", features = ["tokio", "server-auto"] }
 tower        = { version = "0.5", features = ["util"] }
@@ -46,4 +49,3 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 tower        = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tempfile     = "3"

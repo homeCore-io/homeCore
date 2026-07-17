@@ -41,6 +41,7 @@ pub mod handlers;
 pub mod logs;
 pub mod managed_modes;
 pub mod managed_plugins;
+pub mod plugin_install;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
@@ -59,6 +60,7 @@ use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
 use metrics::MetricsCollector;
 pub use managed_plugins::{ManagedPluginStore, ManagedRecord};
+pub use plugin_install::InstallContext;
 pub use plugin_config_store::PluginConfigStore;
 pub use plugin_config_watcher::PluginConfigWatcher;
 use rule_file_store::RuleFileStore;
@@ -210,6 +212,8 @@ pub struct AppState {
     /// Uninstall tombstones ids here so they stay removed across restarts.
     /// `None` in tests / when unconfigured.
     pub managed_plugins: Option<Arc<ManagedPluginStore>>,
+    /// Where + how to install plugins (paths + broker coords). `None` in tests.
+    pub plugin_install: Option<Arc<InstallContext>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -629,6 +633,7 @@ impl AppState {
             calendar_expansion_days: 400,
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             managed_plugins: None,
+            plugin_install: None,
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
@@ -778,6 +783,11 @@ impl AppState {
 
     pub fn with_managed_plugins(mut self, store: Arc<ManagedPluginStore>) -> Self {
         self.managed_plugins = Some(store);
+        self
+    }
+
+    pub fn with_plugin_install(mut self, ctx: Arc<InstallContext>) -> Self {
+        self.plugin_install = Some(ctx);
         self
     }
 
@@ -1020,6 +1030,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
+        .route("/plugins/install", post(handlers::install_plugin))
         .route(
             "/plugins/:id",
             get(handlers::get_plugin)

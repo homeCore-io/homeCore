@@ -1565,6 +1565,12 @@ async fn main() -> Result<()> {
     }
     .with_plugin_commands(plugin_commands)
     .with_managed_plugins(managed_plugins.clone())
+    .with_plugin_install(std::sync::Arc::new(hc_api::InstallContext {
+        plugins_dir: base_dir.join("plugins"),
+        config_plugins_dir: base_dir.join("config").join("plugins"),
+        broker_host: config.broker.host.clone(),
+        broker_port: config.broker.port,
+    }))
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
         &pub_bus_rpc,
