@@ -101,8 +101,17 @@ pub fn install_from_archive(archive: &Path, ctx: &InstallContext) -> Result<Inst
     std::fs::create_dir_all(&install_dir)
         .with_context(|| format!("creating {}", install_dir.display()))?;
     let dst_bin = install_dir.join(&manifest.binary);
-    std::fs::copy(&src_bin, &dst_bin).context("copying plugin binary")?;
-    make_executable(&dst_bin)?;
+    // Stage to a sibling temp file and atomically rename over the destination.
+    // A plain copy over dst_bin fails with ETXTBSY ("Text file busy") when that
+    // binary is the currently-running plugin — i.e. an in-place upgrade of a
+    // live plugin. rename() swaps the directory entry instead: the running
+    // process keeps the old, now-unlinked inode and the next launch picks up
+    // the new binary. Same directory, so the rename stays on one filesystem.
+    let tmp_bin = install_dir.join(format!(".{}.new", manifest.binary));
+    std::fs::copy(&src_bin, &tmp_bin)
+        .with_context(|| format!("staging plugin binary at {}", tmp_bin.display()))?;
+    make_executable(&tmp_bin)?;
+    std::fs::rename(&tmp_bin, &dst_bin).context("installing plugin binary")?;
 
     // 4. Seed operator config — only when none exists, so a reinstall never
     //    clobbers operator edits. Injects the [homecore] bootstrap + a freshly
