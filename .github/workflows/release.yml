@@ -34,7 +34,7 @@ jobs:
       binary_name: hc-hue
       config_example: config/config.toml.example
       rust_version: "stable"
-      publish_docker_image: true
+      publish_docker_image: false
       # While homeCore-io/docker is still on develop. Switch to 'main'
       # (or remove this line) once that repo's main branch carries the
       # docker assets.
