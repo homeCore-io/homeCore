@@ -2908,7 +2908,9 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             ),
             owner_user_id: owner_user_id.to_string(),
             tags: vec!["starter".into(), "home".into(), "overview".into()],
-            icon: "home".into(),
+            // Not "home": that renders the same house glyph as the Home nav
+            // item. "rocket" reads as onboarding and stays distinct.
+            icon: "rocket".into(),
             created_at: now,
             updated_at: now,
             widgets: vec![
