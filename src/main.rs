@@ -172,6 +172,9 @@ async fn try_start(
     if let Some(schema) = config::config_schema() {
         mgmt = mgmt.with_config_schema(schema);
     }
+    // …and the plugin-authored config descriptor, which the editor renders
+    // instead of guessing a form from the schema. Rides the same manifest.
+    mgmt = mgmt.with_config_descriptor(config::config_descriptor());
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
     let mgmt = pairing::register_actions(mgmt, pairing_handle);

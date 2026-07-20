@@ -29,6 +29,228 @@ pub fn config_schema() -> Option<serde_json::Value> {
     None
 }
 
+/// The plugin's own **config descriptor** — how this configuration should be
+/// presented, which a JSON Schema cannot express: units, conditionals, enums as
+/// segmented pickers, and prose.
+///
+/// Published on the capability manifest; core serves it at
+/// `GET /plugins/{id}/config/descriptor` and the editor renders it directly.
+///
+/// Coverage note (phase 6): every `HuePluginConfig` key is represented here.
+/// Bridges are *paired* through the `pair_bridge` action and their learned
+/// app_keys live in core's learned state, not this file — so the Bridges
+/// section is a manual/static escape hatch plus a pointer to the action, not
+/// the primary path. `homecore.plugin_id` is deliberately omitted: it is
+/// bootstrap identity fixed at install, not an operator setting.
+pub fn config_descriptor() -> serde_json::Value {
+    use plugin_sdk_rs::config_descriptor::{Cond, Descriptor, Field, Section};
+
+    let discovery_on = || Cond::truthy("hue.discovery_enabled");
+    let eventstream_on = || Cond::truthy("hue.eventstream_enabled");
+
+    Descriptor::new("plugin.hue")
+        .title("Hue")
+        .section(
+            Section::new("discovery", "Discovery")
+                .field(
+                    Field::toggle("hue.discovery_enabled")
+                        .label("Discover bridges")
+                        .default(true)
+                        .help("Find Hue bridges on the LAN automatically. Turn off to use only the bridges listed below."),
+                )
+                .field(
+                    Field::toggle("hue.discovery_cloud_fallback")
+                        .label("Cloud fallback")
+                        .default(true)
+                        .visible_when(discovery_on())
+                        .help("If mDNS finds nothing, ask Philips' discovery endpoint. The lookup returns only your bridge's LAN IP; no control traffic leaves the network."),
+                )
+                .field(
+                    Field::duration("hue.discovery_timeout_secs")
+                        .label("Discovery timeout")
+                        .unit("secs")
+                        .default(5)
+                        .min(1)
+                        .visible_when(discovery_on())
+                        .help("How long to wait for bridges to answer a discovery scan."),
+                ),
+        )
+        .section(
+            Section::new("bridges", "Bridges")
+                .field(Field::note(
+                    "Bridges are normally added with the Pair Hue bridge action \
+                     (Actions tab) — press the link button and homeCore stores \
+                     the key securely. Add an entry below only to target a bridge \
+                     discovery can't reach, e.g. on another subnet.",
+                ))
+                .field(
+                    Field::table("bridges")
+                        .label("Static bridges")
+                        .render("cards")
+                        .help("Manually configured bridges. Most installs leave this empty and pair from Actions.")
+                        .columns([
+                            Field::text("name").label("Name"),
+                            Field::host("host").label("Host / IP"),
+                            Field::secret("app_key").label("App key"),
+                        ]),
+                ),
+        )
+        .section(
+            Section::new("live", "Live updates")
+                .field(
+                    Field::toggle("hue.eventstream_enabled")
+                        .label("Event stream")
+                        .default(true)
+                        .help("Subscribe to the bridge's push stream so state changes arrive instantly instead of only on the next resync."),
+                )
+                .field(
+                    Field::duration("hue.eventstream_reconnect_secs")
+                        .label("Reconnect delay")
+                        .unit("secs")
+                        .default(3)
+                        .min(1)
+                        .visible_when(eventstream_on())
+                        .help("How long to wait before reconnecting a dropped event stream."),
+                )
+                .field(
+                    Field::duration("hue.resync_interval_secs")
+                        .label("Resync interval")
+                        .unit("secs")
+                        .default(60)
+                        .min(5)
+                        .help("Full re-read of every bridge, as a backstop for anything the event stream missed."),
+                )
+                .field(
+                    Field::duration("hue.heartbeat_secs")
+                        .label("Heartbeat")
+                        .unit("secs")
+                        .default(30)
+                        .min(5)
+                        .help("How often the plugin reports health to homeCore."),
+                ),
+        )
+        .section(
+            Section::new("publishing", "Publishing")
+                .field(
+                    Field::toggle("hue.compact_motion_facets")
+                        .label("Compact motion sensors")
+                        .default(true)
+                        .help("Fold a motion sensor's temperature and light-level readings onto the one device instead of publishing them as separate devices."),
+                )
+                .field(
+                    Field::toggle("hue.publish_grouped_lights")
+                        .label("Publish room/zone groups")
+                        .help("Also expose each Hue room and zone as a single grouped light you can control as one."),
+                )
+                .field(
+                    Field::list("hue.publish_grouped_lights_for", "text")
+                        .label("Only these groups")
+                        .default(Vec::<String>::new())
+                        .help("When set, publish grouped lights for just these room/zone names — instead of all of them."),
+                )
+                .field(
+                    Field::list("hue.skip_grouped_lights_for", "text")
+                        .label("Never these groups")
+                        .default(Vec::<String>::new())
+                        .help("Room/zone names to never publish as a grouped light."),
+                )
+                .field(
+                    Field::toggle("hue.publish_bridge_home")
+                        .label("Publish “All lights” group")
+                        .help("Expose the bridge-wide group that controls every light at once."),
+                )
+                .field(
+                    Field::toggle("hue.publish_entertainment_configurations")
+                        .label("Publish entertainment areas")
+                        .help("Expose Hue entertainment configurations (sync zones) as devices."),
+                ),
+        )
+        .section(
+            Section::new("display", "Display")
+                .field(
+                    Field::enumeration("hue.display.temperature_unit")
+                        .label("Temperature unit")
+                        .render("segmented")
+                        .default("c")
+                        .option("c", "°C")
+                        .option("f", "°F")
+                        .help("Unit for motion-sensor temperature readings."),
+                )
+                .field(
+                    Field::enumeration("hue.display.illuminance_display")
+                        .label("Light level")
+                        .render("segmented")
+                        .default("lux")
+                        .option("lux", "Lux")
+                        .option("raw", "Raw")
+                        .help("Show sensor illuminance as estimated lux, or the bridge's raw value."),
+                ),
+        )
+        .section(
+            Section::new("logging", "Logging")
+                .field(
+                    Field::text("logging.level")
+                        .label("Level")
+                        .default("info")
+                        .placeholder("info | debug | hc_hue=debug"),
+                )
+                .field(
+                    Field::enumeration("logging.log_forward_level")
+                        .label("Forward to core")
+                        .render("segmented")
+                        .default("info")
+                        .help(
+                            "Minimum level forwarded to homeCore over MQTT; \
+                             anything below is written locally only.",
+                        )
+                        .option("off", "Off")
+                        .option("error", "Error")
+                        .option("warn", "Warn")
+                        .option("info", "Info")
+                        .option("debug", "Debug"),
+                )
+                .field(
+                    Field::enumeration("logging.rotation")
+                        .label("Rotate")
+                        .render("segmented")
+                        .default("daily")
+                        .option("hourly", "Hourly")
+                        .option("daily", "Daily")
+                        .option("weekly", "Weekly")
+                        .option("never", "Never"),
+                )
+                .field(
+                    Field::int("logging.max_size_mb")
+                        .label("Rotate at size")
+                        .unit("MB")
+                        .default(100)
+                        .min(0)
+                        .help("Whichever comes first, this or the schedule. 0 disables size-based rotation."),
+                )
+                .field(
+                    Field::int("logging.prune_after_days")
+                        .label("Prune after")
+                        .unit("days")
+                        .default(0)
+                        .min(0)
+                        .help("Delete rotated files older than this. 0 = never prune."),
+                )
+                .field(
+                    Field::toggle("logging.compress")
+                        .label("Compress rotated files")
+                        .default(true),
+                ),
+        )
+        .section(
+            Section::new("connection", "Connection")
+                .hidden()
+                .field(Field::host("homecore.broker_host").label("Broker host"))
+                .field(Field::port("homecore.broker_port").label("Broker port"))
+                .field(Field::secret("homecore.password").label("Broker password")),
+        )
+        .build()
+}
+
 impl HuePluginConfig {
     pub fn load(path: &str) -> Result<Self> {
         let text =
@@ -373,6 +595,113 @@ fn default_eventstream_reconnect_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A published descriptor is *authoritative* — the editor renders it
+    /// instead of deriving from the schema — so any config field it omits
+    /// becomes uneditable. hc-sonos silently dropped four logging settings that
+    /// way (`5bccebf`). This guards against the same regression here: every
+    /// leaf in the config schema must appear in the descriptor, or be listed as
+    /// a deliberate omission with a reason.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn descriptor_covers_every_schema_field() {
+        // Bootstrap identity fixed at install, not an operator setting.
+        const JUSTIFIED_OMISSIONS: &[&str] = &["homecore.plugin_id"];
+
+        // Flatten the schema to dotted leaf paths. Arrays are leaves — an array
+        // field (e.g. `bridges`) is covered as a whole by a table/list, we do
+        // not descend into item properties.
+        fn flatten(
+            schema: &serde_json::Value,
+            defs: &serde_json::Value,
+            prefix: &str,
+            out: &mut Vec<String>,
+        ) {
+            let node = resolve_ref(schema, defs);
+            let is_object = node.get("type").and_then(|t| t.as_str()) == Some("object")
+                || node.get("properties").is_some();
+            if is_object {
+                if let Some(props) = node.get("properties").and_then(|p| p.as_object()) {
+                    for (name, child) in props {
+                        let path = if prefix.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{prefix}.{name}")
+                        };
+                        flatten(child, defs, &path, out);
+                    }
+                }
+            } else {
+                out.push(prefix.to_string());
+            }
+        }
+
+        fn resolve_ref<'a>(
+            node: &'a serde_json::Value,
+            defs: &'a serde_json::Value,
+        ) -> &'a serde_json::Value {
+            // schemars wraps a struct field as `{"allOf": [{"$ref": ...}]}`,
+            // and a bare reference as `{"$ref": ...}`. Unwrap either to the
+            // definition it points at.
+            let reference = node.get("$ref").and_then(|r| r.as_str()).or_else(|| {
+                node.get("allOf")
+                    .and_then(|a| a.as_array())
+                    .filter(|a| a.len() == 1)
+                    .and_then(|a| a[0].get("$ref"))
+                    .and_then(|r| r.as_str())
+            });
+            if let Some(reference) = reference {
+                if let Some(name) = reference.rsplit('/').next() {
+                    if let Some(target) = defs.get(name) {
+                        return target;
+                    }
+                }
+            }
+            node
+        }
+
+        fn collect_keys(descriptor: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+            let Some(sections) = descriptor.get("sections").and_then(|s| s.as_array()) else {
+                return;
+            };
+            for section in sections {
+                let Some(fields) = section.get("fields").and_then(|f| f.as_array()) else {
+                    continue;
+                };
+                for field in fields {
+                    if let Some(key) = field.get("key").and_then(|k| k.as_str()) {
+                        out.insert(key.to_string());
+                    }
+                }
+            }
+        }
+
+        let schema = config_schema().expect("schema feature is on");
+        let defs = schema
+            .get("definitions")
+            .or_else(|| schema.get("$defs"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let mut schema_leaves = Vec::new();
+        flatten(&schema, &defs, "", &mut schema_leaves);
+
+        let mut descriptor_keys = std::collections::HashSet::new();
+        collect_keys(&config_descriptor(), &mut descriptor_keys);
+
+        let uncovered: Vec<&String> = schema_leaves
+            .iter()
+            .filter(|leaf| {
+                !descriptor_keys.contains(*leaf)
+                    && !JUSTIFIED_OMISSIONS.contains(&leaf.as_str())
+            })
+            .collect();
+
+        assert!(
+            uncovered.is_empty(),
+            "config fields missing from the descriptor (add them or justify the omission): {uncovered:?}"
+        );
+    }
 
     #[test]
     fn build_bridge_state_removal_drops_only_the_named_bridge() {
