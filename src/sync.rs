@@ -242,7 +242,7 @@ pub async fn refresh_bridge_state(
                                     .map(|spec| spec.device_type.as_str())
                                     .unwrap_or(aux_device_type(&aux.resource_type)),
                             ),
-                            None,
+                            aux.area.as_deref(),
                             registration
                                 .map(|spec| Value::Object(spec.capabilities.clone()))
                                 .or_else(|| Some(translator::aux_capabilities(&aux))),
@@ -1596,6 +1596,7 @@ mod tests {
     fn compacts_temp_lux_battery_to_motion_device() {
         let motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "motion".to_string(),
             resource_id: "rid-motion".to_string(),
@@ -1605,6 +1606,7 @@ mod tests {
         };
         let temp = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "temperature".to_string(),
             resource_id: "rid-temp".to_string(),
@@ -1629,6 +1631,7 @@ mod tests {
     fn compacts_zigbee_connectivity_to_owner_light_when_no_motion_device() {
         let zigbee = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-2".to_string(),
             resource_type: "zigbee_connectivity".to_string(),
             resource_id: "rid-zigbee".to_string(),
@@ -1651,6 +1654,7 @@ mod tests {
     fn compacts_grouped_sensor_resources_to_motion_device() {
         let grouped_motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_motion".to_string(),
             resource_id: "rid-grouped-motion".to_string(),
@@ -1660,6 +1664,7 @@ mod tests {
         };
         let grouped_light = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_light_level".to_string(),
             resource_id: "rid-grouped-light".to_string(),
@@ -1669,6 +1674,7 @@ mod tests {
         };
         let motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "motion".to_string(),
             resource_id: "rid-motion".to_string(),
@@ -1694,6 +1700,7 @@ mod tests {
     fn skips_standalone_grouped_sensor_devices_and_bridge_home_by_default() {
         let grouped_motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_motion".to_string(),
             resource_id: "rid-grouped-motion".to_string(),
@@ -1703,6 +1710,7 @@ mod tests {
         };
         let bridge_home = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "bridge-owner".to_string(),
             resource_type: "bridge_home".to_string(),
             resource_id: "rid-bridge-home".to_string(),
@@ -1735,6 +1743,7 @@ mod tests {
     fn compacts_remote_facets_to_button_owner_device() {
         let button = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "button".to_string(),
             resource_id: "rid-button".to_string(),
@@ -1744,6 +1753,7 @@ mod tests {
         };
         let rotary = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "relative_rotary".to_string(),
             resource_id: "rid-rotary".to_string(),
@@ -1753,6 +1763,7 @@ mod tests {
         };
         let battery = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "device_power".to_string(),
             resource_id: "rid-battery".to_string(),
@@ -1782,6 +1793,7 @@ mod tests {
     fn skips_standalone_support_facets_without_owner_device() {
         let battery = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-support".to_string(),
             resource_type: "device_power".to_string(),
             resource_id: "rid-battery".to_string(),

@@ -408,6 +408,7 @@ mod tests {
         (
             HueAuxDevice {
                 bridge_id: "bridge-1".to_string(),
+                area: None,
                 owner_rid: "owner-1".to_string(),
                 resource_type: "grouped_motion".to_string(),
                 resource_id: format!("rid-{device_id}"),

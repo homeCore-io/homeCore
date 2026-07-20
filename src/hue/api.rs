@@ -290,59 +290,8 @@ impl HueApiClient {
             }
         }
 
-        // Map each Hue *device* to the room it sits in, so a light can carry the
-        // room as its homeCore area and follow it when someone moves the light
-        // in the Hue app.
-        //
-        // Rooms only — deliberately not zones. In Hue a device belongs to at
-        // most one room (rooms are physical and exclusive), while zones are
-        // arbitrary overlapping groupings ("Downstairs", "Colour lights"), so a
-        // zone cannot answer "which room is this in" unambiguously. A room lists
-        // its devices as `children`.
-        let rooms_url = format!("https://{}/clip/v2/resource/room", self.target.host);
-        let mut device_area: HashMap<String, String> = HashMap::new();
-        match client
-            .get(rooms_url)
-            .header("hue-application-key", &app_key)
-            .send()
-            .await
-        {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(payload) => {
-                        if let Some(items) = payload.get("data").and_then(|v| v.as_array()) {
-                            for item in items {
-                                let Some(name) = item
-                                    .get("metadata")
-                                    .and_then(|m| m.get("name"))
-                                    .and_then(|v| v.as_str())
-                                else {
-                                    continue;
-                                };
-                                let area = Self::slugify(name);
-                                if area.is_empty() {
-                                    continue;
-                                }
-                                for child in item
-                                    .get("children")
-                                    .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flatten()
-                                {
-                                    if let Some(rid) = child.get("rid").and_then(|v| v.as_str()) {
-                                        device_area.insert(rid.to_string(), area.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => warn!(error = %e, "Could not parse Hue rooms; lights get no area"),
-                },
-                Err(e) => warn!(error = %e, "Hue rooms endpoint returned non-success"),
-            },
-            // Rooms are an enrichment, never a reason to fail the whole sync.
-            Err(e) => warn!(error = %e, "Could not fetch Hue rooms; lights get no area"),
-        }
+        let device_area = self.fetch_device_areas(&client, &app_key).await;
+
 
         let lights_url = format!("https://{}/clip/v2/resource/light", self.target.host);
         let lights_payload = client
@@ -778,6 +727,71 @@ impl HueApiClient {
         Ok(scenes)
     }
 
+    /// Map each Hue *device* rid to the room it sits in, slugified as a
+    /// homeCore area, so anything owned by that device can carry the room and
+    /// follow it when someone moves the device in the Hue app.
+    ///
+    /// Rooms only — deliberately not zones. In Hue a device belongs to at most
+    /// one room (rooms are physical and exclusive), while zones are arbitrary
+    /// overlapping groupings ("Downstairs", "Colour lights"), so a zone cannot
+    /// answer "which room is this in" unambiguously. A room lists its devices
+    /// as `children`.
+    ///
+    /// Shared by lights and accessories: a motion sensor is in a room just as
+    /// much as a lamp is, and reading rooms only in the lights fetch left every
+    /// sensor unassigned.
+    async fn fetch_device_areas(
+        &self,
+        client: &Client,
+        app_key: &str,
+    ) -> HashMap<String, String> {
+        let rooms_url = format!("https://{}/clip/v2/resource/room", self.target.host);
+        let mut device_area: HashMap<String, String> = HashMap::new();
+        match client
+            .get(rooms_url)
+            .header("hue-application-key", app_key)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(payload) => {
+                        if let Some(items) = payload.get("data").and_then(|v| v.as_array()) {
+                            for item in items {
+                                let Some(name) = item
+                                    .get("metadata")
+                                    .and_then(|m| m.get("name"))
+                                    .and_then(|v| v.as_str())
+                                else {
+                                    continue;
+                                };
+                                let area = Self::slugify(name);
+                                if area.is_empty() {
+                                    continue;
+                                }
+                                for child in item
+                                    .get("children")
+                                    .and_then(|v| v.as_array())
+                                    .into_iter()
+                                    .flatten()
+                                {
+                                    if let Some(rid) = child.get("rid").and_then(|v| v.as_str()) {
+                                        device_area.insert(rid.to_string(), area.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "Could not parse Hue rooms; devices get no area"),
+                },
+                Err(e) => warn!(error = %e, "Hue rooms endpoint returned non-success"),
+            },
+            // Rooms are an enrichment, never a reason to fail the whole sync.
+            Err(e) => warn!(error = %e, "Could not fetch Hue rooms; devices get no area"),
+        }
+        device_area
+    }
+
     pub async fn fetch_aux_devices(&self) -> Result<Vec<HueAuxDevice>> {
         let Some(app_key) = self.current_app_key() else {
             return Ok(Vec::new());
@@ -785,6 +799,7 @@ impl HueApiClient {
 
         let client = self.http_client();
         let owner_names = self.fetch_owner_names(&client, &app_key).await?;
+        let device_area = self.fetch_device_areas(&client, &app_key).await;
 
         let resource_types = [
             "motion",
@@ -844,6 +859,7 @@ impl HueApiClient {
                 let attributes = self.extract_aux_attributes(resource_type, item);
                 out.push(HueAuxDevice {
                     bridge_id: self.target.bridge_id.clone(),
+                    area: device_area.get(owner_rid).cloned(),
                     owner_rid: owner_rid.to_string(),
                     resource_type: resource_type.to_string(),
                     resource_id: rid.to_string(),

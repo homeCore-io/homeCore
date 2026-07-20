@@ -551,6 +551,7 @@ mod tests {
     fn aux(resource_type: &str) -> HueAuxDevice {
         HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: resource_type.to_string(),
             resource_id: "rid-1".to_string(),

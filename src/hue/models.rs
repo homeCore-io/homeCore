@@ -136,6 +136,10 @@ pub struct HueScene {
 #[derive(Debug, Clone)]
 pub struct HueAuxDevice {
     pub bridge_id: String,
+    /// The Hue room this accessory's owning device sits in, slugified as a
+    /// homeCore area. Same source as [`HueLight::area`] — a sensor belongs to
+    /// a room just as much as a lamp does.
+    pub area: Option<String>,
     pub owner_rid: String,
     pub resource_type: String,
     pub resource_id: String,
