@@ -66,7 +66,10 @@ impl HueApiClient {
         self.app_key.read().ok().and_then(|v| v.clone())
     }
 
-    fn set_app_key(&self, app_key: String) {
+    /// Adopt a newly-learned app key. The key lives behind a lock precisely so
+    /// a running client can be authorized in place — pairing a bridge that was
+    /// already discovered (unpaired) must take effect now, not on next restart.
+    pub(crate) fn set_app_key(&self, app_key: String) {
         if let Ok(mut slot) = self.app_key.write() {
             *slot = Some(app_key);
         }

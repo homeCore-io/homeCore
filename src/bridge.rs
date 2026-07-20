@@ -388,23 +388,58 @@ impl Bridge {
                         Some(target) => {
                             // Dedup: re-pairing an already-running bridge (possibly
                             // with a different-case bridge_id, or targeted by host)
-                            // must not add a second runtime bridge / device. Its new
-                            // app_key is already persisted to learned state and takes
-                            // effect on the next restart. Distinct new bridges (no
-                            // match by id or host) are still added — multi-bridge.
-                            let already_running = self.apis.iter().any(|a| {
+                            // must not add a second runtime bridge / device.
+                            // Distinct new bridges (no match by id or host) are
+                            // still added — multi-bridge.
+                            let running = self.apis.iter().position(|a| {
                                 let t = a.target();
                                 crate::config::same_bridge(
                                     &t.bridge_id, &t.host, &target.bridge_id, &target.host,
                                 )
                             });
-                            if already_running {
+                            if let Some(idx) = running {
+                                // "Already running" does not mean "already working":
+                                // discovery registers every bridge it finds, including
+                                // unpaired ones (auth_required, no app_key). That is
+                                // the normal case for a first pairing, so the existing
+                                // entry must ADOPT the new key — dropping it here left
+                                // the bridge unauthorized with no devices until the
+                                // plugin was restarted, which looked like pairing had
+                                // silently failed.
+                                let api = self.apis[idx].clone();
+                                let was_authorized = api.has_app_key();
+                                if let Some(app_key) = target.app_key.clone() {
+                                    api.set_app_key(app_key);
+                                }
                                 info!(
                                     bridge_id = %target.bridge_id,
                                     host = %target.host,
-                                    "Re-paired an already-running bridge; keeping the existing \
-                                     runtime entry (new key persisted to learned state)"
+                                    newly_authorized = !was_authorized && api.has_app_key(),
+                                    "Re-paired an already-running bridge; adopted the new app key"
                                 );
+                                // Going unauthorized → authorized is the moment this
+                                // bridge becomes usable: start its eventstream and pull
+                                // its devices now rather than waiting for the next
+                                // resync tick.
+                                if !was_authorized && api.has_app_key() {
+                                    if self.cfg.hue.eventstream_enabled {
+                                        let api_for_es = api.clone();
+                                        let tx = event_tx.clone();
+                                        let reconnect_secs =
+                                            self.cfg.hue.eventstream_reconnect_secs;
+                                        tokio::spawn(async move {
+                                            let _ = api_for_es
+                                                .run_eventstream(tx, reconnect_secs)
+                                                .await;
+                                        });
+                                    }
+                                    if let Err(e) = self.refresh(&api).await {
+                                        warn!(
+                                            error = %e,
+                                            "Initial refresh of newly-authorized bridge failed"
+                                        );
+                                    }
+                                }
                             } else {
                                 info!(
                                     bridge_id = %target.bridge_id,
