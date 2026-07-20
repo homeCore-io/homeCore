@@ -610,6 +610,7 @@ mod tests {
     #[test]
     fn light_capabilities_include_advanced_fields_when_supported() {
         let light = HueLight {
+            area: None,
             bridge_id: "bridge-1".to_string(),
             owner_rid: "owner-1".to_string(),
             resource_id: "rid-1".to_string(),

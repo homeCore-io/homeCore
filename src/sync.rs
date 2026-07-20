@@ -65,7 +65,11 @@ pub async fn refresh_bridge_state(
                             &light.device_id,
                             &light.name,
                             Some("light"),
-                            None,
+                            // The Hue room, so moving a light between rooms in
+                            // the Hue app moves it in homeCore too. Core keeps
+                            // this as the plugin-delivered area; a user's
+                            // `area_override` still wins.
+                            light.area.as_deref(),
                             Some(translator::light_capabilities(&light)),
                         )
                         .await?;

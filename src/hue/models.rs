@@ -66,6 +66,10 @@ pub struct BridgeSnapshot {
 pub struct HueLight {
     pub bridge_id: String,
     pub owner_rid: String,
+    /// The Hue room this light's device sits in, slugified as a homeCore area.
+    /// `None` when the light is in no room. Follows the bridge: move the light
+    /// to another room in the Hue app and this follows.
+    pub area: Option<String>,
     pub resource_id: String,
     pub device_id: String,
     pub name: String,
