@@ -1976,11 +1976,25 @@ fn area_id_from_name(name: &str) -> Uuid {
     )
 }
 
+/// Does this (raw, possibly un-normalized) area value name the given area?
+/// Area names are normalized on the way in, but device-side values arrive from
+/// plugins in whatever shape the bridge uses ("Living Room"), so every
+/// comparison has to normalize.
+fn area_matches(value: Option<&str>, area_name: &str) -> bool {
+    value.map(normalize_area_name).as_deref() == Some(area_name)
+}
+
 fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
     let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for device in devices {
-        let Some(area) = device.area.as_deref() else {
+        // Effective, not raw: a device the user has assigned to a room carries
+        // that room in `area_override` with `area` left as whatever the plugin
+        // said (often nothing). Reading `area` alone made every user
+        // assignment invisible here — the room existed and the device pointed
+        // at it, but the area listed no devices, so "add to room" looked like
+        // it had done nothing.
+        let Some(area) = device.effective_area() else {
             continue;
         };
         let normalized = normalize_area_name(area);
@@ -2156,8 +2170,18 @@ pub async fn patch_area(
     };
 
     for device in &mut devices {
-        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
-            device.area = Some(new_name.clone());
+        // Rename whichever field points at this area. A device assigned by the
+        // user carries the room in `area_override`; matching only `area` left
+        // those devices pointing at a room name that no longer exists.
+        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
+        let in_override = area_matches(device.area_override.as_deref(), &area.name);
+        if in_plugin_area || in_override {
+            if in_plugin_area {
+                device.area = Some(new_name.clone());
+            }
+            if in_override {
+                device.area_override = Some(new_name.clone());
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2229,8 +2253,17 @@ pub async fn delete_area(
     };
 
     for device in &mut devices {
-        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
-            device.area = None;
+        // Same reasoning as rename: clear whichever field pointed at the
+        // deleted area, or user-assigned devices keep a dangling room.
+        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
+        let in_override = area_matches(device.area_override.as_deref(), &area.name);
+        if in_plugin_area || in_override {
+            if in_plugin_area {
+                device.area = None;
+            }
+            if in_override {
+                device.area_override = None;
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -6577,12 +6610,17 @@ pub async fn set_area_devices(
 
     for device in &mut devices {
         let in_desired = desired.contains(&device.device_id);
-        let in_area =
-            device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str());
+        // Membership is by *effective* area — a user-assigned device is in the
+        // room even though the plugin never said so.
+        let in_area = area_matches(device.effective_area(), &area.name);
 
         if in_desired {
             if !in_area {
-                device.area = Some(area.name.clone());
+                // This is a user assigning a device to a room, so it writes the
+                // override — the same contract as PATCH /devices. Writing the
+                // plugin-owned `area` here meant the next registration silently
+                // reverted the assignment.
+                device.area_override = Some(area.name.clone());
                 if let Err(e) = s.store.upsert_device(device).await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -6592,7 +6630,13 @@ pub async fn set_area_devices(
                 }
             }
         } else if in_area {
-            device.area = None;
+            // Dropping a device from the room clears the user's assignment. If
+            // the plugin itself still reports this room the device stays in it
+            // — the bridge owns that, per the bridge-wins rule.
+            device.area_override = None;
+            if area_matches(device.area.as_deref(), &area.name) {
+                device.area = None;
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -8634,6 +8678,63 @@ token = "TOKEN-TWO"
         assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A device the user assigned to a room carries it in `area_override`,
+    /// with `area` left as whatever the plugin said (often nothing). Deriving
+    /// membership from `area` alone made every user assignment invisible: the
+    /// room existed and the device pointed at it, but the area listed no
+    /// devices, so "add to room" looked like it had done nothing.
+    #[tokio::test]
+    async fn area_membership_counts_user_assigned_devices() {
+        let state = mk_state().await;
+
+        let mut d = DeviceState::new("sonos_bathroom", "Bathroom", "plugin.sonos");
+        d.area = None; // the plugin reports no room
+        d.area_override = Some("studio_b".into()); // the user assigned one
+        state.store.upsert_device(&d).await.expect("seed");
+
+        let resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
+            .await
+            .into_response();
+        let areas: Vec<Area> = parse_json(resp).await;
+
+        let studio = areas
+            .iter()
+            .find(|a| a.name == "studio_b")
+            .expect("user-assigned room should exist");
+        assert_eq!(studio.device_ids, vec!["sonos_bathroom".to_string()]);
+    }
+
+    /// The override must follow a rename, or the device is left pointing at a
+    /// room name that no longer exists.
+    #[tokio::test]
+    async fn renaming_an_area_follows_user_assignments() {
+        let state = mk_state().await;
+
+        let mut d = DeviceState::new("sonos_bathroom", "Bathroom", "plugin.sonos");
+        d.area_override = Some("studio_b".into());
+        state.store.upsert_device(&d).await.expect("seed");
+
+        let area_id = area_id_from_name("studio_b");
+        patch_area(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(area_id),
+            Json(PatchAreaBody {
+                name: "Studio C".into(),
+            }),
+        )
+        .await
+        .into_response();
+
+        let stored = state
+            .store
+            .get_device("sonos_bathroom")
+            .await
+            .expect("load")
+            .expect("device");
+        assert_eq!(stored.area_override.as_deref(), Some("studio_c"));
+    }
+
     #[tokio::test]
     async fn a_created_switch_is_actually_listed() {
         let state = mk_state().await;
@@ -8881,9 +8982,16 @@ token = "TOKEN-TWO"
             .expect("load d3")
             .expect("d3 exists");
 
-        assert_eq!(d1.area, None);
-        assert_eq!(d2.area, None);
-        assert_eq!(d3.area.as_deref(), Some("kitchen"));
+        // Assigning a device to a room is a *user* action, so it writes the
+        // override — the same contract as PATCH /devices. Writing the
+        // plugin-owned `area` here meant the next registration silently
+        // reverted the assignment.
+        assert_eq!(d1.effective_area(), None);
+        assert_eq!(d2.effective_area(), None);
+        assert_eq!(d3.effective_area(), Some("kitchen"));
+        assert_eq!(d3.area_override.as_deref(), Some("kitchen"));
+        // The plugin's own value is left untouched — it belongs to the plugin.
+        assert_eq!(d3.area.as_deref(), Some("Office"));
     }
 
     #[tokio::test]
@@ -8922,7 +9030,8 @@ token = "TOKEN-TWO"
             .await
             .expect("load d1")
             .expect("d1 exists");
-        assert_eq!(d1.area.as_deref(), Some("office"));
+        assert_eq!(d1.effective_area(), Some("office"));
+        assert_eq!(d1.area_override.as_deref(), Some("office"));
     }
 
     #[tokio::test]
