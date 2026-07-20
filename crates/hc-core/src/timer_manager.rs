@@ -506,6 +506,7 @@ impl TimerManager {
             warn!(%device_id, error = %e, "Timer: failed to persist state");
             return;
         }
+        let device_name = dev.effective_name().to_string();
         let current = dev.attributes;
         let changed: Vec<String> = current
             .keys()
@@ -518,7 +519,7 @@ impl TimerManager {
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
-            device_name: Some(dev.name.clone()),
+            device_name: Some(device_name.clone()),
             previous,
             current,
             changed,
@@ -553,6 +554,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let change = DeviceChange::homecore("timer_manager");
     dev.last_change = Some(change.clone());
     let _ = state.upsert_device(&dev).await;
+    let device_name = dev.effective_name().to_string();
     let current = dev.attributes;
     let changed: Vec<String> = current
         .keys()
@@ -563,7 +565,7 @@ async fn fire_timer(device_id: &str, state: &StateStore, bus: &EventBus) {
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
-        device_name: Some(dev.name.clone()),
+        device_name: Some(device_name.clone()),
         previous,
         current,
         changed,
@@ -595,6 +597,7 @@ async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStor
     let change = DeviceChange::homecore("timer_manager");
     dev.last_change = Some(change.clone());
     let _ = state.upsert_device(&dev).await;
+    let device_name = dev.effective_name().to_string();
     let current = dev.attributes;
     let changed: Vec<String> = current
         .keys()
@@ -605,7 +608,7 @@ async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStor
     let _ = bus.publish(Event::DeviceStateChanged {
         timestamp: Utc::now(),
         device_id: device_id.to_string(),
-        device_name: Some(dev.name.clone()),
+        device_name: Some(device_name.clone()),
         previous,
         current,
         changed,

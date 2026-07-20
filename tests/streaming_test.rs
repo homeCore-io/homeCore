@@ -588,6 +588,8 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 supports_management: true,
                 capabilities: Some(hc_captest::capabilities_manifest()),
                 config_schema: None,
+                config_descriptor: None,
+                installed_version: None,
             },
         );
     }

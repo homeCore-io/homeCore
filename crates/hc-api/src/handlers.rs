@@ -604,8 +604,28 @@ pub async fn update_device(
                 }
             };
 
-            if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
-                device.name = name.to_string();
+            // `name`/`area` name the *user's* intent, so they set the override —
+            // never the plugin-delivered value, which registration overwrites on
+            // every restart (a rename written to `device.name` silently reverted).
+            // Null, or an empty string, clears the override and hands the device
+            // back to whatever the bridge calls it.
+            if let Some(name) = body.get("name") {
+                if name.is_null() {
+                    device.name_override = None;
+                } else if let Some(value) = name.as_str() {
+                    let trimmed = value.trim();
+                    device.name_override = if trimmed.is_empty() || trimmed == device.name {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                } else {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "name must be a string or null" })),
+                    )
+                        .into_response();
+                }
             }
             if let Some(status_icon) = body.get("status_icon") {
                 if status_icon.is_null() {
@@ -626,12 +646,18 @@ pub async fn update_device(
                 }
             }
             if let Some(area) = body.get("area") {
-                device.area = if area.is_null() {
+                let requested = if area.is_null() {
                     None
                 } else {
                     area.as_str()
                         .map(normalize_area_name)
                         .filter(|value| !value.is_empty())
+                };
+                // Same contract as `name`: setting the area the plugin already
+                // reports is not an override, it is agreement — so don't pin it.
+                device.area_override = match requested {
+                    Some(a) if Some(a.as_str()) == device.area.as_deref() => None,
+                    other => other,
                 };
             }
             if let Some(ui_hint) = body.get("ui_hint") {
@@ -2936,11 +2962,41 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "hero".into(), x: 0, y: 0, w: 1, h: 2 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "media".into(), x: 0, y: 2, w: 1, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "devices".into(), x: 0, y: 5, w: 1, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "log".into(), x: 0, y: 8, w: 1, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "modes".into(), x: 0, y: 11, w: 1, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 1,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 0,
+                            y: 5,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 8,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 0,
+                            y: 11,
+                            w: 1,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -2949,11 +3005,41 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "hero".into(), x: 0, y: 0, w: 12, h: 2 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "media".into(), x: 0, y: 2, w: 5, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "devices".into(), x: 5, y: 2, w: 7, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "log".into(), x: 0, y: 5, w: 8, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "modes".into(), x: 8, y: 5, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 5,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 5,
+                            y: 2,
+                            w: 7,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -2962,11 +3048,41 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "hero".into(), x: 0, y: 0, w: 12, h: 2 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "media".into(), x: 0, y: 2, w: 4, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "devices".into(), x: 4, y: 2, w: 8, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "log".into(), x: 0, y: 5, w: 8, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "modes".into(), x: 8, y: 5, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 4,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 4,
+                            y: 2,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
@@ -2975,11 +3091,41 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 120.0,
                     gap: 16.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "hero".into(), x: 0, y: 0, w: 12, h: 2 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "media".into(), x: 0, y: 2, w: 4, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "devices".into(), x: 4, y: 2, w: 8, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "log".into(), x: 0, y: 5, w: 8, h: 3 },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "modes".into(), x: 8, y: 5, w: 4, h: 2 },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 4,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 4,
+                            y: 2,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
             ],
@@ -3054,13 +3200,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     None,
                     json!({"selection_mode": "query", "query": "living", "show_offline": false, "limit": 2}),
                 ),
-                widget(
-                    "scenes",
-                    "scene_row",
-                    "Scenes",
-                    None,
-                    json!({}),
-                ),
+                widget("scenes", "scene_row", "Scenes", None, json!({})),
                 widget(
                     "events",
                     "event_feed",

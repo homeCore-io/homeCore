@@ -14,7 +14,15 @@ struct MatchCandidate {
 }
 
 fn name_matches(reference: &str, device: &DeviceState) -> bool {
-    normalize_name_segment(reference) == normalize_name_segment(&device.name)
+    // Match either label a person could have written the rule against: the
+    // plugin-delivered name, or a user's override of it. Matching only one
+    // would break rules the moment a device was renamed on either side.
+    let reference = normalize_name_segment(reference);
+    reference == normalize_name_segment(&device.name)
+        || device
+            .name_override
+            .as_deref()
+            .is_some_and(|o| reference == normalize_name_segment(o))
 }
 
 fn candidate_label(device: &DeviceState) -> String {

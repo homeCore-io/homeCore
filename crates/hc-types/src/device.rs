@@ -272,12 +272,32 @@ pub struct DeviceState {
     /// Optional UI-facing status icon override selected by the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_icon: Option<String>,
-    /// Human-readable label (from plugin registration or user override).
+    /// Human-readable label **as delivered by the plugin**.
+    ///
+    /// The bridge owns the device, so it owns this label: re-registration
+    /// overwrites it, which is what makes a rename in the vendor's own app
+    /// (the Sonos app, the Hue app) flow through to homeCore. To pin a label
+    /// against that sync, set [`name_override`] — never write here.
     pub name: String,
+    /// Optional user-set label that wins over the plugin-delivered [`name`].
+    ///
+    /// Absent by default: overriding is a deliberate choice, not the default.
+    /// Registration never touches this field, so an override survives plugin
+    /// restarts; clearing it reverts the device to whatever the bridge calls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_override: Option<String>,
     /// The plugin that owns this device.
     pub plugin_id: String,
-    /// Optional area/room assignment.
+    /// Optional area/room assignment, normalized to a slug (`living_room`).
+    ///
+    /// Plugin-delivered where the bridge has a room concept (Hue rooms, Lutron
+    /// areas, Z-Wave locations); it keeps syncing, so moving a device to another
+    /// room on the bridge moves it here too. Absent delivery leaves it alone.
     pub area: Option<String>,
+    /// Optional user-set area that wins over the plugin-delivered [`area`].
+    /// Same contract as [`name_override`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area_override: Option<String>,
     /// Canonical device type tag from plugin registration
     /// (e.g. "switch", "light", "motion_sensor", "virtual_switch").
     /// `None` for devices registered before this field was added.
@@ -312,8 +332,10 @@ impl DeviceState {
             canonical_name: None,
             status_icon: None,
             name: name.into(),
+            name_override: None,
             plugin_id: plugin_id.into(),
             area: None,
+            area_override: None,
             device_type: None,
             ui_hint: None,
             available: false,
@@ -321,6 +343,18 @@ impl DeviceState {
             last_seen: Utc::now(),
             last_change: None,
         }
+    }
+
+    /// The label to show a person: the user's override when set, otherwise
+    /// whatever the owning plugin currently calls the device.
+    pub fn effective_name(&self) -> &str {
+        self.name_override.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The room the device belongs to: the user's override when set, otherwise
+    /// the plugin-delivered area.
+    pub fn effective_area(&self) -> Option<&str> {
+        self.area_override.as_deref().or(self.area.as_deref())
     }
 }
 
