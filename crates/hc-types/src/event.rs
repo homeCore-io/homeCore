@@ -106,6 +106,13 @@ pub enum Event {
         /// form. `None` when the plugin published no schema (→ raw-TOML fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_schema: Option<serde_json::Value>,
+        /// The manifest's `config_descriptor` field — the plugin's own,
+        /// expressive description of its configuration (sections, field kinds,
+        /// conditionals, data sources). Rides alongside the schema the same
+        /// way. `None` when the plugin published none, in which case the client
+        /// auto-derives a baseline descriptor from `config_schema`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_descriptor: Option<serde_json::Value>,
     },
     /// A device's human-readable name was changed at the source (plugin or user).
     DeviceNameChanged {

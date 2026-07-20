@@ -132,6 +132,13 @@ pub struct PluginRecord {
     /// `GET /plugins/:id/config/schema`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<serde_json::Value>,
+    /// The plugin's own config *descriptor* — an expressive description of its
+    /// configuration (sections, field kinds, conditionals, data sources) that
+    /// the editor renders directly. Also carried on the capability manifest.
+    /// `None` → the client auto-derives a baseline descriptor from
+    /// `config_schema`. Served at `GET /plugins/:id/config/descriptor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_descriptor: Option<serde_json::Value>,
     /// Installed artifact version, for plugins added from the registry/managed
     /// store (distinct from the SDK-reported `version`). Drives "update available".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +174,7 @@ impl PluginRecord {
             supports_management: false,
             capabilities: None,
             config_schema: None,
+            config_descriptor: None,
             installed_version,
         }
     }
@@ -345,6 +353,7 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            config_descriptor: None,
                             installed_version: None,
                         });
                     rec.status = "active".into();
@@ -385,6 +394,7 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            config_descriptor: None,
                             installed_version: None,
                         });
                     rec.last_heartbeat = Some(timestamp);
@@ -407,6 +417,7 @@ pub fn spawn_plugin_registry_listener(
                     timestamp,
                     capabilities,
                     config_schema,
+                    config_descriptor,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -429,11 +440,15 @@ pub fn spawn_plugin_registry_listener(
                             supports_management: false,
                             capabilities: None,
                             config_schema: None,
+                            config_descriptor: None,
                             installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);
                     if config_schema.is_some() {
                         rec.config_schema = config_schema;
+                    }
+                    if config_descriptor.is_some() {
+                        rec.config_descriptor = config_descriptor;
                     }
                 }
                 Ok(_) => {}
@@ -1109,6 +1124,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/:id/config/schema",
             get(handlers::get_plugin_config_schema),
+        )
+        .route(
+            "/plugins/:id/config/descriptor",
+            get(handlers::get_plugin_config_descriptor),
         )
         .route("/plugins/:id/command", post(handlers::post_plugin_command))
         .route(

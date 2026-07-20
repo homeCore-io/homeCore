@@ -1341,6 +1341,7 @@ async fn main() -> Result<()> {
                         supports_management: false,
                         capabilities: None,
                         config_schema: None,
+                        config_descriptor: None,
                         installed_version: None,
                     });
             }

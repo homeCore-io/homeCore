@@ -5300,6 +5300,30 @@ pub async fn get_plugin_config_schema(
     }
 }
 
+/// `GET /plugins/:id/config/descriptor` — the plugin's own config descriptor
+/// (sections, field kinds, conditionals, data sources), as published on its
+/// capability manifest. 404 when the plugin ships none; the client then
+/// auto-derives a baseline descriptor from `config/schema`.
+pub async fn get_plugin_config_descriptor(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id).and_then(|r| r.config_descriptor.as_ref()) {
+        Some(descriptor) => (
+            StatusCode::OK,
+            Json(json!({ "plugin_id": id, "descriptor": descriptor })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config descriptor published for this plugin" })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize, Default)]
 pub struct PluginStreamQuery {
     /// JWT token — browsers can't set `Authorization` on `EventSource`, so
