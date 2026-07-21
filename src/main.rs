@@ -1,5 +1,6 @@
 mod bridge;
 mod config;
+mod dbxml;
 mod devices;
 mod lip;
 mod logging;
@@ -141,6 +142,65 @@ async fn try_start(
     // …and the plugin-authored descriptor the editor renders instead of
     // guessing a form from the schema. Rides the same manifest.
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
+    // Backs the descriptor's `import` field. One control, two ways in: paste a
+    // DbXmlInfo.xml, or leave it empty and let the plugin fetch the design from
+    // the repeater. Both end in the same parse, so there is one mapping from
+    // RA2's vocabulary to ours rather than two that can drift.
+    //
+    // The plugin parses, because only it knows RA2's schema; the editor writes,
+    // because config is core-owned. Rows land unsaved so they are reviewed.
+    let repeater_host = cfg.lutron.host.clone();
+    let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
+        "import_design",
+        move |ctx: plugin_sdk_rs::StreamContext, params: serde_json::Value| {
+            let host = repeater_host.clone();
+            async move {
+                let pasted = params
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+
+                let xml = if pasted.is_empty() {
+                    let _ = ctx
+                        .progress(
+                            Some(10),
+                            Some("fetching"),
+                            Some("Reading the repeater's design"),
+                        )
+                        .await;
+                    match dbxml::fetch(&host).await {
+                        Ok(x) => x,
+                        Err(e) => return ctx.error(e.to_string()).await,
+                    }
+                } else {
+                    pasted
+                };
+
+                match dbxml::parse(&xml) {
+                    Ok(found) => {
+                        let summary = found.summary();
+                        info!(
+                            devices = found.devices.len(),
+                            scenes = found.scenes.len(),
+                            time_clocks = found.time_clocks.len(),
+                            "Parsed RA2 design"
+                        );
+                        ctx.complete(serde_json::json!({
+                            "devices": found.devices,
+                            "scenes": found.scenes,
+                            "time_clocks": found.time_clocks,
+                            "summary": summary,
+                        }))
+                        .await
+                    }
+                    Err(e) => ctx.error(e.to_string()).await,
+                }
+            }
+        },
+    ));
 
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.  Without this, queued publishes/subscribes block

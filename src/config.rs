@@ -102,10 +102,26 @@ pub fn config_descriptor() -> serde_json::Value {
         .section(
             Section::new("devices", "Devices")
                 .field(Field::note(
-                    "RA2 can't be queried for its device list, so add each device by \
-                     its integration ID — take them from the integration report \
-                     RadioRA 2 exports, or from http://{repeater}/DbXmlInfo.xml.",
+                    "The Main Repeater serves its whole design at \
+                     http://{repeater}/DbXmlInfo.xml, so devices can be discovered \
+                     rather than typed. RadioRA 2 declares each load's type, so \
+                     imported rows arrive already classified.",
                 ))
+                .field(
+                    Field::import("import_design")
+                        .label("Discover from the repeater")
+                        .targets(["devices", "scenes", "time_clocks"])
+                        .placeholder(
+                            "Leave empty to fetch from the repeater, or paste a \
+                             DbXmlInfo.xml here",
+                        )
+                        .help(
+                            "Press Import to read the design straight from the \
+                             repeater. Paste a DbXmlInfo.xml instead if this machine \
+                             cannot reach it. Rows are added below for review and are \
+                             not saved until you save.",
+                        ),
+                )
                 .field(
                     Field::table("devices")
                         .label("Devices")

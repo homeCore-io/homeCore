@@ -24,6 +24,11 @@ tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
 uuid         = { version = "1", features = ["v4"] }
+# DbXmlInfo.xml discovery. reqwest matches the fleet's HTTP client; roxmltree
+# is hc-sonos's DOM parser, and this parse is ancestry-heavy (a device's room
+# is its nearest enclosing <Area>), which a streaming reader makes painful.
+reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+roxmltree    = "0.18"
 
 [features]
 default = ["schema"]
