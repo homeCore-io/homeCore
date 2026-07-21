@@ -292,7 +292,6 @@ impl HueApiClient {
 
         let device_area = self.fetch_device_areas(&client, &app_key).await;
 
-
         let lights_url = format!("https://{}/clip/v2/resource/light", self.target.host);
         let lights_payload = client
             .get(lights_url)
@@ -740,11 +739,7 @@ impl HueApiClient {
     /// Shared by lights and accessories: a motion sensor is in a room just as
     /// much as a lamp is, and reading rooms only in the lights fetch left every
     /// sensor unassigned.
-    async fn fetch_device_areas(
-        &self,
-        client: &Client,
-        app_key: &str,
-    ) -> HashMap<String, String> {
+    async fn fetch_device_areas(&self, client: &Client, app_key: &str) -> HashMap<String, String> {
         let rooms_url = format!("https://{}/clip/v2/resource/room", self.target.host);
         let mut device_area: HashMap<String, String> = HashMap::new();
         match client
