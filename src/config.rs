@@ -125,13 +125,24 @@ pub fn config_descriptor() -> serde_json::Value {
                 .field(
                     Field::table("devices")
                         .label("Devices")
-                        .render("cards")
+                        // A real RA2 project is dozens of devices — this one
+                        // discovers 46 — which a card apiece makes unreadable.
+                        .render("list")
+                        .group_by("area")
+                        // Identity for discovery: re-running it updates nothing
+                        // and duplicates nothing.
+                        .key_by("integration_id")
                         .help("Each row maps an RA2 integration ID to a homeCore device.")
                         .columns([
                             Field::int("integration_id").label("Integration ID"),
                             Field::text("name").label("Name"),
+                            // Discovery fills this from `OutputType`, so it is
+                            // rarely blank — but a hand-added row still needs
+                            // answering, and a device without a kind is one the
+                            // plugin will skip.
                             Field::select("kind")
                                 .label("Kind")
+                                .prompt_when_empty()
                                 .option("dimmer", "Dimmer")
                                 .option("switch", "Switch")
                                 .option("shade", "Shade")
@@ -185,7 +196,11 @@ pub fn config_descriptor() -> serde_json::Value {
                 .field(
                     Field::table("scenes")
                         .label("Scenes")
-                        .render("cards")
+                        .render("list")
+                        // No `group_by`: a scene is a phantom button on the
+                        // repeater and belongs to no room, so `SceneConfig` has
+                        // no area to group on.
+                        .key_by("button_component")
                         .columns([
                             Field::text("name").label("Name"),
                             Field::int("main_repeater_id")
@@ -208,7 +223,14 @@ pub fn config_descriptor() -> serde_json::Value {
                 .field(
                     Field::table("time_clocks")
                         .label("Timeclock events")
-                        .render("cards")
+                        .render("list")
+                        .group_by("area")
+                        // No `key_by`: an event's identity is the pair
+                        // (timeclock_id, event_index), which a single column
+                        // cannot express — and the index is positional, so
+                        // reordering events in RadioRA 2 silently repoints
+                        // them. Better to have no identity than a wrong one
+                        // that would let discovery overwrite the wrong row.
                         .columns([
                             Field::int("timeclock_id").label("Timeclock ID").default(1),
                             Field::int("event_index").label("Event index"),
