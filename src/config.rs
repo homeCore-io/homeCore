@@ -119,6 +119,8 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .option("dimmer", "Dimmer")
                                 .option("switch", "Switch")
                                 .option("shade", "Shade")
+                                .option("fan_control", "Fan")
+                                .option("cco_pulsed", "Contact closure (pulsed)")
                                 .option("keypad", "Keypad")
                                 .option("pico", "Pico remote")
                                 .option("occupancy_group", "Occupancy group")
@@ -150,8 +152,11 @@ pub fn config_descriptor() -> serde_json::Value {
                             // VCRX only.
                             Field::list("ccis", "int")
                                 .label("Contact inputs")
-                                .placeholder("31, 32, 33, 34")
-                                .help("CCI component numbers that report open/closed."),
+                                .placeholder("30, 31, 32, 33")
+                                .help(
+                                    "CCI component numbers that report open/closed. On a \
+                                     VCRX: 30 Full/Security, 31 Flash, 32 Input 1, 33 Input 2.",
+                                ),
                         ]),
                 ),
         )
@@ -376,6 +381,18 @@ pub enum DeviceKind {
     Switch,
     /// Motorized shade — published as HomeCore `cover`, stubbed for phase 2.
     Shade,
+    /// Ceiling fan controller — discrete speeds over the same `#OUTPUT` levels
+    /// a dimmer uses. RA2 calls it `CEILING_FAN_TYPE`.
+    FanControl,
+    /// A *pulsed* contact-closure output (`CCO_PULSED`) — a momentary relay,
+    /// typically a garage door or gate trigger.
+    ///
+    /// Published as a `scene` rather than a switch, because that is what it
+    /// behaves like: it accepts `{"activate": true}` and does not latch. A
+    /// switch would give the UI a toggle that never stays on. *Maintained*
+    /// CCOs are not a kind of their own — they latch, so `Switch` is already
+    /// the correct model.
+    CcoPulsed,
     /// Wall keypad — publishes button press/release/hold/double_click events and
     /// LED state; accepts set_led and press_button commands.
     Keypad,
@@ -414,7 +431,8 @@ pub struct DeviceConfig {
     pub buttons: Vec<u32>,
     /// CCI (Contact Closure Input) component numbers on a VCRX device.
     /// These report open/closed state via ~DEVICE press/release events.
-    /// Typical values: [31, 32, 33, 34].  Ignored for non-VCRX kinds.
+    /// VCRX components are 30 (Full/Security), 31 (Flash), 32 (Input 1) and
+    /// 33 (Input 2), per the Integration Guide.  Ignored for non-VCRX kinds.
     #[serde(default)]
     pub ccis: Vec<u32>,
 }

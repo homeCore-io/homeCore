@@ -194,6 +194,16 @@ pub fn cmd_shade_action(integration_id: u32, action: u8) -> String {
     format!("#OUTPUT,{integration_id},{action}")
 }
 
+/// `#OUTPUT,{id},6` — pulse a momentary CCO.
+///
+/// Action 6 with no parameters, per the RA2 Integration Guide's CCO table.
+/// The relay closes for its configured pulse time (one second by default) and
+/// opens itself; there is nothing to set back. Levelling it with action 1
+/// would latch a *maintained* CCO instead, which is a different device.
+pub fn cmd_pulse_output(integration_id: u32) -> String {
+    format!("#OUTPUT,{integration_id},6")
+}
+
 /// `#DEVICE,{id},{component},{action}` for press(3)/release(4)
 pub fn cmd_device_action(integration_id: u32, component: u32, action: u8) -> String {
     format!("#DEVICE,{integration_id},{component},{action}")
