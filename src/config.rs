@@ -92,6 +92,24 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::text("name").label("Name"),
                             Field::host("host").label("Host / IP"),
                             Field::secret("app_key").label("App key"),
+                            // Written by pairing, but editable: `to_target`
+                            // resolves a blank host *or* id against discovery,
+                            // so pinning the id targets one bridge by identity
+                            // rather than by a DHCP-mutable address.
+                            Field::text("bridge_id")
+                                .label("Bridge ID")
+                                .placeholder("From discovery")
+                                .help(
+                                    "Leave empty to match on host alone. Set it to pin \
+                                     this entry to one bridge even if its IP changes.",
+                                ),
+                            // Hue bridges ship a self-signed cert, hence both
+                            // default true — surfaced so an operator fronting a
+                            // bridge with a real cert can tighten them.
+                            Field::toggle("verify_tls").label("Verify TLS").default(true),
+                            Field::toggle("allow_self_signed")
+                                .label("Allow self-signed")
+                                .default(true),
                         ]),
                 ),
         )
@@ -595,111 +613,23 @@ fn default_eventstream_reconnect_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// A published descriptor is *authoritative* — the editor renders it
     /// instead of deriving from the schema — so any config field it omits
-    /// becomes uneditable. hc-sonos silently dropped four logging settings that
-    /// way (`5bccebf`). This guards against the same regression here: every
-    /// leaf in the config schema must appear in the descriptor, or be listed as
-    /// a deliberate omission with a reason.
+    /// becomes uneditable (the class of bug that dropped four hc-sonos logging
+    /// settings, `5bccebf`). The check lives in the SDK; every leaf must be in
+    /// the descriptor or a justified omission.
     #[cfg(feature = "schema")]
     #[test]
     fn descriptor_covers_every_schema_field() {
-        // Bootstrap identity fixed at install, not an operator setting.
-        const JUSTIFIED_OMISSIONS: &[&str] = &["homecore.plugin_id"];
-
-        // Flatten the schema to dotted leaf paths. Arrays are leaves — an array
-        // field (e.g. `bridges`) is covered as a whole by a table/list, we do
-        // not descend into item properties.
-        fn flatten(
-            schema: &serde_json::Value,
-            defs: &serde_json::Value,
-            prefix: &str,
-            out: &mut Vec<String>,
-        ) {
-            let node = resolve_ref(schema, defs);
-            let is_object = node.get("type").and_then(|t| t.as_str()) == Some("object")
-                || node.get("properties").is_some();
-            if is_object {
-                if let Some(props) = node.get("properties").and_then(|p| p.as_object()) {
-                    for (name, child) in props {
-                        let path = if prefix.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{prefix}.{name}")
-                        };
-                        flatten(child, defs, &path, out);
-                    }
-                }
-            } else {
-                out.push(prefix.to_string());
-            }
-        }
-
-        fn resolve_ref<'a>(
-            node: &'a serde_json::Value,
-            defs: &'a serde_json::Value,
-        ) -> &'a serde_json::Value {
-            // schemars wraps a struct field as `{"allOf": [{"$ref": ...}]}`,
-            // and a bare reference as `{"$ref": ...}`. Unwrap either to the
-            // definition it points at.
-            let reference = node.get("$ref").and_then(|r| r.as_str()).or_else(|| {
-                node.get("allOf")
-                    .and_then(|a| a.as_array())
-                    .filter(|a| a.len() == 1)
-                    .and_then(|a| a[0].get("$ref"))
-                    .and_then(|r| r.as_str())
-            });
-            if let Some(reference) = reference {
-                if let Some(name) = reference.rsplit('/').next() {
-                    if let Some(target) = defs.get(name) {
-                        return target;
-                    }
-                }
-            }
-            node
-        }
-
-        fn collect_keys(descriptor: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
-            let Some(sections) = descriptor.get("sections").and_then(|s| s.as_array()) else {
-                return;
-            };
-            for section in sections {
-                let Some(fields) = section.get("fields").and_then(|f| f.as_array()) else {
-                    continue;
-                };
-                for field in fields {
-                    if let Some(key) = field.get("key").and_then(|k| k.as_str()) {
-                        out.insert(key.to_string());
-                    }
-                }
-            }
-        }
-
-        let schema = config_schema().expect("schema feature is on");
-        let defs = schema
-            .get("definitions")
-            .or_else(|| schema.get("$defs"))
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        let mut schema_leaves = Vec::new();
-        flatten(&schema, &defs, "", &mut schema_leaves);
-
-        let mut descriptor_keys = std::collections::HashSet::new();
-        collect_keys(&config_descriptor(), &mut descriptor_keys);
-
-        let uncovered: Vec<&String> = schema_leaves
-            .iter()
-            .filter(|leaf| {
-                !descriptor_keys.contains(*leaf)
-                    && !JUSTIFIED_OMISSIONS.contains(&leaf.as_str())
-            })
-            .collect();
-
+        let missing = plugin_sdk_rs::config_descriptor::missing_schema_coverage(
+            &config_schema().expect("schema feature is on"),
+            &config_descriptor(),
+            // Bootstrap identity fixed at install, not an operator setting.
+            &["homecore.plugin_id"],
+        );
         assert!(
-            uncovered.is_empty(),
-            "config fields missing from the descriptor (add them or justify the omission): {uncovered:?}"
+            missing.is_empty(),
+            "config fields missing from the descriptor: {missing:?}"
         );
     }
 
