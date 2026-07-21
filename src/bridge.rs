@@ -16,8 +16,8 @@ use crate::devices::{DeviceEntry, SceneEntry, TimeclockEntry};
 use crate::lip::connection::{connect, send_cmd, send_keepalive};
 use crate::lip::protocol::{
     button_for_led_component, cmd_device_action, cmd_timeclock_enable, cmd_timeclock_execute,
-    led_component_for_button, query_device_led, query_output, DeviceAction, LipMessage,
-    OccupancyState, OutputAction,
+    is_led_state, led_component_for_button, query_device_led, query_output, DeviceAction,
+    LipMessage, OccupancyState, OutputAction,
 };
 use plugin_sdk_rs::DevicePublisher;
 
@@ -233,6 +233,10 @@ impl Bridge {
                 integration_id,
                 state,
             } => {
+                if state == OccupancyState::Unknown {
+                    debug!(id = integration_id, "Ignoring unparseable occupancy state");
+                    return;
+                }
                 if let Some(dev) = self.devices.get(&integration_id) {
                     let occupied = state == OccupancyState::Occupied;
                     let patch = dev.translate_occupancy_state(occupied);
@@ -299,6 +303,11 @@ impl Bridge {
                     self.repeater_button_to_scene.get(&(integration_id, button))
                 {
                     let scene = &self.scenes[scene_idx];
+                    // 255 means no LED is assigned to this phantom button, and
+                    // `> 0` used to read that as the scene being active.
+                    if !is_led_state(state) {
+                        return;
+                    }
                     let on = state > 0; // 1=on, 2=flash, 3=rapid → all "on"
                     let patch = serde_json::json!({ "on": on });
                     let hc_id = scene.hc_id.clone();
@@ -389,6 +398,12 @@ impl Bridge {
                 // component number (button + 80).  Convert back to button number for
                 // the attribute name.
                 if has_leds {
+                    // A button with no LED assigned reports 255; publishing it
+                    // would put an uninterpretable number on the device.
+                    if !is_led_state(state) {
+                        debug!(hc_id, component, "No LED assigned to this button");
+                        return;
+                    }
                     if let Some(button) = button_for_led_component(component) {
                         let attr = format!("led_{button}");
                         let patch = serde_json::json!({ &attr: state });
