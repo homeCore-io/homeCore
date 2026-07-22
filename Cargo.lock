@@ -428,8 +428,8 @@ checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 
 [[package]]
 name = "hc-logging"
-version = "0.1.2"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#e5da5928f012359f4c70fb8311d1c8cb3cb93954"
+version = "0.1.4"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#3f6b829b8d37d9d2cfcb78a00e129aabe426dd47"
 dependencies = [
  "anyhow",
  "chrono",
@@ -467,8 +467,8 @@ dependencies = [
 
 [[package]]
 name = "hc-time"
-version = "0.1.2"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#e5da5928f012359f4c70fb8311d1c8cb3cb93954"
+version = "0.1.4"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#3f6b829b8d37d9d2cfcb78a00e129aabe426dd47"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -477,8 +477,8 @@ dependencies = [
 
 [[package]]
 name = "hc-types"
-version = "0.1.2"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#e5da5928f012359f4c70fb8311d1c8cb3cb93954"
+version = "0.1.4"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#3f6b829b8d37d9d2cfcb78a00e129aabe426dd47"
 dependencies = [
  "chrono",
  "ron",
@@ -972,8 +972,8 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.3.0"
-source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.0#d62f01cf8188a2e086ae896cf731f36b6e5d69e3"
+version = "0.3.1"
+source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.1#a0f915fb3332e5a22f3f99c137fffdfabddabc47"
 dependencies = [
  "anyhow",
  "chrono",
