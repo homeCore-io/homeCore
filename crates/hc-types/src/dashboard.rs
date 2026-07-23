@@ -83,6 +83,32 @@ pub struct DashboardDefinition {
     pub layouts: Vec<DashboardLayout>,
     #[serde(default)]
     pub widgets: Vec<DashboardWidget>,
+    /// Per-user access grants beyond the owner.
+    ///
+    /// A `visibility` field (private | shared | public) once lived here and was
+    /// removed as unfitting for a house — but "share this one board with the
+    /// kids, read-only" is a real ask, and that is what these express. Empty is
+    /// the default: owner-or-admin only, which is how every existing dashboard
+    /// loads (`serde(default)`).
+    #[serde(default)]
+    pub access: Vec<DashboardGrant>,
+}
+
+/// One person's access to a dashboard they do not own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardGrant {
+    pub user_id: String,
+    pub level: GrantLevel,
+}
+
+/// How far a grant reaches. `View` can open the board; `Edit` can also change
+/// its widgets and layout — but never its grants, which stay owner/admin-only
+/// so a shared editor cannot widen their own access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantLevel {
+    View,
+    Edit,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -2860,19 +2860,31 @@ pub async fn delete_automation(
 
 // ---------- Dashboards ----------
 
-/// Everyone who can log in can SEE every dashboard.
+/// May this user open the dashboard?
 ///
-/// This replaces a `visibility` field (private | shared | public) that gated
-/// exactly this filter. Access control for a house is not a CMS problem — the
-/// answer to "who may look at the kitchen dashboard" is "the people who live
-/// here", and they all have accounts. Who may CHANGE one is a real question, and
-/// [`dashboard_mutable_by`] still answers it: the owner, or an admin.
-fn dashboard_visible_to(_claims: &hc_auth::Claims, _dashboard: &DashboardDefinition) -> bool {
-    true
+/// The owner and any admin always may. Beyond them, a per-user grant — view or
+/// edit — opens it. (For years this returned `true` for everyone, on the theory
+/// that a house has no private boards; the grant list is the opt-in that
+/// changes that, and an empty list preserves the old all-visible behaviour.)
+fn dashboard_visible_to(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
+    claims.is_admin()
+        || dashboard.owner_user_id == claims.uid
+        || dashboard.access.iter().any(|g| g.user_id == claims.uid)
 }
 
+/// May this user change the dashboard's widgets and layout?
+///
+/// Owner, admin, or a holder of an **edit** grant. A view grant does not
+/// qualify. Note this governs the dashboard's *content* — its grant list is
+/// guarded separately (see `set_dashboard_access`), so an edit-granted user can
+/// rearrange widgets but cannot hand themselves or anyone else more access.
 fn dashboard_mutable_by(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
-    claims.is_admin() || dashboard.owner_user_id == claims.uid
+    claims.is_admin()
+        || dashboard.owner_user_id == claims.uid
+        || dashboard
+            .access
+            .iter()
+            .any(|g| g.user_id == claims.uid && g.level == hc_types::dashboard::GrantLevel::Edit)
 }
 
 fn dashboard_response_for(
@@ -2963,6 +2975,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Getting Started".to_string(),
             description: Some("Your home at a glance.".to_string()),
             owner_user_id: owner_user_id.to_string(),
+            access: Vec::new(),
             tags: vec!["starter".into(), "home".into(), "overview".into()],
             // Not "home": that renders the same house glyph as the Home nav
             // item. "rocket" reads as onboarding and stays distinct.
@@ -3168,6 +3181,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Security".to_string(),
             description: Some("Entry points, alerts, and camera placeholders.".to_string()),
             owner_user_id: owner_user_id.to_string(),
+            access: Vec::new(),
             tags: vec!["security".into()],
             icon: "shield".into(),
             created_at: now,
@@ -3214,6 +3228,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Living Room".to_string(),
             description: Some("A room-focused dashboard with devices and media.".to_string()),
             owner_user_id: owner_user_id.to_string(),
+            access: Vec::new(),
             tags: vec!["room".into(), "living_room".into()],
             icon: "chair".into(),
             created_at: now,
@@ -3881,6 +3896,13 @@ pub async fn update_dashboard(
         dashboard.owner_user_id = existing.owner_user_id.clone();
         dashboard.created_at = existing.created_at;
         dashboard.updated_at = chrono::Utc::now();
+        // Grants never ride in on a content update. This is the only thing
+        // standing between an edit-granted user and self-promotion: they can
+        // change widgets, but the access list is preserved from the stored copy
+        // and changed only through set_dashboard_access (owner/admin). Without
+        // this line, PUTting a doc with a fatter `access` would be an
+        // escalation.
+        dashboard.access = existing.access.clone();
 
         ensure_default_layouts(&mut dashboard);
 
@@ -4124,6 +4146,88 @@ pub async fn reload_dashboards(
         "user_defaults_total": user_defaults_total
     }))
     .into_response()
+}
+
+/// Body of `PUT /api/v1/dashboards/{id}/access` — the complete grant list, which
+/// replaces whatever was there.
+#[derive(serde::Deserialize)]
+pub struct SetDashboardAccessRequest {
+    #[serde(default)]
+    pub access: Vec<hc_types::dashboard::DashboardGrant>,
+}
+
+/// `PUT /api/v1/dashboards/{id}/access`
+///
+/// Replace a dashboard's grant list. Deliberately its own endpoint, gated on
+/// **owner or admin** rather than the plain `dashboard_mutable_by` — an
+/// edit-granted user may rearrange the board but must not be able to re-grant
+/// access (to themselves or anyone else). The general update path preserves the
+/// stored grants precisely so this stays the only way in.
+pub async fn set_dashboard_access(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<SetDashboardAccessRequest>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        // Owner or admin only — NOT dashboard_mutable_by, which would let an
+        // edit-grantee widen their own access.
+        if !(user.0.is_admin() || existing.owner_user_id == user.0.uid) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "only the owner or an admin can change access" })),
+            )
+                .into_response();
+        }
+
+        let Some(pos) = data.dashboards.iter().position(|item| item.id == id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        // The owner is implicit and never needs a grant; drop any that names
+        // them so the list stays about *other* people.
+        let mut access = body.access;
+        access.retain(|g| g.user_id != existing.owner_user_id);
+        data.dashboards[pos].access = access;
+        data.dashboards[pos].updated_at = chrono::Utc::now();
+
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        data.dashboards[pos].clone()
+    };
+
+    (StatusCode::OK, Json(json!({ "access": response.access }))).into_response()
 }
 
 pub async fn delete_dashboard(
@@ -8534,6 +8638,7 @@ token = "TOKEN-TWO"
             name: "Home".to_string(),
             description: Some("Test dashboard".to_string()),
             owner_user_id: owner_user_id.to_string(),
+            access: Vec::new(),
             tags: vec!["home".to_string()],
             icon: "dashboard".to_string(),
             created_at: Utc::now(),
@@ -9226,10 +9331,19 @@ token = "TOKEN-TWO"
     }
 
     #[tokio::test]
-    async fn every_user_sees_every_dashboard() {
+    async fn a_user_sees_own_and_granted_dashboards_not_others() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
         let state = mk_state().await;
         seed_dashboard(&state, sample_dashboard("mine", "user_a")).await;
-        seed_dashboard(&state, sample_dashboard("someone_elses", "user_b")).await;
+        // user_b's, with user_a granted view — should appear.
+        let mut shared = sample_dashboard("shared_with_me", "user_b");
+        shared.access = vec![DashboardGrant {
+            user_id: "user_a".to_string(),
+            level: GrantLevel::View,
+        }];
+        seed_dashboard(&state, shared).await;
+        // user_b's, no grant — should NOT appear for user_a.
+        seed_dashboard(&state, sample_dashboard("not_mine", "user_b")).await;
 
         let resp = list_dashboards(
             State(state),
@@ -9241,8 +9355,156 @@ token = "TOKEN-TWO"
         assert_eq!(resp.status(), StatusCode::OK);
         let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
         let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
-        assert!(ids.contains("mine"));
-        assert!(ids.contains("someone_elses"));
+        assert!(ids.contains("mine"), "owner sees own");
+        assert!(ids.contains("shared_with_me"), "grantee sees granted");
+        assert!(!ids.contains("not_mine"), "no grant, no visibility");
+    }
+
+    #[tokio::test]
+    async fn admin_still_sees_every_dashboard() {
+        let state = mk_state().await;
+        seed_dashboard(&state, sample_dashboard("a", "user_a")).await;
+        seed_dashboard(&state, sample_dashboard("b", "user_b")).await;
+
+        let resp = list_dashboards(
+            State(state),
+            crate::auth_middleware::DashboardsRead(claims_for("root", Role::Admin)),
+        )
+        .await
+        .into_response();
+
+        let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
+        let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
+        assert!(ids.contains("a") && ids.contains("b"));
+    }
+
+    #[test]
+    fn grant_levels_gate_view_and_edit_correctly() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let mut d = sample_dashboard("d", "owner");
+        d.access = vec![
+            DashboardGrant {
+                user_id: "viewer".to_string(),
+                level: GrantLevel::View,
+            },
+            DashboardGrant {
+                user_id: "editor".to_string(),
+                level: GrantLevel::Edit,
+            },
+        ];
+
+        let viewer = claims_for("viewer", Role::User);
+        let editor = claims_for("editor", Role::User);
+        let stranger = claims_for("stranger", Role::User);
+
+        // View grant: can see, cannot mutate.
+        assert!(dashboard_visible_to(&viewer, &d));
+        assert!(!dashboard_mutable_by(&viewer, &d));
+        // Edit grant: both.
+        assert!(dashboard_visible_to(&editor, &d));
+        assert!(dashboard_mutable_by(&editor, &d));
+        // No grant: neither.
+        assert!(!dashboard_visible_to(&stranger, &d));
+        assert!(!dashboard_mutable_by(&stranger, &d));
+    }
+
+    #[tokio::test]
+    async fn edit_grantee_cannot_change_access_through_update() {
+        // The escalation guard: an edit-granted user may rearrange the board,
+        // but a fatter `access` list posted through the general update must be
+        // ignored — otherwise they could grant themselves ownership-equivalent
+        // reach, or add anyone they like.
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let state = mk_state().await;
+        let mut dashboard = sample_dashboard("board", "owner");
+        dashboard.access = vec![DashboardGrant {
+            user_id: "editor".to_string(),
+            level: GrantLevel::Edit,
+        }];
+        seed_dashboard(&state, dashboard.clone()).await;
+
+        // The editor edits — and slips in a grant promoting a friend to edit.
+        dashboard.name = "Editor was here".to_string();
+        dashboard.access.push(DashboardGrant {
+            user_id: "friend".to_string(),
+            level: GrantLevel::Edit,
+        });
+        let resp = update_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims_for("editor", Role::User)),
+            Path("board".to_string()),
+            Json(dashboard),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The content change stuck; the access change did not.
+        let stored = {
+            let data = state.dashboards.as_ref().unwrap().read().await;
+            data.dashboards
+                .iter()
+                .find(|d| d.id == "board")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored.name, "Editor was here");
+        assert_eq!(stored.access.len(), 1, "friend grant must be dropped");
+        assert_eq!(stored.access[0].user_id, "editor");
+    }
+
+    #[tokio::test]
+    async fn set_access_is_owner_or_admin_only() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let state = mk_state().await;
+        let mut dashboard = sample_dashboard("board", "owner");
+        dashboard.access = vec![DashboardGrant {
+            user_id: "editor".to_string(),
+            level: GrantLevel::Edit,
+        }];
+        seed_dashboard(&state, dashboard).await;
+
+        let grant_body = || {
+            Json(SetDashboardAccessRequest {
+                access: vec![DashboardGrant {
+                    user_id: "friend".to_string(),
+                    level: GrantLevel::View,
+                }],
+            })
+        };
+
+        // An edit-grantee cannot set access.
+        let resp = set_dashboard_access(
+            State(state.clone()),
+            DashboardsWrite(claims_for("editor", Role::User)),
+            Path("board".to_string()),
+            grant_body(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The owner can.
+        let resp = set_dashboard_access(
+            State(state.clone()),
+            DashboardsWrite(claims_for("owner", Role::User)),
+            Path("board".to_string()),
+            grant_body(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = {
+            let data = state.dashboards.as_ref().unwrap().read().await;
+            data.dashboards
+                .iter()
+                .find(|d| d.id == "board")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored.access.len(), 1);
+        assert_eq!(stored.access[0].user_id, "friend");
     }
 
     #[tokio::test]

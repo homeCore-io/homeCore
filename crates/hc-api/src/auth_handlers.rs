@@ -325,6 +325,22 @@ pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl I
     }
 }
 
+// ---------- Roles ----------
+
+/// `GET /api/v1/auth/roles`
+///
+/// The full set of roles and the scopes each grants, straight from
+/// [`Role::scopes`] so the mapping has one home. The client renders this to
+/// show what a role can do and to offer an access key's scopes as a subset of
+/// its owner's role. Not sensitive — any authenticated user may read it.
+pub async fn list_roles(_: AuthUser) -> impl IntoResponse {
+    let roles: Vec<_> = hc_auth::Role::all()
+        .iter()
+        .map(|r| json!({ "role": r.wire(), "scopes": r.scopes() }))
+        .collect();
+    (StatusCode::OK, Json(json!(roles)))
+}
+
 // ---------- Change password ----------
 
 /// `POST /api/v1/auth/change-password`

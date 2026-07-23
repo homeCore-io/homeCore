@@ -928,6 +928,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
     let protected = Router::new()
         // Auth / user management
         .route("/auth/me", get(auth_handlers::me))
+        .route("/auth/roles", get(auth_handlers::list_roles))
         .route(
             "/auth/change-password",
             post(auth_handlers::change_password),
@@ -1080,6 +1081,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_dashboard)
                 .put(handlers::update_dashboard)
                 .delete(handlers::delete_dashboard),
+        )
+        .route(
+            "/dashboards/:id/access",
+            put(handlers::set_dashboard_access),
         )
         .route("/dashboards/:id/export", get(handlers::export_dashboard))
         .route(
