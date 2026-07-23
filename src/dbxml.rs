@@ -224,10 +224,17 @@ pub fn parse(xml: &str) -> Result<Discovered> {
                 let Some(number) = attr_u32(c, "ComponentNumber") else {
                     continue;
                 };
-                let label = c
-                    .descendants()
-                    .find(|b| b.has_tag_name("Button"))
-                    .and_then(|b| b.attribute("Name"))
+                let button = c.descendants().find(|b| b.has_tag_name("Button"));
+                // The user-facing label is the `Engraving`; `Name` stays the
+                // software default ("Button 3") even on a *programmed* phantom
+                // button, so keying off `Name` alone dropped every engraved
+                // scene (Outside On, Deck Off, …). Prefer the engraving, fall
+                // back to a non-default `Name`.
+                let label = button
+                    .and_then(|b| b.attribute("Engraving"))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| button.and_then(|b| b.attribute("Name")).map(str::trim))
                     .unwrap_or("");
                 if label.is_empty() || is_placeholder_button(label) {
                     continue;
@@ -407,6 +414,7 @@ mod tests {
           <Components>
             <Component ComponentNumber="1" ComponentType="BUTTON"><Button Name="Movie Night"/></Component>
             <Component ComponentNumber="2" ComponentType="BUTTON"><Button Name="Button 2"/></Component>
+            <Component ComponentNumber="3" ComponentType="BUTTON"><Button Name="Button 3" Engraving="Outside On"/></Component>
           </Components>
         </Device>
       </Devices></DeviceGroup></DeviceGroups>
@@ -482,10 +490,16 @@ mod tests {
     #[test]
     fn only_programmed_phantom_buttons_become_scenes() {
         let d = parse(XML).unwrap();
-        assert_eq!(d.scenes.len(), 1);
+        assert_eq!(d.scenes.len(), 2);
+        // Labelled via the button `Name`.
         assert_eq!(d.scenes[0]["name"], "Movie Night");
         assert_eq!(d.scenes[0]["button_component"], 1);
         assert_eq!(d.scenes[0]["main_repeater_id"], 1);
+        // Labelled via `Engraving` while `Name` is still the software default
+        // "Button 3" — the case that used to be silently dropped.
+        assert_eq!(d.scenes[1]["name"], "Outside On");
+        assert_eq!(d.scenes[1]["button_component"], 3);
+        assert_eq!(d.scenes[1]["main_repeater_id"], 1);
     }
 
     #[test]
