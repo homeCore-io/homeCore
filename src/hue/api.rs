@@ -704,10 +704,14 @@ impl HueApiClient {
                 let group_kind = group_rid
                     .as_ref()
                     .and_then(|rid| group_meta.get(rid).map(|m| m.kind.clone()));
+                // Hue reports scene `status.active` as a string enum —
+                // "inactive" | "static" | "dynamic_palette" — not a bool. A
+                // scene is applied when it's anything other than "inactive".
                 let active = item
                     .get("status")
                     .and_then(|s| s.get("active"))
-                    .and_then(|v| v.as_bool());
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "inactive");
 
                 scenes.push(HueScene {
                     bridge_id: self.target.bridge_id.clone(),

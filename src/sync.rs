@@ -651,10 +651,17 @@ async fn apply_event_item(
                 saw_known_type = true;
                 if let Some(device_id) = registry.find_scene_device_id(bridge_id, rid) {
                     applied = true;
+                    // `status.active` is a string enum
+                    // ("inactive" | "static" | "dynamic_palette"), not a bool —
+                    // a recall flips the previous scene to "inactive" and the
+                    // new one to "static", and the bridge emits both events, so
+                    // this stays in sync even when the change came from the Hue
+                    // app rather than homeCore.
                     if let Some(active) = item
                         .get("status")
                         .and_then(|s| s.get("active"))
-                        .and_then(|v| v.as_bool())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s != "inactive")
                     {
                         publisher
                             .publish_state_partial(&device_id, &json!({ "active": active }))
