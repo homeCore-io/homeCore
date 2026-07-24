@@ -301,7 +301,19 @@ pub fn parse(xml: &str) -> Result<Discovered> {
         if name == ROOT_AREA {
             continue;
         }
-        let Some(&number) = group_numbers.get(assigned) else {
+        // The area must actually be assigned a real occupancy group.
+        if !group_numbers.contains_key(assigned) {
+            continue;
+        }
+        // RA2 reports occupancy on `~GROUP,{N}` where N is the *area's*
+        // `IntegrationID` — NOT the `OccupancyGroupNumber`. The group number is
+        // an internal identifier (equal to the UUID / `OccupancyGroupAssignedToID`)
+        // and is never emitted on the wire, so importing it registered devices
+        // the repeater's occupancy events could never match and every `~GROUP`
+        // was silently dropped. Verified against a real DbXmlInfo: Bathroom
+        // area IntegrationID=2, OccupancyGroupNumber=62 — the repeater fires
+        // `~GROUP,2`.
+        let Some(area_id) = attr_u32(a, "IntegrationID") else {
             continue;
         };
         // RA2 assigns a group to every area whether or not anything senses in
@@ -311,7 +323,7 @@ pub fn parse(xml: &str) -> Result<Discovered> {
             continue;
         }
         out.devices.push(json!({
-            "integration_id": number,
+            "integration_id": area_id,
             "name": format!("{name} Occupancy"),
             "kind": "occupancy_group",
             "area": name,
@@ -480,8 +492,14 @@ mod tests {
     fn only_occupancy_groups_with_a_sensor_are_imported() {
         let d = parse(XML).unwrap();
         // Kitchen has a MOTION_SENSOR; Hallway does not.
-        assert_eq!(find(&d, 368)["kind"], "occupancy_group");
-        assert!(d.devices.iter().all(|r| r["integration_id"] != 749));
+        // The device's id is the *area's* IntegrationID (58) — the value the
+        // repeater emits on `~GROUP` — NOT the OccupancyGroupNumber (368),
+        // which the repeater never sends.
+        assert_eq!(find(&d, 58)["kind"], "occupancy_group");
+        assert_eq!(find(&d, 58)["area"], "Kitchen");
+        assert!(d.devices.iter().all(|r| r["integration_id"] != 368));
+        // Hallway (area 59) has no sensor, so no occupancy device at all.
+        assert!(d.devices.iter().all(|r| r["integration_id"] != 59));
         assert!(d.summary().contains("1 occupancy group with no sensor"));
         // The sensor itself is never a device.
         assert!(d.devices.iter().all(|r| r["integration_id"] != 56));
