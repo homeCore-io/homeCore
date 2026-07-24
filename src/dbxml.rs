@@ -202,6 +202,14 @@ pub fn parse(xml: &str) -> Result<Discovered> {
 
     // ── devices: things with components ─────────────────────────────────────
     let mut sensor_areas: HashSet<String> = HashSet::new();
+    // A RA2 repeater has 100 phantom buttons and installers routinely engrave
+    // the same label onto several of them (this house has "Vacation Mode",
+    // "Goodnight", "Welcome" and "Away Scene" on four buttons apiece). One scene
+    // per button turns the list into four identical rows, so keep the first
+    // button for each engraving (lowest number, since buttons parse in order)
+    // and drop the rest. Keyed by repeater so two repeaters can share a label.
+    let mut seen_scenes: HashSet<(u32, String)> = HashSet::new();
+    let mut dup_scenes = 0usize;
     for d in root.descendants().filter(|n| n.has_tag_name("Device")) {
         let Some(dt) = d.attribute("DeviceType") else {
             continue;
@@ -239,10 +247,15 @@ pub fn parse(xml: &str) -> Result<Discovered> {
                 if label.is_empty() || is_placeholder_button(label) {
                     continue;
                 }
+                let repeater_id = attr_u32(d, "IntegrationID").unwrap_or(1);
+                if !seen_scenes.insert((repeater_id, label.to_string())) {
+                    dup_scenes += 1;
+                    continue;
+                }
                 out.scenes.push(json!({
                     "name": label,
                     "button_component": number,
-                    "main_repeater_id": attr_u32(d, "IntegrationID").unwrap_or(1),
+                    "main_repeater_id": repeater_id,
                 }));
             }
             continue;
@@ -355,6 +368,12 @@ pub fn parse(xml: &str) -> Result<Discovered> {
             plural(empty_groups)
         ));
     }
+    if dup_scenes > 0 {
+        out.skipped.push(format!(
+            "Merged {dup_scenes} phantom button{} that repeat an engraving already imported.",
+            plural(dup_scenes)
+        ));
+    }
     for (ot, n) in unknown_outputs {
         out.skipped.push(format!(
             "Skipped {n} output{} of unknown type {ot}.",
@@ -427,6 +446,7 @@ mod tests {
             <Component ComponentNumber="1" ComponentType="BUTTON"><Button Name="Movie Night"/></Component>
             <Component ComponentNumber="2" ComponentType="BUTTON"><Button Name="Button 2"/></Component>
             <Component ComponentNumber="3" ComponentType="BUTTON"><Button Name="Button 3" Engraving="Outside On"/></Component>
+            <Component ComponentNumber="7" ComponentType="BUTTON"><Button Name="Button 7" Engraving="Outside On"/></Component>
           </Components>
         </Device>
       </Devices></DeviceGroup></DeviceGroups>
@@ -508,6 +528,8 @@ mod tests {
     #[test]
     fn only_programmed_phantom_buttons_become_scenes() {
         let d = parse(XML).unwrap();
+        // Button 7 repeats "Outside On" — the same engraving as button 3 — so it
+        // is merged away, leaving two scenes, not three.
         assert_eq!(d.scenes.len(), 2);
         // Labelled via the button `Name`.
         assert_eq!(d.scenes[0]["name"], "Movie Night");
@@ -516,8 +538,27 @@ mod tests {
         // Labelled via `Engraving` while `Name` is still the software default
         // "Button 3" — the case that used to be silently dropped.
         assert_eq!(d.scenes[1]["name"], "Outside On");
+        // The first button with the engraving wins (3, not the later 7).
         assert_eq!(d.scenes[1]["button_component"], 3);
         assert_eq!(d.scenes[1]["main_repeater_id"], 1);
+    }
+
+    #[test]
+    fn a_repeated_engraving_is_merged_not_duplicated() {
+        let d = parse(XML).unwrap();
+        // Only one "Outside On" survives even though two buttons carry it.
+        assert_eq!(
+            d.scenes
+                .iter()
+                .filter(|s| s["name"] == "Outside On")
+                .count(),
+            1
+        );
+        assert!(
+            d.summary().contains("Merged 1 phantom button"),
+            "summary was {:?}",
+            d.summary()
+        );
     }
 
     #[test]
