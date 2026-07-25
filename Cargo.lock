@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "hc-lutron"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -972,8 +972,8 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.3.1"
-source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.1#a0f915fb3332e5a22f3f99c137fffdfabddabc47"
+version = "0.3.3"
+source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.3#05b7720a02f7996001fefb2c2ce49b231e409e78"
 dependencies = [
  "anyhow",
  "chrono",
