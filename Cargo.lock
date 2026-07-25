@@ -938,8 +938,8 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.3.2"
-source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.2#b6578e2a6b501e2f5f76de76dfb425a0cc799006"
+version = "0.3.3"
+source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.3#05b7720a02f7996001fefb2c2ce49b231e409e78"
 dependencies = [
  "anyhow",
  "chrono",
