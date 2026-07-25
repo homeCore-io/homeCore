@@ -4,6 +4,7 @@ mod dbxml;
 mod devices;
 mod lip;
 mod logging;
+mod schema;
 
 use anyhow::Result;
 use plugin_sdk_rs::{PluginClient, PluginConfig};

@@ -323,6 +323,7 @@ mod tests {
             fade_secs: None,
             invert_position: false,
             buttons: vec![],
+            all_buttons: vec![],
             ccis: vec![],
         })
     }

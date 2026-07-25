@@ -176,6 +176,15 @@ pub fn config_descriptor() -> serde_json::Value {
                                     "Button component numbers, used to read each LED's \
                                      state on connect. Pico buttons start at 2.",
                                 ),
+                            Field::list("all_buttons", "int")
+                                .label("All buttons")
+                                .placeholder("2, 3, 4, 5, 6")
+                                .help(
+                                    "Every pressable button, LED or not — published as \
+                                     available_buttons so a rule editor can name them. \
+                                     Filled in by DbXML discovery; a Pico has no LEDs, so \
+                                     this is the only list that ever contains its buttons.",
+                                ),
                             // VCRX only.
                             Field::list("ccis", "int")
                                 .label("Contact inputs")
@@ -467,6 +476,15 @@ pub struct DeviceConfig {
     /// LED component = button component + 80; this offset is applied automatically.
     #[serde(default)]
     pub buttons: Vec<u32>,
+    /// Every button a person can press on this device, LED or not.
+    ///
+    /// Distinct from `buttons`, which is the LED-query list and is empty on a
+    /// Pico. This is what gets published as `available_buttons` so a UI can
+    /// name the buttons rather than asking for a component number. Populated
+    /// by DbXML discovery; empty on a config written before that existed, in
+    /// which case the device simply reports no catalogue.
+    #[serde(default)]
+    pub all_buttons: Vec<u32>,
     /// CCI (Contact Closure Input) component numbers on a VCRX device.
     /// These report open/closed state via ~DEVICE press/release events.
     /// VCRX components are 30 (Full/Security), 31 (Flash), 32 (Input 1) and

@@ -278,16 +278,30 @@ pub fn parse(xml: &str) -> Result<Discovered> {
             row["area"] = json!(area);
         }
 
+        // Two different lists, and conflating them is why no UI could ever
+        // show a Pico's buttons.
+        //
         // `buttons` exists solely to query LED state on connect, so only
         // buttons that *have* an LED belong in it. A SeeTouch's raise/lower
-        // (18/19) have none, and a Pico has none at all.
+        // (18/19) have none, and a Pico has none at all — so this list is
+        // empty for every Pico ever made.
+        //
+        // `all_buttons` is what a person can actually press. It is what the
+        // device publishes as `available_buttons`, so a rule editor can offer
+        // "button 2 on the Kitchen Pico" instead of an empty dropdown or a
+        // bare number box.
+        let all_buttons = components(d, "BUTTON");
         let leds: HashSet<u32> = components(d, "LED").into_iter().collect();
-        let buttons: Vec<u32> = components(d, "BUTTON")
-            .into_iter()
+        let buttons: Vec<u32> = all_buttons
+            .iter()
+            .copied()
             .filter(|b| leds.contains(&(b + 80)))
             .collect();
         if !buttons.is_empty() {
             row["buttons"] = json!(buttons);
+        }
+        if !all_buttons.is_empty() {
+            row["all_buttons"] = json!(all_buttons);
         }
         let ccis = components(d, "CCI");
         if !ccis.is_empty() {

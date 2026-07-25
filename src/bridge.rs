@@ -511,6 +511,11 @@ impl Bridge {
         // Regular device command
         if let Some(&integration_id) = self.hc_to_id.get(hc_id) {
             if let Some(dev) = self.devices.get(&integration_id) {
+                // Action style — `{"action":"press_button","button":3}` — is what a
+                // declared action sends. Rewrite it into the attribute form so
+                // there is exactly one implementation of what each command means.
+                let cmd = &normalise_action_style(&cmd);
+
                 // press_button requires an async press+release with a gap — handle before
                 // translate_command (which is synchronous and cannot produce the delay).
                 if matches!(dev.config.kind, DeviceKind::Keypad | DeviceKind::Vcrx) {
@@ -567,6 +572,21 @@ impl Bridge {
             }
             if let Err(e) = self.publisher.publish_availability(&dev.hc_id, true).await {
                 warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish availability");
+            }
+            // Buttons: the list DbXML has always known, finally said out loud.
+            if let Some(schema) = crate::schema::device_schema_json(&dev.config) {
+                if let Err(e) = self
+                    .publisher
+                    .register_device_schema_json(&dev.hc_id, &schema)
+                    .await
+                {
+                    warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish device schema");
+                }
+            }
+            if let Some(cat) = crate::schema::button_catalogue(&dev.config) {
+                if let Err(e) = self.publisher.publish_state_partial(&dev.hc_id, &cat).await {
+                    warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish button catalogue");
+                }
             }
         }
         for scene in &self.scenes {
@@ -678,5 +698,77 @@ impl Bridge {
                     error = %e, "Failed to query scene LED state");
             }
         }
+    }
+}
+
+/// Rewrite a declared action into the attribute form the translator speaks.
+///
+/// `{"action":"press_button","button":3}` becomes `{"press_button":3}`, and
+/// `{"action":"set_led","button":3,"state":1}` becomes the nested `set_led`
+/// object. Anything else passes through untouched, so attribute-style callers
+/// and older rules are unaffected.
+fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
+    let Some(action) = cmd.get("action").and_then(serde_json::Value::as_str) else {
+        return cmd.clone();
+    };
+    match action {
+        "press_button" => match cmd.get("button").and_then(serde_json::Value::as_u64) {
+            Some(b) => serde_json::json!({ "press_button": b }),
+            None => cmd.clone(),
+        },
+        "set_led" => {
+            let button = cmd
+                .get("button")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            // The declared param is an enum, so the state may arrive as "1".
+            let state = cmd
+                .get("state")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .unwrap_or(0);
+            serde_json::json!({ "set_led": { "button": button, "state": state } })
+        }
+        _ => cmd.clone(),
+    }
+}
+
+#[cfg(test)]
+mod action_style_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A declared action and a hand-written attribute payload must reach the
+    /// same place — one implementation of what "press button 3" means.
+    #[test]
+    fn action_style_becomes_attribute_style() {
+        assert_eq!(
+            normalise_action_style(&json!({"action": "press_button", "button": 3})),
+            json!({"press_button": 3})
+        );
+        assert_eq!(
+            normalise_action_style(&json!({"action": "set_led", "button": 3, "state": 1})),
+            json!({"set_led": {"button": 3, "state": 1}})
+        );
+    }
+
+    /// The declared `state` param is an enum, so it arrives as a string.
+    #[test]
+    fn a_stringly_led_state_still_parses() {
+        assert_eq!(
+            normalise_action_style(&json!({"action": "set_led", "button": 2, "state": "3"})),
+            json!({"set_led": {"button": 2, "state": 3}})
+        );
+    }
+
+    /// Attribute-style callers and existing rules are untouched.
+    #[test]
+    fn anything_else_passes_through() {
+        let raw = json!({"press_button": 5});
+        assert_eq!(normalise_action_style(&raw), raw);
+        let unknown = json!({"action": "fly"});
+        assert_eq!(normalise_action_style(&unknown), unknown);
     }
 }
