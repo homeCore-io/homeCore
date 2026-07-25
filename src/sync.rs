@@ -380,7 +380,10 @@ fn build_light_schema() -> DeviceSchema {
             options: None,
         },
     );
-    DeviceSchema { attributes: attrs }
+    DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 fn build_group_schema() -> DeviceSchema {
@@ -401,7 +404,10 @@ fn build_group_schema() -> DeviceSchema {
             Some(1.0),
         ),
     );
-    DeviceSchema { attributes: attrs }
+    DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 /// Map a Hue auxiliary resource type to the canonical homeCore device
