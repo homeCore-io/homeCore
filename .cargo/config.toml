@@ -1,0 +1,10 @@
+# Standalone build profile — applies when this repo is cloned alone
+# (CI, fresh checkout) without the meta-layout workspace at
+# plugins/Cargo.toml. In workspace mode the workspace root profile
+# takes precedence; this file is the standalone fallback so
+# binary-size optimization is preserved in both contexts.
+
+[profile.release]
+strip         = "symbols"
+lto           = "thin"
+codegen-units = 1
