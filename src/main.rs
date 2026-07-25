@@ -1,6 +1,7 @@
 //! hc-roku — Roku streaming players and Roku TVs in homeCore, over the
 //! External Control Protocol.
 
+mod actions;
 mod bridge;
 mod commands;
 mod config;

@@ -275,9 +275,15 @@ impl Bridge {
         {
             warn!(hc_id = %entry.hc_id, error = %e, "Failed to register device");
         }
+        // Attributes and actions travel together on the one retained schema
+        // topic — what can be written, and what can be done.
+        let schema = plugin_sdk_rs::device_actions::with_actions(
+            &crate::schema::device_schema(),
+            crate::actions::device_actions(),
+        );
         if let Err(e) = self
             .publisher
-            .register_device_schema(&entry.hc_id, &crate::schema::device_schema())
+            .register_device_schema_json(&entry.hc_id, &schema)
             .await
         {
             warn!(hc_id = %entry.hc_id, error = %e, "Failed to publish device schema");

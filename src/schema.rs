@@ -102,7 +102,11 @@ pub fn device_schema() -> DeviceSchema {
         attr(AttributeKind::Json, false, "TV channel lineup", None),
     );
 
-    DeviceSchema { attributes: a }
+    DeviceSchema {
+        attributes: a,
+        // Actions are declared separately and merged at publish time.
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
