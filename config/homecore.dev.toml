@@ -200,6 +200,12 @@ config  = "../plugins/hc-wled/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
+id      = "plugin.roku"
+binary  = "../plugins/target/debug/hc-roku"
+config  = "../plugins/hc-roku/config/config.dev.toml"
+enabled = true
+
+[[plugins]]
 id      = "plugin.isy"
 binary  = "../plugins/target/debug/hc-isy"
 config  = "../plugins/hc-isy/config/config.dev.toml"
