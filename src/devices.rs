@@ -324,6 +324,7 @@ mod tests {
             invert_position: false,
             buttons: vec![],
             all_buttons: vec![],
+            button_names: vec![],
             ccis: vec![],
         })
     }

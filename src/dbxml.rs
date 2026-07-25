@@ -164,6 +164,30 @@ fn components(node: roxmltree::Node<'_, '_>, kind: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Button components with the label Lutron engraved on them.
+///
+/// The engraving is what is physically printed on the keypad, so it is what a
+/// person calls that button — "Overhead On", not "button 3". `Name` is the
+/// fallback, and a default `Name` ("Button 3") is treated as no label at all
+/// so the UI can say "Button 3" itself rather than echoing a placeholder.
+fn button_labels(node: roxmltree::Node<'_, '_>) -> Vec<(u32, String)> {
+    node.descendants()
+        .filter(|c| c.has_tag_name("Component") && c.attribute("ComponentType") == Some("BUTTON"))
+        .filter_map(|c| {
+            let number = attr_u32(c, "ComponentNumber")?;
+            let label = c
+                .children()
+                .find(|k| k.has_tag_name("Button"))
+                .and_then(|b| b.attribute("Engraving").or_else(|| b.attribute("Name")))
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !is_placeholder_button(s))
+                .unwrap_or("")
+                .to_string();
+            Some((number, label))
+        })
+        .collect()
+}
+
 /// Parse a `DbXmlInfo.xml` into rows for `[[devices]]`, `[[scenes]]` and
 /// `[[time_clocks]]`.
 pub fn parse(xml: &str) -> Result<Discovered> {
@@ -290,7 +314,8 @@ pub fn parse(xml: &str) -> Result<Discovered> {
         // device publishes as `available_buttons`, so a rule editor can offer
         // "button 2 on the Kitchen Pico" instead of an empty dropdown or a
         // bare number box.
-        let all_buttons = components(d, "BUTTON");
+        let labelled = button_labels(d);
+        let all_buttons: Vec<u32> = labelled.iter().map(|(n, _)| *n).collect();
         let leds: HashSet<u32> = components(d, "LED").into_iter().collect();
         let buttons: Vec<u32> = all_buttons
             .iter()
@@ -302,6 +327,11 @@ pub fn parse(xml: &str) -> Result<Discovered> {
         }
         if !all_buttons.is_empty() {
             row["all_buttons"] = json!(all_buttons);
+            // Parallel to `all_buttons`, empty where Lutron engraved nothing.
+            if labelled.iter().any(|(_, l)| !l.is_empty()) {
+                row["button_names"] =
+                    json!(labelled.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>());
+            }
         }
         let ccis = components(d, "CCI");
         if !ccis.is_empty() {

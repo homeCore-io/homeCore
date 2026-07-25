@@ -185,6 +185,14 @@ pub fn config_descriptor() -> serde_json::Value {
                                      Filled in by DbXML discovery; a Pico has no LEDs, so \
                                      this is the only list that ever contains its buttons.",
                                 ),
+                            Field::list("button_names", "string")
+                                .label("Button engravings")
+                                .placeholder("Overhead On, Overhead Off")
+                                .help(
+                                    "What is printed on each button, in the same order as \
+                                     All buttons. Filled in by DbXML discovery; leave an \
+                                     entry blank where a button has no engraving.",
+                                ),
                             // VCRX only.
                             Field::list("ccis", "int")
                                 .label("Contact inputs")
@@ -485,6 +493,14 @@ pub struct DeviceConfig {
     /// which case the device simply reports no catalogue.
     #[serde(default)]
     pub all_buttons: Vec<u32>,
+    /// What Lutron engraved on each button, positionally matching
+    /// `all_buttons`, empty where a button carries no engraving.
+    ///
+    /// Parallel rather than a map because that is what a config file can show
+    /// legibly and a descriptor can render. Published alongside the numbers so
+    /// a UI can offer "Overhead On" instead of "button 3".
+    #[serde(default)]
+    pub button_names: Vec<String>,
     /// CCI (Contact Closure Input) component numbers on a VCRX device.
     /// These report open/closed state via ~DEVICE press/release events.
     /// VCRX components are 30 (Full/Security), 31 (Flash), 32 (Input 1) and

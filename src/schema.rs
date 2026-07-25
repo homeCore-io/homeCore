@@ -47,11 +47,12 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
             ro(AttributeKind::Json, "Buttons"),
         );
     }
-    for b in &cfg.all_buttons {
-        attrs.insert(
-            format!("button_{b}"),
-            ro(AttributeKind::String, &format!("Button {b}")),
-        );
+    // Every button gets an attribute, whether it has ever been pressed or not.
+    // A button only appears in state after someone presses it, so listing them
+    // from the schema is what makes an untouched keypad show all six — and
+    // they are all pressable from the UI regardless.
+    for (b, label) in buttons_with_labels(cfg) {
+        attrs.insert(format!("button_{b}"), ro(AttributeKind::String, &label));
     }
 
     let schema = DeviceSchema {
@@ -71,8 +72,14 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
             p
         } else {
             // The catalogue convention: the list is the device's own, so a
-            // client offers this keypad's actual buttons.
-            p.options_from(Source::attribute("available_buttons"))
+            // client offers this keypad's actual buttons — by engraving, since
+            // that is what is printed on the wall, while still sending the
+            // number the protocol wants.
+            p.options_from(
+                Source::attribute("available_buttons")
+                    .label_key("name")
+                    .value_key("number"),
+            )
         }
     };
 
@@ -108,13 +115,38 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
     ))
 }
 
+/// Number and engraving for every button, with a sensible name where Lutron
+/// engraved nothing.
+pub fn buttons_with_labels(cfg: &DeviceConfig) -> Vec<(u32, String)> {
+    cfg.all_buttons
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let engraved = cfg.button_names.get(i).map(String::as_str).unwrap_or("");
+            let label = if engraved.is_empty() {
+                format!("Button {b}")
+            } else {
+                engraved.to_string()
+            };
+            (*b, label)
+        })
+        .collect()
+}
+
 /// The state a device publishes about its own buttons, merged into its first
 /// state publish. Empty when discovery never learned them.
+///
+/// Objects rather than bare numbers so a client can show the engraving and
+/// send the number — `label_key` / `value_key` on the action parameter.
 pub fn button_catalogue(cfg: &DeviceConfig) -> Option<Value> {
     if cfg.all_buttons.is_empty() {
         return None;
     }
-    Some(serde_json::json!({ "available_buttons": cfg.all_buttons }))
+    let list: Vec<Value> = buttons_with_labels(cfg)
+        .into_iter()
+        .map(|(number, name)| serde_json::json!({ "number": number, "name": name }))
+        .collect();
+    Some(serde_json::json!({ "available_buttons": list }))
 }
 
 #[cfg(test)]
@@ -131,6 +163,7 @@ mod tests {
             invert_position: false,
             buttons: vec![],
             all_buttons,
+            button_names: vec![],
             ccis: vec![],
         }
     }
@@ -185,7 +218,41 @@ mod tests {
     #[test]
     fn the_catalogue_is_omitted_when_unknown() {
         assert!(button_catalogue(&cfg(DeviceKind::Pico, vec![])).is_none());
-        let v = button_catalogue(&cfg(DeviceKind::Pico, vec![2, 4])).unwrap();
-        assert_eq!(v["available_buttons"], serde_json::json!([2, 4]));
+    }
+
+    /// Engravings are what is printed on the wall, so they are what a person
+    /// picks by — while the number is still what goes on the wire.
+    #[test]
+    fn the_catalogue_carries_engravings() {
+        let mut c = cfg(DeviceKind::Keypad, vec![1, 2, 3]);
+        c.button_names = vec!["Overhead On".into(), String::new(), "All Off".into()];
+        let v = button_catalogue(&c).unwrap();
+        assert_eq!(
+            v["available_buttons"],
+            serde_json::json!([
+                { "number": 1, "name": "Overhead On" },
+                // No engraving — named for its number rather than left blank.
+                { "number": 2, "name": "Button 2" },
+                { "number": 3, "name": "All Off" },
+            ])
+        );
+        // And the attribute a device sheet renders carries it too.
+        let schema = device_schema_json(&c).unwrap();
+        assert_eq!(
+            schema["attributes"]["button_1"]["display_name"],
+            "Overhead On"
+        );
+        assert_eq!(schema["attributes"]["button_2"]["display_name"], "Button 2");
+    }
+
+    /// The picker must send a number while showing the engraving.
+    #[test]
+    fn the_button_param_maps_label_to_value() {
+        let mut c = cfg(DeviceKind::Keypad, vec![1]);
+        c.button_names = vec!["Overhead On".into()];
+        let v = device_schema_json(&c).unwrap();
+        let src = &v["actions"][0]["params"][0]["options_from"]["attribute"];
+        assert_eq!(src["label_key"], "name");
+        assert_eq!(src["value_key"], "number");
     }
 }
