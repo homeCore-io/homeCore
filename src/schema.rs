@@ -22,11 +22,7 @@ fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
         // with `press_button`, it does not assign "press" to an attribute.
         writable: false,
         display_name: Some(display.to_string()),
-        unit: None,
-        min: None,
-        max: None,
-        step: None,
-        options: None,
+        ..Default::default()
     }
 }
 

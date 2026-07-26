@@ -536,7 +536,7 @@ impl Bridge {
                     }
                 }
 
-                let lip_cmds = dev.translate_command(&cmd, self.global_fade);
+                let lip_cmds = dev.translate_command(cmd, self.global_fade);
                 if lip_cmds.is_empty() {
                     warn!(hc_id, ?cmd, "Unrecognised command for device");
                 }
