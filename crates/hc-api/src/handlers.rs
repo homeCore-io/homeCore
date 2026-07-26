@@ -1419,14 +1419,33 @@ pub async fn create_glue(
         _ => {}
     }
 
-    match s.store.upsert_device(&dev).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (
+    if let Err(e) = s.store.upsert_device(&dev).await {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         )
-            .into_response(),
+            .into_response();
     }
+
+    // A group is recalculated when a member changes, so a fresh one sat at its
+    // create-time `active_count: 0, member_count: 0` until something moved —
+    // reading as "nothing matches" when it may already be satisfied. Evaluate
+    // it once now so it is correct the moment it exists.
+    if dev.device_type.as_deref() == Some("group") {
+        hc_core::glue::group::recalculate(&s.store, &s.event_bus, &device_id).await;
+    }
+
+    // Re-read, so the response carries the evaluated counts rather than the
+    // zeros that were written a moment ago.
+    let created = s
+        .store
+        .get_device(&device_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(dev);
+
+    (StatusCode::CREATED, Json(json!(created))).into_response()
 }
 
 /// `GET /api/v1/glue` — list all glue devices.
