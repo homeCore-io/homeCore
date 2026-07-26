@@ -1484,7 +1484,14 @@ fn glue_config_keys(device_type: &str) -> &'static [&'static str] {
         "text" => &["max_length"],
         "datetime" => &["has_date", "has_time"],
         "group" => &["member_ids", "attribute", "mode", "expect"],
-        "threshold" => &["source_device_id", "source_attribute", "threshold"],
+        "threshold" => &[
+            "source_device_id",
+            "source_attribute",
+            "threshold",
+            // The flap guard. Without it a reading sitting on the line
+            // toggles the helper — and every rule watching it — repeatedly.
+            "hysteresis",
+        ],
         "timer" => &["duration_secs", "repeat"],
         _ => &[],
     }
