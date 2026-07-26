@@ -17,6 +17,7 @@ pub mod datetime;
 pub mod group;
 pub mod number;
 pub mod schedule;
+pub mod schema;
 pub mod select;
 pub mod switch;
 pub mod text;
@@ -372,5 +373,47 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
             migrated,
             "Glue migration: updated legacy devices (plugin_id / device_type)"
         );
+    }
+}
+
+
+/// Give core's own devices the schema they never had.
+///
+/// Glue devices are created directly in the state store rather than registered
+/// over MQTT, so the schema-publishing path plugins use never applied to them
+/// and clients were left inferring every attribute. Runs on startup beside
+/// [`migrate_legacy_plugin_ids`], and is idempotent: the schema is derived
+/// from the device type, so re-running writes the same bytes.
+pub async fn publish_core_device_schemas(store: &StateStore) {
+    let devices = match store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "Glue schemas: failed to list devices");
+            return;
+        }
+    };
+
+    let mut written = 0u32;
+    for dev in devices {
+        let schema = match dev.plugin_id.as_str() {
+            GLUE_PLUGIN_ID => match dev.device_type.as_deref() {
+                Some(t) => schema::schema_for(t),
+                None => None,
+            },
+            "core.mode" => Some(schema::mode_schema()),
+            _ => None,
+        };
+        let Some(schema) = schema else { continue };
+
+        if let Err(e) = store.upsert_device_schema(&dev.device_id, &schema).await {
+            warn!(device_id = %dev.device_id, error = %e,
+                  "Glue schemas: failed to persist");
+        } else {
+            written += 1;
+        }
+    }
+
+    if written > 0 {
+        info!(written, "Glue schemas: published for core-owned devices");
     }
 }

@@ -402,6 +402,10 @@ impl Core {
             let store = self.state.clone();
             tokio::spawn(async move {
                 glue::migrate_legacy_plugin_ids(&store).await;
+                // Core's own devices never had schemas, so every client
+                // inferred them — a timer's `state` became a text box wanting
+                // `"finished"` with the quotes.
+                glue::publish_core_device_schemas(&store).await;
             });
         }
 
