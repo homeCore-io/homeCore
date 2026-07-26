@@ -992,7 +992,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/glue",
             get(handlers::list_glue).post(handlers::create_glue),
         )
-        .route("/glue/:id", delete(handlers::delete_glue))
+        .route(
+            "/glue/:id",
+            delete(handlers::delete_glue).patch(handlers::update_glue),
+        )
         // Modes (mode devices are also visible via /devices)
         .route(
             "/modes",

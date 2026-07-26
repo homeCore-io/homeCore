@@ -1446,6 +1446,130 @@ pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoRe
 }
 
 /// `DELETE /api/v1/glue/:id` — delete a glue device.
+/// The keys `PATCH /glue/:id` will merge, per device type.
+///
+/// Deliberately a whitelist. A helper's attributes are a mix of configuration
+/// (a number's range) and live readings (its current value), and letting a
+/// PATCH write anything would make "edit this helper" a way to fake its state.
+fn glue_config_keys(device_type: &str) -> &'static [&'static str] {
+    match device_type {
+        "counter" => &["step", "min", "max"],
+        "number" => &["min", "max", "step", "unit"],
+        "select" => &["options"],
+        "text" => &["max_length"],
+        "datetime" => &["has_date", "has_time"],
+        "group" => &["member_ids", "attribute", "mode"],
+        "threshold" => &["source_device_id", "source_attribute", "threshold"],
+        "timer" => &["duration_secs", "repeat"],
+        _ => &[],
+    }
+}
+
+/// `PATCH /api/v1/glue/:id` — reconfigure an existing helper.
+///
+/// The command surface (`{"command": "set"}`) *operates* a helper: it sets a
+/// number's value or picks a select's option. It cannot change what the helper
+/// IS — a select's option list, a group's members, a number's range — so the
+/// only way to fix one of those was to delete and recreate, which breaks every
+/// rule referring to it.
+///
+/// Merges only the keys [`glue_config_keys`] allows for the type, so a PATCH
+/// cannot write a live reading and pass it off as configuration.
+pub async fn update_glue(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let mut dev = match s.store.get_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    if dev.plugin_id != "core.glue" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "not a helper device" })),
+        )
+            .into_response();
+    }
+
+    let device_type = dev.device_type.clone().unwrap_or_default();
+    let allowed = glue_config_keys(&device_type);
+    if allowed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{device_type} has nothing to configure") })),
+        )
+            .into_response();
+    }
+
+    let config = body.get("config").and_then(|c| c.as_object());
+    let Some(config) = config else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing config" })),
+        )
+            .into_response();
+    };
+
+    // `members` is the word the create body uses; the attribute is member_ids.
+    let mut incoming = config.clone();
+    if let Some(members) = incoming.remove("members") {
+        incoming.insert("member_ids".into(), members);
+    }
+
+    for key in allowed {
+        if let Some(v) = incoming.get(*key) {
+            dev.attributes.insert((*key).to_string(), v.clone());
+        }
+    }
+
+    // A select whose selected value just fell out of its options would keep
+    // reporting a value it can no longer be set to.
+    if device_type == "select" {
+        let options = dev
+            .attributes
+            .get("options")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let selected = dev.attributes.get("selected").cloned();
+        let still_valid = selected
+            .as_ref()
+            .map(|sel| options.contains(sel))
+            .unwrap_or(false);
+        if !still_valid {
+            dev.attributes.insert(
+                "selected".into(),
+                options.first().cloned().unwrap_or(json!("")),
+            );
+        }
+    }
+
+    match s.store.upsert_device(&dev).await {
+        Ok(_) => (StatusCode::OK, Json(json!(dev))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_glue(
     State(s): State<AppState>,
     _: DevicesWrite,
@@ -1463,6 +1587,53 @@ pub async fn delete_glue(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod glue_config_tests {
+    use super::glue_config_keys;
+
+    /// A helper's attributes mix configuration with live readings, and a PATCH
+    /// that could write either would make "edit this helper" a way to fake its
+    /// state — a timer reporting `finished` because someone said so.
+    #[test]
+    fn live_readings_are_never_configurable() {
+        const READINGS: &[(&str, &str)] = &[
+            ("counter", "count"),
+            ("number", "value"),
+            ("select", "selected"),
+            ("text", "value"),
+            ("group", "on"),
+            ("group", "active_count"),
+            ("group", "member_count"),
+            ("threshold", "above"),
+            ("threshold", "source_value"),
+            ("timer", "state"),
+            ("timer", "remaining_secs"),
+        ];
+        for (device_type, reading) in READINGS {
+            assert!(
+                !glue_config_keys(device_type).contains(reading),
+                "{device_type} would let a PATCH write `{reading}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_configurable_types_expose_their_config() {
+        assert!(glue_config_keys("number").contains(&"min"));
+        assert!(glue_config_keys("select").contains(&"options"));
+        assert!(glue_config_keys("group").contains(&"member_ids"));
+    }
+
+    /// A switch is a flag: there is nothing about it to configure, and the
+    /// handler refuses rather than silently accepting a no-op PATCH.
+    #[test]
+    fn a_type_with_nothing_to_configure_offers_nothing() {
+        assert!(glue_config_keys("switch").is_empty());
+        assert!(glue_config_keys("button").is_empty());
+        assert!(glue_config_keys("not_a_type").is_empty());
     }
 }
 
