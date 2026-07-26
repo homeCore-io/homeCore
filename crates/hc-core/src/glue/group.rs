@@ -109,9 +109,9 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
     let devices = state.list_devices().await.unwrap_or_default();
 
     for mid in &member_ids {
-        let member = devices.iter().find(|d| {
-            d.device_id == *mid || d.canonical_name.as_deref() == Some(mid.as_str())
-        });
+        let member = devices
+            .iter()
+            .find(|d| d.device_id == *mid || d.canonical_name.as_deref() == Some(mid.as_str()));
         if let Some(member) = member {
             if let Some(val) = member.attributes.get(attribute) {
                 if is_truthy(val) == expect {

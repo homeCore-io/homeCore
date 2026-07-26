@@ -15,9 +15,7 @@
 //! `remaining_secs` does nothing. Only the attributes a command path genuinely
 //! honours are declared writable; the rest are reported.
 
-use hc_types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
-};
+use hc_types::schema::{AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel};
 use std::collections::HashMap;
 
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
@@ -87,7 +85,10 @@ pub fn schema_for(device_type: &str) -> Option<DeviceSchema> {
 
         "switch" => {
             // The one glue attribute that really is written as an attribute.
-            a.insert("on".into(), on_off(AttributeSchema::new(AttributeKind::Bool).labelled("State")));
+            a.insert(
+                "on".into(),
+                on_off(AttributeSchema::new(AttributeKind::Bool).labelled("State")),
+            );
         }
 
         "counter" => {
@@ -130,10 +131,7 @@ pub fn schema_for(device_type: &str) -> Option<DeviceSchema> {
                 "active_count".into(),
                 ro(AttributeKind::Integer, "Members on"),
             );
-            a.insert(
-                "member_count".into(),
-                ro(AttributeKind::Integer, "Members"),
-            );
+            a.insert("member_count".into(), ro(AttributeKind::Integer, "Members"));
         }
 
         "threshold" => {
@@ -214,8 +212,17 @@ mod tests {
     use super::*;
 
     const TYPES: &[&str] = &[
-        "timer", "switch", "counter", "number", "select", "text", "datetime",
-        "button", "group", "threshold", "schedule",
+        "timer",
+        "switch",
+        "counter",
+        "number",
+        "select",
+        "text",
+        "datetime",
+        "button",
+        "group",
+        "threshold",
+        "schedule",
     ];
 
     #[test]

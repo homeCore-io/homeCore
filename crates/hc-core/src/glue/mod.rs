@@ -376,7 +376,6 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
     }
 }
 
-
 /// Give core's own devices the schema they never had.
 ///
 /// Glue devices are created directly in the state store rather than registered
@@ -417,7 +416,6 @@ pub async fn publish_core_device_schemas(store: &StateStore) {
         info!(written, "Glue schemas: published for core-owned devices");
     }
 }
-
 
 /// Evaluate every group once at startup.
 ///
