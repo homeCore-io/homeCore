@@ -556,10 +556,8 @@ pub fn parse_active_app(xml: &str) -> Result<ActiveApp> {
         match node.tag_name().name() {
             // The home screen is `<app>Roku</app>` — no id attribute.
             // Anything with an id is a real running app.
-            "app" => {
-                if node.attribute("id").is_some() {
-                    active.app = Some(app_from_node(&node));
-                }
+            "app" if node.attribute("id").is_some() => {
+                active.app = Some(app_from_node(&node));
             }
             "screensaver" => active.screensaver = Some(app_from_node(&node)),
             _ => {}

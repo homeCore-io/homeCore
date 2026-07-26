@@ -14,7 +14,9 @@
 
 use std::collections::HashMap;
 
-use plugin_sdk_rs::types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::types::schema::{
+    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 
 fn attr(
     kind: AttributeKind,
@@ -26,11 +28,8 @@ fn attr(
         kind,
         writable,
         display_name: Some(display.to_string()),
-        unit: None,
-        min: None,
-        max: None,
-        step: None,
         options,
+        ..Default::default()
     }
 }
 
@@ -51,7 +50,15 @@ pub fn device_schema() -> DeviceSchema {
             ),
         ),
     );
-    a.insert("on".into(), attr(AttributeKind::Bool, true, "Power", None));
+    // A boolean is two events, not one. Without both names a client offers
+    // "on" and pushes "turns off" behind a Not gate.
+    a.insert(
+        "on".into(),
+        attr(AttributeKind::Bool, true, "Power", None).with_states(BoolStates {
+            when_true: StateLabel::verbed("on", "turns on"),
+            when_false: StateLabel::verbed("off", "turns off"),
+        }),
+    );
     a.insert(
         "source".into(),
         // Writable free-form rather than an enum: the option list is the
@@ -111,6 +118,35 @@ pub fn device_schema() -> DeviceSchema {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every boolean names both of its states.
+    ///
+    /// A boolean attribute is two events, not one: a client given only one
+    /// name offers one row, and the other direction needs a Not gate wrapped
+    /// round the trigger. Half-declaring is worse than not declaring, because
+    /// the client's own fallback lexicon is skipped for an attribute that then
+    /// has no second name.
+    #[test]
+    fn every_boolean_names_both_of_its_states() {
+        let schemas = [("roku", device_schema())];
+        for (label, schema) in schemas {
+            for (name, attr) in &schema.attributes {
+                if !matches!(attr.kind, AttributeKind::Bool) {
+                    continue;
+                }
+                let s = attr
+                    .states
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{label}.{name} is a bool with no state names"));
+                assert!(!s.when_true.label.is_empty(), "{label}.{name}");
+                assert!(!s.when_false.label.is_empty(), "{label}.{name}");
+                assert_ne!(
+                    s.when_true.label, s.when_false.label,
+                    "{label}.{name} names both states the same thing"
+                );
+            }
+        }
+    }
     use super::*;
 
     /// Every writable attribute must have a command path in

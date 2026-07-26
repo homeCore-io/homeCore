@@ -270,7 +270,11 @@ pub fn device_actions() -> Vec<Action> {
         ("info", "Info / options", "press Info on {device}"),
         ("enter", "Enter", "press Enter on {device}"),
         ("backspace", "Backspace", "press Backspace on {device}"),
-        ("find_remote", "Find my remote", "make {device} find its remote"),
+        (
+            "find_remote",
+            "Find my remote",
+            "make {device} find its remote",
+        ),
     ] {
         out.push(key_action(id, label, "remote", sentence));
     }
