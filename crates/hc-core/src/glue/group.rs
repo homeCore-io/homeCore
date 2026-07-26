@@ -14,8 +14,13 @@
 //! ```
 //!
 //! `mode`:
-//! - `"any"` — `on = true` if ANY member's attribute is truthy (default)
-//! - `"all"` — `on = true` only if ALL members' attribute is truthy
+//! - `"any"` — `on = true` if ANY member matches (default)
+//! - `"all"` — `on = true` only if ALL members match
+//!
+//! `expect` — the value a member has to hold to count as matching. Defaults to
+//! `true`, which is what every group written before it existed meant. Without
+//! it a group could only ask "are any of these ON", so "all deck doors CLOSED"
+//! — an ordinary thing to want — could not be expressed at all.
 //!
 //! # Commands
 //!
@@ -83,13 +88,21 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
         .and_then(|v| v.as_str())
         .unwrap_or("any");
 
+    // The state a member must be in to count. `true` keeps every group that
+    // predates this field meaning exactly what it meant.
+    let expect = dev
+        .attributes
+        .get("expect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     let mut active_count: u64 = 0;
     let member_count = member_ids.len() as u64;
 
     for mid in &member_ids {
         if let Ok(Some(member)) = state.get_device(mid).await {
             if let Some(val) = member.attributes.get(attribute) {
-                if is_truthy(val) {
+                if is_truthy(val) == expect {
                     active_count += 1;
                 }
             }

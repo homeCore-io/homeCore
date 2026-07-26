@@ -1375,6 +1375,12 @@ pub async fn create_glue(
                 "mode".into(),
                 body.config.get("mode").cloned().unwrap_or(json!("any")),
             );
+            // Which state counts. Defaults to true — "any of these are ON" —
+            // so a group written without it behaves as it always did.
+            dev.attributes.insert(
+                "expect".into(),
+                body.config.get("expect").cloned().unwrap_or(json!(true)),
+            );
             dev.attributes.insert("active_count".into(), json!(0));
             dev.attributes.insert("member_count".into(), json!(0));
         }
@@ -1458,7 +1464,7 @@ fn glue_config_keys(device_type: &str) -> &'static [&'static str] {
         "select" => &["options"],
         "text" => &["max_length"],
         "datetime" => &["has_date", "has_time"],
-        "group" => &["member_ids", "attribute", "mode"],
+        "group" => &["member_ids", "attribute", "mode", "expect"],
         "threshold" => &["source_device_id", "source_attribute", "threshold"],
         "timer" => &["duration_secs", "repeat"],
         _ => &[],
@@ -1618,6 +1624,16 @@ mod glue_config_tests {
                 "{device_type} would let a PATCH write `{reading}`"
             );
         }
+    }
+
+    /// A group has to be able to ask about the FALSE state.
+    ///
+    /// Counting truthy members only lets a group say "are any of these ON".
+    /// "All deck doors closed" is an ordinary thing to want and could not be
+    /// expressed at all, so `expect` has to be reconfigurable like the rest.
+    #[test]
+    fn a_group_can_be_reconfigured_to_test_the_other_state() {
+        assert!(glue_config_keys("group").contains(&"expect"));
     }
 
     #[test]
