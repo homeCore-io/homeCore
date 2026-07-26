@@ -400,12 +400,17 @@ impl Core {
         // Migrate legacy plugin_ids (core.switch → core.glue) on startup.
         {
             let store = self.state.clone();
+            let bus = self.pub_bus.clone();
             tokio::spawn(async move {
                 glue::migrate_legacy_plugin_ids(&store).await;
                 // Core's own devices never had schemas, so every client
                 // inferred them — a timer's `state` became a text box wanting
                 // `"finished"` with the quotes.
                 glue::publish_core_device_schemas(&store).await;
+                // A group only recalculates when a member changes, so one
+                // whose members did not move while the hub was down reads as
+                // "nothing matches" when it may be fully satisfied.
+                glue::recalculate_all_groups(&store, &bus).await;
             });
         }
 

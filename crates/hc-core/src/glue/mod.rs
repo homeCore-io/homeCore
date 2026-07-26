@@ -417,3 +417,36 @@ pub async fn publish_core_device_schemas(store: &StateStore) {
         info!(written, "Glue schemas: published for core-owned devices");
     }
 }
+
+
+/// Evaluate every group once at startup.
+///
+/// A group recalculates when a member changes. One created before that
+/// evaluation existed — or whose members happened not to move while the hub
+/// was down — sits at `active_count: 0, member_count: 0`, which reads as
+/// "nothing matches" when it may be fully satisfied. A group of doors that are
+/// all shut looked wrong until someone opened one.
+///
+/// Cheap and idempotent: it reads each member and writes the counts it derives.
+pub async fn recalculate_all_groups(state: &StateStore, pub_bus: &EventBus) {
+    let devices = match state.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "Group startup recalculation: failed to list devices");
+            return;
+        }
+    };
+
+    let mut done = 0u32;
+    for dev in devices {
+        if dev.plugin_id != GLUE_PLUGIN_ID || dev.device_type.as_deref() != Some("group") {
+            continue;
+        }
+        group::recalculate(state, pub_bus, &dev.device_id).await;
+        done += 1;
+    }
+
+    if done > 0 {
+        info!(groups = done, "Groups recalculated at startup");
+    }
+}
