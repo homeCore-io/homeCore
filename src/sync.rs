@@ -9,7 +9,9 @@ use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
-use plugin_sdk_rs::types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::types::schema::{
+    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 use plugin_sdk_rs::DevicePublisher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,7 +335,7 @@ fn make_attr(
         min,
         max,
         step,
-        options: None,
+        ..Default::default()
     }
 }
 
@@ -341,7 +343,14 @@ fn build_light_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
     attrs.insert(
         "on".into(),
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+        // Both directions named. A boolean attribute is two events, and a
+        // client given only "on" needs a Not gate to catch a light going off.
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
+            BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            },
+        ),
     );
     attrs.insert(
         "brightness_pct".into(),
@@ -373,11 +382,7 @@ fn build_light_schema() -> DeviceSchema {
             kind: AttributeKind::ColorXy,
             writable: true,
             display_name: Some("Colour".into()),
-            unit: None,
-            min: None,
-            max: None,
-            step: None,
-            options: None,
+            ..Default::default()
         },
     );
     DeviceSchema {
@@ -390,7 +395,14 @@ fn build_group_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
     attrs.insert(
         "on".into(),
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+        // Both directions named. A boolean attribute is two events, and a
+        // client given only "on" needs a Not gate to catch a light going off.
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
+            BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            },
+        ),
     );
     attrs.insert(
         "brightness_pct".into(),
@@ -1502,6 +1514,38 @@ fn apply_display_preferences_to_patch(
 
 #[cfg(test)]
 mod tests {
+
+    /// Every boolean names both of its states.
+    ///
+    /// A boolean attribute is two events, not one: a client given only one
+    /// name offers one row, and the other direction needs a Not gate wrapped
+    /// round the trigger. Half-declaring is worse than not declaring, because
+    /// the client's own fallback lexicon is skipped for an attribute that then
+    /// has no second name.
+    #[test]
+    fn every_boolean_names_both_of_its_states() {
+        let schemas = [
+            ("light", build_light_schema()),
+            ("group", build_group_schema()),
+        ];
+        for (label, schema) in schemas {
+            for (name, attr) in &schema.attributes {
+                if !matches!(attr.kind, AttributeKind::Bool) {
+                    continue;
+                }
+                let s = attr
+                    .states
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{label}.{name} is a bool with no state names"));
+                assert!(!s.when_true.label.is_empty(), "{label}.{name}");
+                assert!(!s.when_false.label.is_empty(), "{label}.{name}");
+                assert_ne!(
+                    s.when_true.label, s.when_false.label,
+                    "{label}.{name} names both states the same thing"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use crate::hue::models::HueAuxDevice;
