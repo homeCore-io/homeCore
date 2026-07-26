@@ -1100,6 +1100,82 @@ curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKE
 
 ---
 
+## Orphaned devices (`GET /devices/orphaned`)
+
+An **orphaned** device is one HomeCore still holds a registration and retained
+state for, but whose owning plugin no longer manages it — a Hue grouped light
+after `publish_grouped_lights` is turned off, say, or an Ecowitt sensor the
+plugin stopped publishing.
+
+This is nastier than a deleted device, because **nothing fails**:
+
+- Plugins subscribe to command topics **per-device** (`homecore/devices/{id}/cmd`),
+  only for devices they registered. There is no wildcard subscription. So a
+  command published for an orphan has **no subscriber** and the broker drops it.
+  The plugin never sees it; no error is raised anywhere; the rule engine still
+  records the action as `fired: success`.
+- Its state is **frozen** at whatever it last was — forever — and rule conditions
+  keep reading that frozen value as truth.
+
+The two combine into a silent deadlock. A toggle pair built on a frozen
+attribute wedges permanently:
+
+```
+Btn1 "On"  — condition: light.on == false  → turn on    ← can NEVER pass
+Btn1 "Off" — condition: light.on == true   → turn off   ← ALWAYS passes
+```
+
+If the orphan's `on` is frozen `true`, the "On" rule can never fire and the
+"Off" rule fires on every press — while its command evaporates at the broker.
+The button appears dead, and every layer reports success. One such keypad ran
+this way from May to July: `GET /automations/{id}/history` showed the "On" rule
+`condition_failed` **9 times out of 9**, never once firing.
+
+### Finding them
+
+```sh
+curl -s http://localhost:8080/api/v1/devices/orphaned -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Detection is a **count comparison, not a staleness threshold**. Every
+management-capable plugin self-reports `device_count`; if core holds more
+devices for that plugin than the plugin claims, the difference is exactly the
+orphan count.
+
+Thresholding on `last_seen` age is the obvious approach and it is **wrong**:
+plugins that publish only on change leave healthy devices cold for months (a
+wall switch nobody flips is not orphaned), so an age rule fires on precisely
+the quiet devices operators care least about, and the noise gets it ignored.
+
+Identifying *which* devices are orphaned is necessarily heuristic — plugins
+report a count, not an id list — so the `orphan_count` least-recently-seen
+devices come back as `suspects`. In practice orphans sit months behind their
+siblings and the ranking is unambiguous.
+
+The same check by hand, useful when the endpoint isn't deployed yet:
+
+```sh
+# per plugin: what it claims vs what core holds
+paste <(curl -s .../plugins  | jq -r '.[] | "\(.plugin_id)\t\(.device_count)"') \
+      <(curl -s .../devices  | jq -r 'group_by(.plugin_id)[] | "\(.[0].plugin_id)\t\(length)"')
+```
+
+### Why `reconcile_devices` does not clean them up
+
+The SDK's cross-restart reconcile computes `stale = known − live`, where `known`
+comes from its persisted `.published-device-ids.json` (a sibling of the plugin's
+`config.toml`). Devices registered **before that persistence mechanism existed**
+were never written to that file, so `known == live` and the stale set is empty.
+
+Such devices are **structurally invisible** to reconcile — the "cleanup stale
+devices" plugin action will never remove them, and logs nothing when it doesn't.
+The only fix is an explicit `DELETE /devices/{id}`.
+
+Check `affected_rules` in the delete response before assuming it was harmless;
+an empty list means no automation referenced the orphan.
+
+---
+
 ## Working with rules during development
 
 Rules are the core of HomeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
@@ -3673,8 +3749,26 @@ When Claude (or you) adds a new feature, here is where each piece typically goes
 1. Write the handler function in `crates/hc-api/src/handlers.rs` (or `auth_handlers.rs` for auth routes).
 2. Register the route in `crates/hc-api/src/lib.rs` — in `public` if no auth needed, `protected` otherwise.
 3. If it needs a new `StateStore` method, add it to the appropriate `*_store.rs` file and expose it from `StateStore` in `crates/hc-state/src/lib.rs`.
-4. Run `cargo check -p hc-api` to verify it compiles.
-5. Test it manually with `curl`.
+4. **Document it in `docs/openapi.yaml`.** Path, methods, params, request/response
+   shapes, status codes, and the scope the guard requires. This step used to be
+   missing from this checklist, and the spec drifted to documenting 39 of 89
+   routes before anyone noticed — a spec that lags the server is worse than none,
+   because people trust it. Verify parity afterwards:
+
+   ```bash
+   # every route registered in the router
+   perl -0777 -ne 'while (/\.route\(\s*"([^"]+)"/gs) { print "$1\n" }' \
+     crates/hc-api/src/lib.rs | sed -E 's/:([a-zA-Z_]+)/{\1}/g' | sort -u
+
+   # every path documented in the spec (and confirms the YAML still parses)
+   yq eval '.paths | keys | .[]' docs/openapi.yaml | sort -u
+   ```
+
+   The two lists should be identical. `yq` doubles as the syntax check — the
+   spec was silently unparseable for a while (an unquoted `description:` value
+   containing `": "` reads as a nested mapping), so *always* run it.
+5. Run `cargo check -p hc-api` to verify it compiles.
+6. Test it manually with `curl`.
 
 ---
 
@@ -4685,6 +4779,200 @@ This gives device `zwave_5` a state like `{"on": true, "ep1_on": false, "ep2_on"
 
 **Lock shows wrong value**
 - Door Lock (CC 98) uses integer values 0/255; `hc-zwave` applies `Transform::NonzeroBool` automatically. If your lock uses different values, add a custom `AliasEntry` with the appropriate transform.
+
+---
+
+## Roku (`hc-roku` plugin)
+
+HomeCore controls Roku streaming players and Roku TVs through the **`hc-roku`** plugin, which speaks Roku's [External Control Protocol](https://developer.roku.com/dev/docs/external-control-api) — a plain-HTTP API every Roku serves on port 8060. Each device registers as one `media_player`.
+
+Source: `../hc-roku/` (separate git repo)
+
+---
+
+### The device setting that breaks everything
+
+> Settings → System → Advanced system settings → Control by mobile apps → **Network access**
+
+Must be `Default` or `Permissive`. Set to **Disabled**, ECP keeps answering `query/device-info` and `query/apps` but returns **HTTP 403** for every `keypress`, `keydown`, `keyup`, `query/icon`, and both TV-channel queries. The symptom is a device that appears online in homeCore, reports what it is playing, and silently ignores every command. The plugin surfaces the 403 with this setting named in the error text — check the plugin log before suspecting anything else.
+
+---
+
+### How it works
+
+There is no push channel in ECP, so all state comes from polling:
+
+- `query/device-info` **every cycle** — the only source of the power state, and the reachability check.
+- `query/active-app`, `query/media-player` — only while `power-mode` is `PowerOn`. In standby these return the *last* running app, which would leave `source` reporting Netflix on a TV that has been off for a week.
+- `query/tv-active-channel` — only on a Roku TV whose active app is `tvinput.dtv`.
+- `query/apps`, `query/tv-channels` — on a slow separate cadence (`app_refresh_interval_secs`, default 1 h); these change when someone installs a channel or re-scans the tuner, not when they press a button.
+
+Poll cadence is `poll_interval_secs` (default 10 s) while on, `standby_poll_interval_secs` (default 60 s) while in standby or unreachable. Full state is published **only when it changes** — ECP answers identically between polls far more often than not.
+
+After a command the plugin waits ~900 ms before re-polling. Roku applies a keypress asynchronously; polling immediately reads the state from *before* the press and publishes a value the next cycle contradicts.
+
+**Discovery** is SSDP (`ST: roku:ecp`, multicast `239.255.255.250:1900`), swept at startup and every `discovery_interval_secs`. Discovered devices are keyed by **serial number**, persisted in the plugin's durable learned-state document, so a Roku that moves to a new DHCP address keeps its homeCore device id — and with it its name, room, and every rule referencing it.
+
+SSDP is link-local: it does not cross a VLAN, and it does not cross a Docker bridge network. Use `manual_hosts` (or `--network host`) for anything multicast can't reach. ECP itself is ordinary unicast HTTP and works either way.
+
+---
+
+### Configuration
+
+`config/config.toml` — on a flat network only `[homecore]` is required; devices discover themselves.
+
+```toml
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.roku"
+
+[roku]
+discovery_enabled          = true
+auto_add_discovered        = true
+discovery_interval_secs    = 900
+poll_interval_secs         = 10    # while powered on
+standby_poll_interval_secs = 60    # while in standby / unreachable
+app_refresh_interval_secs  = 3600
+wake_on_lan                = true
+# manual_hosts = ["10.0.20.50"]    # for Rokus SSDP can't reach
+
+# Optional — pin an id, or run with discovery off
+#[[devices]]
+#host  = "10.0.10.40"
+#hc_id = "roku_living_room"
+#name  = "Living Room Roku"
+#area  = "living_room"
+```
+
+---
+
+### State published to homeCore
+
+```json
+{
+  "state":            "playing",
+  "on":               true,
+  "power_mode":       "PowerOn",
+  "source":           "Netflix",
+  "app_id":           "12",
+  "app_name":         "Netflix",
+  "app_type":         "appl",
+  "is_tv_input":      false,
+  "media_position":   38,
+  "media_duration":   6496,
+  "media_is_live":    false,
+  "media_format":     { "container": "hls", "video": "mpeg4_10b" },
+  "available_sources": ["Netflix", "YouTube", "Antenna TV"],
+  "available_apps":    [{ "id": "12", "name": "Netflix", "type": "appl" }],
+  "available_inputs":  [{ "id": "tvinput.hdmi1", "name": "Blu-ray player" }],
+  "model_name":       "Roku Ultra",
+  "is_tv":            false,
+  "device_info":      { "…": "full query/device-info dump" }
+}
+```
+
+`state` follows the `media_player` device type (`playing | paused | stopped | idle | buffering | unavailable`), mapped from context rather than straight from ECP:
+
+| Situation | `state` |
+|---|---|
+| `<player state="play">` | `playing` |
+| `<player state="pause">` | `paused` |
+| `<player state="startup" \| "buffer">` | `buffering` |
+| Roku TV tuned to a channel (the tuner bypasses the media player entirely) | `playing` |
+| Home screen | `idle` |
+| App open, nothing playing | `stopped` |
+| Standby — ECP still answers | `stopped`, `on: false` |
+| Not reachable at all | `unavailable` + availability `offline` |
+
+Standby is deliberately **not** `unavailable`: ECP answers fine, and a rule waiting on `unavailable` would never see the device come back.
+
+**No `volume` attribute.** ECP exposes VolumeUp/VolumeDown/VolumeMute as key presses and reports no level back, so there is nothing to publish and no slider to bind. Same reason `media_position` is read-only — Roku has no seek.
+
+---
+
+### Commands
+
+Both forms work on `homecore/devices/{hc_id}/cmd`.
+
+**Attributes** (what `PATCH /devices/{id}/state` sends): `on`, `source`, `state`, `tv_channel`, `mute`, `key`, `text`.
+
+**Actions:**
+
+| Group | Actions |
+|---|---|
+| Power | `power_on`, `power_off`, `power_toggle` |
+| Transport | `play`, `pause`, `play_pause`, `stop`, `next`, `previous`, `instant_replay` |
+| Navigation | `home`, `back`, `select`, `up`, `down`, `left`, `right`, `info`, `enter`, `backspace`, `find_remote` |
+| Volume | `volume_up`, `volume_down`, `mute` — all take `count` |
+| Live TV | `channel_up`, `channel_down`, `tune` (`channel: "14.3"`) |
+| Apps | `launch_app` (`app`, `content_id`, `media_type`, `params`), `select_source`, `install_app`, `exit_app`, `app_state` |
+| Raw input | `key` (`key`, `count`, `hold_ms`), `key_hold`, `key_down`, `key_up`, `text` (`text`, `submit`), `send_input`, `search` |
+
+Two behaviours worth knowing:
+
+- **`play` and `pause` are idempotent.** Roku's `Play` is one key that *toggles*, so sending it to an already-playing stream pauses it. The plugin checks the last polled state and does nothing when the device is already where you asked for — which is what a rule firing twice needs. Use `play_pause` when you actually want a toggle.
+- **`stop` sends `Back`.** ECP has no stop; `Back` is what leaves playback on a real remote.
+- **`tune` is a deep link** (`/launch/tvinput.dtv?ch=14.3`), not key presses — `ChannelUp`/`ChannelDown` can only step, so they could never reach a requested channel.
+
+`launch_app` accepts a channel **name** as well as an id, resolving exact matches first and then unique prefixes, so `"netflix"` works. An ambiguous prefix is an error rather than a guess.
+
+```sh
+# Turn on and open Netflix
+curl -X PATCH http://localhost:8080/api/v1/devices/roku_living_room/state \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"on": true, "source": "Netflix"}'
+
+# Deep-link to a title
+curl -X POST http://localhost:8080/api/v1/devices/roku_living_room/actions \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"action":"launch_app","app":"Netflix","content_id":"80100172","media_type":"movie"}'
+
+# Type into a focused search box, then submit
+curl -X POST http://localhost:8080/api/v1/devices/roku_living_room/actions \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"action":"text","text":"the expanse","submit":true}'
+```
+
+Text entry sends one `Lit_` keypress per **character** (`€` is one key, `Lit_%E2%82%AC`, not three), with a configurable `type_delay_ms` gap — Roku's on-screen keyboards drop keys that arrive faster than the UI redraws.
+
+---
+
+### Powering on a TV that is fully off
+
+A Roku TV in full power-off has no network stack, so `POST /keypress/PowerOn` has nothing to arrive at. With `wake_on_lan = true` (default), `power_on` on an unreachable device sends a Wake-on-LAN magic packet to the MAC cached from `device-info` while the device was last online — which is why a device must have been polled successfully at least once before this can work.
+
+Standby (`power-mode` = `Ready`) is different: ECP is still listening and `PowerOn` works normally.
+
+---
+
+### Plugin actions
+
+| Action | Purpose |
+|---|---|
+| `discover_devices` | Streaming SSDP sweep; registers what it finds |
+| `list_devices` | Managed devices with address, serial, source (config vs discovered), reachability |
+| `refresh_catalog` | Re-read installed channels, inputs, TV lineup now instead of on the hourly timer |
+| `device_info` | Raw `query/device-info` per device — first diagnostic to reach for |
+| `send_command` | Run one device command and get a real success/failure (the device `cmd` topic is fire-and-forget) |
+| `app_icon` | Channel icon as a data URI |
+| `forget_stale_devices` | Unregister discovered devices that no longer answer (admin) |
+
+Device cleanup is deliberately manual. A Roku that is unplugged, or a TV that is fully powered off, is indistinguishable from one that has been thrown away, so the plugin never retires a device on its own while discovery is enabled — `forget_stale_devices` is the explicit escape hatch. Devices listed in `[[devices]]` are never removed. With `discovery_enabled = false` the config *is* the complete inventory, so the plugin reconciles against it at startup like every other plugin.
+
+---
+
+### Troubleshooting
+
+**Device appears online but ignores all commands** — "Control by mobile apps" is Disabled. See above; the plugin log carries the 403 and the fix.
+
+**No devices discovered** — SSDP is link-local. Check the plugin and the Rokus are on the same subnet, and that the container is on host networking. Add each address to `manual_hosts` to bypass discovery entirely.
+
+**A device got a new id after a while** — that only happens if it answered without a serial number (`query/device-info` has neither `serial-number` nor `device-id`), in which case the id is derived from the address. Pin it with a `[[devices]]` entry.
+
+**`media_title` is empty on a streaming app** — expected. Roku reports no title through ECP; `query/media-player` gives position, duration and format only. Live TV is the exception: `program-title` from the tuner fills `media_title`.
+
+**`exit_app` / `app_state` return an error** — both are developer-mode endpoints (Roku OS 13.0+) and are rejected on a retail device.
 
 ---
 

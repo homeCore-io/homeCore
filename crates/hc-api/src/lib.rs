@@ -40,10 +40,15 @@ pub mod group_store;
 pub mod handlers;
 pub mod logs;
 pub mod managed_modes;
+pub mod managed_plugins;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod plugin_config_store;
+pub mod plugin_config_watcher;
+pub mod plugin_install;
 pub mod rate_limit;
+pub mod registry;
 pub mod rule_file_store;
 pub mod streaming;
 pub mod ws;
@@ -54,7 +59,11 @@ use dashboard_store::{DashboardStore, DashboardStoreData};
 use event_log::EventLog;
 use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
+pub use managed_plugins::{ManagedPluginStore, ManagedRecord};
 use metrics::MetricsCollector;
+pub use plugin_config_store::PluginConfigStore;
+pub use plugin_config_watcher::PluginConfigWatcher;
+pub use plugin_install::{InstallContext, InstalledPlugin};
 use rule_file_store::RuleFileStore;
 
 /// Runtime command sent to a plugin supervisor task.
@@ -117,6 +126,58 @@ pub struct PluginRecord {
     /// publishes, or if the published manifest failed to decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<hc_types::Capabilities>,
+    /// JSON Schema for the plugin's operator config, carried on the capability
+    /// manifest. Drives the config editor's typed form; `None` → raw-TOML
+    /// fallback. Not shown in the plugin list — served at
+    /// `GET /plugins/:id/config/schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<serde_json::Value>,
+    /// The plugin's own config *descriptor* — an expressive description of its
+    /// configuration (sections, field kinds, conditionals, data sources) that
+    /// the editor renders directly. Also carried on the capability manifest.
+    /// `None` → the client auto-derives a baseline descriptor from
+    /// `config_schema`. Served at `GET /plugins/:id/config/descriptor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_descriptor: Option<serde_json::Value>,
+    /// Installed artifact version, for plugins added from the registry/managed
+    /// store (distinct from the SDK-reported `version`). Drives "update available".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+}
+
+impl PluginRecord {
+    /// A seed record for a locally-managed plugin, before it registers/starts —
+    /// used when a plugin is installed at runtime so it shows in the list
+    /// immediately (supervisor status updates are update-only).
+    pub fn managed_seed(
+        plugin_id: String,
+        config_path: Option<String>,
+        binary_path: Option<String>,
+        enabled: bool,
+        installed_version: Option<String>,
+    ) -> Self {
+        Self {
+            plugin_id,
+            registered_at: chrono::Utc::now(),
+            status: if enabled { "starting" } else { "stopped" }.into(),
+            enabled,
+            managed: true,
+            config_path,
+            binary_path,
+            last_heartbeat: None,
+            last_restart: None,
+            restart_count: 0,
+            uptime_started: None,
+            device_count: 0,
+            log_level: None,
+            version: None,
+            supports_management: false,
+            capabilities: None,
+            config_schema: None,
+            config_descriptor: None,
+            installed_version,
+        }
+    }
 }
 
 /// Shared state injected into every handler via axum's `State` extractor.
@@ -194,6 +255,18 @@ pub struct AppState {
     pub calendar_expansion_days: u32,
     /// Per-plugin command channels for start/stop/restart (local plugins only).
     pub plugin_commands: PluginCommandChannels,
+    /// Runtime-mutable managed-plugin store (`config/plugins/managed.toml`).
+    /// Uninstall tombstones ids here so they stay removed across restarts.
+    /// `None` in tests / when unconfigured.
+    pub managed_plugins: Option<Arc<ManagedPluginStore>>,
+    /// Where + how to install plugins (paths + broker coords). `None` in tests.
+    pub plugin_install: Option<Arc<InstallContext>>,
+    /// Sends a freshly-installed plugin to the supervisor for dynamic activation
+    /// (no restart). Wired to a listener in `main.rs`. `None` in tests.
+    pub plugin_spawn: Option<tokio::sync::mpsc::Sender<InstalledPlugin>>,
+    /// Client for the remote signed plugin registry. `None` when `[registry]`
+    /// isn't configured (browse/registry-install then return 503).
+    pub registry: Option<Arc<registry::RegistryClient>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -279,6 +352,9 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
+                            config_descriptor: None,
+                            installed_version: None,
                         });
                     rec.status = "active".into();
                     rec.registered_at = timestamp;
@@ -317,6 +393,9 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
+                            config_descriptor: None,
+                            installed_version: None,
                         });
                     rec.last_heartbeat = Some(timestamp);
                     rec.supports_management = true;
@@ -337,6 +416,8 @@ pub fn spawn_plugin_registry_listener(
                     plugin_id,
                     timestamp,
                     capabilities,
+                    config_schema,
+                    config_descriptor,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -358,8 +439,78 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            config_schema: None,
+                            config_descriptor: None,
+                            installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);
+                    if config_schema.is_some() {
+                        rec.config_schema = config_schema;
+                    }
+                    if config_descriptor.is_some() {
+                        rec.config_descriptor = config_descriptor;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Parse `homecore/plugins/<id>/state/set` → `<id>`, or `None` if the topic is
+/// not a plugin state-write.
+fn parse_plugin_state_set_topic(topic: &str) -> Option<&str> {
+    match topic.split('/').collect::<Vec<_>>().as_slice() {
+        ["homecore", "plugins", id, "state", "set"] => Some(*id),
+        _ => None,
+    }
+}
+
+/// Core of the write-back path: a plugin published a learned-state delta to
+/// `homecore/plugins/<id>/state/set`. Merge it into durable storage and return
+/// the `(retained topic, serialized doc)` to re-publish as the authoritative
+/// `homecore/plugins/<id>/state`. `Ok(None)` when the topic isn't a state-write.
+pub async fn ingest_plugin_state_set(
+    store: &StateStore,
+    topic: &str,
+    payload: &[u8],
+) -> Result<Option<(String, Vec<u8>)>> {
+    let Some(id) = parse_plugin_state_set_topic(topic) else {
+        return Ok(None);
+    };
+    let delta: serde_json::Value = serde_json::from_slice(payload)
+        .with_context(|| format!("parse state/set payload for {id}"))?;
+    let merged = store.plugin_state_merge(id, &delta).await?;
+    let bytes = serde_json::to_vec(&merged)?;
+    Ok(Some((format!("homecore/plugins/{id}/state"), bytes)))
+}
+
+/// Subscribe to the raw MQTT bus and persist plugin learned-state writes
+/// (`homecore/plugins/<id>/state/set`) to redb, re-publishing the merged result
+/// as the retained `homecore/plugins/<id>/state`. This is the plugin→core half
+/// of the D8 learned-state channel (the core→plugin half is the retained topic,
+/// restored at boot in `main.rs`).
+///
+/// Spawn on the **raw / internal** bus (the one carrying `Event::MqttMessage`).
+pub fn spawn_plugin_state_listener(raw_bus: EventBus, store: StateStore, publish: PublishHandle) {
+    let mut rx = raw_bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(hc_types::event::Event::MqttMessage { topic, payload, .. }) => {
+                    match ingest_plugin_state_set(&store, &topic, &payload).await {
+                        Ok(Some((out_topic, bytes))) => {
+                            if let Err(e) = publish.publish_retained(&out_topic, bytes).await {
+                                warn!(topic = %out_topic, error = %e, "Failed to re-publish plugin state");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(topic = %topic, error = %e, "Failed to ingest plugin state/set")
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -544,6 +695,10 @@ impl AppState {
             calendar_dir: None,
             calendar_expansion_days: 400,
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
+            managed_plugins: None,
+            plugin_install: None,
+            plugin_spawn: None,
+            registry: None,
             management_rpc: None,
             log_level_handle: None,
             homecore_version: env!("CARGO_PKG_VERSION"),
@@ -691,6 +846,26 @@ impl AppState {
         self
     }
 
+    pub fn with_managed_plugins(mut self, store: Arc<ManagedPluginStore>) -> Self {
+        self.managed_plugins = Some(store);
+        self
+    }
+
+    pub fn with_plugin_install(mut self, ctx: Arc<InstallContext>) -> Self {
+        self.plugin_install = Some(ctx);
+        self
+    }
+
+    pub fn with_plugin_spawn(mut self, tx: tokio::sync::mpsc::Sender<InstalledPlugin>) -> Self {
+        self.plugin_spawn = Some(tx);
+        self
+    }
+
+    pub fn with_registry(mut self, client: Arc<registry::RegistryClient>) -> Self {
+        self.registry = Some(client);
+        self
+    }
+
     pub fn with_management_rpc(mut self, rpc: management_rpc::ManagementRpc) -> Self {
         self.management_rpc = Some(rpc);
         self
@@ -753,6 +928,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
     let protected = Router::new()
         // Auth / user management
         .route("/auth/me", get(auth_handlers::me))
+        .route("/auth/roles", get(auth_handlers::list_roles))
         .route(
             "/auth/change-password",
             post(auth_handlers::change_password),
@@ -785,6 +961,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .patch(handlers::bulk_patch_devices)
                 .delete(handlers::bulk_delete_devices),
         )
+        // Must stay ahead of `/devices/:id` so "orphaned" is not read as an id.
+        .route("/devices/orphaned", get(handlers::orphaned_devices))
         .route(
             "/devices/:id",
             get(handlers::get_device)
@@ -794,6 +972,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/devices/:id/state", patch(handlers::command_device))
         .route("/devices/:id/history", get(handlers::device_history))
         .route("/devices/:id/schema", get(handlers::get_device_schema))
+        // Artwork lives on the device (a Sonos speaker serves it from its own
+        // LAN address), which a browser generally cannot reach. Core fetches it
+        // and hands it back same-origin.
+        .route("/devices/:id/media/art", get(handlers::device_media_art))
         // Timers (timer devices are also visible via /devices)
         .route(
             "/timers",
@@ -851,6 +1033,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .delete(handlers::delete_automation),
         )
         .route("/automations/:id/test", post(handlers::test_automation))
+        .route(
+            "/automations/vocabulary",
+            get(handlers::get_rule_vocabulary),
+        )
         .route("/automations/:id/ron", get(handlers::get_automation_ron))
         .route(
             "/automations/:id/history",
@@ -896,6 +1082,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .put(handlers::update_dashboard)
                 .delete(handlers::delete_dashboard),
         )
+        .route(
+            "/dashboards/:id/access",
+            put(handlers::set_dashboard_access),
+        )
         .route("/dashboards/:id/export", get(handlers::export_dashboard))
         .route(
             "/dashboards/:id/duplicate",
@@ -920,6 +1110,9 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
+        .route("/plugins/install", post(handlers::install_plugin))
+        .route("/registry/plugins", get(handlers::browse_registry))
+        .route("/registry/plugins/:id", get(handlers::get_registry_plugin))
         .route(
             "/plugins/:id",
             get(handlers::get_plugin)
@@ -932,6 +1125,14 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/:id/config",
             get(handlers::get_plugin_config).put(handlers::put_plugin_config),
+        )
+        .route(
+            "/plugins/:id/config/schema",
+            get(handlers::get_plugin_config_schema),
+        )
+        .route(
+            "/plugins/:id/config/descriptor",
+            get(handlers::get_plugin_config_descriptor),
         )
         .route("/plugins/:id/command", post(handlers::post_plugin_command))
         .route(
@@ -1154,4 +1355,91 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
         "Admin UDS listener bound"
     );
     Ok(listener)
+}
+
+#[cfg(test)]
+mod plugin_state_tests {
+    use super::*;
+
+    #[test]
+    fn parse_state_set_topic_matches_only_state_set() {
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/state/set"),
+            Some("plugin.hue")
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/state"),
+            None
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/plugins/plugin.hue/cmd"),
+            None
+        );
+        assert_eq!(
+            parse_plugin_state_set_topic("homecore/devices/x/state/set"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_merges_and_returns_retained_republish() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Non-matching topic → Ok(None).
+        assert!(
+            ingest_plugin_state_set(&store, "homecore/plugins/p/state", b"{}")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // First write establishes the doc; returns the retained republish target.
+        let (topic, bytes) = ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            br#"{"app_key":"k1"}"#,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(topic, "homecore/plugins/plugin.hue/state");
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc, serde_json::json!({ "app_key": "k1" }));
+
+        // Second write shallow-merges (adds a key, keeps the first).
+        let (_t, bytes2) = ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            br#"{"published_ids":["a","b"]}"#,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let doc2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+        assert_eq!(
+            doc2,
+            serde_json::json!({ "app_key": "k1", "published_ids": ["a", "b"] })
+        );
+
+        // Persisted durably.
+        assert_eq!(
+            store.plugin_state_get("plugin.hue").await.unwrap().unwrap(),
+            doc2
+        );
+
+        // Bad payload on a matching topic → Err (the listener logs and drops it).
+        assert!(ingest_plugin_state_set(
+            &store,
+            "homecore/plugins/plugin.hue/state/set",
+            b"not json"
+        )
+        .await
+        .is_err());
+    }
 }

@@ -149,6 +149,46 @@ fn resolve_opt_path(field: &mut Option<String>, base: &Path) {
     }
 }
 
+/// Phase 0 of plugin-config centralization: for each `(plugin_id, legacy_path)`,
+/// import the plugin's existing config into the core-owned [`PluginConfigStore`]
+/// (one-time byte-copy, idempotent — skipped if a central file already exists),
+/// and return the **effective** config path to hand the plugin as `argv[1]`.
+///
+/// The effective path is the central file once it exists, otherwise the legacy
+/// path verbatim — so a plugin with nothing to import behaves exactly as before.
+/// `homecore.toml` is never rewritten; its `config` field stays the import source.
+fn centralize_plugin_configs<'a>(
+    store: &hc_api::PluginConfigStore,
+    plugins: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> std::collections::HashMap<String, String> {
+    plugins
+        .into_iter()
+        .map(|(id, legacy_path)| {
+            if !store.exists(id) {
+                let legacy = Path::new(legacy_path);
+                if legacy.exists() {
+                    match store.import_legacy(id, legacy) {
+                        Ok(true) => {
+                            info!(id, "Imported plugin config → central store (one-time)")
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(
+                            id, error = %e,
+                            "Config import failed; using legacy path"
+                        ),
+                    }
+                }
+            }
+            let effective = if store.exists(id) {
+                store.path_for(id).to_string_lossy().into_owned()
+            } else {
+                legacy_path.to_string()
+            };
+            (id.to_string(), effective)
+        })
+        .collect()
+}
+
 // ── config structs ──────────────────────────────────────────────────────────
 
 /// Top-level config shape (subset — just what main.rs needs to parse).
@@ -190,6 +230,20 @@ struct AppConfig {
     influx: InfluxConfig,
     #[serde(default)]
     metrics: MetricsSection,
+    #[serde(default)]
+    registry: RegistrySection,
+}
+
+/// `[registry]` — the remote signed plugin registry. Both fields must be set to
+/// enable browse + registry-install; otherwise those endpoints return 503.
+#[derive(Deserialize, Default, Clone)]
+struct RegistrySection {
+    /// URL (or local path / `file://`) of the signed `index.json`.
+    #[serde(default)]
+    url: Option<String>,
+    /// Base64-encoded ed25519 public key that signs the index.
+    #[serde(default)]
+    public_key: Option<String>,
 }
 
 impl AppConfig {
@@ -235,6 +289,41 @@ impl PluginEntry {
         resolve_path(&mut self.binary, base, "");
         resolve_path(&mut self.config, base, "");
     }
+}
+
+/// Merge the static `[[plugins]]` set with the managed-plugin store: drop
+/// tombstoned (uninstalled) ids, then layer runtime-installed records on top
+/// (records win on id collision). This is the effective set core spawns,
+/// supervises, seeds registry records for, and hot-reload-watches.
+fn build_effective_plugins(
+    static_plugins: &[PluginEntry],
+    managed: &hc_api::ManagedPluginStore,
+    base: &Path,
+) -> Vec<PluginEntry> {
+    let removed = managed.removed_ids();
+    let mut out: Vec<PluginEntry> = static_plugins
+        .iter()
+        .filter(|p| !removed.contains(&p.id))
+        .cloned()
+        .collect();
+    for rec in managed.records() {
+        if removed.contains(&rec.id) {
+            continue;
+        }
+        out.retain(|p| p.id != rec.id);
+        let mut entry = PluginEntry {
+            id: rec.id,
+            binary: rec.binary,
+            config: rec.config,
+            enabled: rec.enabled,
+        };
+        // Resolve any relative record paths against base_dir exactly as static
+        // plugins are (absolute paths pass through), so activation doesn't depend
+        // on the process's CWD.
+        entry.resolve(base);
+        out.push(entry);
+    }
+    out
 }
 
 /// `[rules]` section of homecore.toml.
@@ -568,12 +657,21 @@ impl Default for LocationSection {
 /// metrics endpoint is gated by network identity instead. The whitelist
 /// defaults to empty, which means **no IPs are allowed** — operators must
 /// explicitly list the scrape source(s) before metrics become reachable.
+///
+/// This is deliberate and is not going to be auto-discovered from the host's
+/// interfaces. Metrics expose device counts, rule counts, and plugin health;
+/// defaulting them open to whatever subnet the machine happens to sit on would
+/// widen the attack surface silently, and "it worked without me configuring it"
+/// is exactly how an endpoint ends up exposed on a network nobody audited.
+/// Opening it stays an explicit act.
 #[derive(Deserialize, Default)]
 struct MetricsSection {
     /// IP addresses or CIDR ranges allowed to scrape `/api/v1/metrics`.
     /// Both IPv4 and IPv6 are supported.
     /// Example: `whitelist = ["127.0.0.1/32", "10.0.0.0/24"]`.
-    /// Empty (default) means the endpoint returns 403 to every caller.
+    ///
+    /// Empty (the default) means the endpoint returns 403 to every caller. It
+    /// says so at startup, and the 403 body names the exact CIDR line to add.
     #[serde(default)]
     whitelist: Vec<String>,
 }
@@ -799,6 +897,7 @@ async fn main() -> Result<()> {
     for subdir in &[
         "config/profiles",
         "config/calendars",
+        "config/plugins",
         "data",
         "logs",
         "rules",
@@ -926,6 +1025,15 @@ async fn main() -> Result<()> {
     // startup; spawning this inside AppState::new_with_plugins is too late
     // because broadcast channels don't replay history on late subscribe.
     hc_api::spawn_plugin_registry_listener(pub_bus.clone(), plugin_registry.clone());
+
+    // Persist plugin learned-state writes (homecore/plugins/<id>/state/set) to
+    // redb and re-publish the merged doc as the retained authoritative state.
+    // Subscribes to the raw MQTT bus (internal_bus carries Event::MqttMessage).
+    hc_api::spawn_plugin_state_listener(
+        internal_bus.clone(),
+        store.clone(),
+        publish_handle.clone(),
+    );
 
     // ── 12. Load rules from TOML files ────────────────────────────────────
     let rules_dir = PathBuf::from(&config.rules.dir);
@@ -1111,6 +1219,32 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── Managed-plugin store (Phase A) ────────────────────────────────────
+    // The effective plugin set = static [[plugins]] minus uninstalled
+    // (tombstoned) ids, plus runtime-installed managed records (records win on
+    // id collision). Reassigning `config.plugins` routes every downstream use —
+    // config centralization, record seeding, spawn, hot-reload watcher — through
+    // it with no other change. Uninstall tombstones an id in this store so it
+    // stays removed across restarts even while still declared in homecore.toml.
+    let managed_plugins = std::sync::Arc::new(hc_api::ManagedPluginStore::load(
+        base_dir.join("config").join("plugins"),
+    ));
+    {
+        let removed = managed_plugins.removed_ids();
+        if !removed.is_empty() {
+            info!(?removed, "Managed store: suppressing uninstalled plugin(s)");
+        }
+    }
+    config.plugins = build_effective_plugins(&config.plugins, &managed_plugins, &base_dir);
+
+    // Absolute install root, so an installed plugin's recorded binary/config
+    // paths work regardless of the process CWD (dynamic spawn + next boot).
+    let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
+    // Channel: the install handler pushes a freshly-installed plugin here and a
+    // listener (below) spawns it into the running supervisor — no restart.
+    let (plugin_spawn_tx, mut plugin_spawn_rx) =
+        tokio::sync::mpsc::channel::<hc_api::InstalledPlugin>(8);
+
     // ── 15. Launch plugins (after MQTT is subscribed) ─────────────────────
     //
     // Wait for the internal MQTT client to confirm its homecore/# subscription
@@ -1137,6 +1271,48 @@ async fn main() -> Result<()> {
             tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
         }
 
+        // Restore each plugin's durable learned-state as a retained MQTT message
+        // so a (re)connecting plugin loads it on subscribe. The broker's retained
+        // store is in-memory (lost on restart); redb is the durable source.
+        match store.plugin_state_list_ids().await {
+            Ok(ids) => {
+                for id in ids {
+                    if let Ok(Some(doc)) = store.plugin_state_get(&id).await {
+                        let bytes = serde_json::to_vec(&doc).unwrap_or_default();
+                        let topic = format!("homecore/plugins/{id}/state");
+                        if let Err(e) = publish_handle.publish_retained(&topic, bytes).await {
+                            tracing::warn!(plugin_id = %id, error = %e, "Failed to restore retained plugin state");
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Could not list plugin learned-state at boot"),
+        }
+
+        // ── Plugin config centralization (Phase 0) ──────────────────────────
+        // Move each plugin's config to a core-owned central location
+        // (`{base}/config/plugins/<id>.toml`) so a fetch+uncompress upgrade of a
+        // plugin can't clobber it, and the API/editor/file-edit all target one
+        // file. The import is a one-time byte-copy (preserves comments +
+        // secrets); homecore.toml is NOT rewritten — its `config` field stays as
+        // the import source. A plugin with nothing to import falls back to its
+        // legacy path verbatim, so this is a no-op for anything unexpected.
+        let plugin_config_store =
+            hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins"));
+        let plugin_config_paths = centralize_plugin_configs(
+            &plugin_config_store,
+            config
+                .plugins
+                .iter()
+                .map(|p| (p.id.as_str(), p.config.as_str())),
+        );
+        let effective_config = |p: &PluginEntry| {
+            plugin_config_paths
+                .get(&p.id)
+                .cloned()
+                .unwrap_or_else(|| p.config.clone())
+        };
+
         // Seed plugin records for ALL configured plugins (enabled and disabled)
         // so the API can list them before registration messages arrive.
         {
@@ -1153,7 +1329,7 @@ async fn main() -> Result<()> {
                         },
                         enabled: p.enabled,
                         managed: true,
-                        config_path: Some(p.config.clone()),
+                        config_path: Some(effective_config(p)),
                         binary_path: Some(p.binary.clone()),
                         last_heartbeat: None,
                         last_restart: None,
@@ -1164,7 +1340,19 @@ async fn main() -> Result<()> {
                         version: None,
                         supports_management: false,
                         capabilities: None,
+                        config_schema: None,
+                        config_descriptor: None,
+                        installed_version: None,
                     });
+            }
+            // Stamp installed_version from the managed store (registry/installed
+            // plugins) so the UI can compute "update available".
+            for rec in managed_plugins.records() {
+                if let Some(pr) = map.get_mut(&rec.id) {
+                    if !rec.version.is_empty() {
+                        pr.installed_version = Some(rec.version.clone());
+                    }
+                }
             }
         }
 
@@ -1180,7 +1368,7 @@ async fn main() -> Result<()> {
                 .map(|p| plugin_manager::PluginProcess {
                     id: p.id.clone(),
                     binary: PathBuf::from(&p.binary),
-                    config: PathBuf::from(&p.config),
+                    config: PathBuf::from(effective_config(p)),
                     enabled: p.enabled,
                 })
                 .collect();
@@ -1195,6 +1383,33 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Activate freshly-installed plugins without a restart: convert each install
+    // request to a supervised process. Lives for the whole run.
+    {
+        let plugins = plugin_registry.clone();
+        let cmds = plugin_commands.clone();
+        let bus = pub_bus.clone();
+        let sd = shutdown_rx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = plugin_spawn_rx.recv().await {
+                info!(plugin_id = %req.id, "Activating installed plugin (dynamic spawn)");
+                plugin_manager::spawn_one(
+                    plugin_manager::PluginProcess {
+                        id: req.id,
+                        binary: PathBuf::from(req.binary),
+                        config: PathBuf::from(req.config),
+                        enabled: req.enabled,
+                    },
+                    plugins.clone(),
+                    cmds.clone(),
+                    bus.clone(),
+                    sd.clone(),
+                )
+                .await;
+            }
+        });
+    }
+
     // ── 16. Notification service + core.start moved up to 13b so the state
     //        bridge subscribes to internal_bus before the MQTT client begins
     //        delivering retained manifest messages.
@@ -1207,6 +1422,15 @@ async fn main() -> Result<()> {
         std::sync::Arc::clone(&source_rules_handle),
         std::sync::Arc::clone(&rules_handle),
         Some(purge_fn),
+    )?;
+
+    // Hot-reload plugin config: an operator editing config/plugins/<id>.toml (or
+    // an API PUT) restarts that plugin so it re-reads its config. Bound at
+    // function scope so the watcher lives for the whole run.
+    let _plugin_config_watcher = hc_api::PluginConfigWatcher::start(
+        hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins")),
+        plugin_commands.clone(),
+        config.plugins.iter().map(|p| p.id.clone()).collect(),
     )?;
 
     // ── 17. JWT service ────────────────────────────────────────────────────
@@ -1301,7 +1525,12 @@ async fn main() -> Result<()> {
     }).collect();
 
     if metrics_whitelist.is_empty() {
-        info!("/api/v1/metrics is locked down (no metrics.whitelist configured)");
+        info!(
+            "/api/v1/metrics is closed to every caller — [metrics].whitelist is not configured. \
+             This is the default and is deliberate: the endpoint is opened explicitly, never \
+             auto-discovered from the host's network. To allow a scraper, set e.g. \
+             `[metrics] whitelist = [\"10.0.0.5/32\"]` in homecore.toml and restart."
+        );
     } else {
         info!(
             count = metrics_whitelist.len(),
@@ -1323,12 +1552,21 @@ async fn main() -> Result<()> {
         Default::default()
     });
 
+    // Back up the authoritative (central) config file for each plugin, falling
+    // back to the legacy path for anything not migrated. Migration ran during
+    // plugin startup above, so central files already exist by now.
+    let backup_config_store =
+        hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins"));
     let plugin_configs: Vec<hc_api::backup::PluginConfigEntry> = config
         .plugins
         .iter()
         .map(|p| hc_api::backup::PluginConfigEntry {
             id: p.id.clone(),
-            path: std::path::PathBuf::from(&p.config),
+            path: if backup_config_store.exists(&p.id) {
+                backup_config_store.path_for(&p.id)
+            } else {
+                std::path::PathBuf::from(&p.config)
+            },
         })
         .collect();
     let backup_paths = hc_api::backup::BackupPaths {
@@ -1392,6 +1630,14 @@ async fn main() -> Result<()> {
         app_state
     }
     .with_plugin_commands(plugin_commands)
+    .with_managed_plugins(managed_plugins.clone())
+    .with_plugin_install(std::sync::Arc::new(hc_api::InstallContext {
+        plugins_dir: install_base.join("plugins"),
+        config_plugins_dir: install_base.join("config").join("plugins"),
+        broker_host: config.broker.host.clone(),
+        broker_port: config.broker.port,
+    }))
+    .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
         &pub_bus_rpc,
@@ -1402,6 +1648,18 @@ async fn main() -> Result<()> {
     ))
     .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days)
     .with_metrics_whitelist(metrics_whitelist);
+
+    // Enable the plugin registry when `[registry]` has both a url and a pubkey.
+    let app_state = match (&config.registry.url, &config.registry.public_key) {
+        (Some(url), Some(pk)) if !url.trim().is_empty() && !pk.trim().is_empty() => {
+            info!(url = %url, "Plugin registry enabled");
+            app_state.with_registry(std::sync::Arc::new(hc_api::registry::RegistryClient::new(
+                url.clone(),
+                pk.clone(),
+            )))
+        }
+        _ => app_state,
+    };
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store
@@ -1561,4 +1819,67 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centralize_imports_legacy_and_returns_central_path() {
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let legacy = legacy_dir.path().join("config.toml");
+        let original = "[yolink]\nmode = \"local\"\n# keep this comment\n";
+        std::fs::write(&legacy, original).unwrap();
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        let map = centralize_plugin_configs(&store, [("plugin.yolink", legacy.to_str().unwrap())]);
+
+        // Effective path is now the central file, and it's a byte-for-byte copy.
+        let central = store.path_for("plugin.yolink");
+        assert_eq!(map["plugin.yolink"], central.to_string_lossy());
+        assert_eq!(std::fs::read_to_string(&central).unwrap(), original);
+    }
+
+    #[test]
+    fn centralize_is_idempotent_and_authoritative_after_import() {
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let legacy = legacy_dir.path().join("config.toml");
+        std::fs::write(&legacy, "v = 1\n").unwrap();
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        centralize_plugin_configs(&store, [("plugin.a", legacy.to_str().unwrap())]);
+        // A later legacy edit must not overwrite the now-authoritative central copy.
+        std::fs::write(&legacy, "v = 2\n").unwrap();
+        let map = centralize_plugin_configs(&store, [("plugin.a", legacy.to_str().unwrap())]);
+
+        assert_eq!(
+            map["plugin.a"],
+            store.path_for("plugin.a").to_string_lossy()
+        );
+        assert_eq!(store.read("plugin.a").unwrap(), "v = 1\n");
+    }
+
+    #[test]
+    fn centralize_falls_back_to_legacy_path_when_nothing_to_import() {
+        // No file at the legacy path and no central file → effective path is the
+        // legacy string verbatim, matching pre-centralization behavior exactly.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = hc_api::PluginConfigStore::new(store_dir.path());
+
+        let map = centralize_plugin_configs(
+            &store,
+            [("plugin.missing", "plugins/hc-missing/config/config.toml")],
+        );
+
+        assert_eq!(
+            map["plugin.missing"],
+            "plugins/hc-missing/config/config.toml"
+        );
+        assert!(!store.exists("plugin.missing"));
+    }
 }

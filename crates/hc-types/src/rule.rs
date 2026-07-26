@@ -11,6 +11,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Controls how a rule behaves when it is triggered while previous actions
 /// from the same rule are still executing.
 ///
@@ -40,6 +41,7 @@ fn default_max_queue() -> usize {
     10
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A complete automation rule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
@@ -130,6 +132,7 @@ fn is_parallel(m: &RunMode) -> bool {
     *m == RunMode::Parallel
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// What causes a rule to be evaluated.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Trigger {
@@ -334,6 +337,7 @@ pub enum Trigger {
     },
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Button event types for `Trigger::ButtonEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ButtonEventType {
@@ -343,6 +347,7 @@ pub enum ButtonEventType {
     Released,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Threshold direction operators for `Trigger::NumericThreshold`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThresholdOp {
@@ -356,6 +361,7 @@ pub enum ThresholdOp {
     CrossesBelow,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Time unit for `Trigger::Periodic`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeriodicUnit {
@@ -365,6 +371,7 @@ pub enum PeriodicUnit {
     Weeks,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Solar event types for time-based triggers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SunEventType {
@@ -375,6 +382,7 @@ pub enum SunEventType {
     CivilDusk,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A side-effect-free predicate evaluated before actions are executed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
@@ -486,6 +494,7 @@ pub enum Condition {
     },
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Comparison operators for `Condition::DeviceState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareOp {
@@ -497,6 +506,7 @@ pub enum CompareOp {
     Lte,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A branch in a multi-arm `Conditional` action (`ELSE-IF`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConditionalBranch {
@@ -505,6 +515,7 @@ pub struct ConditionalBranch {
     pub actions: Vec<Action>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Variable operation for `SetVariable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariableOp {
@@ -518,6 +529,7 @@ pub enum VariableOp {
     Toggle,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Command for `Action::SetMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModeCommand {
@@ -526,6 +538,7 @@ pub enum ModeCommand {
     Toggle,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Log level for `LogMessage` action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
@@ -540,6 +553,7 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A wrapper that pairs an `Action` with a per-action enable flag.
 ///
 /// When `enabled` is `false` the executor skips the action and records a
@@ -552,6 +566,7 @@ pub struct RuleAction {
     pub action: Action,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A single step in a rule's action sequence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
@@ -944,6 +959,7 @@ pub enum Action {
     },
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Context captured from the event that triggered a rule firing.
 /// Injected into Rhai scripts as `trigger_device()`, `trigger_value()`, etc.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -972,6 +988,7 @@ pub struct TriggerContext {
     pub trigger_label: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A mode → state mapping entry for `Action::SetDeviceStatePerMode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeStateEntry {
@@ -981,6 +998,7 @@ pub struct ModeStateEntry {
     pub state: JsonValue,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A mode → delay mapping entry for `Action::DelayPerMode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeDelayEntry {
@@ -989,6 +1007,7 @@ pub struct ModeDelayEntry {
     pub duration_secs: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A mode → scene mapping entry for `Action::ActivateScenePerMode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeSceneEntry {
@@ -996,6 +1015,7 @@ pub struct ModeSceneEntry {
     pub scene_id: Uuid,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A named snapshot of device states that can be activated as a unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {

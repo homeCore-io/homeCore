@@ -48,6 +48,35 @@ pub enum Role {
 }
 
 impl Role {
+    /// Every role, in rough order of decreasing privilege. The client lists
+    /// these so a person can see the whole ladder, not just the three the UI
+    /// once hardcoded.
+    pub const fn all() -> [Role; 7] {
+        [
+            Role::Admin,
+            Role::User,
+            Role::ReadOnly,
+            Role::Observer,
+            Role::DeviceOperator,
+            Role::RuleEditor,
+            Role::ServiceOperator,
+        ]
+    }
+
+    /// The `snake_case` wire form (`device_operator`), matching the serde
+    /// representation used everywhere else a role crosses the boundary.
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::User => "user",
+            Role::ReadOnly => "read_only",
+            Role::Observer => "observer",
+            Role::DeviceOperator => "device_operator",
+            Role::RuleEditor => "rule_editor",
+            Role::ServiceOperator => "service_operator",
+        }
+    }
+
     /// Returns the set of JWT scopes granted to this role.
     pub fn scopes(&self) -> Vec<String> {
         // Scope primitives — grouped here so adding a new one lands in one
@@ -224,6 +253,19 @@ mod role_tests {
             serde_json::to_string(&Role::ServiceOperator).unwrap(),
             "\"service_operator\""
         );
+    }
+
+    #[test]
+    fn all_covers_every_variant_and_wire_matches_serde() {
+        // `all()` feeds the /auth/roles endpoint; if a variant is added to the
+        // enum but not to `all()`, the client silently stops offering it.
+        assert_eq!(Role::all().len(), 7);
+        // `wire()` must agree with the serde representation exactly, since the
+        // client sends role strings back on user create / set-role.
+        for r in Role::all() {
+            let serde = serde_json::to_string(&r).unwrap();
+            assert_eq!(format!("\"{}\"", r.wire()), serde);
+        }
     }
 }
 

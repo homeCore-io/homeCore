@@ -1,0 +1,1099 @@
+{
+  "triggers": [
+    {
+      "tag": "ButtonEvent",
+      "fields": [
+        {
+          "name": "button_number",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "event",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "CalendarEvent",
+      "fields": [
+        {
+          "name": "calendar_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "offset_minutes",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "title_contains",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "Cron",
+      "fields": [
+        {
+          "name": "expression",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "CustomEvent",
+      "fields": [
+        {
+          "name": "event_type",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "DeviceAvailabilityChanged",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "for_duration_secs",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "to",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "DeviceBatteryLow",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "DeviceBatteryRecovered",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "DeviceStateChanged",
+      "fields": [
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "change_kind",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "change_source",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "for_duration_secs",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "from",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "not_from",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "not_to",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "to",
+          "type": "any",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "HubVariableChanged",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "ManualTrigger",
+      "fields": []
+    },
+    {
+      "tag": "ModeChanged",
+      "fields": [
+        {
+          "name": "mode_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "to",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "MqttMessage",
+      "fields": [
+        {
+          "name": "payload",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "topic_pattern",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value_cmp",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "value_op",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "value_path",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "NumericThreshold",
+      "fields": [
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "for_duration_secs",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "op",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Periodic",
+      "fields": [
+        {
+          "name": "every_n",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SunEvent",
+      "fields": [
+        {
+          "name": "event",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "offset_minutes",
+          "type": "integer",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SystemStarted",
+      "fields": []
+    },
+    {
+      "tag": "TimeOfDay",
+      "fields": [
+        {
+          "name": "days",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "time",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "WebhookReceived",
+      "fields": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "conditions": [
+    {
+      "tag": "And",
+      "fields": [
+        {
+          "name": "conditions",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "CalendarActive",
+      "fields": [
+        {
+          "name": "calendar_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "title_contains",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "DeviceLastChange",
+      "fields": [
+        {
+          "name": "actor_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "actor_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "DeviceState",
+      "fields": [
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "op",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "HubVariable",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "op",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "ModeIs",
+      "fields": [
+        {
+          "name": "mode_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "on",
+          "type": "boolean",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Not",
+      "fields": [
+        {
+          "name": "condition",
+          "type": "object",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Or",
+      "fields": [
+        {
+          "name": "conditions",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "PrivateBooleanIs",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "boolean",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "ScriptExpression",
+      "fields": [
+        {
+          "name": "script",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "TimeElapsed",
+      "fields": [
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "duration_secs",
+          "type": "integer",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "TimeWindow",
+      "fields": [
+        {
+          "name": "end",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "start",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Xor",
+      "fields": [
+        {
+          "name": "conditions",
+          "type": "array",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "tag": "ActivateScenePerMode",
+      "fields": [
+        {
+          "name": "default_scene_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "modes",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "CallService",
+      "fields": [
+        {
+          "name": "body",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "method",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "response_event",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "retries",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "CancelDelays",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "CancelRuleTimers",
+      "fields": [
+        {
+          "name": "rule_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "CaptureDeviceState",
+      "fields": [
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Comment",
+      "fields": [
+        {
+          "name": "text",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Conditional",
+      "fields": [
+        {
+          "name": "condition",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "else_actions",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "else_if",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "then_actions",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Delay",
+      "fields": [
+        {
+          "name": "cancel_key",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "cancelable",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "duration_secs",
+          "type": "integer",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "DelayPerMode",
+      "fields": [
+        {
+          "name": "default_secs",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "modes",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "ExitRule",
+      "fields": []
+    },
+    {
+      "tag": "FadeDevice",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "duration_secs",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "steps",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "target",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "FireEvent",
+      "fields": [
+        {
+          "name": "event_type",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "payload",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "LogMessage",
+      "fields": [
+        {
+          "name": "level",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "Notify",
+      "fields": [
+        {
+          "name": "channel",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "Parallel",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "PauseRule",
+      "fields": [
+        {
+          "name": "rule_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "PingHost",
+      "fields": [
+        {
+          "name": "count",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "else_actions",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "host",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "response_event",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "then_actions",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "PublishMqtt",
+      "fields": [
+        {
+          "name": "payload",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "retain",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "RepeatCount",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "count",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "interval_ms",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "RepeatUntil",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "condition",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "interval_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max_iterations",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "RepeatWhile",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "condition",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "interval_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max_iterations",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "RestoreDeviceState",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "ResumeRule",
+      "fields": [
+        {
+          "name": "rule_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "RunRuleActions",
+      "fields": [
+        {
+          "name": "rule_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "RunScript",
+      "fields": [
+        {
+          "name": "script",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SetDeviceState",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "any",
+          "required": true
+        },
+        {
+          "name": "track_event_value",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "SetDeviceStatePerMode",
+      "fields": [
+        {
+          "name": "default_state",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "modes",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SetHubVariable",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "op",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "value",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SetMode",
+      "fields": [
+        {
+          "name": "command",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "mode_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SetPrivateBoolean",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "boolean",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "SetVariable",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "op",
+          "type": "any",
+          "required": false
+        },
+        {
+          "name": "value",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "StopRuleChain",
+      "fields": []
+    },
+    {
+      "tag": "WaitForEvent",
+      "fields": [
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "event_type",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "WaitForExpression",
+      "fields": [
+        {
+          "name": "expression",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "hold_duration_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "poll_interval_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    }
+  ]
+}

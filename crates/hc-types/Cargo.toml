@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 default = []
 # Enable for wasm32 targets — adds js-based RNG for uuid and wasmbind for chrono.
 wasm = ["uuid/js", "chrono/wasmbind"]
+# Emits the rule vocabulary — every variant and every field — from the types
+# themselves, so a client's descriptor table can be checked against the REAL
+# thing rather than against itself. Off by default: wasm clients never compile
+# schemars, and neither does the shipped server unless hc-api asks for it.
+schema = ["dep:schemars"]
 
 [dependencies]
 serde      = { workspace = true }
@@ -16,3 +21,4 @@ uuid       = { workspace = true }
 chrono     = { workspace = true }
 thiserror  = { workspace = true }
 ron        = { workspace = true }
+schemars   = { workspace = true, optional = true }

@@ -188,10 +188,18 @@ impl MetricsCollector {
 
 /// `GET /metrics` — Prometheus text exposition.
 ///
-/// Gated by source IP via `[metrics].whitelist` in homecore.toml. Empty
-/// whitelist (the default) means every caller receives 403 — operators must
-/// explicitly list the scrape source(s). Prometheus scrapers can't set
-/// Authorization headers easily, so network identity is the access control.
+/// Gated by source IP via `[metrics].whitelist` in homecore.toml. Prometheus
+/// scrapers can't easily set an `Authorization` header, so network identity is
+/// the access control.
+///
+/// The whitelist is **deliberately not auto-discovered**. An empty whitelist —
+/// the default — denies everyone. Exposing metrics to whatever subnet the host
+/// happens to sit on would be a silent, invisible widening of the attack
+/// surface; opening this endpoint is a decision an operator makes explicitly.
+///
+/// What the default must not be is *mysterious*, which it was: a bare
+/// "access denied" and a `debug!` line nobody sees. Both now name the config
+/// key and the exact IP to add.
 pub async fn metrics_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
@@ -212,8 +220,37 @@ pub async fn metrics_handler(
         .iter()
         .any(|net| net.contains(&remote_ip));
     if !allowed {
-        tracing::debug!(ip = %remote_ip, "metrics scrape denied — IP not in metrics.whitelist");
-        return (StatusCode::FORBIDDEN, "metrics access denied\n").into_response();
+        // Distinguish "closed because nobody configured it" from "configured,
+        // and you are not on the list" — the fix is different for each, and the
+        // old message told you neither.
+        // debug!, not warn!: a misconfigured scraper polls every 15 s, and
+        // flooding the log would just trade a silent failure for a noisy one.
+        // The 403 body below is what a human actually reads.
+        let body = if state.metrics_whitelist.is_empty() {
+            tracing::debug!(
+                ip = %remote_ip,
+                "metrics scrape denied — [metrics].whitelist is empty, so /api/v1/metrics is closed to everyone"
+            );
+            format!(
+                "metrics access denied\n\n\
+                 [metrics].whitelist is not configured, so this endpoint is closed to every caller.\n\
+                 To allow this scraper, add its address to homecore.toml and restart:\n\n\
+                 [metrics]\n\
+                 whitelist = [\"{remote_ip}/32\"]\n"
+            )
+        } else {
+            tracing::debug!(
+                ip = %remote_ip,
+                "metrics scrape denied — source IP is not in [metrics].whitelist"
+            );
+            format!(
+                "metrics access denied\n\n\
+                 {remote_ip} is not in [metrics].whitelist. Add it to homecore.toml and restart:\n\n\
+                 [metrics]\n\
+                 whitelist = [\"{remote_ip}/32\"]\n"
+            )
+        };
+        return (StatusCode::FORBIDDEN, body).into_response();
     }
 
     let m = &state.metrics;

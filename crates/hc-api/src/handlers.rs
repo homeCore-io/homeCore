@@ -9,7 +9,7 @@ use axum::{
 use hc_core::{device_naming, rule_resolver};
 use hc_state::StateStore;
 use hc_topic_map::canonical_device_type_name;
-use hc_types::dashboard::{DashboardDefinition, DashboardResponse, DashboardVisibility};
+use hc_types::dashboard::{DashboardDefinition, DashboardResponse};
 use hc_types::device::{with_command_change_metadata, Area, DeviceChange, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
@@ -397,6 +397,132 @@ pub async fn get_device(
     }
 }
 
+/// Attribute keys a plugin may publish artwork under, in preference order.
+///
+/// `art_url` is the canonical media-contract name; `media_image_url` is what
+/// hc-sonos has published all along. Both are accepted so the plugin needs no
+/// change and new plugins get a name that reads right.
+const ART_URL_KEYS: [&str; 2] = ["art_url", "media_image_url"];
+
+/// Artwork is fetched from devices on the LAN, which is fast; a stuck speaker
+/// must not tie up a connection.
+const ART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Album art is a few hundred KB at most. The cap stops a misbehaving or
+/// impersonated device from streaming us something enormous.
+const ART_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// `GET /devices/:id/media/art` — proxies a media player's artwork.
+///
+/// Plugins publish artwork as an absolute URL pointing at the device itself
+/// (hc-sonos gives `http://10.0.10.28:1400/getaa?...`, the speaker's own LAN
+/// address). A browser usually cannot load that: it is unreachable from outside
+/// the LAN, and on an HTTPS page it is blocked outright as mixed content. So the
+/// art is published but unusable by the very frontends it exists for.
+///
+/// Core fetches it server-side and streams it back same-origin, which settles
+/// mixed content, remote access and CORS in one move.
+///
+/// **Why this is not an SSRF gadget:** the URL is read from *the device's own
+/// state*, never from the caller. A client can only ask us to fetch a URL that a
+/// plugin already published for that device. The scheme check below is a
+/// belt-and-braces guard against a compromised plugin publishing `file://` or
+/// similar.
+pub async fn device_media_art(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let err = |code: StatusCode, msg: &str| -> axum::response::Response {
+        (code, Json(json!({ "error": msg }))).into_response()
+    };
+
+    let device = match s.store.get_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "device not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let Some(url) = ART_URL_KEYS
+        .iter()
+        .find_map(|k| device.attributes.get(*k).and_then(Value::as_str))
+        .filter(|u| !u.is_empty())
+    else {
+        // Nothing playing, or a track with no artwork. Not an error — the UI
+        // simply falls back to a placeholder.
+        return err(StatusCode::NOT_FOUND, "no artwork for this device");
+    };
+
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "device published an unusable art url",
+            )
+        }
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return err(StatusCode::BAD_GATEWAY, "art url scheme not allowed");
+    }
+
+    let client = match reqwest::Client::builder().timeout(ART_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let upstream = match client.get(parsed).send().await {
+        Ok(r) => r,
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "could not reach the device for artwork",
+            )
+        }
+    };
+    if !upstream.status().is_success() {
+        return err(StatusCode::BAD_GATEWAY, "device returned no artwork");
+    }
+
+    // Trust the upstream's type only if it actually claims to be an image;
+    // otherwise a compromised device could have us serve HTML or a script under
+    // our own origin.
+    let content_type = upstream
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|t| t.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match upstream.bytes().await {
+        Ok(b) => b,
+        Err(_) => return err(StatusCode::BAD_GATEWAY, "artwork download failed"),
+    };
+    if bytes.len() > ART_MAX_BYTES {
+        return err(StatusCode::BAD_GATEWAY, "artwork too large");
+    }
+
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&content_type) {
+        headers.insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    // Art changes with the track, so this must not be cached for long — but a
+    // wall panel re-rendering the now-playing card should not refetch every
+    // frame either.
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=60"),
+    );
+    // Never let a proxied blob be sniffed into something executable.
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+
+    (StatusCode::OK, headers, bytes).into_response()
+}
+
 pub async fn get_device_schema(
     State(s): State<AppState>,
     _: DevicesRead,
@@ -478,8 +604,28 @@ pub async fn update_device(
                 }
             };
 
-            if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
-                device.name = name.to_string();
+            // `name`/`area` name the *user's* intent, so they set the override —
+            // never the plugin-delivered value, which registration overwrites on
+            // every restart (a rename written to `device.name` silently reverted).
+            // Null, or an empty string, clears the override and hands the device
+            // back to whatever the bridge calls it.
+            if let Some(name) = body.get("name") {
+                if name.is_null() {
+                    device.name_override = None;
+                } else if let Some(value) = name.as_str() {
+                    let trimmed = value.trim();
+                    device.name_override = if trimmed.is_empty() || trimmed == device.name {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                } else {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "name must be a string or null" })),
+                    )
+                        .into_response();
+                }
             }
             if let Some(status_icon) = body.get("status_icon") {
                 if status_icon.is_null() {
@@ -500,12 +646,18 @@ pub async fn update_device(
                 }
             }
             if let Some(area) = body.get("area") {
-                device.area = if area.is_null() {
+                let requested = if area.is_null() {
                     None
                 } else {
                     area.as_str()
                         .map(normalize_area_name)
                         .filter(|value| !value.is_empty())
+                };
+                // Same contract as `name`: setting the area the plugin already
+                // reports is not an override, it is agreement — so don't pin it.
+                device.area_override = match requested {
+                    Some(a) if Some(a.as_str()) == device.area.as_deref() => None,
+                    other => other,
                 };
             }
             if let Some(ui_hint) = body.get("ui_hint") {
@@ -1028,7 +1180,11 @@ pub async fn create_switch(
 
     let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
     let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
-    dev.device_type = Some("virtual_switch".to_string());
+    // Must be "switch", not "virtual_switch": that is what `GLUE_TYPES` writes,
+    // what the `core.switch` → `core.glue` migration backfills, and what
+    // `list_switches` filters on.  Writing "virtual_switch" here created
+    // switches that GET /switches could never return.
+    dev.device_type = Some("switch".to_string());
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
@@ -1820,11 +1976,25 @@ fn area_id_from_name(name: &str) -> Uuid {
     )
 }
 
+/// Does this (raw, possibly un-normalized) area value name the given area?
+/// Area names are normalized on the way in, but device-side values arrive from
+/// plugins in whatever shape the bridge uses ("Living Room"), so every
+/// comparison has to normalize.
+fn area_matches(value: Option<&str>, area_name: &str) -> bool {
+    value.map(normalize_area_name).as_deref() == Some(area_name)
+}
+
 fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
     let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for device in devices {
-        let Some(area) = device.area.as_deref() else {
+        // Effective, not raw: a device the user has assigned to a room carries
+        // that room in `area_override` with `area` left as whatever the plugin
+        // said (often nothing). Reading `area` alone made every user
+        // assignment invisible here — the room existed and the device pointed
+        // at it, but the area listed no devices, so "add to room" looked like
+        // it had done nothing.
+        let Some(area) = device.effective_area() else {
             continue;
         };
         let normalized = normalize_area_name(area);
@@ -2000,8 +2170,18 @@ pub async fn patch_area(
     };
 
     for device in &mut devices {
-        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
-            device.area = Some(new_name.clone());
+        // Rename whichever field points at this area. A device assigned by the
+        // user carries the room in `area_override`; matching only `area` left
+        // those devices pointing at a room name that no longer exists.
+        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
+        let in_override = area_matches(device.area_override.as_deref(), &area.name);
+        if in_plugin_area || in_override {
+            if in_plugin_area {
+                device.area = Some(new_name.clone());
+            }
+            if in_override {
+                device.area_override = Some(new_name.clone());
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2073,8 +2253,17 @@ pub async fn delete_area(
     };
 
     for device in &mut devices {
-        if device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str()) {
-            device.area = None;
+        // Same reasoning as rename: clear whichever field pointed at the
+        // deleted area, or user-assigned devices keep a dangling room.
+        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
+        let in_override = area_matches(device.area_override.as_deref(), &area.name);
+        if in_plugin_area || in_override {
+            if in_plugin_area {
+                device.area = None;
+            }
+            if in_override {
+                device.area_override = None;
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2413,6 +2602,25 @@ pub async fn get_automation(
 /// clients like `hc-tui` that want to display rules without
 /// re-serializing through JSON. Auto-generated rules backed only by
 /// the in-memory store (no `.ron` file) return 404.
+/// The rule vocabulary — every variant, every field — derived from the types.
+///
+/// A rule editor needs to know what a rule can contain, and every client so far
+/// has kept that table BY HAND. A hand-written mirror of a Rust enum always
+/// cracks: core grew `HouseStatusHero`, shipped it on its own default dashboard,
+/// and the Dart client's mirror had never heard of it — so it coerced the card
+/// to `markdown` and would have saved it back as one.
+///
+/// The tripwire meant to catch that was hand-written too: the client asserted
+/// its OWN table had 18 triggers in it. That measures the mirror, not the thing
+/// being mirrored, and it passes happily while core grows a 19th.
+///
+/// So core now says what it knows, mechanically, and a client can check itself
+/// against the real thing. No auth beyond read: it is a description of the
+/// software, not of the house.
+pub async fn get_rule_vocabulary(_: State<AppState>, _: AutomationsRead) -> impl IntoResponse {
+    Json(hc_types::vocabulary::Vocabulary::derive())
+}
+
 pub async fn get_automation_ron(
     State(s): State<AppState>,
     _: AutomationsRead,
@@ -2652,17 +2860,31 @@ pub async fn delete_automation(
 
 // ---------- Dashboards ----------
 
+/// May this user open the dashboard?
+///
+/// The owner and any admin always may. Beyond them, a per-user grant — view or
+/// edit — opens it. (For years this returned `true` for everyone, on the theory
+/// that a house has no private boards; the grant list is the opt-in that
+/// changes that, and an empty list preserves the old all-visible behaviour.)
 fn dashboard_visible_to(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
     claims.is_admin()
         || dashboard.owner_user_id == claims.uid
-        || matches!(
-            dashboard.visibility,
-            DashboardVisibility::Shared | DashboardVisibility::Public
-        )
+        || dashboard.access.iter().any(|g| g.user_id == claims.uid)
 }
 
+/// May this user change the dashboard's widgets and layout?
+///
+/// Owner, admin, or a holder of an **edit** grant. A view grant does not
+/// qualify. Note this governs the dashboard's *content* — its grant list is
+/// guarded separately (see `set_dashboard_access`), so an edit-granted user can
+/// rearrange widgets but cannot hand themselves or anyone else more access.
 fn dashboard_mutable_by(claims: &hc_auth::Claims, dashboard: &DashboardDefinition) -> bool {
-    claims.is_admin() || dashboard.owner_user_id == claims.uid
+    claims.is_admin()
+        || dashboard.owner_user_id == claims.uid
+        || dashboard
+            .access
+            .iter()
+            .any(|g| g.user_id == claims.uid && g.level == hc_types::dashboard::GrantLevel::Edit)
 }
 
 fn dashboard_response_for(
@@ -2720,7 +2942,6 @@ fn default_dashboard_layout(
                         *w
                     },
                     h: *h,
-                    section_id: None,
                 },
             )
             .collect(),
@@ -2735,267 +2956,263 @@ fn default_dashboard_layout(
 }
 
 fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
-    use hc_types::dashboard::{
-        DashboardBreakpoint, DashboardDefinition, DashboardRefreshPolicy, DashboardSection,
-        DashboardVisibility, DashboardWidget, DashboardWidgetType,
-    };
+    use hc_types::dashboard::{DashboardBreakpoint, DashboardDefinition, DashboardWidget};
 
     let now = chrono::Utc::now();
-    let widget = |id: &str,
-                  r#type: DashboardWidgetType,
-                  title: &str,
-                  subtitle: Option<&str>,
-                  refresh_policy: DashboardRefreshPolicy,
-                  config: Value| DashboardWidget {
-        id: id.to_string(),
-        r#type,
-        title: title.to_string(),
-        subtitle: subtitle.map(str::to_string),
-        refresh_policy,
-        config,
+    let widget = |id: &str, r#type: &str, title: &str, subtitle: Option<&str>, config: Value| {
+        DashboardWidget {
+            id: id.to_string(),
+            r#type: r#type.to_string(),
+            title: title.to_string(),
+            subtitle: subtitle.map(str::to_string),
+            config,
+        }
     };
-    let section =
-        |id: &str, breakpoint: DashboardBreakpoint, title: &str, order: i32, y: i32, min_h: i32| {
-            DashboardSection {
-                id: id.to_string(),
-                breakpoint,
-                title: title.to_string(),
-                order,
-                y,
-                layout_policy: hc_types::dashboard::DashboardSectionLayoutPolicy::Grid,
-                min_h,
-                hidden: false,
-            }
-        };
 
     vec![
         DashboardDefinition {
             id: "starter_getting_started".to_string(),
             name: "Getting Started".to_string(),
-            description: Some(
-                "Clean developer workspace focused on the dashboard features currently in progress."
-                    .to_string(),
-            ),
+            description: Some("Your home at a glance.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
+            access: Vec::new(),
             tags: vec!["starter".into(), "home".into(), "overview".into()],
-            icon: "home".into(),
+            // Not "home": that renders the same house glyph as the Home nav
+            // item. "rocket" reads as onboarding and stays distinct.
+            icon: "rocket".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![
-                section("mobile-overview", DashboardBreakpoint::Mobile, "Overview", 0, 0, 4),
-                section("mobile-devices", DashboardBreakpoint::Mobile, "Devices", 1, 4, 6),
-                section("mobile-activity", DashboardBreakpoint::Mobile, "Activity", 2, 10, 3),
-                section("tablet-overview", DashboardBreakpoint::Tablet, "Overview", 0, 0, 2),
-                section("tablet-devices", DashboardBreakpoint::Tablet, "Devices", 1, 2, 3),
-                section("tablet-activity", DashboardBreakpoint::Tablet, "Activity", 2, 5, 2),
-                section("desktop-overview", DashboardBreakpoint::Desktop, "Overview", 0, 0, 2),
-                section("desktop-devices", DashboardBreakpoint::Desktop, "Devices", 1, 2, 3),
-                section("desktop-activity", DashboardBreakpoint::Desktop, "Activity", 2, 5, 2),
-                section("tv-overview", DashboardBreakpoint::Tv, "Overview", 0, 0, 2),
-                section("tv-devices", DashboardBreakpoint::Tv, "Devices", 1, 2, 3),
-                section("tv-activity", DashboardBreakpoint::Tv, "Activity", 2, 5, 2),
-            ],
             widgets: vec![
+                widget("hero", "house_status_hero", "Home", None, json!({})),
                 widget(
-                    "intro",
-                    DashboardWidgetType::Markdown,
-                    "Dashboard Workbench",
-                    Some("Starter sample with the newer card treatments"),
-                    DashboardRefreshPolicy::Manual,
-                    json!({"markdown": "Use this dashboard as a clean composer sandbox. It includes a summary card, a compact device list, a richer device grid, and a recent events feed."}),
+                    "media",
+                    "media_player",
+                    "Now Playing",
+                    None,
+                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 4}),
                 ),
                 widget(
-                    "summary",
-                    DashboardWidgetType::StatSummary,
-                    "Home Summary",
-                    Some("Quick system counts"),
-                    DashboardRefreshPolicy::Live,
-                    json!({"metrics": ["devices", "on", "offline"]}),
+                    "devices",
+                    "device_grid",
+                    "Devices",
+                    None,
+                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 12}),
                 ),
-                widget(
-                    "list",
-                    DashboardWidgetType::DeviceList,
-                    "Device List",
-                    Some("Compact device inventory"),
-                    DashboardRefreshPolicy::Live,
-                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 8}),
-                ),
-                widget(
-                    "grid",
-                    DashboardWidgetType::DeviceGrid,
-                    "Device Grid",
-                    Some("Richer tile sample"),
-                    DashboardRefreshPolicy::Live,
-                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 6}),
-                ),
-                widget(
-                    "events",
-                    DashboardWidgetType::EventFeed,
-                    "Recent Events",
-                    Some("Activity sample"),
-                    DashboardRefreshPolicy::Live,
-                    json!({"limit": 6}),
-                ),
+                widget("log", "event_feed", "Activity", None, json!({"limit": 16})),
+                widget("modes", "mode_chips", "Modes", None, json!({})),
             ],
             layouts: vec![
                 hc_types::dashboard::DashboardLayout {
                     breakpoint: DashboardBreakpoint::Mobile,
                     columns: 1,
-                    row_height: 150.0,
+                    row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 0, y: 2, w: 1, h: 2, section_id: Some("mobile-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 4, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 0, y: 7, w: 1, h: 3, section_id: Some("mobile-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 10, w: 1, h: 3, section_id: Some("mobile-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 1,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 0,
+                            y: 5,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 8,
+                            w: 1,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 0,
+                            y: 11,
+                            w: 1,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
                     breakpoint: DashboardBreakpoint::Tablet,
                     columns: 12,
-                    row_height: 150.0,
+                    row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tablet-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tablet-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tablet-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tablet-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tablet-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 5,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 5,
+                            y: 2,
+                            w: 7,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
                     breakpoint: DashboardBreakpoint::Desktop,
                     columns: 12,
-                    row_height: 150.0,
+                    row_height: 100.0,
                     gap: 12.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("desktop-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("desktop-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("desktop-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("desktop-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("desktop-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 4,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 4,
+                            y: 2,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
                 hc_types::dashboard::DashboardLayout {
                     breakpoint: DashboardBreakpoint::Tv,
                     columns: 12,
-                    row_height: 180.0,
+                    row_height: 120.0,
                     gap: 16.0,
                     placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "intro".into(), x: 0, y: 0, w: 8, h: 2, section_id: Some("tv-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "summary".into(), x: 8, y: 0, w: 4, h: 2, section_id: Some("tv-overview".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "list".into(), x: 0, y: 2, w: 5, h: 3, section_id: Some("tv-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "grid".into(), x: 5, y: 2, w: 7, h: 3, section_id: Some("tv-devices".into()) },
-                        hc_types::dashboard::DashboardWidgetPlacement { widget_id: "events".into(), x: 0, y: 5, w: 12, h: 2, section_id: Some("tv-activity".into()) },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "hero".into(),
+                            x: 0,
+                            y: 0,
+                            w: 12,
+                            h: 2,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "media".into(),
+                            x: 0,
+                            y: 2,
+                            w: 4,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "devices".into(),
+                            x: 4,
+                            y: 2,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "log".into(),
+                            x: 0,
+                            y: 5,
+                            w: 8,
+                            h: 3,
+                        },
+                        hc_types::dashboard::DashboardWidgetPlacement {
+                            widget_id: "modes".into(),
+                            x: 8,
+                            y: 5,
+                            w: 4,
+                            h: 2,
+                        },
                     ],
                 },
             ],
-        },
-        DashboardDefinition {
-            id: "template_home_overview".to_string(),
-            name: "Home Overview".to_string(),
-            description: Some("General whole-home dashboard.".to_string()),
-            owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
-            tags: vec!["home".into(), "overview".into()],
-            icon: "dashboard".into(),
-            created_at: now,
-            updated_at: now,
-            sections: vec![],
-            widgets: vec![
-                widget(
-                    "summary",
-                    DashboardWidgetType::StatSummary,
-                    "Summary",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({"metrics": ["devices", "on", "offline", "media_playing"]}),
-                ),
-                widget(
-                    "modes",
-                    DashboardWidgetType::ModeChips,
-                    "Modes",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({}),
-                ),
-                widget(
-                    "scenes",
-                    DashboardWidgetType::SceneRow,
-                    "Scenes",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({}),
-                ),
-                widget(
-                    "grid",
-                    DashboardWidgetType::DeviceGrid,
-                    "Devices",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 12}),
-                ),
-                widget(
-                    "events",
-                    DashboardWidgetType::EventFeed,
-                    "Recent Events",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({"limit": 10}),
-                ),
-            ],
-            layouts: default_dashboard_layout(&[
-                ("summary", 0, 0, 12, 2),
-                ("modes", 0, 2, 12, 1),
-                ("scenes", 0, 3, 12, 1),
-                ("grid", 0, 4, 8, 3),
-                ("events", 8, 4, 4, 3),
-            ]),
         },
         DashboardDefinition {
             id: "template_security".to_string(),
             name: "Security".to_string(),
             description: Some("Entry points, alerts, and camera placeholders.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
+            access: Vec::new(),
             tags: vec!["security".into()],
             icon: "shield".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![],
             widgets: vec![
                 widget(
                     "summary",
-                    DashboardWidgetType::StatSummary,
+                    "stat_summary",
                     "Security Summary",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"metrics": ["doors_open", "motion_active", "offline"]}),
                 ),
                 widget(
                     "devices",
-                    DashboardWidgetType::DeviceList,
+                    "device_list",
                     "Security Devices",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "door,motion,lock,camera", "show_offline": true, "limit": 16}),
                 ),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Alerts",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 12, "types": ["device_state_changed", "system_alert"], "group_by": "device"}),
                 ),
                 widget(
                     "notes",
-                    DashboardWidgetType::Markdown,
+                    "markdown",
                     "Camera Setup",
                     None,
-                    DashboardRefreshPolicy::Passive,
                     json!({"markdown": "Add camera widgets after configuring approved sources and embed policy."}),
                 ),
             ],
@@ -3011,43 +3228,32 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             name: "Living Room".to_string(),
             description: Some("A room-focused dashboard with devices and media.".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
+            access: Vec::new(),
             tags: vec!["room".into(), "living_room".into()],
             icon: "chair".into(),
             created_at: now,
             updated_at: now,
-            sections: vec![],
             widgets: vec![
                 widget(
                     "devices",
-                    DashboardWidgetType::DeviceGrid,
+                    "device_grid",
                     "Living Room Devices",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "area", "area_name": "Living Room", "show_offline": false, "limit": 8}),
                 ),
                 widget(
                     "media",
-                    DashboardWidgetType::MediaPlayer,
+                    "media_player",
                     "Media",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"selection_mode": "query", "query": "living", "show_offline": false, "limit": 2}),
                 ),
-                widget(
-                    "scenes",
-                    DashboardWidgetType::SceneRow,
-                    "Scenes",
-                    None,
-                    DashboardRefreshPolicy::Live,
-                    json!({}),
-                ),
+                widget("scenes", "scene_row", "Scenes", None, json!({})),
                 widget(
                     "events",
-                    DashboardWidgetType::EventFeed,
+                    "event_feed",
                     "Room Activity",
                     None,
-                    DashboardRefreshPolicy::Live,
                     json!({"limit": 8, "area_name": "Living Room"}),
                 ),
             ],
@@ -3098,27 +3304,6 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     }
     if dashboard.layouts.is_empty() {
         return Err("dashboard must define at least one layout".into());
-    }
-
-    let mut section_ids = HashSet::new();
-    let mut section_breakpoints = HashMap::new();
-    for section in &dashboard.sections {
-        if section.id.trim().is_empty() {
-            return Err("section id cannot be empty".into());
-        }
-        if section.title.trim().is_empty() {
-            return Err(format!("section '{}' title cannot be empty", section.id));
-        }
-        if section.y < 0 {
-            return Err(format!("section '{}' must have non-negative y", section.id));
-        }
-        if section.min_h <= 0 {
-            return Err(format!("section '{}' must have min_h > 0", section.id));
-        }
-        if !section_ids.insert(section.id.as_str()) {
-            return Err(format!("duplicate section id '{}'", section.id));
-        }
-        section_breakpoints.insert(section.id.as_str(), section.breakpoint);
     }
 
     let mut widget_ids = HashSet::new();
@@ -3172,20 +3357,6 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     "layout {:?} has duplicate placement for widget '{}'",
                     layout.breakpoint, placement.widget_id
                 ));
-            }
-            if let Some(section_id) = placement.section_id.as_deref() {
-                if !section_ids.contains(section_id) {
-                    return Err(format!(
-                        "layout {:?} references unknown section '{}'",
-                        layout.breakpoint, section_id
-                    ));
-                }
-                if section_breakpoints.get(section_id).copied() != Some(layout.breakpoint) {
-                    return Err(format!(
-                        "layout {:?} references section '{}' from a different breakpoint",
-                        layout.breakpoint, section_id
-                    ));
-                }
             }
             if placement.x < 0 || placement.y < 0 {
                 return Err(format!(
@@ -3331,15 +3502,18 @@ fn validate_selection_widget_config(
     Ok(())
 }
 
+/// Validates the config of the widget types core happens to know about.
+///
+/// An UNKNOWN type is accepted, not rejected. That is the point of `type` being
+/// a string: the client's registry decides what can be drawn, and core stays out
+/// of the business of knowing which cards exist. Rejecting unknown types is what
+/// forced every new card — including plugin cards — through a core release.
 fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Result<(), String> {
-    match widget.r#type {
-        hc_types::dashboard::DashboardWidgetType::DeviceGrid
-        | hc_types::dashboard::DashboardWidgetType::DeviceList
-        | hc_types::dashboard::DashboardWidgetType::DeviceTile
-        | hc_types::dashboard::DashboardWidgetType::MediaPlayer => {
+    match widget.r#type.as_str() {
+        "device_grid" | "device_list" | "device_tile" | "media_player" => {
             validate_selection_widget_config(widget, false)
         }
-        hc_types::dashboard::DashboardWidgetType::StatSummary => {
+        "stat_summary" => {
             let map = config_object(widget)?;
             let metrics = map
                 .get("metrics")
@@ -3353,7 +3527,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::EventFeed => {
+        "event_feed" => {
             let map = config_object(widget)?;
             optional_i64_min(map, "limit", 1, &widget.id)?;
             optional_string_list(map, "types", &widget.id)?;
@@ -3385,7 +3559,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::CameraVideo => {
+        "camera_video" => {
             let map = config_object(widget)?;
             let source_type = require_string(map, "source_type", &widget.id)?;
             match source_type.as_str() {
@@ -3401,7 +3575,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             optional_i64_min(map, "refresh_secs", 1, &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::WebEmbed => {
+        "web_embed" => {
             let map = config_object(widget)?;
             require_string(map, "url", &widget.id)?;
             if let Some(value) = map.get("sandbox_profile") {
@@ -3423,7 +3597,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::Markdown => {
+        "markdown" => {
             let map = config_object(widget)?;
             if let Some(value) = map.get("markdown") {
                 if value.as_str().is_none() {
@@ -3440,7 +3614,7 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             }
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::HistoryChart => {
+        "history_chart" => {
             let map = config_object(widget)?;
             require_string(map, "device_id", &widget.id)?;
             require_string(map, "attribute", &widget.id)?;
@@ -3448,25 +3622,44 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
             optional_i64_min(map, "timeframe_hours", 1, &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::DashboardLink => {
+        "dashboard_link" => {
             let map = config_object(widget)?;
             optional_string_list(map, "dashboard_ids", &widget.id)?;
             Ok(())
         }
-        hc_types::dashboard::DashboardWidgetType::ModeChips
-        | hc_types::dashboard::DashboardWidgetType::SceneRow => {
+        "mode_chips" | "scene_row" => {
             let _ = config_object(widget)?;
             Ok(())
         }
         // Hero is rendered client-side from the live device map. Config is
         // optional (defaults to all 6 systems); accept any object shape and
         // let the renderer ignore unknown fields.
-        hc_types::dashboard::DashboardWidgetType::HouseStatusHero => {
+        "house_status_hero" => {
             if !widget.config.is_object() && !widget.config.is_null() {
                 return Err(format!("widget '{}' config must be an object", widget.id));
             }
             Ok(())
         }
+        // A plugin-contributed card. Core validates only the two keys that
+        // identify it and treats the rest as opaque — it has no business knowing
+        // what a given plugin's card needs, and guessing would make every new
+        // card a core release.
+        "plugin_widget" => {
+            let map = config_object(widget)?;
+            require_string(map, "plugin_id", &widget.id)?;
+            require_string(map, "widget_id", &widget.id)?;
+            Ok(())
+        }
+        // An unknown card is NOT an error.
+        //
+        // This is the whole reason `type` stopped being an enum. Core has no
+        // business knowing which cards exist — it stores the type verbatim and
+        // the client's registry decides what can be drawn. Rejecting here would
+        // put every new card, including every plugin card, behind a core
+        // release, and it is what let core and the Dart client drift until
+        // `house_status_hero` — shipped on core's OWN default dashboard — was a
+        // type the client had never heard of.
+        _ => Ok(()),
     }
 }
 
@@ -3703,6 +3896,13 @@ pub async fn update_dashboard(
         dashboard.owner_user_id = existing.owner_user_id.clone();
         dashboard.created_at = existing.created_at;
         dashboard.updated_at = chrono::Utc::now();
+        // Grants never ride in on a content update. This is the only thing
+        // standing between an edit-granted user and self-promotion: they can
+        // change widgets, but the access list is preserved from the stored copy
+        // and changed only through set_dashboard_access (owner/admin). Without
+        // this line, PUTting a doc with a fatter `access` would be an
+        // escalation.
+        dashboard.access = existing.access.clone();
 
         ensure_default_layouts(&mut dashboard);
 
@@ -3777,7 +3977,6 @@ pub async fn duplicate_dashboard(
         let mut duplicate = existing.clone();
         duplicate.id = format!("dashboard_{}", Uuid::new_v4().simple());
         duplicate.owner_user_id = user.0.uid.clone();
-        duplicate.visibility = DashboardVisibility::Private;
         duplicate.name = dashboard_copy_name(&existing.name, &existing_names);
         duplicate.created_at = now;
         duplicate.updated_at = now;
@@ -3865,7 +4064,6 @@ pub async fn import_dashboard(
         let now = chrono::Utc::now();
         dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
         dashboard.owner_user_id = user.0.uid.clone();
-        dashboard.visibility = DashboardVisibility::Private;
         dashboard.name = if existing_names.contains(&dashboard.name) {
             dashboard_copy_name(&dashboard.name, &existing_names)
         } else {
@@ -3948,6 +4146,88 @@ pub async fn reload_dashboards(
         "user_defaults_total": user_defaults_total
     }))
     .into_response()
+}
+
+/// Body of `PUT /api/v1/dashboards/{id}/access` — the complete grant list, which
+/// replaces whatever was there.
+#[derive(serde::Deserialize)]
+pub struct SetDashboardAccessRequest {
+    #[serde(default)]
+    pub access: Vec<hc_types::dashboard::DashboardGrant>,
+}
+
+/// `PUT /api/v1/dashboards/{id}/access`
+///
+/// Replace a dashboard's grant list. Deliberately its own endpoint, gated on
+/// **owner or admin** rather than the plain `dashboard_mutable_by` — an
+/// edit-granted user may rearrange the board but must not be able to re-grant
+/// access (to themselves or anyone else). The general update path preserves the
+/// stored grants precisely so this stays the only way in.
+pub async fn set_dashboard_access(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+    Json(body): Json<SetDashboardAccessRequest>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(existing) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        // Owner or admin only — NOT dashboard_mutable_by, which would let an
+        // edit-grantee widen their own access.
+        if !(user.0.is_admin() || existing.owner_user_id == user.0.uid) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "only the owner or an admin can change access" })),
+            )
+                .into_response();
+        }
+
+        let Some(pos) = data.dashboards.iter().position(|item| item.id == id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        // The owner is implicit and never needs a grant; drop any that names
+        // them so the list stays about *other* people.
+        let mut access = body.access;
+        access.retain(|g| g.user_id != existing.owner_user_id);
+        data.dashboards[pos].access = access;
+        data.dashboards[pos].updated_at = chrono::Utc::now();
+
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        data.dashboards[pos].clone()
+    };
+
+    (StatusCode::OK, Json(json!({ "access": response.access }))).into_response()
 }
 
 pub async fn delete_dashboard(
@@ -4785,21 +5065,355 @@ pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl Int
     (StatusCode::OK, Json(json!(list)))
 }
 
+/// Delete every device belonging to `plugin_id`, emitting a `device_deleted`
+/// event for each so live clients drop the tile without a manual refresh (the
+/// same event shape the plugin-unregister path in state_bridge emits), and
+/// nullifying any rule references. Shared by plugin uninstall and the
+/// `/plugins/:id/devices` wipe. Returns `(deleted, device_ids, affected_rules)`.
+async fn remove_plugin_devices(s: &AppState, plugin_id: &str) -> (usize, Vec<String>, Vec<String>) {
+    let devices_before = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(plugin_id, error = %e, "remove_plugin_devices: list_devices failed");
+            return (0, Vec::new(), Vec::new());
+        }
+    };
+    let target_ids: Vec<String> = devices_before
+        .iter()
+        .filter(|d| d.plugin_id == plugin_id)
+        .map(|d| d.device_id.clone())
+        .collect();
+
+    let mut deleted = 0usize;
+    let mut affected_rules: Vec<String> = Vec::new();
+    for id in &target_ids {
+        match s.store.delete_device(id).await {
+            Ok(true) => {
+                deleted += 1;
+                let _ = s.event_bus.publish(hc_types::event::Event::Custom {
+                    timestamp: chrono::Utc::now(),
+                    event_type: "device_deleted".to_string(),
+                    payload: json!({
+                        "device_id": id,
+                        "plugin_id": plugin_id,
+                        "source": "plugin_uninstall",
+                    }),
+                });
+                if let Some(rfs) = &s.rule_file_store {
+                    if let Ok(names) =
+                        crate::rule_file_store::nullify_device_refs(&rfs.dir, id, &devices_before)
+                    {
+                        for name in names {
+                            if !affected_rules.contains(&name) {
+                                affected_rules.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(false) => {} // race: gone between list and delete — not an error
+            Err(e) => {
+                tracing::warn!(device_id = %id, error = %e, "remove_plugin_devices: delete failed");
+            }
+        }
+    }
+    (deleted, target_ids, affected_rules)
+}
+
+/// `DELETE /api/v1/plugins/:id` — **full uninstall** (Phase A).
+///
+/// Was a soft "deregister" that only forgot the in-memory record, leaving the
+/// process running and its devices behind as ghosts. Now it: (1) stops the
+/// managed child, (2) unregisters all of the plugin's devices (emitting
+/// `device_deleted` so clients update live), (3) drops it from the registry and
+/// clears its learned state + retained topic.
+///
+/// NOTE (Phase A limit): a plugin still declared in `[[plugins]]` respawns on the
+/// next core restart — removing the *declaration* needs the managed-plugin store
+/// (Phase A slice 2). Returns a summary of what was torn down.
 pub async fn deregister_plugin(
     State(s): State<AppState>,
     _: PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let mut map = s.plugins.write().await;
-    if map.remove(&id).is_some() {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (
+    // 1. Stop the managed child if we supervise it (best-effort). Stopping first
+    //    prevents the plugin re-registering devices we're about to delete.
+    let stopped = {
+        let cmds = s.plugin_commands.read().await;
+        match cmds.get(&id) {
+            Some(tx) => tx.send(crate::PluginCommand::Stop).await.is_ok(),
+            None => false,
+        }
+    };
+
+    // 2. Unregister its devices (no ghosts; emits device_deleted per device).
+    let (devices_removed, device_ids, affected_rules) = remove_plugin_devices(&s, &id).await;
+
+    // 3. Drop from the registry + clear learned state + retained topic.
+    let removed = {
+        let mut map = s.plugins.write().await;
+        map.remove(&id).is_some()
+    };
+    if removed {
+        if let Err(e) = s.store.plugin_state_delete(&id).await {
+            tracing::warn!(plugin_id = %id, error = %e, "Failed to delete plugin learned state");
+        }
+        if let Some(ref publish) = s.publish {
+            let _ = publish
+                .publish_retained(&format!("homecore/plugins/{id}/state"), Vec::new())
+                .await;
+        }
+    }
+
+    if !removed && !stopped && devices_removed == 0 {
+        return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "plugin not found" })),
         )
-            .into_response()
+            .into_response();
     }
+
+    // 4. Persist the uninstall: drop any managed record + tombstone the id so a
+    //    plugin still declared statically in homecore.toml doesn't respawn on the
+    //    next core restart.
+    if let Some(mp) = &s.managed_plugins {
+        if let Err(e) = mp.uninstall(&id) {
+            tracing::warn!(plugin_id = %id, error = %e, "Failed to record uninstall in managed store");
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "uninstalled": id,
+            "stopped": stopped,
+            "devices_removed": devices_removed,
+            "device_ids": device_ids,
+            "affected_rules": affected_rules,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/registry/plugins` — browse the (verified, cached) registry index.
+pub async fn browse_registry(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
+    let Some(reg) = &s.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no plugin registry is configured" })),
+        )
+            .into_response();
+    };
+    match reg.index().await {
+        Ok(idx) => (StatusCode::OK, Json(json!({ "plugins": idx.plugins }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("registry unavailable: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/registry/plugins/:id` — one plugin's registry detail.
+pub async fn get_registry_plugin(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(reg) = &s.registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no plugin registry is configured" })),
+        )
+            .into_response();
+    };
+    match reg.index().await {
+        Ok(idx) => match idx.plugin(&id) {
+            Some(p) => (StatusCode::OK, Json(json!(p))).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "plugin not in registry" })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("registry unavailable: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/plugins/install` — install a plugin, then activate it.
+///
+/// Two sources: `{ "id": "...", "version": "..."? }` resolves + downloads +
+/// verifies (sha256, over a signature-verified index) from the remote registry
+/// (Phase C); `{ "path": "/abs/x.tar.zst" }` installs a local artifact (Phase B).
+/// Either way it unpacks the `.tar.zst`, installs the binary under
+/// `HOMECORE_HOME/plugins/`, mints an MQTT credential + seeds operator config,
+/// records a managed entry (clearing any uninstall tombstone), and dynamically
+/// spawns it (no restart).
+pub async fn install_plugin(
+    State(s): State<AppState>,
+    _: PluginsWrite,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let (Some(mp), Some(ctx)) = (s.managed_plugins.clone(), s.plugin_install.clone()) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "plugin install is not configured on this server" })),
+        )
+            .into_response();
+    };
+
+    // Resolve the artifact path: registry `{id, version?}` or local `{path}`.
+    // A downloaded temp file must outlive the blocking install that reads it.
+    let mut _download_guard: Option<tempfile::NamedTempFile> = None;
+    let archive_path = if let Some(id) = body.get("id").and_then(Value::as_str) {
+        let Some(reg) = s.registry.clone() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "no plugin registry is configured" })),
+            )
+                .into_response();
+        };
+        let version = body.get("version").and_then(Value::as_str);
+        let (art, _ver) = match reg.resolve(id, version).await {
+            Ok(x) => x,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("registry resolve failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let f = match reg.download_artifact(&art).await {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("artifact download failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let p = f.path().to_string_lossy().into_owned();
+        _download_guard = Some(f);
+        p
+    } else if let Some(p) = body
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+    {
+        p.to_string()
+    } else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "provide `id` (registry) or `path` (local artifact)" })),
+        )
+            .into_response();
+    };
+
+    // Unpack + copy + write config off the async runtime.
+    let ctx_inner = (*ctx).clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::plugin_install::install_from_archive(std::path::Path::new(&archive_path), &ctx_inner)
+    })
+    .await;
+
+    let outcome = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("install failed: {e:#}") })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("install task panicked: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut record = outcome.record;
+    record.installed_at = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = mp.install(record.clone()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("installed but failed to record: {e}") })),
+        )
+            .into_response();
+    }
+
+    // Seed or refresh the registry record — keeping binary/config/version current
+    // so a reinstall/upgrade points the (record-driven) supervisor at the new
+    // binary — then activate.
+    {
+        let mut map = s.plugins.write().await;
+        let entry = map.entry(record.id.clone()).or_insert_with(|| {
+            crate::PluginRecord::managed_seed(
+                record.id.clone(),
+                Some(record.config.clone()),
+                Some(record.binary.clone()),
+                record.enabled,
+                Some(record.version.clone()),
+            )
+        });
+        entry.binary_path = Some(record.binary.clone());
+        entry.config_path = Some(record.config.clone());
+        entry.installed_version = Some(record.version.clone());
+        entry.enabled = record.enabled;
+    }
+    // Already supervised (reinstall / upgrade) → Restart relaunches the new
+    // binary (the supervisor reads binary/config from the record). Fresh install
+    // → dynamic spawn into the supervisor.
+    let already_supervised = s.plugin_commands.read().await.contains_key(&record.id);
+    let activated = if !record.enabled {
+        false
+    } else if already_supervised {
+        let cmds = s.plugin_commands.read().await;
+        match cmds.get(&record.id) {
+            Some(tx) => tx.send(crate::PluginCommand::Restart).await.is_ok(),
+            None => false,
+        }
+    } else {
+        match &s.plugin_spawn {
+            Some(tx) => tx
+                .send(crate::InstalledPlugin {
+                    id: record.id.clone(),
+                    binary: record.binary.clone(),
+                    config: record.config.clone(),
+                    enabled: record.enabled,
+                })
+                .await
+                .is_ok(),
+            None => false,
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "installed": record.id,
+            "name": record.name,
+            "version": record.version,
+            "binary": record.binary,
+            "config": record.config,
+            "reinstall": outcome.reinstall,
+            "activated": activated,
+            "note": if activated {
+                "installed and activated"
+            } else {
+                "installed; activate on next core start"
+            },
+        })),
+    )
+        .into_response()
 }
 
 /// `DELETE /api/v1/plugins/:id/devices`
@@ -4933,6 +5547,55 @@ pub async fn get_plugin_capabilities(
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "capabilities not published" })),
+        )
+            .into_response(),
+    }
+}
+
+/// The plugin's operator-config JSON Schema, published on its capability
+/// manifest. The config editor renders a typed form from this; a 404 means the
+/// plugin published no schema and the editor should fall back to raw TOML. This
+/// is non-secret shape information (no config values), so `plugins:read` is
+/// sufficient — same as capabilities.
+pub async fn get_plugin_config_schema(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id).and_then(|r| r.config_schema.as_ref()) {
+        Some(schema) => (
+            StatusCode::OK,
+            Json(json!({ "plugin_id": id, "schema": schema })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config schema published for this plugin" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /plugins/:id/config/descriptor` — the plugin's own config descriptor
+/// (sections, field kinds, conditionals, data sources), as published on its
+/// capability manifest. 404 when the plugin ships none; the client then
+/// auto-derives a baseline descriptor from `config/schema`.
+pub async fn get_plugin_config_descriptor(
+    State(s): State<AppState>,
+    _: PluginsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    match map.get(&id).and_then(|r| r.config_descriptor.as_ref()) {
+        Some(descriptor) => (
+            StatusCode::OK,
+            Json(json!({ "plugin_id": id, "descriptor": descriptor })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no config descriptor published for this plugin" })),
         )
             .into_response(),
     }
@@ -5303,6 +5966,214 @@ pub async fn patch_plugin(
     (StatusCode::OK, Json(json!(new_rec))).into_response()
 }
 
+/// Written in place of every secret by `GET /plugins/{id}/config`.
+///
+/// `PUT` restores the stored value wherever it sees this, so a config editor can
+/// fetch a document, edit an unrelated field, and save it back without wiping
+/// out credentials it was never shown.  The admin UI does exactly that: it loads
+/// `raw` into a text area and PUTs the text straight back.
+const REDACTED_SECRET: &str = "__redacted__";
+
+/// Whether a TOML/JSON key holds a credential, as opposed to merely pointing at
+/// one.  `password` and `app_key` are secrets; `key_path`, `token_url`, and
+/// `refresh_token_expiry_days` are not, and redacting those would corrupt the
+/// config to no benefit — so the exclusions are checked first.
+fn is_secret_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    if k.ends_with("path") || k.ends_with("_url") || k.ends_with("_type") || k.contains("expiry") {
+        return false;
+    }
+    const SECRET_PARTS: &[&str] = &[
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "hash",
+        "api_key",
+        "apikey",
+        "app_key",
+        "appkey",
+        "access_key",
+        "private_key",
+        "user_key",
+        "auth_key",
+    ];
+    SECRET_PARTS.iter().any(|p| k.contains(p))
+        || matches!(k.as_str(), "key" | "pat" | "pin" | "passphrase")
+}
+
+/// Section label for each line of a TOML document.  `[[array]]` tables carry an
+/// occurrence suffix so repeated tables (e.g. several `[[notify.channels]]`,
+/// each with its own `token`) stay distinct instead of collapsing together.
+fn toml_line_sections(src: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("[[") && t.ends_with("]]") {
+            let name = t.trim_matches(|c| c == '[' || c == ']').to_string();
+            let n = seen.entry(name.clone()).or_insert(0);
+            current = format!("{name}#{n}");
+            *n += 1;
+        } else if t.starts_with('[') && t.ends_with(']') {
+            current = t.trim_matches(|c| c == '[' || c == ']').to_string();
+        }
+        sections.push(current.clone());
+    }
+    sections
+}
+
+/// Split a TOML line into `(indent, key, value)` if it is a plain `key = value`
+/// assignment.  Comment lines and table headers yield `None`.
+fn toml_assignment(line: &str) -> Option<(&str, &str, &str)> {
+    let body = line.trim_start();
+    if body.starts_with('#') || body.starts_with('[') {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let indent = &line[..line.len() - body.len()];
+    Some((indent, line[..eq].trim(), line[eq + 1..].trim()))
+}
+
+/// Redact secrets in raw TOML text, preserving comments and layout — the admin
+/// UI shows this verbatim in an editor, so re-serializing the parsed document
+/// (and losing every comment) would not do.
+fn redact_toml_text(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        match toml_assignment(line) {
+            Some((indent, key, _)) if is_secret_key(key) => {
+                out.push_str(&format!("{indent}{key} = \"{REDACTED_SECRET}\"\n"));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Put the stored secret back wherever the client echoed the placeholder.
+/// Without this, saving a config fetched from the API would overwrite every
+/// credential in it with `__redacted__`.
+fn restore_toml_secrets(incoming: &str, current: &str) -> String {
+    let cur_sections = toml_line_sections(current);
+    let mut stored: HashMap<(String, String), String> = HashMap::new();
+    for (i, line) in current.lines().enumerate() {
+        if let Some((_, key, value)) = toml_assignment(line) {
+            if is_secret_key(key) {
+                stored.insert(
+                    (cur_sections[i].clone(), key.to_string()),
+                    value.to_string(),
+                );
+            }
+        }
+    }
+
+    let in_sections = toml_line_sections(incoming);
+    let mut out = String::with_capacity(incoming.len());
+    for (i, line) in incoming.lines().enumerate() {
+        if let Some((indent, key, value)) = toml_assignment(line) {
+            if is_secret_key(key) && value.trim_matches('"') == REDACTED_SECRET {
+                if let Some(original) = stored.get(&(in_sections[i].clone(), key.to_string())) {
+                    out.push_str(&format!("{indent}{key} = {original}\n"));
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Redact secret leaves anywhere in a parsed config tree.
+fn redact_json_secrets(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_secret_key(k) && !v.is_object() && !v.is_array() {
+                    *v = Value::String(REDACTED_SECRET.to_string());
+                } else {
+                    redact_json_secrets(v);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_json_secrets),
+        _ => {}
+    }
+}
+
+/// Structural counterpart to [`restore_toml_secrets`], for the `config` (JSON)
+/// form of the body.  Arrays are matched positionally.
+fn restore_json_secrets(incoming: &mut Value, current: &Value) {
+    match (incoming, current) {
+        (Value::Object(inc), Value::Object(cur)) => {
+            for (k, v) in inc.iter_mut() {
+                if v.as_str() == Some(REDACTED_SECRET) {
+                    if let Some(original) = cur.get(k) {
+                        *v = original.clone();
+                    }
+                } else if let Some(c) = cur.get(k) {
+                    restore_json_secrets(v, c);
+                }
+            }
+        }
+        (Value::Array(inc), Value::Array(cur)) => {
+            // Match elements by a stable identity field when present, falling
+            // back to positional. Pure positional matching corrupts secrets the
+            // moment an array element is removed or reordered: dropping
+            // `bridges[0]` would shift every following bridge up one slot, so
+            // core would restore each remaining bridge's redacted `app_key` from
+            // the WRONG stored element. Identity matching keeps `bridges[i]`
+            // pinned to its own stored entry regardless of position.
+            for (i, v) in inc.iter_mut().enumerate() {
+                let matched = array_identity_match(v, cur).or_else(|| cur.get(i));
+                if let Some(c) = matched {
+                    restore_json_secrets(v, c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Find the element of `current` that refers to the same logical entity as
+/// `incoming`, by the first identity field they share a value on. Returns
+/// `None` for non-objects or when no identity field matches (caller then falls
+/// back to positional). Weak keys (name/host) come last so a strong id wins.
+fn array_identity_match<'a>(incoming: &Value, current: &'a [Value]) -> Option<&'a Value> {
+    const ID_KEYS: [&str; 6] = ["id", "bridge_id", "uuid", "serial", "name", "host"];
+    let inc = incoming.as_object()?;
+    for key in ID_KEYS {
+        let Some(want) = inc.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(found) = current.iter().find(|c| {
+            c.as_object()
+                .and_then(|co| co.get(key))
+                .and_then(Value::as_str)
+                == Some(want)
+        }) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Does this tree still carry a redaction placeholder anywhere?
+fn has_redaction(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s == REDACTED_SECRET,
+        Value::Object(map) => map.values().any(has_redaction),
+        Value::Array(items) => items.iter().any(has_redaction),
+        _ => false,
+    }
+}
+
 pub async fn get_plugin_config(
     State(s): State<AppState>,
     _: PluginsWrite,
@@ -5321,12 +6192,24 @@ pub async fn get_plugin_config(
     };
 
     // Local plugin: read config file directly.
+    //
+    // Secrets are replaced with REDACTED_SECRET — this response used to hand
+    // back every plugin credential (Hue app_key, YoLink client_secret, MQTT
+    // passwords) in clear text to anyone with plugins:write. PUT restores them,
+    // so an editor can still round-trip the document safely.
     if let Some(ref path) = config_path {
         if let Ok(content) = std::fs::read_to_string(path) {
-            let mut resp = json!({ "plugin_id": id, "format": "toml", "raw": content });
+            let mut resp = json!({
+                "plugin_id": id,
+                "format":    "toml",
+                "raw":       redact_toml_text(&content),
+                "redacted":  true,
+            });
             // Also include parsed JSON for clients that want structured access.
             if let Ok(parsed) = content.parse::<toml::Value>() {
-                resp["config"] = serde_json::to_value(parsed).unwrap_or_default();
+                let mut cfg = serde_json::to_value(parsed).unwrap_or_default();
+                redact_json_secrets(&mut cfg);
+                resp["config"] = cfg;
             }
             return (StatusCode::OK, Json(resp)).into_response();
         }
@@ -5335,7 +6218,20 @@ pub async fn get_plugin_config(
     // Remote plugin: use MQTT management RPC.
     if let Some(ref rpc) = s.management_rpc {
         match rpc.get_config(&id).await {
-            Ok(resp) => (StatusCode::OK, Json(json!({ "plugin_id": id, "format": "remote", "config": resp.get("data").cloned().unwrap_or(resp) }))).into_response(),
+            Ok(resp) => {
+                let mut cfg = resp.get("data").cloned().unwrap_or(resp);
+                redact_json_secrets(&mut cfg);
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "plugin_id": id,
+                        "format":    "remote",
+                        "config":    cfg,
+                        "redacted":  true,
+                    })),
+                )
+                    .into_response()
+            }
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
         }
     } else if !managed {
@@ -5373,11 +6269,24 @@ pub async fn put_plugin_config(
 
     // Local plugin: write config file directly.
     if let Some(ref path) = config_path {
+        // GET redacts secrets, so a client that fetched this config never saw
+        // them. Restore the stored value wherever it echoed the placeholder back
+        // — otherwise round-tripping a config through the editor would silently
+        // overwrite every credential in it with "__redacted__".
+        let current = std::fs::read_to_string(path).unwrap_or_default();
+
         // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
         let toml_str = if let Some(raw) = body["raw"].as_str() {
-            raw.to_string()
+            restore_toml_secrets(raw, &current)
         } else if let Some(config) = body.get("config") {
-            let toml_val: toml::Value = match serde_json::from_value(config.clone()) {
+            let mut config = config.clone();
+            if has_redaction(&config) {
+                if let Ok(parsed) = current.parse::<toml::Value>() {
+                    let current_json = serde_json::to_value(parsed).unwrap_or_default();
+                    restore_json_secrets(&mut config, &current_json);
+                }
+            }
+            let toml_val: toml::Value = match serde_json::from_value(config) {
                 Ok(v) => v,
                 Err(e) => {
                     return (
@@ -5410,7 +6319,15 @@ pub async fn put_plugin_config(
 
     // Remote plugin: use MQTT management RPC.
     if let Some(ref rpc) = s.management_rpc {
-        let config = body.get("config").cloned().unwrap_or(body.clone());
+        let mut config = body.get("config").cloned().unwrap_or(body.clone());
+        // Same restore as the local path — fetch what the plugin currently holds
+        // and put the real secrets back before pushing the document to it.
+        if has_redaction(&config) {
+            if let Ok(current) = rpc.get_config(&id).await {
+                let current = current.get("data").cloned().unwrap_or(current);
+                restore_json_secrets(&mut config, &current);
+            }
+        }
         match rpc.set_config(&id, config).await {
             Ok(_) => (StatusCode::OK, Json(json!({ "ok": true, "plugin_id": id }))).into_response(),
             Err(e) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "error": e }))).into_response(),
@@ -5573,10 +6490,20 @@ pub async fn post_plugin_command(
         }
     }
 
-    match rpc
-        .send_command_with_id(&id, &action, &request_id, params)
-        .await
-    {
+    // Streaming actions keep the convention-applying path: a `status:"error"`
+    // ack means the stream never started, so release the reserved slot and
+    // report 504. For non-streaming actions, a plugin reply of ANY status is
+    // the action's result — return it verbatim (HTTP 200). Only a genuine
+    // no-response timeout is a 504; a plugin's own business error (e.g. "no
+    // devices configured to discover") is not a gateway timeout.
+    let outcome = if is_streaming {
+        rpc.send_command_with_id(&id, &action, &request_id, timeout_ms, params)
+            .await
+    } else {
+        rpc.send_command_raw_with_id(&id, &action, &request_id, timeout_ms, params)
+            .await
+    };
+    match outcome {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
         Err(e) => {
             if is_streaming {
@@ -5787,12 +6714,17 @@ pub async fn set_area_devices(
 
     for device in &mut devices {
         let in_desired = desired.contains(&device.device_id);
-        let in_area =
-            device.area.as_deref().map(normalize_area_name).as_deref() == Some(area.name.as_str());
+        // Membership is by *effective* area — a user-assigned device is in the
+        // room even though the plugin never said so.
+        let in_area = area_matches(device.effective_area(), &area.name);
 
         if in_desired {
             if !in_area {
-                device.area = Some(area.name.clone());
+                // This is a user assigning a device to a room, so it writes the
+                // override — the same contract as PATCH /devices. Writing the
+                // plugin-owned `area` here meant the next registration silently
+                // reverted the assignment.
+                device.area_override = Some(area.name.clone());
                 if let Err(e) = s.store.upsert_device(device).await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -5802,7 +6734,13 @@ pub async fn set_area_devices(
                 }
             }
         } else if in_area {
-            device.area = None;
+            // Dropping a device from the room clears the user's assignment. If
+            // the plugin itself still reports this room the device stays in it
+            // — the bridge owns that, per the bridge-wins rule.
+            device.area_override = None;
+            if area_matches(device.area.as_deref(), &area.name) {
+                device.area = None;
+            }
             if let Err(e) = s.store.upsert_device(device).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -5952,6 +6890,11 @@ pub async fn patch_automation(
 pub struct BulkPatchQuery {
     /// Apply only to rules that have this tag.  Ignored when `ids` is present in the body.
     pub tag: Option<String>,
+    /// Opt in to patching *every* rule.  Required to hit all rules; without it,
+    /// a request carrying no selector is rejected rather than assumed to mean
+    /// "all".
+    #[serde(default)]
+    pub all: bool,
 }
 
 #[derive(Deserialize)]
@@ -5962,12 +6905,18 @@ pub struct BulkPatchBody {
     pub enabled: Option<bool>,
 }
 
-/// `PATCH /api/v1/automations[?tag=<tag>]`
+/// `PATCH /api/v1/automations?tag=<tag>|all=true`
 ///
-/// Bulk enable/disable rules, selecting targets in priority order:
-/// 1. `ids` field in body — explicit list of rule UUIDs (ignores `?tag=`)
-/// 2. `?tag=<tag>` query param — all rules with that tag
-/// 3. No selector — all rules
+/// Bulk enable/disable rules.  Exactly one selector is required:
+/// 1. `ids` field in body — explicit list of rule UUIDs (takes precedence)
+/// 2. `?tag=<tag>` — all rules carrying that tag
+/// 3. `?all=true` — every rule, stated deliberately
+///
+/// A request with no selector is a **400**.  It used to mean "all rules", so
+/// `PATCH /automations {"enabled": false}` — a plausible typo, or a client that
+/// forgot to send `ids` — silently disabled every automation in the house.  The
+/// blast radius of the default was the whole system, so the default is now to
+/// refuse.
 ///
 /// Returns `{ "updated": N, "rules": [...] }`.
 pub async fn bulk_patch_automations(
@@ -5976,6 +6925,18 @@ pub async fn bulk_patch_automations(
     Query(params): Query<BulkPatchQuery>,
     Json(patch): Json<BulkPatchBody>,
 ) -> impl IntoResponse {
+    // Refuse a request that names no target.  Hitting every rule must be said
+    // out loud, not arrived at by omission.
+    if patch.ids.is_none() && params.tag.is_none() && !params.all {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "no selector — send `ids` in the body, or ?tag=<tag>, or ?all=true to patch every rule"
+            })),
+        )
+            .into_response();
+    }
+
     let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -6007,7 +6968,9 @@ pub async fn bulk_patch_automations(
             } else if let Some(ref tag) = params.tag {
                 rule.tags.contains(tag)
             } else {
-                true
+                // Only reachable with ?all=true — the no-selector case was
+                // rejected above.
+                params.all
             };
             if selected && !managed_rule_ids.contains(&rule.id) {
                 if let Some(enabled) = patch.enabled {
@@ -6169,6 +7132,131 @@ pub async fn clone_automation(
 
 /// `GET /api/v1/automations/stale-refs`
 ///
+/// Pick the likely orphans among one plugin's devices, given how many that
+/// plugin says it manages.  `devices` is reordered (oldest `last_seen` first).
+///
+/// `None` when the counts agree, or when the plugin claims more devices than
+/// homeCore holds — that is a plugin mid-registration, not an orphan.
+fn orphan_suspects<'a>(
+    devices: &mut Vec<&'a DeviceState>,
+    plugin_reports: usize,
+) -> Option<Vec<&'a DeviceState>> {
+    let core_holds = devices.len();
+    if core_holds <= plugin_reports {
+        return None;
+    }
+    // Orphans are the devices the plugin stopped republishing, so they fall to
+    // the back of the pack as its live devices keep being refreshed.
+    devices.sort_by_key(|d| d.last_seen);
+    Some(
+        devices
+            .iter()
+            .take(core_holds - plugin_reports)
+            .copied()
+            .collect(),
+    )
+}
+
+/// `GET /api/v1/devices/orphaned`
+///
+/// An *orphaned* device is one homeCore still holds a registration and retained
+/// state for, but which the owning plugin no longer manages — e.g. a Hue grouped
+/// light after `publish_grouped_lights` is turned off.  Nothing else in the
+/// system notices: the plugin subscribes to command topics per-device, so
+/// commands published for an orphan have no subscriber and are dropped by the
+/// broker, while its state stays frozen at whatever it last was and rule
+/// conditions keep reading that as truth.  A toggle pair
+/// (`on == false` → turn on / `on == true` → turn off) built on a frozen
+/// attribute wedges permanently: one rule can never pass, the other always
+/// does, and the rule engine records `fired: success` either way.
+///
+/// Detection is a **count comparison, not a staleness threshold**.  Every
+/// management-capable plugin self-reports how many devices it manages
+/// (`device_count`); if homeCore holds more devices for that plugin than the
+/// plugin claims, the difference is exactly the orphan count.  A `last_seen`-age
+/// rule was the obvious approach and is wrong: plugins that publish only on
+/// change leave healthy devices untouched for months (a Caseta switch nobody
+/// flips is not orphaned), so it produces false positives on precisely the
+/// quiet devices operators care least about.
+///
+/// Identifying *which* devices are orphaned is necessarily a heuristic — the
+/// plugin reports a count, not an id list — so the least-recently-seen
+/// `orphan_count` devices are returned as `suspects`.  On real data the orphans
+/// are frozen months behind their siblings and the ranking is unambiguous, but
+/// callers should confirm before deleting.
+///
+/// Only `active` plugins with `supports_management` are checked: a stopped
+/// plugin legitimately reports zero devices while homeCore still holds them,
+/// and a plugin that never reports `device_count` would otherwise look
+/// entirely orphaned.
+pub async fn orphaned_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let plugins = s.plugins.read().await;
+    let now = chrono::Utc::now();
+    let mut report = Vec::new();
+    let mut total_orphans: usize = 0;
+
+    for plugin in plugins.values() {
+        if plugin.status != "active" || !plugin.supports_management {
+            continue;
+        }
+
+        let mut owned: Vec<_> = devices
+            .iter()
+            .filter(|d| d.plugin_id == plugin.plugin_id)
+            .collect();
+
+        let core_holds = owned.len();
+        let plugin_reports = plugin.device_count as usize;
+        let Some(orphans) = orphan_suspects(&mut owned, plugin_reports) else {
+            continue;
+        };
+        let orphan_count = orphans.len();
+        total_orphans += orphan_count;
+
+        let suspects: Vec<_> = orphans
+            .iter()
+            .map(|d| {
+                json!({
+                    "device_id":  d.device_id,
+                    "name":       d.name,
+                    "device_type": d.device_type,
+                    "last_seen":  d.last_seen,
+                    "stale_secs": (now - d.last_seen).num_seconds().max(0),
+                })
+            })
+            .collect();
+
+        report.push(json!({
+            "plugin_id":      plugin.plugin_id,
+            "status":         plugin.status,
+            "plugin_reports": plugin_reports,
+            "core_holds":     core_holds,
+            "orphan_count":   orphan_count,
+            "suspects":       suspects,
+        }));
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "total_orphans": total_orphans,
+            "plugins":       report,
+        })),
+    )
+        .into_response()
+}
+
 /// Returns rules that reference device IDs not currently registered in the
 /// device store.  Useful for finding automations broken by device
 /// renames or deletions.
@@ -7277,19 +8365,52 @@ pub async fn system_restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_json_secrets_realigns_after_array_element_removed() {
+        // Current stored config: two bridges, each with a real key.
+        let current = serde_json::json!({
+            "bridges": [
+                { "bridge_id": "aaa", "app_key": "KEY_A" },
+                { "bridge_id": "bbb", "app_key": "KEY_B" },
+            ]
+        });
+        // Client removed bridges[0] and echoed the survivor's key as redacted.
+        // Positionally, incoming[0] (bbb) would line up with current[0] (aaa)
+        // and wrongly receive KEY_A — identity matching must keep KEY_B.
+        let mut incoming = serde_json::json!({
+            "bridges": [
+                { "bridge_id": "bbb", "app_key": "__redacted__" },
+            ]
+        });
+        restore_json_secrets(&mut incoming, &current);
+        assert_eq!(incoming["bridges"][0]["app_key"], "KEY_B");
+    }
+
+    #[test]
+    fn restore_json_secrets_positional_fallback_without_identity() {
+        // No id fields → fall back to positional matching (unchanged behaviour).
+        let current = serde_json::json!({ "keys": [{ "app_key": "K0" }, { "app_key": "K1" }] });
+        let mut incoming =
+            serde_json::json!({ "keys": [{ "app_key": "__redacted__" }, { "app_key": "K1b" }] });
+        restore_json_secrets(&mut incoming, &current);
+        assert_eq!(incoming["keys"][0]["app_key"], "K0");
+        assert_eq!(incoming["keys"][1]["app_key"], "K1b");
+    }
+
     use crate::auth_middleware::{
-        whitelist_claims, AreasRead, AreasWrite, AuthUser, DashboardsWrite,
+        whitelist_claims, AreasRead, AreasWrite, AuthUser, AutomationsWrite, DashboardsWrite,
+        DevicesRead, DevicesWrite,
     };
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
-    use axum::extract::{Path, State};
+    use axum::extract::{Path, Query, State};
     use axum::response::IntoResponse;
     use chrono::Utc;
     use hc_auth::{Claims, JwtService, Role};
     use hc_core::EventBus;
     use hc_types::dashboard::{
-        DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardRefreshPolicy,
-        DashboardResponse, DashboardVisibility, DashboardWidget, DashboardWidgetPlacement,
-        DashboardWidgetType,
+        DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardResponse,
+        DashboardWidget, DashboardWidgetPlacement,
     };
     use hc_types::device::DeviceState;
     use http_body_util::BodyExt;
@@ -7319,6 +8440,167 @@ mod tests {
         );
         AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
             .with_dashboard_store(dashboard_store, DashboardStoreData::default())
+    }
+
+    // A config with the shapes that actually occur: a secret at top level, one
+    // inside a table, decoy keys that merely *reference* a secret, and repeated
+    // [[array]] tables each carrying their own distinct token.
+    const SAMPLE_CONFIG: &str = r#"# Hue plugin
+app_key = "REAL-HUE-APP-KEY"
+verify_tls = true
+
+[mqtt]
+host = "10.0.0.1"
+password = "REAL-MQTT-PASSWORD"
+key_path = "/etc/homecore/broker.key"   # a path, not a secret
+token_url = "https://example.test/oauth"
+refresh_token_expiry_days = 30
+
+[[notify.channels]]
+kind = "pushover"
+token = "TOKEN-ONE"
+
+[[notify.channels]]
+kind = "telegram"
+token = "TOKEN-TWO"
+"#;
+
+    #[test]
+    fn secret_keys_exclude_things_that_merely_point_at_secrets() {
+        for k in [
+            "password",
+            "app_key",
+            "client_secret",
+            "api_token",
+            "user_key",
+            "password_hash",
+        ] {
+            assert!(is_secret_key(k), "{k} should be treated as a secret");
+        }
+        // Redacting any of these would corrupt the config and protect nothing.
+        for k in [
+            "key_path",
+            "cert_path",
+            "capath",
+            "token_url",
+            "token_type",
+            "refresh_token_expiry_days",
+            "host",
+            "kind",
+        ] {
+            assert!(!is_secret_key(k), "{k} must NOT be redacted");
+        }
+    }
+
+    #[test]
+    fn redaction_hides_secrets_but_keeps_the_document_intact() {
+        let out = redact_toml_text(SAMPLE_CONFIG);
+        for secret in [
+            "REAL-HUE-APP-KEY",
+            "REAL-MQTT-PASSWORD",
+            "TOKEN-ONE",
+            "TOKEN-TWO",
+        ] {
+            assert!(!out.contains(secret), "{secret} leaked through redaction");
+        }
+        // Comments, layout, and non-secret values survive — the admin UI shows
+        // this text verbatim in an editor.
+        assert!(out.contains("# Hue plugin"));
+        assert!(out.contains("/etc/homecore/broker.key"));
+        assert!(out.contains("https://example.test/oauth"));
+        assert!(out.contains("refresh_token_expiry_days = 30"));
+        assert!(out.contains("[[notify.channels]]"));
+    }
+
+    #[test]
+    fn saving_a_redacted_config_does_not_destroy_the_secrets() {
+        // Exactly what the admin UI does: GET the config, edit one visible
+        // field, PUT the text back. Every secret it never saw must survive.
+        let shown = redact_toml_text(SAMPLE_CONFIG);
+        let edited = shown.replace("host = \"10.0.0.1\"", "host = \"10.0.0.9\"");
+        let written = restore_toml_secrets(&edited, SAMPLE_CONFIG);
+
+        assert!(written.contains("app_key = \"REAL-HUE-APP-KEY\""));
+        assert!(written.contains("password = \"REAL-MQTT-PASSWORD\""));
+        assert!(written.contains("host = \"10.0.0.9\""), "edit was lost");
+        assert!(
+            !written.contains(REDACTED_SECRET),
+            "placeholder was written to disk"
+        );
+    }
+
+    #[test]
+    fn repeated_array_tables_keep_their_own_secrets() {
+        // Both channels have a key literally named `token`. Keyed on name alone
+        // they would collapse and one channel would inherit the other's secret.
+        let written = restore_toml_secrets(&redact_toml_text(SAMPLE_CONFIG), SAMPLE_CONFIG);
+        let one = written.find("TOKEN-ONE").expect("first token restored");
+        let two = written.find("TOKEN-TWO").expect("second token restored");
+        assert!(one < two, "the two channels' tokens were swapped");
+        assert_eq!(written.matches("TOKEN-ONE").count(), 1);
+        assert_eq!(written.matches("TOKEN-TWO").count(), 1);
+    }
+
+    #[test]
+    fn json_config_round_trips_secrets_too() {
+        let current = json!({
+            "app_key": "REAL-KEY",
+            "mqtt": { "password": "REAL-PW", "host": "10.0.0.1" },
+        });
+        let mut shown = current.clone();
+        redact_json_secrets(&mut shown);
+        assert_eq!(shown["app_key"], json!(REDACTED_SECRET));
+        assert_eq!(shown["mqtt"]["password"], json!(REDACTED_SECRET));
+        assert_eq!(shown["mqtt"]["host"], json!("10.0.0.1"));
+
+        assert!(has_redaction(&shown));
+        let mut incoming = shown.clone();
+        incoming["mqtt"]["host"] = json!("10.0.0.9");
+        restore_json_secrets(&mut incoming, &current);
+
+        assert_eq!(incoming["app_key"], json!("REAL-KEY"));
+        assert_eq!(incoming["mqtt"]["password"], json!("REAL-PW"));
+        assert_eq!(incoming["mqtt"]["host"], json!("10.0.0.9"));
+        assert!(!has_redaction(&incoming));
+    }
+
+    fn device_seen_days_ago(id: &str, days: i64) -> DeviceState {
+        let mut d = DeviceState::new(id, id, "plugin.test");
+        d.last_seen = Utc::now() - chrono::Duration::days(days);
+        d
+    }
+
+    #[test]
+    fn orphan_suspects_is_silent_when_counts_agree() {
+        let a = device_seen_days_ago("fresh", 0);
+        let b = device_seen_days_ago("quiet", 90);
+        let mut owned = vec![&a, &b];
+        // A device untouched for 90 days is NOT an orphan while the plugin still
+        // claims it — plugins that publish only on change leave healthy devices
+        // cold for months. Staleness alone must never raise a flag.
+        assert!(orphan_suspects(&mut owned, 2).is_none());
+    }
+
+    #[test]
+    fn orphan_suspects_returns_the_least_recently_seen() {
+        let live_a = device_seen_days_ago("live_a", 0);
+        let live_b = device_seen_days_ago("live_b", 0);
+        let ghost_old = device_seen_days_ago("ghost_old", 100);
+        let ghost_older = device_seen_days_ago("ghost_older", 120);
+        let mut owned = vec![&live_a, &ghost_old, &live_b, &ghost_older];
+
+        // Plugin manages 2, core holds 4 → the 2 coldest are the orphans.
+        let found = orphan_suspects(&mut owned, 2).expect("orphans");
+        let ids: Vec<&str> = found.iter().map(|d| d.device_id.as_str()).collect();
+        assert_eq!(ids, vec!["ghost_older", "ghost_old"]);
+    }
+
+    #[test]
+    fn orphan_suspects_ignores_a_plugin_still_registering() {
+        let a = device_seen_days_ago("a", 0);
+        let mut owned = vec![&a];
+        // Plugin claims 5 but core only knows 1 — mid-registration, not orphaned.
+        assert!(orphan_suspects(&mut owned, 5).is_none());
     }
 
     async fn seed_device(state: &AppState, id: &str, area: Option<&str>) {
@@ -7356,12 +8638,11 @@ mod tests {
             name: "Home".to_string(),
             description: Some("Test dashboard".to_string()),
             owner_user_id: owner_user_id.to_string(),
-            visibility: DashboardVisibility::Private,
+            access: Vec::new(),
             tags: vec!["home".to_string()],
             icon: "dashboard".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            sections: vec![],
             layouts: vec![DashboardLayout {
                 breakpoint: DashboardBreakpoint::Desktop,
                 columns: 12,
@@ -7373,15 +8654,13 @@ mod tests {
                     y: 0,
                     w: 12,
                     h: 1,
-                    section_id: None,
                 }],
             }],
             widgets: vec![DashboardWidget {
                 id: "summary".to_string(),
-                r#type: DashboardWidgetType::StatSummary,
+                r#type: "stat_summary".to_string(),
                 title: "Summary".to_string(),
                 subtitle: None,
-                refresh_policy: DashboardRefreshPolicy::Live,
                 config: json!({"metrics":["devices"]}),
             }],
         }
@@ -7452,6 +8731,145 @@ mod tests {
                 }
             ]
         })
+    }
+
+    #[tokio::test]
+    async fn bulk_patch_without_a_selector_is_refused() {
+        let state = mk_state().await;
+
+        // This exact request used to mean "every rule in the system", so a
+        // client that forgot to send `ids` disabled every automation in the
+        // house and got a 200 for it.
+        let resp = bulk_patch_automations(
+            State(state.clone()),
+            AutomationsWrite(whitelist_claims()),
+            Query(BulkPatchQuery {
+                tag: None,
+                all: false,
+            }),
+            Json(BulkPatchBody {
+                ids: None,
+                enabled: Some(false),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bulk_patch_all_true_is_allowed_through() {
+        let state = mk_state().await;
+
+        // Hitting every rule is still possible — it just has to be said out
+        // loud. Past the selector guard this state has no rule engine, so any
+        // status other than 400 proves the guard let it through.
+        let resp = bulk_patch_automations(
+            State(state.clone()),
+            AutomationsWrite(whitelist_claims()),
+            Query(BulkPatchQuery {
+                tag: None,
+                all: true,
+            }),
+            Json(BulkPatchBody {
+                ids: None,
+                enabled: Some(false),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A device the user assigned to a room carries it in `area_override`,
+    /// with `area` left as whatever the plugin said (often nothing). Deriving
+    /// membership from `area` alone made every user assignment invisible: the
+    /// room existed and the device pointed at it, but the area listed no
+    /// devices, so "add to room" looked like it had done nothing.
+    #[tokio::test]
+    async fn area_membership_counts_user_assigned_devices() {
+        let state = mk_state().await;
+
+        let mut d = DeviceState::new("sonos_bathroom", "Bathroom", "plugin.sonos");
+        d.area = None; // the plugin reports no room
+        d.area_override = Some("studio_b".into()); // the user assigned one
+        state.store.upsert_device(&d).await.expect("seed");
+
+        let resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
+            .await
+            .into_response();
+        let areas: Vec<Area> = parse_json(resp).await;
+
+        let studio = areas
+            .iter()
+            .find(|a| a.name == "studio_b")
+            .expect("user-assigned room should exist");
+        assert_eq!(studio.device_ids, vec!["sonos_bathroom".to_string()]);
+    }
+
+    /// The override must follow a rename, or the device is left pointing at a
+    /// room name that no longer exists.
+    #[tokio::test]
+    async fn renaming_an_area_follows_user_assignments() {
+        let state = mk_state().await;
+
+        let mut d = DeviceState::new("sonos_bathroom", "Bathroom", "plugin.sonos");
+        d.area_override = Some("studio_b".into());
+        state.store.upsert_device(&d).await.expect("seed");
+
+        let area_id = area_id_from_name("studio_b");
+        patch_area(
+            State(state.clone()),
+            AreasWrite(whitelist_claims()),
+            Path(area_id),
+            Json(PatchAreaBody {
+                name: "Studio C".into(),
+            }),
+        )
+        .await
+        .into_response();
+
+        let stored = state
+            .store
+            .get_device("sonos_bathroom")
+            .await
+            .expect("load")
+            .expect("device");
+        assert_eq!(stored.area_override.as_deref(), Some("studio_c"));
+    }
+
+    #[tokio::test]
+    async fn a_created_switch_is_actually_listed() {
+        let state = mk_state().await;
+
+        let resp = create_switch(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Json(CreateSwitchBody {
+                id: "vacation_mode".into(),
+                label: Some("Vacation Mode".into()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = list_switches(State(state.clone()), DevicesRead(whitelist_claims()))
+            .await
+            .into_response();
+        let switches: Vec<DeviceState> = parse_json(resp).await;
+
+        // Regression: create_switch wrote device_type "virtual_switch", which
+        // list_switches filters out — so POST /switches created a device that
+        // GET /switches could never return. It existed, and was invisible.
+        assert_eq!(
+            switches.len(),
+            1,
+            "the switch we just created is missing from GET /switches"
+        );
+        assert_eq!(switches[0].device_id, "switch_vacation_mode");
     }
 
     #[tokio::test]
@@ -7669,9 +9087,16 @@ mod tests {
             .expect("load d3")
             .expect("d3 exists");
 
-        assert_eq!(d1.area, None);
-        assert_eq!(d2.area, None);
-        assert_eq!(d3.area.as_deref(), Some("kitchen"));
+        // Assigning a device to a room is a *user* action, so it writes the
+        // override — the same contract as PATCH /devices. Writing the
+        // plugin-owned `area` here meant the next registration silently
+        // reverted the assignment.
+        assert_eq!(d1.effective_area(), None);
+        assert_eq!(d2.effective_area(), None);
+        assert_eq!(d3.effective_area(), Some("kitchen"));
+        assert_eq!(d3.area_override.as_deref(), Some("kitchen"));
+        // The plugin's own value is left untouched — it belongs to the plugin.
+        assert_eq!(d3.area.as_deref(), Some("Office"));
     }
 
     #[tokio::test]
@@ -7710,7 +9135,8 @@ mod tests {
             .await
             .expect("load d1")
             .expect("d1 exists");
-        assert_eq!(d1.area.as_deref(), Some("office"));
+        assert_eq!(d1.effective_area(), Some("office"));
+        assert_eq!(d1.area_override.as_deref(), Some("office"));
     }
 
     #[tokio::test]
@@ -7765,7 +9191,6 @@ mod tests {
         let created: DashboardResponse = parse_json(resp).await;
         assert_eq!(created.dashboard.id, "starter_web");
         assert_eq!(created.dashboard.owner_user_id, "web_user");
-        assert_eq!(created.dashboard.visibility, DashboardVisibility::Private);
         assert_eq!(created.dashboard.layouts.len(), 2);
         assert_eq!(created.dashboard.widgets.len(), 3);
         assert!(!created.is_default);
@@ -7852,17 +9277,73 @@ mod tests {
         assert!(listed.is_empty());
     }
 
+    /// Everyone who can log in sees every dashboard.
+    ///
+    /// This REPLACES `list_dashboards_filters_by_visibility`, and the change is
+    /// deliberate rather than incidental. `visibility` (private | shared |
+    /// public) existed to gate exactly this list. Access control for a house is
+    /// not a CMS problem: the answer to "who may look at the kitchen dashboard"
+    /// is "the people who live here", and they all have accounts.
+    ///
+    /// Who may CHANGE one is a real question, and it is still answered — see
+    /// `non_owner_cannot_update_shared_dashboard` below, which is the test that
+    /// actually protects anything.
+    /// `/automations/vocabulary` must not be swallowed by `/automations/:id`.
+    ///
+    /// It very nearly is. Against a core that does NOT have this route, the path
+    /// falls through to `/automations/:id`, fails to parse "vocabulary" as a
+    /// Uuid, and answers 400 — not 404. (That is what a live older core actually
+    /// does, and it is why the client treats *any* failure as "could not ask"
+    /// rather than looking for a 404.)
+    ///
+    /// So the static route winning here is load-bearing, not incidental: get it
+    /// wrong and the endpoint is dead on arrival while every test that calls the
+    /// handler directly still passes.
     #[tokio::test]
-    async fn list_dashboards_filters_by_visibility() {
+    async fn the_vocabulary_route_is_not_shadowed_by_the_id_route() {
+        use tower::ServiceExt;
+
         let state = mk_state().await;
-        seed_dashboard(&state, sample_dashboard("private_mine", "user_a")).await;
-        seed_dashboard(&state, sample_dashboard("private_other", "user_b")).await;
-        let mut shared = sample_dashboard("shared_other", "user_b");
-        shared.visibility = DashboardVisibility::Shared;
+        let app = crate::router(state, None);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/automations/vocabulary")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Unauthenticated here, so 200 or 401 — either proves the route matched.
+        // A 400 would mean `:id` swallowed it and tried to parse a Uuid.
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "/automations/vocabulary was swallowed by /automations/:id"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/automations/vocabulary is not routed at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_sees_own_and_granted_dashboards_not_others() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let state = mk_state().await;
+        seed_dashboard(&state, sample_dashboard("mine", "user_a")).await;
+        // user_b's, with user_a granted view — should appear.
+        let mut shared = sample_dashboard("shared_with_me", "user_b");
+        shared.access = vec![DashboardGrant {
+            user_id: "user_a".to_string(),
+            level: GrantLevel::View,
+        }];
         seed_dashboard(&state, shared).await;
-        let mut public = sample_dashboard("public_other", "user_b");
-        public.visibility = DashboardVisibility::Public;
-        seed_dashboard(&state, public).await;
+        // user_b's, no grant — should NOT appear for user_a.
+        seed_dashboard(&state, sample_dashboard("not_mine", "user_b")).await;
 
         let resp = list_dashboards(
             State(state),
@@ -7874,17 +9355,162 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
         let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
-        assert!(ids.contains("private_mine"));
-        assert!(ids.contains("shared_other"));
-        assert!(ids.contains("public_other"));
-        assert!(!ids.contains("private_other"));
+        assert!(ids.contains("mine"), "owner sees own");
+        assert!(ids.contains("shared_with_me"), "grantee sees granted");
+        assert!(!ids.contains("not_mine"), "no grant, no visibility");
+    }
+
+    #[tokio::test]
+    async fn admin_still_sees_every_dashboard() {
+        let state = mk_state().await;
+        seed_dashboard(&state, sample_dashboard("a", "user_a")).await;
+        seed_dashboard(&state, sample_dashboard("b", "user_b")).await;
+
+        let resp = list_dashboards(
+            State(state),
+            crate::auth_middleware::DashboardsRead(claims_for("root", Role::Admin)),
+        )
+        .await
+        .into_response();
+
+        let dashboards: Vec<DashboardResponse> = parse_json(resp).await;
+        let ids: HashSet<_> = dashboards.iter().map(|d| d.dashboard.id.as_str()).collect();
+        assert!(ids.contains("a") && ids.contains("b"));
+    }
+
+    #[test]
+    fn grant_levels_gate_view_and_edit_correctly() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let mut d = sample_dashboard("d", "owner");
+        d.access = vec![
+            DashboardGrant {
+                user_id: "viewer".to_string(),
+                level: GrantLevel::View,
+            },
+            DashboardGrant {
+                user_id: "editor".to_string(),
+                level: GrantLevel::Edit,
+            },
+        ];
+
+        let viewer = claims_for("viewer", Role::User);
+        let editor = claims_for("editor", Role::User);
+        let stranger = claims_for("stranger", Role::User);
+
+        // View grant: can see, cannot mutate.
+        assert!(dashboard_visible_to(&viewer, &d));
+        assert!(!dashboard_mutable_by(&viewer, &d));
+        // Edit grant: both.
+        assert!(dashboard_visible_to(&editor, &d));
+        assert!(dashboard_mutable_by(&editor, &d));
+        // No grant: neither.
+        assert!(!dashboard_visible_to(&stranger, &d));
+        assert!(!dashboard_mutable_by(&stranger, &d));
+    }
+
+    #[tokio::test]
+    async fn edit_grantee_cannot_change_access_through_update() {
+        // The escalation guard: an edit-granted user may rearrange the board,
+        // but a fatter `access` list posted through the general update must be
+        // ignored — otherwise they could grant themselves ownership-equivalent
+        // reach, or add anyone they like.
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let state = mk_state().await;
+        let mut dashboard = sample_dashboard("board", "owner");
+        dashboard.access = vec![DashboardGrant {
+            user_id: "editor".to_string(),
+            level: GrantLevel::Edit,
+        }];
+        seed_dashboard(&state, dashboard.clone()).await;
+
+        // The editor edits — and slips in a grant promoting a friend to edit.
+        dashboard.name = "Editor was here".to_string();
+        dashboard.access.push(DashboardGrant {
+            user_id: "friend".to_string(),
+            level: GrantLevel::Edit,
+        });
+        let resp = update_dashboard(
+            State(state.clone()),
+            DashboardsWrite(claims_for("editor", Role::User)),
+            Path("board".to_string()),
+            Json(dashboard),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The content change stuck; the access change did not.
+        let stored = {
+            let data = state.dashboards.as_ref().unwrap().read().await;
+            data.dashboards
+                .iter()
+                .find(|d| d.id == "board")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored.name, "Editor was here");
+        assert_eq!(stored.access.len(), 1, "friend grant must be dropped");
+        assert_eq!(stored.access[0].user_id, "editor");
+    }
+
+    #[tokio::test]
+    async fn set_access_is_owner_or_admin_only() {
+        use hc_types::dashboard::{DashboardGrant, GrantLevel};
+        let state = mk_state().await;
+        let mut dashboard = sample_dashboard("board", "owner");
+        dashboard.access = vec![DashboardGrant {
+            user_id: "editor".to_string(),
+            level: GrantLevel::Edit,
+        }];
+        seed_dashboard(&state, dashboard).await;
+
+        let grant_body = || {
+            Json(SetDashboardAccessRequest {
+                access: vec![DashboardGrant {
+                    user_id: "friend".to_string(),
+                    level: GrantLevel::View,
+                }],
+            })
+        };
+
+        // An edit-grantee cannot set access.
+        let resp = set_dashboard_access(
+            State(state.clone()),
+            DashboardsWrite(claims_for("editor", Role::User)),
+            Path("board".to_string()),
+            grant_body(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The owner can.
+        let resp = set_dashboard_access(
+            State(state.clone()),
+            DashboardsWrite(claims_for("owner", Role::User)),
+            Path("board".to_string()),
+            grant_body(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = {
+            let data = state.dashboards.as_ref().unwrap().read().await;
+            data.dashboards
+                .iter()
+                .find(|d| d.id == "board")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(stored.access.len(), 1);
+        assert_eq!(stored.access[0].user_id, "friend");
     }
 
     #[tokio::test]
     async fn non_owner_cannot_update_shared_dashboard() {
         let state = mk_state().await;
         let mut dashboard = sample_dashboard("shared_1", "owner");
-        dashboard.visibility = DashboardVisibility::Shared;
         seed_dashboard(&state, dashboard.clone()).await;
 
         dashboard.name = "Renamed".to_string();
@@ -7976,10 +9602,9 @@ mod tests {
         let mut dashboard = sample_dashboard("bad_1", "owner");
         dashboard.widgets.push(DashboardWidget {
             id: "summary".to_string(),
-            r#type: DashboardWidgetType::Markdown,
+            r#type: "markdown".to_string(),
             title: "Duplicate".to_string(),
             subtitle: None,
-            refresh_policy: DashboardRefreshPolicy::Passive,
             config: json!({"markdown":"hello"}),
         });
 
@@ -8002,10 +9627,9 @@ mod tests {
         let mut dashboard = sample_dashboard("bad_cfg", "owner");
         dashboard.widgets[0] = DashboardWidget {
             id: "camera".to_string(),
-            r#type: DashboardWidgetType::CameraVideo,
+            r#type: "camera_video".to_string(),
             title: "Camera".to_string(),
             subtitle: None,
-            refresh_policy: DashboardRefreshPolicy::Passive,
             config: json!({"source_type":"bogus","url":"https://example.com/cam"}),
         };
         dashboard.layouts[0].placements[0].widget_id = "camera".to_string();

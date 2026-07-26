@@ -405,6 +405,22 @@ impl Core {
             });
         }
 
+        // Normalize any device.area still holding a raw plugin label
+        // ("Living Room" → "living_room"). Registrations are normalized at
+        // ingest now, so live plugins heal their own devices on the next
+        // registration — but devices whose plugin is stopped or gone would stay
+        // split from the rest of their room, so sweep them once here.
+        {
+            let store = self.state.clone();
+            tokio::spawn(async move {
+                match device_naming::migrate_area_names(&store).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(devices = n, "Normalized device areas"),
+                    Err(e) => tracing::warn!(error = %e, "Area-name migration failed"),
+                }
+            });
+        }
+
         // Mode manager: solar + manual named boolean modes.
         if let Some(modes_path) = self.modes_path.clone() {
             let mode_mgr = mode_manager::ModeManager::new(

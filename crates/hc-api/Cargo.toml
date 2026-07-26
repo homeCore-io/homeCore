@@ -7,12 +7,14 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 axum       = { workspace = true }
 tokio      = { workspace = true }
+# Outbound fetch for the media-art proxy (see handlers::device_media_art).
+reqwest    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
 tracing    = { workspace = true }
 utoipa     = { workspace = true }
-hc-types   = { path = "../hc-types" }
+hc-types   = { path = "../hc-types", features = ["schema"] }
 hc-state   = { path = "../hc-state" }
 hc-core    = { version = "0.1.0", path = "../hc-core" }
 hc-time    = { path = "../hc-time" }
@@ -31,8 +33,16 @@ ipnet        = { workspace = true }
 toml         = { workspace = true }
 toml_edit    = "0.22"
 ron          = { workspace = true }
+notify       = { workspace = true }
 prometheus   = { workspace = true }
 zip          = { version = "2", default-features = false, features = ["deflate"] }
+tar          = "0.4"
+zstd         = "0.13"
+tempfile     = "3"
+ed25519-dalek = "2"
+base64       = "0.22"
+sha2         = "0.10"
+hex          = "0.4"
 hyper        = { version = "1", features = ["server", "http1"] }
 hyper-util   = { version = "0.1", features = ["tokio", "server-auto"] }
 tower        = { version = "0.5", features = ["util"] }
@@ -43,4 +53,3 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 tower        = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tempfile     = "3"

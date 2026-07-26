@@ -175,6 +175,7 @@ impl SwitchManager {
             return;
         }
 
+        let device_name = dev.effective_name().to_string();
         let current = dev.attributes;
         let changed: Vec<String> = current
             .keys()
@@ -185,7 +186,7 @@ impl SwitchManager {
         let _ = self.pub_bus.publish(Event::DeviceStateChanged {
             timestamp: Utc::now(),
             device_id: device_id.to_string(),
-            device_name: Some(dev.name.clone()),
+            device_name: Some(device_name.clone()),
             previous,
             current,
             changed,

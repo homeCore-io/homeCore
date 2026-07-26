@@ -20,10 +20,19 @@
 //!
 //! ## Restore (`POST /system/restore`)
 //!
-//! Accepts a JSON body with base64-encoded ZIP content.  Extracts to a staging
-//! directory, validates the archive structure, then copies files into place.
-//! A server restart is required after restore for changes to take effect.
-//! Requires Admin role.
+//! Accepts the **raw ZIP bytes as the request body** — not JSON, and not
+//! base64.  Extracts to a staging directory, validates the archive structure,
+//! then copies files into place.  A server restart is required after restore for
+//! changes to take effect.  Requires Admin role.
+//!
+//! ```sh
+//! curl -X POST --data-binary @backup.zip \
+//!      -H "Authorization: Bearer $TOKEN" \
+//!      http://localhost:8080/api/v1/system/restore
+//! ```
+//!
+//! The route carries `DefaultBodyLimit::max(500 MiB)`, so an archive larger than
+//! that is rejected with 413 before the handler runs.
 
 use axum::{
     body::Bytes,

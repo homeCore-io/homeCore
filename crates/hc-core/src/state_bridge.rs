@@ -17,7 +17,10 @@
 //! - `homecore/devices/{id}/cmd` on a mapped device is relayed to the native
 //!   device command topic via the router's outbound path.
 
-use crate::{device_naming::ensure_unique_canonical_name, EventBus};
+use crate::{
+    device_naming::{ensure_unique_canonical_name, normalize_name_segment},
+    EventBus,
+};
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -283,10 +286,23 @@ impl StateBridge {
             }
             match serde_json::from_slice::<hc_types::Capabilities>(payload) {
                 Ok(caps) => {
+                    // `config_schema` and `config_descriptor` ride on the manifest
+                    // JSON but are not part of the frozen `Capabilities` type;
+                    // pull them from the raw payload.
+                    let raw = serde_json::from_slice::<serde_json::Value>(payload).ok();
+                    let pick = |key: &str| {
+                        raw.as_ref()
+                            .and_then(|v| v.get(key).cloned())
+                            .filter(|v| !v.is_null())
+                    };
+                    let config_schema = pick("config_schema");
+                    let config_descriptor = pick("config_descriptor");
                     let _ = self.pub_bus.publish(Event::PluginCapabilities {
                         timestamp: Utc::now(),
                         plugin_id: plugin_id.to_string(),
                         capabilities: caps,
+                        config_schema,
+                        config_descriptor,
                     });
                 }
                 Err(e) => warn!(
@@ -492,7 +508,7 @@ impl StateBridge {
             let _ = self.pub_bus.publish(Event::DeviceStateChanged {
                 timestamp: Utc::now(),
                 device_id: device_id.to_string(),
-                device_name: Some(device.name.clone()),
+                device_name: Some(device.effective_name().to_string()),
                 previous,
                 current,
                 changed,
@@ -525,7 +541,36 @@ impl StateBridge {
         let new_name = json["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("registration missing name"))?;
-        let area = json["area"].as_str().map(str::to_string);
+        // Canonicalize the area exactly as `device_type` is canonicalized below.
+        //
+        // `device.area` holds a normalized slug (`living_room`); the UI renders a
+        // pretty label from it, and `derive_areas_from_devices`,
+        // `set_area_devices`, and `area_id_from_name` all key on the normalized
+        // form. Plugins, though, report whatever the upstream system calls the
+        // room — Z-Wave JS says "Living Room" — and that string used to be stored
+        // verbatim. The same room then existed twice, as `Living Room` and
+        // `living_room`, and anything grouping devices by the raw string split it
+        // in two: a duplicate room appeared, and the devices landed in neither.
+        //
+        // Normalizing here means plugins can keep reporting the upstream label
+        // and core owns the canonical form — which is the whole point of having
+        // one.
+        let area = json["area"]
+            .as_str()
+            .map(normalize_name_segment)
+            .filter(|a| !a.is_empty());
+        if let Some(raw) = json["area"].as_str() {
+            if let Some(canonical) = area.as_deref() {
+                if raw != canonical {
+                    debug!(
+                        device_id,
+                        raw_area = raw,
+                        canonical_area = canonical,
+                        "Normalized plugin-reported area"
+                    );
+                }
+            }
+        }
         let raw_device_type = json["device_type"].as_str().map(str::to_string);
         let device_type = raw_device_type.as_deref().map(canonical_device_type_name);
 
@@ -685,7 +730,7 @@ impl StateBridge {
             let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
                 timestamp: Utc::now(),
                 device_id: device_id.to_string(),
-                device_name: Some(device.name.clone()),
+                device_name: Some(device.effective_name().to_string()),
                 available,
             });
         }

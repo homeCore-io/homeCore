@@ -190,7 +190,10 @@ fn json_schema_to_device_schema(schema: &Value) -> DeviceSchema {
     let mut attributes = HashMap::new();
 
     let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
-        return DeviceSchema { attributes };
+        return DeviceSchema {
+            attributes,
+            ..Default::default()
+        };
     };
 
     for (name, property) in properties {
@@ -221,17 +224,19 @@ fn json_schema_to_device_schema(schema: &Value) -> DeviceSchema {
             AttributeSchema {
                 kind,
                 writable,
-                display_name: None,
                 unit,
                 min,
                 max,
-                step: None,
                 options,
+                ..Default::default()
             },
         );
     }
 
-    DeviceSchema { attributes }
+    DeviceSchema {
+        attributes,
+        ..Default::default()
+    }
 }
 
 fn infer_attribute_kind(name: &str, property: &Value) -> AttributeKind {

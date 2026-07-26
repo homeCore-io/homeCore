@@ -55,19 +55,35 @@ pub async fn spawn_all(
     event_bus: EventBus,
     shutdown: watch::Receiver<bool>,
 ) {
-    let mut cmds = plugin_commands.write().await;
     for p in processes {
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PluginCommand>(8);
-        cmds.insert(p.id.clone(), cmd_tx);
-
-        tokio::spawn(supervise(
-            p.clone(),
-            cmd_rx,
+        spawn_one(
+            p,
             Arc::clone(&plugins),
+            plugin_commands.clone(),
             event_bus.clone(),
             shutdown.clone(),
-        ));
+        )
+        .await;
     }
+}
+
+/// Register a command channel and spawn a supervisor for a single plugin.
+/// Used at boot by [`spawn_all`] and at runtime to activate a freshly-installed
+/// plugin without a restart. The caller must have seeded the plugin's
+/// `PluginRecord` (supervisor status updates are update-only).
+pub async fn spawn_one(
+    process: PluginProcess,
+    plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
+    plugin_commands: PluginCommandChannels,
+    event_bus: EventBus,
+    shutdown: watch::Receiver<bool>,
+) {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<PluginCommand>(8);
+    plugin_commands
+        .write()
+        .await
+        .insert(process.id.clone(), cmd_tx);
+    tokio::spawn(supervise(process, cmd_rx, plugins, event_bus, shutdown));
 }
 
 // ── Supervisor ─────────────────────────────────────────────────────────────
@@ -113,17 +129,37 @@ async fn supervise(
         set_status(&plugins, &event_bus, &entry.id, "starting").await;
         record_restart(&plugins, &entry.id).await;
 
+        // Read binary/config from the plugin's record so an upgrade (which
+        // rewrites the record + sends Restart) launches the NEW binary without
+        // having to replace this supervisor. Falls back to the spawn-time entry.
+        let (binary, config) = {
+            let map = plugins.read().await;
+            match map.get(&entry.id) {
+                Some(r) => (
+                    r.binary_path
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| entry.binary.clone()),
+                    r.config_path
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| entry.config.clone()),
+                ),
+                None => (entry.binary.clone(), entry.config.clone()),
+            }
+        };
+
         info!(
             plugin_id = %entry.id,
-            binary    = %entry.binary.display(),
-            config    = %entry.config.display(),
+            binary    = %binary.display(),
+            config    = %config.display(),
             "Launching plugin"
         );
 
         let started_at = Instant::now();
 
-        let mut child = match Command::new(&entry.binary)
-            .arg(&entry.config)
+        let mut child = match Command::new(&binary)
+            .arg(&config)
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn()

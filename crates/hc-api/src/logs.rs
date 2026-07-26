@@ -155,14 +155,8 @@ async fn handle_socket(
 ) {
     // Register in the active-connection map; guard auto-removes on
     // every return path. OPS-1 piece 3.
-    let _registry_guard = register_connection(
-        &connections,
-        "logs_stream",
-        client_id,
-        ip,
-        user,
-        user_agent,
-    );
+    let _registry_guard =
+        register_connection(&connections, "logs_stream", client_id, ip, user, user_agent);
     // Bump connect counter (OPS-1 piece 4); disconnect counter is
     // incremented after the labelled block below with the categorised
     // reason — same scheme as `/events/stream`.
