@@ -7,12 +7,7 @@ on:
     paths-ignore:
       - '**/*.md'
       - '.github/dependabot.yml'
-  workflow_dispatch:
-    inputs:
-      fast:
-        description: "Skip aarch64 to halve runtime (dev iteration; tag pushes always go multi-arch)."
-        type: boolean
-        default: true
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -36,4 +31,3 @@ jobs:
       # a tag release, package the binary, attach it to the GitHub Release, and
       # notify the plugin registry to index it.
       publish_registry: true
-      fast: ${{ inputs.fast || false }}
