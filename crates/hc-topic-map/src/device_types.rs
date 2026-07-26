@@ -224,12 +224,11 @@ fn json_schema_to_device_schema(schema: &Value) -> DeviceSchema {
             AttributeSchema {
                 kind,
                 writable,
-                display_name: None,
                 unit,
                 min,
                 max,
-                step: None,
                 options,
+                ..Default::default()
             },
         );
     }

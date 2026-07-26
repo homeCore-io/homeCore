@@ -238,6 +238,154 @@ pub struct AttributeSchema {
     /// Fixed option list for `Enum` kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
+    /// What this attribute's two states are *called*, for `Bool` kind.
+    ///
+    /// Absent on every attribute that predates this field, and meaningless on
+    /// the non-boolean kinds, which is why it is optional rather than defaulted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<BoolStates>,
+}
+
+/// The names of a boolean attribute's two states, in the device's own words.
+///
+/// **A boolean attribute is two events, not one.** A contact sensor has a single
+/// `open` attribute, so a client that lists *attributes* offers one row — and
+/// closing the door becomes "open, but Not", a logic gate standing in for a word
+/// the device already knows. Closed is not the absence of open; it is the other
+/// half of the same attribute, and it needs its own name to get its own row.
+///
+/// Clients used to carry a hard-coded lexicon for this (`open`/`closed`,
+/// `locked`/`unlocked`, and the fact that `contact` is *inverted* — contact
+/// CLOSED means the door is shut). That is the client guessing at plugin
+/// semantics, which is exactly what [`DeviceAction`] was introduced to stop.
+/// The plugin knows; let it say so.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoolStates {
+    /// What the device is when the attribute reads `true`.
+    pub when_true: StateLabel,
+    /// What it is when the attribute reads `false`.
+    pub when_false: StateLabel,
+}
+
+/// One state of a boolean attribute: what it *is*, and what it does to get there.
+///
+/// Two forms because English will not derive one from the other — `open` →
+/// "opens", but `locked` → "locks" and `motion` → "detects motion". A condition
+/// reads the adjective ("while the door is open") and a trigger reads the verb
+/// ("when the door opens").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateLabel {
+    /// The adjective: `open`, `closed`, `locked`, `unlocked`.
+    pub label: String,
+    /// The transition verb: `opens`, `closes`, `locks`, `detects motion`.
+    ///
+    /// Optional because it is the one a plugin is most likely to get wrong in a
+    /// second language, and because `becomes {label}` is a serviceable fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
+}
+
+impl StateLabel {
+    /// A state named only by its adjective; the verb falls back to `becomes …`.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            verb: None,
+        }
+    }
+
+    /// A state with both forms — `StateLabel::verbed("open", "opens")`.
+    pub fn verbed(label: impl Into<String>, verb: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            verb: Some(verb.into()),
+        }
+    }
+
+    /// What a trigger should say. Never empty, so a client always has a row
+    /// label without needing a lexicon of its own.
+    pub fn transition(&self) -> String {
+        self.verb
+            .clone()
+            .unwrap_or_else(|| format!("becomes {}", self.label))
+    }
+}
+
+impl BoolStates {
+    /// The common case: two adjectives, verbs left to the fallback.
+    pub fn new(when_true: impl Into<String>, when_false: impl Into<String>) -> Self {
+        Self {
+            when_true: StateLabel::new(when_true),
+            when_false: StateLabel::new(when_false),
+        }
+    }
+
+    /// The state matching a reading.
+    pub fn get(&self, value: bool) -> &StateLabel {
+        if value {
+            &self.when_true
+        } else {
+            &self.when_false
+        }
+    }
+}
+
+/// Mirrors the *serde* defaults exactly, so a schema built in Rust and one
+/// parsed from an absent-field wire form describe the same device.
+///
+/// Written by hand rather than derived for that reason: `#[derive(Default)]`
+/// would make `writable` false while [`default_true`] makes it true, and two
+/// different defaults for one field is the sort of thing that is only ever
+/// found from the outside, by a control that will not work.
+impl Default for AttributeSchema {
+    fn default() -> Self {
+        Self {
+            kind: AttributeKind::Json,
+            writable: true,
+            display_name: None,
+            unit: None,
+            min: None,
+            max: None,
+            step: None,
+            options: None,
+            states: None,
+        }
+    }
+}
+
+impl AttributeSchema {
+    /// An attribute of [`kind`](AttributeKind) with everything else defaulted.
+    ///
+    /// Prefer this and `..Default::default()` over a full struct literal:
+    /// adding a field to this struct has now twice broken every plugin that
+    /// spelled all of them out.
+    pub fn new(kind: AttributeKind) -> Self {
+        Self {
+            kind,
+            ..Default::default()
+        }
+    }
+
+    /// A read-only attribute — the common case for a sensor.
+    pub fn read_only(kind: AttributeKind) -> Self {
+        Self {
+            kind,
+            writable: false,
+            ..Default::default()
+        }
+    }
+
+    /// Name this attribute's two boolean states. See [`BoolStates`].
+    pub fn with_states(mut self, states: BoolStates) -> Self {
+        self.states = Some(states);
+        self
+    }
+
+    /// Give the attribute a display label.
+    pub fn labelled(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
+    }
 }
 
 fn default_true() -> bool {
@@ -364,6 +512,79 @@ mod tests {
         .unwrap();
         assert!(s.actions[0].params[0].options_from.is_none());
         assert_eq!(s.actions[0].params[0].kind, ParamKind::Enum);
+    }
+
+    /// The Rust default and the wire default must agree. They disagreed once
+    /// already, on `writable`, which is why this is pinned rather than trusted.
+    #[test]
+    fn the_rust_default_matches_the_wire_default() {
+        let parsed: AttributeSchema = serde_json::from_value(json!({ "kind": "json" })).unwrap();
+        let built = AttributeSchema::default();
+        assert_eq!(parsed.writable, built.writable);
+        assert_eq!(parsed.states, built.states);
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::to_value(&built).unwrap()
+        );
+    }
+
+    /// An attribute written before `states` existed must serialise exactly as it
+    /// did, or every device on the bus churns its retained schema for nothing.
+    #[test]
+    fn states_are_absent_from_the_wire_when_unset() {
+        let s: DeviceSchema = serde_json::from_value(json!({
+            "attributes": { "on": { "kind": "bool", "writable": true } }
+        }))
+        .unwrap();
+        let wire = serde_json::to_string(&s).unwrap();
+        assert!(!wire.contains("states"), "{wire}");
+        assert!(s.attributes["on"].states.is_none());
+    }
+
+    #[test]
+    fn a_declared_pair_round_trips_with_both_forms() {
+        let s: DeviceSchema = serde_json::from_value(json!({
+            "attributes": {
+                "open": {
+                    "kind": "bool",
+                    "writable": false,
+                    "states": {
+                        "when_true":  { "label": "open",   "verb": "opens" },
+                        "when_false": { "label": "closed", "verb": "closes" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let states = s.attributes["open"].states.as_ref().unwrap();
+        assert_eq!(states.get(true).label, "open");
+        assert_eq!(states.get(false).transition(), "closes");
+
+        let back: DeviceSchema = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.attributes["open"].states.as_ref(), Some(states));
+    }
+
+    /// The verb is the optional half, and its absence must still yield a usable
+    /// row label — a client that has to invent one is back to a lexicon.
+    #[test]
+    fn a_pair_without_verbs_still_names_both_transitions() {
+        let p = BoolStates::new("tampered", "untampered");
+        assert_eq!(p.get(true).transition(), "becomes tampered");
+        assert_eq!(p.get(false).transition(), "becomes untampered");
+    }
+
+    /// The case the client lexicon got right and no client should have to know:
+    /// on a `contact` sensor, TRUE means the circuit is closed — the door is
+    /// shut. Declaring the pair is what lets the plugin own that inversion.
+    #[test]
+    fn an_inverted_attribute_is_expressible() {
+        let p = BoolStates {
+            when_true: StateLabel::verbed("closed", "closes"),
+            when_false: StateLabel::verbed("open", "opens"),
+        };
+        assert_eq!(p.get(true).label, "closed");
+        assert_eq!(p.get(false).label, "open");
     }
 
     /// `requires_role` is shared with the frozen v1 manifest rather than
