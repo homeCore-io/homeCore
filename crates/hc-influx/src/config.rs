@@ -3,6 +3,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InfluxConfig {
     /// Master switch. Default: false.
     #[serde(default)]

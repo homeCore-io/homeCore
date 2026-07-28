@@ -4,6 +4,12 @@ version = "0.1.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+# Emits a JSON Schema of this crate's config structs, so hc-config can describe
+# the sections of homecore.toml that live here. Off by default.
+schema = ["dep:schemars"]
+
 [dependencies]
 tracing            = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
@@ -16,3 +22,4 @@ chrono             = { workspace = true }
 tokio              = { workspace = true }
 hc-types           = { path = "../hc-types" }
 hc-time            = { path = "../hc-time" }
+schemars        = { workspace = true, optional = true }

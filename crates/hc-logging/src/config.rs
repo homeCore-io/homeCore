@@ -47,6 +47,7 @@ fn default_app_name() -> String {
 /// ```
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TimeDisplay {
     /// Local system timezone (e.g. `2026-03-25T09:32:00.123-05:00`).
     #[default]
@@ -57,6 +58,7 @@ pub enum TimeDisplay {
 
 /// Top-level `[logging]` config section.
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoggingConfig {
     /// Global default log level: error | warn | info | debug | trace
     #[serde(default = "default_level")]
@@ -111,6 +113,7 @@ impl Default for LoggingConfig {
 
 /// Configuration for the live log streaming WebSocket endpoint.
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoggingStreamConfig {
     /// Enable the log streaming endpoint (GET /api/v1/logs/stream).
     #[serde(default = "default_true")]
@@ -132,6 +135,7 @@ impl Default for LoggingStreamConfig {
 // ── stderr ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StderrConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -156,6 +160,7 @@ impl Default for StderrConfig {
 // ── file ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FileConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -218,6 +223,7 @@ impl Default for FileConfig {
 /// format   = "pretty"        # human-readable; use "json" for log aggregators
 /// ```
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RulesFileConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -265,6 +271,7 @@ impl Default for RulesFileConfig {
 // ── syslog ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SyslogConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -309,6 +316,7 @@ impl Default for SyslogConfig {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum OutputFormat {
     #[default]
     Pretty,
@@ -318,6 +326,7 @@ pub enum OutputFormat {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RotationStrategy {
     #[default]
     Daily,
@@ -328,6 +337,7 @@ pub enum RotationStrategy {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SyslogTransport {
     #[default]
     Udp,
@@ -335,6 +345,7 @@ pub enum SyslogTransport {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SyslogProtocol {
     #[serde(rename = "rfc3164")]
     Rfc3164,

@@ -1454,6 +1454,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-config"
+version = "0.1.6"
+dependencies = [
+ "hc-influx",
+ "hc-logging",
+ "hc-notify",
+ "schemars",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "hc-core"
 version = "0.1.4"
 dependencies = [
@@ -1490,6 +1503,7 @@ dependencies = [
  "chrono",
  "hc-types",
  "reqwest 0.13.3",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -1505,6 +1519,7 @@ dependencies = [
  "flate2",
  "hc-time",
  "hc-types",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -1535,6 +1550,7 @@ dependencies = [
  "async-trait",
  "lettre",
  "reqwest 0.13.3",
+ "schemars",
  "serde",
  "tokio",
  "tracing",
@@ -1663,6 +1679,7 @@ dependencies = [
  "hc-broker",
  "hc-captest",
  "hc-cli",
+ "hc-config",
  "hc-core",
  "hc-influx",
  "hc-logging",

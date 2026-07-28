@@ -1,0 +1,186 @@
+# HomeCore DEV configuration
+#
+# Used when running HomeCore from the development workspace (the sandbox home).
+# Launch with:
+#   homecore --home /var/lib/homecore \
+#            --config /var/lib/homecore/homecore.toml
+#
+# Plugin binary paths are relative to HOMECORE_HOME and point directly into
+# the shared plugins workspace target/debug/ directory (per the meta-layout
+# at ../plugins/Cargo.toml) so no install step is needed during development.
+#
+# DO NOT use this config in production — use config/homecore.toml instead.
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+[server]
+host = "0.0.0.0"
+port = 8080
+
+# ---------------------------------------------------------------------------
+# Embedded MQTT broker
+# ---------------------------------------------------------------------------
+[broker]
+host = "127.0.0.1"
+port = 1883
+# v5_port = 1884
+
+# ---------------------------------------------------------------------------
+# Location
+# ---------------------------------------------------------------------------
+[location]
+latitude  = 38.9072
+longitude = -77.0369
+timezone  = "America/New_York"
+
+# ---------------------------------------------------------------------------
+# Battery alerts
+# ---------------------------------------------------------------------------
+[battery]
+threshold_pct    = 20.0
+recover_band_pct = 5.0
+# notify_channel       = "all"
+# notify_on_recovered  = false
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics endpoint  (GET /api/v1/metrics)
+# ---------------------------------------------------------------------------
+# IP whitelist — default-deny. Empty list = endpoint returns 403 to everyone.
+[metrics]
+whitelist = [
+    "127.0.0.1",
+    "10.0.10.200",
+]
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+[auth]
+# jwt_secret is auto-generated and persisted to {state_db parent}/jwt_secret
+# (0600). Do not set inline — it would commit the signing key into git.
+token_expiry_hours = 24
+
+whitelist = [
+    "127.0.0.1",
+    "10.0.10.200",
+]
+
+# ---------------------------------------------------------------------------
+# Storage  (defaults to {base_dir}/data/ — fine for dev)
+# ---------------------------------------------------------------------------
+[storage]
+# state_db_path   = "data/state.redb"
+# history_db_path = "data/history.db"
+
+# ---------------------------------------------------------------------------
+# Rules  (defaults to {base_dir}/rules/)
+# ---------------------------------------------------------------------------
+[rules]
+# dir = "rules"
+
+# ---------------------------------------------------------------------------
+# Ecosystem profiles  (defaults to {base_dir}/config/profiles/)
+# ---------------------------------------------------------------------------
+[profiles]
+# dir = "config/profiles"
+
+# ---------------------------------------------------------------------------
+# Logging  — pretty stderr only in dev; file logging off to reduce noise
+# ---------------------------------------------------------------------------
+[logging]
+level = "debug"
+time_display = "local"   # "local" (default) | "utc"
+
+[logging.targets]
+# hc_core        = "debug"
+# hc_mqtt_client = "debug"
+# hc_broker      = "warn"
+
+# Live log streaming over WebSocket (GET /api/v1/logs/stream).
+[logging.stream]
+enabled          = true
+ring_buffer_size = 500
+
+[logging.stderr]
+enabled = false
+format  = "pretty"
+ansi    = true
+
+[logging.file]
+enabled          = true
+prefix           = "homecore"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
+#format          = "json"
+
+# Dedicated rule/automation log — captures only hc_core at debug level.
+# Clean audit trail: every trigger check, condition result, and action step.
+[logging.rules_file]
+enabled          = true
+prefix           = "rules"
+rotation         = "daily"
+max_size_mb      = 100
+compress         = true
+prune_after_days = 5
+format           = "pretty"
+
+[logging.syslog]
+enabled = false
+transport = "udp"
+host    = "192.168.1.100"
+port    = 514
+protocol = "rfc5424"
+facility = "daemon"
+app_name = "homecore"
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+[startup]
+plugin_ready_delay_secs = 10
+
+[shutdown]
+drain_timeout_secs = 10
+
+[web_admin]
+enabled = true
+
+[scheduler]
+catchup_window_minutes = 15
+
+# ---------------------------------------------------------------------------
+# Plugins — paths relative to HOMECORE_HOME = homeCore/homeCore/
+# Plugin repos sit one level up at homeCore/hc-*/
+# ---------------------------------------------------------------------------
+
+[[plugins]]
+id      = "plugin.hue"
+binary  = "../plugins/target/debug/hc-hue"
+config  = "../plugins/hc-hue/config/config.dev.toml"
+enabled = true
+
+# Hue-only sandbox (trimmed 2026-07-16). The other plugins — yolink, lutron,
+# caseta, sonos, zwave, wled, isy, thermostat, matter, ecowitt, hc-captest —
+# were declared here (all disabled) but still listed in /plugins and left
+# ghost devices in state.redb. Full roster preserved at
+# config/homecore.local.toml.bak; re-add a block to bring one back.
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+# Uncomment and set real values to enable. Leaving "CHANGE_ME" in place
+# now causes the server to refuse to start (S4 in release_0_1_1.md).
+# [[notify.channels]]
+# name      = "telegram"
+# type      = "telegram"
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# chat_id   = "-100123456789"
+
+
+[registry]
+url = "file:///var/lib/homecore/registry/index.json"
+public_key = "GX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWE="

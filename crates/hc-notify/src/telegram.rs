@@ -21,6 +21,7 @@ use crate::channel::NotifyChannel;
 
 /// TOML configuration for the Telegram channel.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
