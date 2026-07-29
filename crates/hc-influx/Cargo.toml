@@ -5,6 +5,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "InfluxDB v2 metrics exporter for homeCore device state"
 
+[features]
+default = []
+# Emits a JSON Schema of this crate's config structs, so hc-config can describe
+# the sections of homecore.toml that live here. Off by default.
+schema = ["dep:schemars"]
+
 [dependencies]
 hc-types        = { path = "../hc-types" }
 anyhow          = { workspace = true }
@@ -14,3 +20,4 @@ tracing         = { workspace = true }
 tokio           = { workspace = true }
 chrono          = { workspace = true }
 reqwest         = { version = "0.13.2", default-features = false, features = ["rustls"] }
+schemars        = { workspace = true, optional = true }

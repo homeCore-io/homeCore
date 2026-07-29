@@ -591,8 +591,7 @@ mod tests {
     /// reinvented, and defaults to the same thing.
     #[test]
     fn requires_role_defaults_to_user() {
-        let a: DeviceAction =
-            serde_json::from_value(json!({ "id": "x", "label": "X" })).unwrap();
+        let a: DeviceAction = serde_json::from_value(json!({ "id": "x", "label": "X" })).unwrap();
         assert_eq!(
             a.requires_role,
             crate::plugin_capabilities::RequiresRole::User

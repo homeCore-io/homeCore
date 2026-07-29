@@ -1375,6 +1375,12 @@ pub async fn create_glue(
                 "mode".into(),
                 body.config.get("mode").cloned().unwrap_or(json!("any")),
             );
+            // Which state counts. Defaults to true — "any of these are ON" —
+            // so a group written without it behaves as it always did.
+            dev.attributes.insert(
+                "expect".into(),
+                body.config.get("expect").cloned().unwrap_or(json!(true)),
+            );
             dev.attributes.insert("active_count".into(), json!(0));
             dev.attributes.insert("member_count".into(), json!(0));
         }
@@ -1413,14 +1419,33 @@ pub async fn create_glue(
         _ => {}
     }
 
-    match s.store.upsert_device(&dev).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (
+    if let Err(e) = s.store.upsert_device(&dev).await {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         )
-            .into_response(),
+            .into_response();
     }
+
+    // A group is recalculated when a member changes, so a fresh one sat at its
+    // create-time `active_count: 0, member_count: 0` until something moved —
+    // reading as "nothing matches" when it may already be satisfied. Evaluate
+    // it once now so it is correct the moment it exists.
+    if dev.device_type.as_deref() == Some("group") {
+        hc_core::glue::group::recalculate(&s.store, &s.event_bus, &device_id).await;
+    }
+
+    // Re-read, so the response carries the evaluated counts rather than the
+    // zeros that were written a moment ago.
+    let created = s
+        .store
+        .get_device(&device_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(dev);
+
+    (StatusCode::CREATED, Json(json!(created))).into_response()
 }
 
 /// `GET /api/v1/glue` — list all glue devices.
@@ -1446,6 +1471,137 @@ pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoRe
 }
 
 /// `DELETE /api/v1/glue/:id` — delete a glue device.
+/// The keys `PATCH /glue/:id` will merge, per device type.
+///
+/// Deliberately a whitelist. A helper's attributes are a mix of configuration
+/// (a number's range) and live readings (its current value), and letting a
+/// PATCH write anything would make "edit this helper" a way to fake its state.
+fn glue_config_keys(device_type: &str) -> &'static [&'static str] {
+    match device_type {
+        "counter" => &["step", "min", "max"],
+        "number" => &["min", "max", "step", "unit"],
+        "select" => &["options"],
+        "text" => &["max_length"],
+        "datetime" => &["has_date", "has_time"],
+        "group" => &["member_ids", "attribute", "mode", "expect"],
+        "threshold" => &[
+            "source_device_id",
+            "source_attribute",
+            "threshold",
+            // The flap guard. Without it a reading sitting on the line
+            // toggles the helper — and every rule watching it — repeatedly.
+            "hysteresis",
+        ],
+        "timer" => &["duration_secs", "repeat"],
+        _ => &[],
+    }
+}
+
+/// `PATCH /api/v1/glue/:id` — reconfigure an existing helper.
+///
+/// The command surface (`{"command": "set"}`) *operates* a helper: it sets a
+/// number's value or picks a select's option. It cannot change what the helper
+/// IS — a select's option list, a group's members, a number's range — so the
+/// only way to fix one of those was to delete and recreate, which breaks every
+/// rule referring to it.
+///
+/// Merges only the keys [`glue_config_keys`] allows for the type, so a PATCH
+/// cannot write a live reading and pass it off as configuration.
+pub async fn update_glue(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let mut dev = match s.store.get_device(&id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    if dev.plugin_id != "core.glue" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "not a helper device" })),
+        )
+            .into_response();
+    }
+
+    let device_type = dev.device_type.clone().unwrap_or_default();
+    let allowed = glue_config_keys(&device_type);
+    if allowed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{device_type} has nothing to configure") })),
+        )
+            .into_response();
+    }
+
+    let config = body.get("config").and_then(|c| c.as_object());
+    let Some(config) = config else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing config" })),
+        )
+            .into_response();
+    };
+
+    // `members` is the word the create body uses; the attribute is member_ids.
+    let mut incoming = config.clone();
+    if let Some(members) = incoming.remove("members") {
+        incoming.insert("member_ids".into(), members);
+    }
+
+    for key in allowed {
+        if let Some(v) = incoming.get(*key) {
+            dev.attributes.insert((*key).to_string(), v.clone());
+        }
+    }
+
+    // A select whose selected value just fell out of its options would keep
+    // reporting a value it can no longer be set to.
+    if device_type == "select" {
+        let options = dev
+            .attributes
+            .get("options")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let selected = dev.attributes.get("selected").cloned();
+        let still_valid = selected
+            .as_ref()
+            .map(|sel| options.contains(sel))
+            .unwrap_or(false);
+        if !still_valid {
+            dev.attributes.insert(
+                "selected".into(),
+                options.first().cloned().unwrap_or(json!("")),
+            );
+        }
+    }
+
+    match s.store.upsert_device(&dev).await {
+        Ok(_) => (StatusCode::OK, Json(json!(dev))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_glue(
     State(s): State<AppState>,
     _: DevicesWrite,
@@ -1463,6 +1619,63 @@ pub async fn delete_glue(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod glue_config_tests {
+    use super::glue_config_keys;
+
+    /// A helper's attributes mix configuration with live readings, and a PATCH
+    /// that could write either would make "edit this helper" a way to fake its
+    /// state — a timer reporting `finished` because someone said so.
+    #[test]
+    fn live_readings_are_never_configurable() {
+        const READINGS: &[(&str, &str)] = &[
+            ("counter", "count"),
+            ("number", "value"),
+            ("select", "selected"),
+            ("text", "value"),
+            ("group", "on"),
+            ("group", "active_count"),
+            ("group", "member_count"),
+            ("threshold", "above"),
+            ("threshold", "source_value"),
+            ("timer", "state"),
+            ("timer", "remaining_secs"),
+        ];
+        for (device_type, reading) in READINGS {
+            assert!(
+                !glue_config_keys(device_type).contains(reading),
+                "{device_type} would let a PATCH write `{reading}`"
+            );
+        }
+    }
+
+    /// A group has to be able to ask about the FALSE state.
+    ///
+    /// Counting truthy members only lets a group say "are any of these ON".
+    /// "All deck doors closed" is an ordinary thing to want and could not be
+    /// expressed at all, so `expect` has to be reconfigurable like the rest.
+    #[test]
+    fn a_group_can_be_reconfigured_to_test_the_other_state() {
+        assert!(glue_config_keys("group").contains(&"expect"));
+    }
+
+    #[test]
+    fn the_configurable_types_expose_their_config() {
+        assert!(glue_config_keys("number").contains(&"min"));
+        assert!(glue_config_keys("select").contains(&"options"));
+        assert!(glue_config_keys("group").contains(&"member_ids"));
+    }
+
+    /// A switch is a flag: there is nothing about it to configure, and the
+    /// handler refuses rather than silently accepting a no-op PATCH.
+    #[test]
+    fn a_type_with_nothing_to_configure_offers_nothing() {
+        assert!(glue_config_keys("switch").is_empty());
+        assert!(glue_config_keys("button").is_empty());
+        assert!(glue_config_keys("not_a_type").is_empty());
     }
 }
 
@@ -8062,6 +8275,132 @@ pub async fn list_calendar_events(
 // System config + restart  (admin-only; modify homecore.toml at runtime)
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct NotifyTestBody {
+    /// A configured channel name, or `all` to fan out to every one.
+    pub channel: String,
+    /// What to send. Defaults to something that identifies itself, because the
+    /// message arrives on somebody's phone and "test" alone is unhelpful three
+    /// days later.
+    pub message: Option<String>,
+}
+
+/// `POST /api/v1/notify/test`
+///
+/// Send a message through a configured channel, so an operator can find out
+/// whether it works without waiting for a rule to fire. Admin-only: a channel
+/// reaches a real phone or inbox, and this is a send button.
+///
+/// Failure is reported as 502 with the provider's own error, not 500 — the
+/// request was fine, the delivery was not, and the difference is the whole
+/// answer the operator came for.
+pub async fn notify_test(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Json(body): Json<NotifyTestBody>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(notify) = s.notify.as_ref() else {
+        // No channels configured at all: `[[notify.channels]]` is empty or the
+        // service was never built. Saying so beats "channel not found".
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "no notification channels are configured",
+            })),
+        )
+            .into_response();
+    };
+
+    let channel = body.channel.trim();
+    if channel.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "channel is required" })),
+        )
+            .into_response();
+    }
+
+    let message = body
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("Test message from homeCore. If you are reading this, the channel works.");
+
+    let result = notify.notify(channel, "homeCore", message).await;
+
+    // Audited either way: this sends something to a person, and a burst of
+    // tests is worth being able to see after the fact. The message body is
+    // recorded — it is operator-authored and contains no credential — while
+    // the channel's own configuration is not.
+    let mut e =
+        audit::entry_from_claims(&claims, "notify.test").with_target("notify_channel", channel);
+    e.result = if result.is_ok() {
+        hc_state::AuditResult::Success
+    } else {
+        hc_state::AuditResult::Error
+    };
+    e.detail = json!({ "channel": channel });
+    audit::emit(&s, e).await;
+
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "sent": true, "channel": channel })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "sent": false,
+                "channel": channel,
+                // The provider's message, chained — "Notification channel 'x'
+                // not configured" and an SMTP rejection are different problems
+                // and the operator has to be able to tell them apart.
+                "error": format!("{err:#}"),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/system/config/descriptor`
+///
+/// How to *present* homecore.toml: sections in a sensible order, a typed kind
+/// per field, help text, and conditionals — the same vocabulary a plugin
+/// publishes for its own config, so a client renders both with one renderer.
+///
+/// Values still come from `GET /system/config`; this says nothing about them.
+/// Admin-only, matching the endpoint that serves the values.
+pub async fn get_system_config_descriptor(AuthUser(claims): AuthUser) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    // Same envelope as GET /plugins/:id/config/descriptor, so a client can
+    // hand either to the same renderer without unwrapping them differently.
+    (
+        StatusCode::OK,
+        Json(json!({
+            "plugin_id": "homecore",
+            "descriptor": hc_config::descriptor::system_config_descriptor(),
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /api/v1/system/config`
 ///
 /// Returns the current homecore.toml — both the raw text (for the raw
@@ -8632,6 +8971,106 @@ token = "TOKEN-TWO"
         }
     }
 
+    // ── notify test ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn notify_test_is_admin_only() {
+        // It sends something to a real phone or inbox. Read access to the
+        // house is not consent to make it buzz.
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("u1", Role::User)),
+            Json(NotifyTestBody {
+                channel: "phone".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn notify_test_says_when_nothing_is_configured() {
+        // The common case on a fresh house: no channels at all. 503 with a
+        // plain reason beats "channel 'phone' not configured", which reads as
+        // a typo in the name.
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("admin", Role::Admin)),
+            Json(NotifyTestBody {
+                channel: "phone".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("configured"),
+            "should explain that there are no channels: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_test_rejects_an_empty_channel_name() {
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("admin", Role::Admin)),
+            Json(NotifyTestBody {
+                channel: "   ".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        // 503 before 422 would be wrong the other way round too — but with no
+        // service configured the missing service is the more useful answer.
+        assert!(
+            resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+                || resp.status() == StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    // ── system config descriptor ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_descriptor_is_admin_only() {
+        // The values behind it are admin-only, and the descriptor names every
+        // path, port and secret field in the file — it should not be a map of
+        // the deployment handed to anyone who can sign in.
+        let resp = get_system_config_descriptor(AuthUser(claims_for("u1", Role::User)))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn config_descriptor_matches_the_plugin_envelope() {
+        let resp = get_system_config_descriptor(AuthUser(claims_for("admin", Role::Admin)))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = parse_json(resp).await;
+        // Same two keys GET /plugins/:id/config/descriptor returns, so one
+        // client-side renderer can consume either without special-casing.
+        assert_eq!(body["plugin_id"], "homecore");
+        let d = &body["descriptor"];
+        assert_eq!(d["descriptor_version"], 1);
+        assert!(
+            d["sections"].as_array().is_some_and(|s| s.len() >= 15),
+            "every section of homecore.toml should be described"
+        );
+    }
+
     fn sample_dashboard(id: &str, owner_user_id: &str) -> DashboardDefinition {
         DashboardDefinition {
             id: id.to_string(),
@@ -8820,7 +9259,7 @@ token = "TOKEN-TWO"
         state.store.upsert_device(&d).await.expect("seed");
 
         let area_id = area_id_from_name("studio_b");
-        patch_area(
+        let resp = patch_area(
             State(state.clone()),
             AreasWrite(whitelist_claims()),
             Path(area_id),
@@ -8830,6 +9269,9 @@ token = "TOKEN-TWO"
         )
         .await
         .into_response();
+        // Assert it, rather than discard it: a rename that 500s would
+        // otherwise leave this test asserting only that nothing changed.
+        assert_eq!(resp.status(), StatusCode::OK);
 
         let stored = state
             .store

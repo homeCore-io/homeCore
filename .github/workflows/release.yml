@@ -7,17 +7,7 @@ on:
     paths-ignore:
       - '**/*.md'
       - '.github/dependabot.yml'
-  workflow_dispatch:
-    inputs:
-      fast:
-        description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
-        type: boolean
-        default: true
-  # Fired by hc-web-leptos's CI when develop is green, so a leptos-only
-  # change rebuilds hc-core:dev with the new WASM bundled. Without this
-  # the dev appliance carries stale UI until a separate core commit lands.
-  repository_dispatch:
-    types: [webui-updated]
+  workflow_dispatch: {}
 
 # contents: write — reusable workflow's release job creates a GH Release.
 # packages: write — reusable workflow's docker-publish job pushes to ghcr.io.
@@ -28,9 +18,6 @@ permissions:
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
-    # Inherit org-level secrets (CROSS_REPO_DISPATCH_PAT etc.) so the
-    # reusable workflow's dispatch-appliance job can cascade to the
-    # docker repo on develop pushes.
     secrets: inherit
     with:
       binary_name: homecore
@@ -40,30 +27,20 @@ jobs:
         scripts/service-templates/homecore.service
       rust_version: "stable"
       # Docker image: hc-core (binary is "homecore", image name diverges).
+      #
+      # hc-core is the API and the embedded broker. Nothing else.
+      #
+      # It used to also clone hc-web-leptos, compile it to WASM, and bake the
+      # bundle in; and a second job merged core with every plugin's release
+      # tarball into an "appliance" image. Neither describes the product any
+      # more. The UI is hc-web — its own image, its own repo, serving the app
+      # and proxying /api/v1 to core. Plugins install at runtime from the signed
+      # registry. So core builds one binary and one image, and nothing here
+      # builds a UI core does not own.
       publish_docker_image: true
       image_name: hc-core
       dockerfile_name: Dockerfile.core
-      bundle_webui: true
-      # The web UI is not built by its own repo — it is cloned and built here,
-      # so whatever ref this names is what ends up inside the image.
-      #
-      # On a tag push, pin it to the identical tag: hc-web-leptos is versioned in
-      # lockstep with core (both carry v0.1.3/4/5), so v0.1.6 of core bundles
-      # v0.1.6 of the UI. Without this a *released* image bundled whatever
-      # hc-web-leptos@develop happened to be at that instant, which meant the
-      # image could not be rebuilt from core's tag — the UI inside it was
-      # unrecorded. Rebuilding v0.1.5 today would quietly produce a different
-      # artifact than v0.1.5 did.
-      #
-      # Everything else (develop pushes, workflow_dispatch, the webui-updated
-      # dispatch) keeps tracking develop, which is the point of a dev image.
-      #
-      # This makes the ordering explicit: tag hc-web-leptos before tagging core.
-      # If the matching tag is missing the release fails at checkout rather than
-      # silently falling back to develop — a release that bundles an unrecorded
-      # UI is the thing this exists to prevent.
-      webui_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
-      # The Dockerfile and entrypoints that build the published image come from
+      # The Dockerfile and entrypoint that build the published image come from
       # homeCore-io/docker at this ref, so it is part of the build recipe — not
       # just orchestration. Hardcoding `develop` meant a *tagged* image was built
       # from whatever that branch happened to be at the time, so the image could
@@ -74,30 +51,8 @@ jobs:
       # builds against docker v0.1.6. Everything else keeps tracking develop,
       # which is what a dev image wants.
       #
-      # Ordering is now explicit: tag homeCore-io/docker before tagging this
-      # component. If the tag is missing the release fails — hc-scripts'
-      # pre-flight names the cause — rather than silently building from develop.
+      # This is now the ONLY cross-repo ordering constraint a release has: tag
+      # homeCore-io/docker before tagging core. If the tag is missing the release
+      # fails — hc-scripts' pre-flight names the cause — rather than silently
+      # building from develop.
       docker_repo_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
-      # Forwards the workflow_dispatch input to the reusable workflow.
-      # On tag push (no inputs), the `|| false` fallback ensures
-      # full multi-arch — the reusable defaults `fast` to false too,
-      # but expression-context yields '' for an undefined input which
-      # the boolean coerces, so we're explicit here.
-      fast: ${{ inputs.fast || false }}
-      # Tag-push-only: assemble homecore-appliance-<tag>-<platform>.tar.gz
-      # by downloading each plugin's matching release from its own repo
-      # and merging into a single archive. Every plugin in the list must
-      # have a release tagged the same as core's tag for assembly to
-      # succeed.
-      assemble_appliance: true
-      appliance_plugins: |
-        hc-hue
-        hc-yolink
-        hc-lutron
-        hc-caseta
-        hc-sonos
-        hc-ecowitt
-        hc-zwave
-        hc-isy
-        hc-wled
-        hc-thermostat

@@ -6786,39 +6786,32 @@ volume on first run by `entrypoint.sh`; edit the volume copy to enable plugins.
 | `hc-wled.toml` | `plugin.wled` | `[[devices]]` per WLED controller |
 | `hc-isy.toml` | `plugin.isy` | host, port, username, password, tls |
 
-### Plugin containers (independent deployment)
+### Plugin distribution
 
-Each plugin can run in its own container instead of (or alongside) the monolith.
+Plugins are **not** container images. They ship as signed `.tar.zst` artifacts
+in the plugin registry: a `plugin.toml` manifest plus the binary, ed25519-signed,
+indexed at `https://homecore.io/registry/index.json`.
 
-**`plugins/Dockerfile.plugin`** — generic template, takes one build arg:
-```bash
-# Build
-docker build -f plugins/Dockerfile.plugin \
-  --build-arg PLUGIN_NAME=hc-hue \
-  -t hc-hue:latest plugins/
+Core downloads the artifact, verifies it against the public key in its
+`[registry]` config, unpacks it to `$HOMECORE_HOME/plugins/<id>/<version>/`
+(staged then atomically renamed, so a live upgrade does not hit ETXTBSY, and
+previous versions are kept for rollback), seeds
+`config/plugins/<id>.toml` with generated MQTT credentials, and records the
+install in `config/plugins/managed.toml`. `PluginManager` then runs it as a
+supervised child process with exponential backoff.
 
-# Run (bind-mount your config.toml)
-docker run -d \
-  -v /path/to/hc-hue.toml:/opt/plugin/config/config.toml:ro \
-  --network host \
-  hc-hue:latest
-```
+Users install with Plugins → Add in the web UI. Tagging `v<version>` in a plugin
+repo publishes it: the shared release workflow builds a static musl binary,
+packages the `.tar.zst`, attaches it to the GitHub Release, notifies the registry
+repo, and polls the *served* index until the entry appears — so a green release
+means an installable plugin rather than just a successful build.
 
-The binary runs as `/opt/plugin/bin/plugin config/config.toml` with WORKDIR
-`/opt/plugin`, matching every plugin's default config path.
-
-**`plugins/docker-compose.plugins.yml`** — all 7 plugins as separate services.
-All use `network_mode: host` (required for SSDP multicast discovery in Sonos/WLED).
-Config files bind-mounted read-only from `docker/plugin-configs/`.
-
-```bash
-# Full stack — core + plugins as separate containers:
-docker compose -f docker-compose.yml \
-  -f plugins/docker-compose.plugins.yml up -d
-
-# Plugins only (against external MQTT broker):
-docker compose -f plugins/docker-compose.plugins.yml up -d hc-hue hc-yolink
-```
+`plugins/Dockerfile.plugin` and `plugins/docker-compose.plugins.yml` used to
+describe running each plugin as its own container with `network_mode: host`.
+Both are gone, along with the per-plugin Dockerfiles and the per-plugin GHCR
+images. The SDK still supports a plugin on another host — point `broker_host` /
+`broker_port` in its `[homecore]` block at core's broker — but core cannot
+install, upgrade or supervise a plugin it did not launch.
 
 ### Environment variables
 

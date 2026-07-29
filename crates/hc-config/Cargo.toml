@@ -1,0 +1,32 @@
+[package]
+name    = "hc-config"
+version = "0.1.6"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The shape of homecore.toml — the deserialised form of homeCore's own configuration"
+
+[features]
+default = []
+# Emits a JSON Schema of homecore.toml from the structs themselves, so a
+# descriptor of these sections can be checked against the real thing rather
+# than against itself. Off by default — only hc-api asks for it. Same pattern,
+# and the same reason, as hc-types' `schema` feature.
+schema = ["dep:schemars", "hc-logging/schema", "hc-influx/schema", "hc-notify/schema"]
+# The hand-authored descriptor of homecore.toml. Separate from `schema` because
+# the schema is machine-derived and this is prose: hc-api wants both, a test
+# wants both, and nothing else wants either.
+descriptor = ["dep:hc-types", "dep:serde_json", "hc-types/descriptor"]
+
+[dependencies]
+hc-influx      = { path = "../hc-influx" }
+hc-logging     = { path = "../hc-logging" }
+hc-notify      = { path = "../hc-notify" }
+hc-types       = { path = "../hc-types", optional = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true, optional = true }
+schemars       = { workspace = true, optional = true }
+
+[dev-dependencies]
+hc-types       = { path = "../hc-types", features = ["descriptor"] }
+toml           = { workspace = true }
+serde_json     = { workspace = true }

@@ -55,6 +55,7 @@ const TELEGRAM_PLACEHOLDER: &str = "CHANGE_ME";
 
 /// Top-level TOML block: `[[notify.channels]]`
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelConfig {
     /// Name used by `Notify { channel: "..." }` rules.
     pub name: String,
@@ -68,6 +69,7 @@ pub struct ChannelConfig {
 /// [`NotificationService::from_configs`].
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProviderConfig {
     Email(EmailConfig),
     Pushover(PushoverConfig),

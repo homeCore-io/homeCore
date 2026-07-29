@@ -14,8 +14,13 @@
 //! ```
 //!
 //! `mode`:
-//! - `"any"` — `on = true` if ANY member's attribute is truthy (default)
-//! - `"all"` — `on = true` only if ALL members' attribute is truthy
+//! - `"any"` — `on = true` if ANY member matches (default)
+//! - `"all"` — `on = true` only if ALL members match
+//!
+//! `expect` — the value a member has to hold to count as matching. Defaults to
+//! `true`, which is what every group written before it existed meant. Without
+//! it a group could only ask "are any of these ON", so "all deck doors CLOSED"
+//! — an ordinary thing to want — could not be expressed at all.
 //!
 //! # Commands
 //!
@@ -83,13 +88,33 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
         .and_then(|v| v.as_str())
         .unwrap_or("any");
 
+    // The state a member must be in to count. `true` keeps every group that
+    // predates this field meaning exactly what it meant.
+    let expect = dev
+        .attributes
+        .get("expect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     let mut active_count: u64 = 0;
     let member_count = member_ids.len() as u64;
 
+    // One read, then resolve each member against it. A member is stored the
+    // way rules store a device reference — a raw `device_id` OR a
+    // `canonical_name` — and `get_device` only knows the first. A group whose
+    // members were picked in the UI (which prefers the canonical form, because
+    // it survives the device being replaced) resolved NOTHING and sat at
+    // `active_count: 0` forever, looking like a group whose members were all
+    // in the wrong state.
+    let devices = state.list_devices().await.unwrap_or_default();
+
     for mid in &member_ids {
-        if let Ok(Some(member)) = state.get_device(mid).await {
+        let member = devices
+            .iter()
+            .find(|d| d.device_id == *mid || d.canonical_name.as_deref() == Some(mid.as_str()));
+        if let Some(member) = member {
             if let Some(val) = member.attributes.get(attribute) {
-                if is_truthy(val) {
+                if is_truthy(val) == expect {
                     active_count += 1;
                 }
             }
@@ -113,15 +138,28 @@ pub async fn recalculate(state: &StateStore, pub_bus: &EventBus, device_id: &str
 
 /// Check if a device_id is a member of a group device.
 pub async fn is_member(state: &StateStore, group_device_id: &str, member_device_id: &str) -> bool {
-    if let Ok(Some(dev)) = state.get_device(group_device_id).await {
-        dev.attributes
-            .get("member_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().any(|v| v.as_str() == Some(member_device_id)))
-            .unwrap_or(false)
-    } else {
-        false
+    let Ok(Some(dev)) = state.get_device(group_device_id).await else {
+        return false;
+    };
+    let Some(members) = dev.attributes.get("member_ids").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    if members.iter().any(|v| v.as_str() == Some(member_device_id)) {
+        return true;
     }
+
+    // The changed device arrives as a `device_id`, but the member may be
+    // recorded under its canonical name. Matching only the raw id meant a
+    // group built through the UI never auto-recalculated: the member changed,
+    // nothing matched, and the group stayed as it was.
+    let Ok(Some(changed)) = state.get_device(member_device_id).await else {
+        return false;
+    };
+    let Some(canonical) = changed.canonical_name.as_deref() else {
+        return false;
+    };
+    members.iter().any(|v| v.as_str() == Some(canonical))
 }
 
 /// Handle explicit commands (only "recalculate" for now).

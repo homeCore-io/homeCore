@@ -11,15 +11,13 @@ use hc_api::{
 };
 use hc_auth::{hash_password, JwtService, Role, User};
 use hc_broker::{Broker, BrokerConfig, ClientAcl};
+use hc_config::{AppConfig, PluginEntry};
 use hc_core::{device_naming, rule_loader, rule_resolver, Core, EventBus};
-use hc_influx::InfluxConfig;
-use hc_logging::LoggingConfig;
 use hc_mqtt_client::{MqttClient, MqttClientConfig};
-use hc_notify::{ChannelConfig, NotificationService};
+use hc_notify::NotificationService;
 use hc_state::StateStore;
 use hc_topic_map::{loader::load_profiles_from_dir, DeviceTypeRegistry, EcosystemRouter};
 use ipnet::IpNet;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -128,27 +126,6 @@ fn resolve_config_path(base: &Path) -> PathBuf {
     base.join("config").join("homecore.toml")
 }
 
-/// Resolve a path string field:
-///   - empty string  → `{base}/{relative_default}`
-///   - relative path → `{base}/{path}`
-///   - absolute path → unchanged
-fn resolve_path(field: &mut String, base: &Path, relative_default: &str) {
-    if field.is_empty() {
-        *field = base.join(relative_default).to_string_lossy().into_owned();
-    } else if !Path::new(field.as_str()).is_absolute() {
-        *field = base.join(field.as_str()).to_string_lossy().into_owned();
-    }
-}
-
-/// Resolve an optional path string: only touches it when Some and relative.
-fn resolve_opt_path(field: &mut Option<String>, base: &Path) {
-    if let Some(p) = field {
-        if !Path::new(p.as_str()).is_absolute() {
-            *field = Some(base.join(p.as_str()).to_string_lossy().into_owned());
-        }
-    }
-}
-
 /// Phase 0 of plugin-config centralization: for each `(plugin_id, legacy_path)`,
 /// import the plugin's existing config into the core-owned [`PluginConfigStore`]
 /// (one-time byte-copy, idempotent — skipped if a central file already exists),
@@ -189,108 +166,9 @@ fn centralize_plugin_configs<'a>(
         .collect()
 }
 
-// ── config structs ──────────────────────────────────────────────────────────
-
-/// Top-level config shape (subset — just what main.rs needs to parse).
-#[derive(Deserialize, Default)]
-struct AppConfig {
-    #[serde(default)]
-    server: ServerSection,
-    #[serde(default)]
-    broker: BrokerSection,
-    #[serde(default)]
-    location: LocationSection,
-    #[serde(default)]
-    storage: StorageSection,
-    #[serde(default)]
-    profiles: ProfilesSection,
-    #[serde(default)]
-    rules: RulesSection,
-    #[serde(default)]
-    auth: AuthSection,
-    #[serde(default)]
-    notify: NotifySection,
-    #[serde(default)]
-    startup: StartupSection,
-    #[serde(default)]
-    shutdown: ShutdownConfig,
-    #[serde(default)]
-    scheduler: SchedulerSection,
-    #[serde(default)]
-    logging: LoggingConfig,
-    #[serde(default)]
-    web_admin: WebAdminSection,
-    #[serde(default)]
-    plugins: Vec<PluginEntry>,
-    #[serde(default)]
-    calendars: CalendarsSection,
-    #[serde(default)]
-    battery: BatterySection,
-    #[serde(default)]
-    influx: InfluxConfig,
-    #[serde(default)]
-    metrics: MetricsSection,
-    #[serde(default)]
-    registry: RegistrySection,
-}
-
-/// `[registry]` — the remote signed plugin registry. Both fields must be set to
-/// enable browse + registry-install; otherwise those endpoints return 503.
-#[derive(Deserialize, Default, Clone)]
-struct RegistrySection {
-    /// URL (or local path / `file://`) of the signed `index.json`.
-    #[serde(default)]
-    url: Option<String>,
-    /// Base64-encoded ed25519 public key that signs the index.
-    #[serde(default)]
-    public_key: Option<String>,
-}
-
-impl AppConfig {
-    /// Fill in any empty/relative path fields using `base_dir` as the root.
-    /// Called after loading the TOML file so explicit absolute paths in config
-    /// are always honoured; only unset (empty) or relative paths are resolved.
-    fn resolve_paths(&mut self, base: &Path) {
-        self.storage.resolve(base);
-        self.profiles.resolve(base);
-        self.rules.resolve(base);
-        self.broker.resolve(base);
-        self.logging.resolve_paths(base);
-        self.calendars.resolve(base);
-        for plugin in &mut self.plugins {
-            plugin.resolve(base);
-        }
-    }
-}
-
-/// A single `[[plugins]]` entry — a plugin binary HomeCore will spawn and
-/// supervise.
-#[derive(Deserialize, Clone)]
-struct PluginEntry {
-    /// Identifier used in log messages (e.g. "plugin.yolink").
-    id: String,
-    /// Path to the compiled plugin binary.
-    /// Relative paths are resolved against base_dir.
-    binary: String,
-    /// Path to the plugin's config file, passed as its first argument.
-    /// Relative paths are resolved against base_dir.
-    config: String,
-    /// Set to false to disable this plugin without removing the entry.
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl PluginEntry {
-    fn resolve(&mut self, base: &Path) {
-        resolve_path(&mut self.binary, base, "");
-        resolve_path(&mut self.config, base, "");
-    }
-}
-
+// Stays here rather than moving to hc-config with the structs it operates
+// on: it reads the managed-plugin store from hc-api, and hc-api is about to
+// depend on hc-config to describe these same sections.
 /// Merge the static `[[plugins]]` set with the managed-plugin store: drop
 /// tombstoned (uninstalled) ids, then layer runtime-installed records on top
 /// (records win on id collision). This is the effective set core spawns,
@@ -326,471 +204,11 @@ fn build_effective_plugins(
     out
 }
 
-/// `[rules]` section of homecore.toml.
-#[derive(Deserialize, Default)]
-struct RulesSection {
-    /// Directory containing per-rule TOML files.
-    /// Default: `{base_dir}/rules`
-    #[serde(default)]
-    dir: String,
-}
-
-impl RulesSection {
-    fn resolve(&mut self, base: &Path) {
-        resolve_path(&mut self.dir, base, "rules");
-    }
-}
-
-#[derive(Deserialize)]
-struct ServerSection {
-    #[serde(default = "default_server_host")]
-    host: String,
-    #[serde(default = "default_server_port")]
-    port: u16,
-}
-
-impl Default for ServerSection {
-    fn default() -> Self {
-        Self {
-            host: default_server_host(),
-            port: default_server_port(),
-        }
-    }
-}
-
-fn default_server_host() -> String {
-    "0.0.0.0".into()
-}
-fn default_server_port() -> u16 {
-    8080
-}
-
-/// `[battery]` section of homecore.toml — drives the battery watcher.
-#[derive(Deserialize, Clone)]
-struct BatterySection {
-    /// Battery percentage at or below which the latch engages.
-    #[serde(default = "default_battery_threshold")]
-    threshold_pct: f64,
-    /// Recovery band added to threshold to clear the latch.
-    #[serde(default = "default_battery_recover")]
-    recover_band_pct: f64,
-    /// Optional hc-notify channel for the built-in notification shortcut.
-    /// Leave unset to disable the shortcut (rules-engine still receives the
-    /// `device.battery_low` events either way).
-    #[serde(default)]
-    notify_channel: Option<String>,
-    /// When true and `notify_channel` is set, recovery edges also notify.
-    #[serde(default)]
-    notify_on_recovered: bool,
-}
-
-impl Default for BatterySection {
-    fn default() -> Self {
-        Self {
-            threshold_pct: default_battery_threshold(),
-            recover_band_pct: default_battery_recover(),
-            notify_channel: None,
-            notify_on_recovered: false,
-        }
-    }
-}
-
-fn default_battery_threshold() -> f64 {
-    20.0
-}
-fn default_battery_recover() -> f64 {
-    5.0
-}
-
-#[derive(Deserialize, Default)]
-struct StorageSection {
-    /// Path to the redb state database.
-    /// Default: `{base_dir}/data/state.redb`
-    #[serde(default)]
-    state_db_path: String,
-    /// Path to the SQLite history database.
-    /// Default: `{base_dir}/data/history.db`
-    #[serde(default)]
-    history_db_path: String,
-}
-
-impl StorageSection {
-    fn resolve(&mut self, base: &Path) {
-        resolve_path(&mut self.state_db_path, base, "data/state.redb");
-        resolve_path(&mut self.history_db_path, base, "data/history.db");
-    }
-}
-
-#[derive(Deserialize, Default)]
-struct ProfilesSection {
-    /// Directory containing ecosystem profile TOML files (Shelly, Tasmota, etc.).
-    /// Default: `{base_dir}/config/profiles`
-    #[serde(default)]
-    dir: String,
-}
-
-impl ProfilesSection {
-    fn resolve(&mut self, base: &Path) {
-        resolve_path(&mut self.dir, base, "config/profiles");
-    }
-}
-
-/// `[broker]` section of homecore.toml.
-#[derive(Deserialize)]
-struct BrokerSection {
-    #[serde(default = "default_broker_host")]
-    host: String,
-    #[serde(default = "default_broker_port")]
-    port: u16,
-    /// MQTT v5 listener port. Defaults to port+1 (1884 when port is 1883).
-    /// Set to null to disable.
-    #[serde(default = "default_broker_v5_port")]
-    v5_port: Option<u16>,
-    tls_port: Option<u16>,
-    /// Path to TLS certificate file.  Relative paths are resolved against
-    /// base_dir; absolute paths are used as-is.
-    cert_path: Option<String>,
-    /// Path to TLS private key file.  Same resolution rules as cert_path.
-    key_path: Option<String>,
-    /// Per-client credentials.  When any entries are present the broker
-    /// requires authentication on all connections.
-    #[serde(default)]
-    clients: Vec<ClientAclConfig>,
-}
-
-impl Default for BrokerSection {
-    fn default() -> Self {
-        Self {
-            host: default_broker_host(),
-            port: default_broker_port(),
-            v5_port: default_broker_v5_port(),
-            tls_port: None,
-            cert_path: None,
-            key_path: None,
-            clients: vec![],
-        }
-    }
-}
-
-impl BrokerSection {
-    fn resolve(&mut self, base: &Path) {
-        resolve_opt_path(&mut self.cert_path, base);
-        resolve_opt_path(&mut self.key_path, base);
-    }
-}
-
-fn default_broker_host() -> String {
-    "0.0.0.0".into()
-}
-fn default_broker_v5_port() -> Option<u16> {
-    Some(1884)
-}
-fn default_broker_port() -> u16 {
-    1883
-}
-
-/// A single `[[broker.clients]]` entry.
-#[derive(Deserialize, Clone)]
-struct ClientAclConfig {
-    id: String,
-    password: String,
-    #[serde(default)]
-    allow_pub: Vec<String>,
-    #[serde(default)]
-    allow_sub: Vec<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct NotifySection {
-    #[serde(default)]
-    channels: Vec<ChannelConfig>,
-}
-
-/// `[startup]` section of homecore.toml.
-#[derive(Deserialize)]
-struct StartupSection {
-    /// Seconds to wait after launch before publishing initial mode states.
-    ///
-    /// Plugins need time to connect and subscribe to their cmd topics.
-    /// If a rule fires during this window (e.g. mode_night already on at
-    /// restart) and the target plugin hasn't subscribed yet, the command is
-    /// silently dropped.  Increase this value if you have plugins with long
-    /// startup times.  Default: 10 s.
-    #[serde(default = "default_startup_delay")]
-    plugin_ready_delay_secs: u64,
-}
-
-fn default_startup_delay() -> u64 {
-    10
-}
-
-impl Default for StartupSection {
-    fn default() -> Self {
-        Self {
-            plugin_ready_delay_secs: default_startup_delay(),
-        }
-    }
-}
-
-/// `[shutdown]` section of homecore.toml.
-#[derive(Deserialize)]
-struct ShutdownConfig {
-    /// Seconds to wait for in-flight rule action tasks to finish during graceful
-    /// shutdown before forcing a stop.  Default: 10 s.
-    #[serde(default = "default_drain_timeout")]
-    drain_timeout_secs: u64,
-}
-
-fn default_drain_timeout() -> u64 {
-    10
-}
-
-impl Default for ShutdownConfig {
-    fn default() -> Self {
-        Self {
-            drain_timeout_secs: default_drain_timeout(),
-        }
-    }
-}
-
-/// `[web_admin]` section of homecore.toml.
-#[derive(Deserialize, Default)]
-struct WebAdminSection {
-    /// Enable the built-in admin UI served by HomeCore.
-    ///
-    /// When enabled, HomeCore serves the pre-built Leptos/WASM admin UI
-    /// as static files and preserves the API under `/api/v1`.
-    /// Requires `dist_path` to point to a valid `trunk build` output directory.
-    #[serde(default)]
-    enabled: bool,
-
-    /// Path to the Leptos UI build output directory (trunk build --release).
-    /// Relative paths are resolved against base_dir.
-    /// Required when enabled = true.
-    #[serde(default)]
-    dist_path: Option<String>,
-}
-
-/// `[calendars]` section of homecore.toml.
-#[derive(Deserialize)]
-struct CalendarsSection {
-    /// Directory containing `.ics` calendar files.
-    /// Default: `{base_dir}/config/calendars`
-    #[serde(default)]
-    dir: String,
-    /// How many days forward to expand recurring events.  Default: 400.
-    #[serde(default = "default_expansion_days")]
-    expansion_days: u32,
-}
-
-fn default_expansion_days() -> u32 {
-    400
-}
-
-impl Default for CalendarsSection {
-    fn default() -> Self {
-        Self {
-            dir: String::new(),
-            expansion_days: default_expansion_days(),
-        }
-    }
-}
-
-impl CalendarsSection {
-    fn resolve(&mut self, base: &Path) {
-        resolve_path(&mut self.dir, base, "config/calendars");
-    }
-}
-
-/// `[scheduler]` section of homecore.toml.
-#[derive(Deserialize)]
-struct SchedulerSection {
-    /// How many minutes back from startup to search for missed time-based
-    /// triggers (SunEvent and TimeOfDay).  Any rule whose scheduled time falls
-    /// within `(now - window, now]` is fired immediately on startup so that a
-    /// brief process restart does not silently skip an automation.
-    ///
-    /// Set to 0 to disable catch-up entirely.  Default: 15.
-    #[serde(default = "default_catchup_window")]
-    catchup_window_minutes: u32,
-}
-
-fn default_catchup_window() -> u32 {
-    15
-}
-
-impl Default for SchedulerSection {
-    fn default() -> Self {
-        Self {
-            catchup_window_minutes: default_catchup_window(),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct LocationSection {
-    latitude: f64,
-    longitude: f64,
-    /// IANA zone name (e.g. `"America/New_York"`). Drives every
-    /// user-facing timestamp — log file/stderr output, console-style
-    /// API endpoints, mode-manager "what time is it locally" checks.
-    /// Storage stays UTC. Falls back to UTC when unset or unparseable;
-    /// the parse error is logged at startup so a typo is visible
-    /// without reading the source.
-    #[serde(default)]
-    timezone: Option<String>,
-}
-
-impl Default for LocationSection {
-    fn default() -> Self {
-        Self {
-            latitude: 38.9072,
-            longitude: -77.0369,
-            timezone: None,
-        }
-    }
-}
-
-/// `[metrics]` section — gates `GET /api/v1/metrics` by source IP.
-///
-/// Prometheus scrapers can't easily set Authorization headers, so the
-/// metrics endpoint is gated by network identity instead. The whitelist
-/// defaults to empty, which means **no IPs are allowed** — operators must
-/// explicitly list the scrape source(s) before metrics become reachable.
-///
-/// This is deliberate and is not going to be auto-discovered from the host's
-/// interfaces. Metrics expose device counts, rule counts, and plugin health;
-/// defaulting them open to whatever subnet the machine happens to sit on would
-/// widen the attack surface silently, and "it worked without me configuring it"
-/// is exactly how an endpoint ends up exposed on a network nobody audited.
-/// Opening it stays an explicit act.
-#[derive(Deserialize, Default)]
-struct MetricsSection {
-    /// IP addresses or CIDR ranges allowed to scrape `/api/v1/metrics`.
-    /// Both IPv4 and IPv6 are supported.
-    /// Example: `whitelist = ["127.0.0.1/32", "10.0.0.0/24"]`.
-    ///
-    /// Empty (the default) means the endpoint returns 403 to every caller. It
-    /// says so at startup, and the 403 body names the exact CIDR line to add.
-    #[serde(default)]
-    whitelist: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct AuthSection {
-    /// HMAC-SHA256 secret for signing JWTs. **Deprecated** — prefer leaving
-    /// this unset and letting the core manage `jwt_secret_file` automatically.
-    /// If set, takes precedence over `jwt_secret_file` and emits a warning.
-    jwt_secret: Option<String>,
-    /// Path to a file holding the persistent JWT HS256 secret. When unset,
-    /// defaults to `<parent-of-state_db_path>/jwt_secret`. The file is
-    /// auto-generated with 0600 perms on first startup and re-used across
-    /// restarts so issued tokens survive reboots.
-    #[serde(default)]
-    jwt_secret_file: Option<std::path::PathBuf>,
-    #[serde(default = "default_expiry")]
-    token_expiry_hours: u64,
-    /// Refresh-token lifetime in days. A successful login also returns a
-    /// long-lived refresh token; each `/auth/refresh` call rotates it.
-    /// Default: 30 days.
-    #[serde(default = "default_refresh_days")]
-    refresh_token_expiry_days: u64,
-    /// How many days of audit-log history to keep. Entries older than this
-    /// are pruned by a background task that runs every 6 hours.
-    /// Default: 365 days.
-    #[serde(default = "default_audit_retention_days")]
-    audit_retention_days: u64,
-    /// IP addresses or CIDR ranges that may access all API endpoints without
-    /// a JWT.  Requests from these addresses receive full Admin access.
-    /// Parsed as standard CIDR notation.  Both IPv4 and IPv6 are supported.
-    /// Example: ["127.0.0.1/32", "::1/128", "192.168.1.0/24"]
-    ///
-    /// **Deprecated** — prefer `[auth.admin_uds]` for same-host admin
-    /// tooling. This option will be removed in a future release.
-    #[serde(default)]
-    whitelist: Vec<String>,
-    /// Admin-only Unix domain socket listener for `hc-cli` and other
-    /// same-host admin tooling. Replaces the CIDR whitelist.
-    #[serde(default)]
-    admin_uds: AdminUdsSection,
-    /// Path where the auto-generated initial admin password is written
-    /// the first time homeCore boots with no users in the store. Set to
-    /// the empty string to disable file output (password is still
-    /// printed to logs).
-    ///
-    /// Defaults to `<parent-of-state_db_path>/INITIAL_ADMIN_PASSWORD`,
-    /// 0600. The file should be deleted by the operator after first
-    /// login; homeCore does NOT re-write it on subsequent boots.
-    #[serde(default)]
-    initial_admin_password_file: Option<std::path::PathBuf>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AdminUdsSection {
-    #[serde(default)]
-    enabled: bool,
-    /// Default: `/run/homecore/admin.sock`.
-    #[serde(default = "default_admin_uds_path")]
-    path: String,
-    /// POSIX group that owns the socket. Members of this group can connect.
-    #[serde(default = "default_admin_uds_group")]
-    group: String,
-    /// Mode for the socket file, as an octal string (e.g. "0660").
-    #[serde(default = "default_admin_uds_mode")]
-    mode: String,
-    /// Extra UIDs allowed to connect. The process UID is always allowed.
-    #[serde(default)]
-    allowed_uids: Vec<u32>,
-}
-
-fn default_admin_uds_path() -> String {
-    "/run/homecore/admin.sock".into()
-}
-fn default_admin_uds_group() -> String {
-    "homecore-admin".into()
-}
-fn default_admin_uds_mode() -> String {
-    "0660".into()
-}
-
-impl Default for AdminUdsSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            path: default_admin_uds_path(),
-            group: default_admin_uds_group(),
-            mode: default_admin_uds_mode(),
-            allowed_uids: vec![],
-        }
-    }
-}
-
-fn default_expiry() -> u64 {
-    24
-}
-
-fn default_refresh_days() -> u64 {
-    30
-}
-
-fn default_audit_retention_days() -> u64 {
-    365
-}
-
-impl Default for AuthSection {
-    fn default() -> Self {
-        Self {
-            jwt_secret: None,
-            jwt_secret_file: None,
-            token_expiry_hours: 24,
-            refresh_token_expiry_days: 30,
-            audit_retention_days: 365,
-            whitelist: vec![],
-            admin_uds: AdminUdsSection::default(),
-            initial_admin_password_file: None,
-        }
-    }
-}
+// ── config structs ──────────────────────────────────────────────────────────
+//
+// Moved to the `hc-config` crate so `hc-api` can describe the same sections
+// it already serves through GET/PUT /system/config. `main.rs` keeps parsing
+// exactly the same shape.
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -1199,14 +617,17 @@ async fn main() -> Result<()> {
     // `homecore/#`, otherwise those early deliveries (plugin capability
     // manifests in particular) are broadcast to zero subscribers and lost.
     // tokio::broadcast does not buffer for future subscribers.
+    // Held so the API layer gets the same instance the rule executor uses.
+    let mut notify_service: Option<std::sync::Arc<NotificationService>> = None;
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
-        let svc = NotificationService::from_configs(config.notify.channels)?;
+        let svc = std::sync::Arc::new(NotificationService::from_configs(config.notify.channels)?);
         info!(
             channels = count,
             registered = svc.channel_names().len(),
             "Notification service ready"
         );
+        notify_service = Some(svc.clone());
         core = core.with_notify(svc);
     }
 
@@ -1648,6 +1069,13 @@ async fn main() -> Result<()> {
     ))
     .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days)
     .with_metrics_whitelist(metrics_whitelist);
+
+    // The same notification service the rule executor holds, so a send-test
+    // exercises the channel that actually delivers.
+    let app_state = match notify_service {
+        Some(svc) => app_state.with_notify(svc),
+        None => app_state,
+    };
 
     // Enable the plugin registry when `[registry]` has both a url and a pubkey.
     let app_state = match (&config.registry.url, &config.registry.public_key) {

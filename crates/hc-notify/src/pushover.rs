@@ -23,6 +23,7 @@ const PUSHOVER_API_URL: &str = "https://api.pushover.net/1/messages.json";
 /// priority  = 0             # optional — -2 (lowest) to 2 (emergency). Default 0.
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PushoverConfig {
     pub api_token: String,
     pub user_key: String,

@@ -189,8 +189,11 @@ impl Core {
     }
 
     /// Attach a notification service so `Notify` rule actions are delivered.
-    pub fn with_notify(mut self, svc: NotificationService) -> Self {
-        self.notify = Some(Arc::new(svc));
+    /// Takes an `Arc` rather than the service itself so the same instance can
+    /// be shared with the API layer, which offers a send-test. Testing through
+    /// a second instance would prove nothing about the one that delivers.
+    pub fn with_notify(mut self, svc: Arc<NotificationService>) -> Self {
+        self.notify = Some(svc);
         self
     }
 
@@ -400,8 +403,17 @@ impl Core {
         // Migrate legacy plugin_ids (core.switch → core.glue) on startup.
         {
             let store = self.state.clone();
+            let bus = self.pub_bus.clone();
             tokio::spawn(async move {
                 glue::migrate_legacy_plugin_ids(&store).await;
+                // Core's own devices never had schemas, so every client
+                // inferred them — a timer's `state` became a text box wanting
+                // `"finished"` with the quotes.
+                glue::publish_core_device_schemas(&store).await;
+                // A group only recalculates when a member changes, so one
+                // whose members did not move while the hub was down reads as
+                // "nothing matches" when it may be fully satisfied.
+                glue::recalculate_all_groups(&store, &bus).await;
             });
         }
 

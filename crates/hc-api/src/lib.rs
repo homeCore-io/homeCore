@@ -234,6 +234,13 @@ pub struct AppState {
     pub metrics: std::sync::Arc<MetricsCollector>,
     /// File paths required to produce a backup archive.
     pub backup_paths: Option<BackupPaths>,
+
+    /// The notification channels, so an operator can prove one works.
+    ///
+    /// The rule executor owns the same service; this is a second handle to it,
+    /// not a second service — a test that went through a different instance
+    /// would prove nothing about the one that actually delivers.
+    pub notify: Option<Arc<hc_notify::NotificationService>>,
     /// Wall-clock time the server started, for uptime calculation.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Per-rule ring buffer of recent evaluation results; provided by the rule engine.
@@ -685,6 +692,7 @@ impl AppState {
             log_stream: None,
             metrics,
             backup_paths: None,
+            notify: None,
             started_at: chrono::Utc::now(),
             fire_history: None,
             rule_groups: None,
@@ -787,6 +795,11 @@ impl AppState {
     }
 
     /// Attach file paths used by `POST /system/backup`.
+    pub fn with_notify(mut self, svc: Arc<hc_notify::NotificationService>) -> Self {
+        self.notify = Some(svc);
+        self
+    }
+
     pub fn with_backup_paths(mut self, paths: BackupPaths) -> Self {
         self.backup_paths = Some(paths);
         self
@@ -992,7 +1005,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/glue",
             get(handlers::list_glue).post(handlers::create_glue),
         )
-        .route("/glue/:id", delete(handlers::delete_glue))
+        .route(
+            "/glue/:id",
+            delete(handlers::delete_glue).patch(handlers::update_glue),
+        )
         // Modes (mode devices are also visible via /devices)
         .route(
             "/modes",
@@ -1180,6 +1196,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/system/config",
             get(handlers::get_system_config).put(handlers::put_system_config),
         )
+        .route(
+            "/system/config/descriptor",
+            get(handlers::get_system_config_descriptor),
+        )
+        .route("/notify/test", post(handlers::notify_test))
         .route("/system/restart", post(handlers::system_restart))
         // WebSocket connection registry (OPS-1 piece 3). Admin-only;
         // role check is in the handler itself, the route_layer below

@@ -28,6 +28,7 @@ use crate::channel::NotifyChannel;
 /// starttls  = true         # optional, default true; set false for port 465
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EmailConfig {
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]

@@ -3,6 +3,17 @@
 # Alpine Linux — minimal, static-friendly runtime
 # =============================================================================
 #
+# THIS IS NOT THE PUBLISHED IMAGE. It builds core from source, here, as a local
+# convenience. The image on ghcr.io/homecore-io/hc-core is built by this repo's
+# release.yml from `images/Dockerfile.core` in homeCore-io/docker, against
+# prebuilt musl binaries — a different recipe with a different layout
+# (/homecore, not /opt/homecore) and a privilege-dropping entrypoint.
+#
+# So do not treat a change here as changing what ships, and do not expect the
+# base-image pin below to affect the released image. To run homeCore in
+# containers, use the compose files in homeCore-io/docker; they wire hc-core
+# together with hc-web, which serves the UI and proxies /api/v1 here.
+#
 # Build:
 #   docker build -t homecore:latest .
 #

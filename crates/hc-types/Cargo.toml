@@ -13,6 +13,10 @@ wasm = ["uuid/js", "chrono/wasmbind"]
 # thing rather than against itself. Off by default: wasm clients never compile
 # schemars, and neither does the shipped server unless hc-api asks for it.
 schema = ["dep:schemars"]
+# The config-descriptor builders. Core turns this on to describe homecore.toml;
+# plugin-sdk-rs turns it on and re-exports the module, so plugins and core
+# author descriptors with one implementation and check them with one rule.
+descriptor = []
 
 [dependencies]
 serde      = { workspace = true }
