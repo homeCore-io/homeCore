@@ -21,5 +21,6 @@ serde          = { workspace = true }
 schemars       = { workspace = true, optional = true }
 
 [dev-dependencies]
+hc-types       = { path = "../hc-types", features = ["descriptor"] }
 toml           = { workspace = true }
 serde_json     = { workspace = true }

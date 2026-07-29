@@ -1460,6 +1460,7 @@ dependencies = [
  "hc-influx",
  "hc-logging",
  "hc-notify",
+ "hc-types",
  "schemars",
  "serde",
  "serde_json",

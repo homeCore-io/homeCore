@@ -90,3 +90,35 @@ fn the_schema_covers_the_nested_sections() {
     let port = defs["ServerSection"]["properties"]["port"].clone();
     assert!(!port.is_null(), "server.port should be described");
 }
+
+/// The coverage rule has to work against *this* schema, not just a plugin's.
+///
+/// This is the check Phase 4's descriptor will be held to, exercised now while
+/// the descriptor is still empty: with nothing described, every leaf of
+/// homecore.toml should be reported missing. If the walk failed to descend into
+/// the nested `[logging.*]` tables the list would be suspiciously short, and a
+/// descriptor written later would pass its coverage test while omitting half
+/// the file.
+#[cfg(feature = "schema")]
+#[test]
+fn the_coverage_rule_reads_this_schema() {
+    use hc_types::config_descriptor::{missing_schema_coverage, Descriptor};
+
+    let schema = serde_json::to_value(schemars::schema_for!(AppConfig)).unwrap();
+    let nothing_described = Descriptor::new("homecore").build();
+
+    let missing = missing_schema_coverage(&schema, &nothing_described, &[]);
+
+    assert!(
+        missing.iter().any(|k| k == "server.port"),
+        "a top-level leaf should be reported: {missing:?}"
+    );
+    assert!(
+        missing.iter().any(|k| k.starts_with("logging.")),
+        "the walk must descend into the nested logging tables: {missing:?}"
+    );
+    assert!(
+        missing.iter().any(|k| k.starts_with("auth.admin_uds.")),
+        "and into a struct nested two deep: {missing:?}"
+    );
+}
