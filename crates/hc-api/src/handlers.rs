@@ -9094,7 +9094,7 @@ token = "TOKEN-TWO"
         state.store.upsert_device(&d).await.expect("seed");
 
         let area_id = area_id_from_name("studio_b");
-        patch_area(
+        let resp = patch_area(
             State(state.clone()),
             AreasWrite(whitelist_claims()),
             Path(area_id),
@@ -9104,6 +9104,9 @@ token = "TOKEN-TWO"
         )
         .await
         .into_response();
+        // Assert it, rather than discard it: a rename that 500s would
+        // otherwise leave this test asserting only that nothing changed.
+        assert_eq!(resp.status(), StatusCode::OK);
 
         let stored = state
             .store

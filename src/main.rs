@@ -210,7 +210,6 @@ fn build_effective_plugins(
 // it already serves through GET/PUT /system/config. `main.rs` keeps parsing
 // exactly the same shape.
 
-
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Default destination for the first-boot admin password file:

@@ -8,6 +8,31 @@ repository  = "https://github.com/homeCore-io/homeCore"
 
 [workspace]
 resolver = "2"
+# `cargo test` at the root tests the *current package* only, and the root
+# package is the binary — so every crate's tests (hc-api's 100+, hc-config's
+# coverage rule) were invisible to CI, which runs a bare
+# `cargo test --all-features`. Listing the members as defaults makes the
+# workspace the default unit of work for build, test and clippy alike.
+default-members = [
+    ".",
+    "crates/hc-types",
+    "crates/hc-broker",
+    "crates/hc-mqtt-client",
+    "crates/hc-topic-map",
+    "crates/hc-core",
+    "crates/hc-state",
+    "crates/hc-api",
+    "crates/hc-web-admin",
+    "crates/hc-auth",
+    "crates/hc-api-types",
+    "crates/hc-cli",
+    "crates/hc-scripting",
+    "crates/hc-notify",
+    "crates/hc-logging",
+    "crates/hc-influx",
+    "crates/hc-config",
+    "crates/hc-time",
+]
 members = [
     "crates/hc-types",
     "crates/hc-broker",
