@@ -189,8 +189,11 @@ impl Core {
     }
 
     /// Attach a notification service so `Notify` rule actions are delivered.
-    pub fn with_notify(mut self, svc: NotificationService) -> Self {
-        self.notify = Some(Arc::new(svc));
+    /// Takes an `Arc` rather than the service itself so the same instance can
+    /// be shared with the API layer, which offers a send-test. Testing through
+    /// a second instance would prove nothing about the one that delivers.
+    pub fn with_notify(mut self, svc: Arc<NotificationService>) -> Self {
+        self.notify = Some(svc);
         self
     }
 

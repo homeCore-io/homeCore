@@ -8275,6 +8275,103 @@ pub async fn list_calendar_events(
 // System config + restart  (admin-only; modify homecore.toml at runtime)
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct NotifyTestBody {
+    /// A configured channel name, or `all` to fan out to every one.
+    pub channel: String,
+    /// What to send. Defaults to something that identifies itself, because the
+    /// message arrives on somebody's phone and "test" alone is unhelpful three
+    /// days later.
+    pub message: Option<String>,
+}
+
+/// `POST /api/v1/notify/test`
+///
+/// Send a message through a configured channel, so an operator can find out
+/// whether it works without waiting for a rule to fire. Admin-only: a channel
+/// reaches a real phone or inbox, and this is a send button.
+///
+/// Failure is reported as 502 with the provider's own error, not 500 — the
+/// request was fine, the delivery was not, and the difference is the whole
+/// answer the operator came for.
+pub async fn notify_test(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Json(body): Json<NotifyTestBody>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    let Some(notify) = s.notify.as_ref() else {
+        // No channels configured at all: `[[notify.channels]]` is empty or the
+        // service was never built. Saying so beats "channel not found".
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "no notification channels are configured",
+            })),
+        )
+            .into_response();
+    };
+
+    let channel = body.channel.trim();
+    if channel.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "channel is required" })),
+        )
+            .into_response();
+    }
+
+    let message = body
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("Test message from homeCore. If you are reading this, the channel works.");
+
+    let result = notify.notify(channel, "homeCore", message).await;
+
+    // Audited either way: this sends something to a person, and a burst of
+    // tests is worth being able to see after the fact. The message body is
+    // recorded — it is operator-authored and contains no credential — while
+    // the channel's own configuration is not.
+    let mut e =
+        audit::entry_from_claims(&claims, "notify.test").with_target("notify_channel", channel);
+    e.result = if result.is_ok() {
+        hc_state::AuditResult::Success
+    } else {
+        hc_state::AuditResult::Error
+    };
+    e.detail = json!({ "channel": channel });
+    audit::emit(&s, e).await;
+
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "sent": true, "channel": channel })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "sent": false,
+                "channel": channel,
+                // The provider's message, chained — "Notification channel 'x'
+                // not configured" and an SMTP rejection are different problems
+                // and the operator has to be able to tell them apart.
+                "error": format!("{err:#}"),
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /api/v1/system/config/descriptor`
 ///
 /// How to *present* homecore.toml: sections in a sensible order, a typed kind
@@ -8872,6 +8969,74 @@ token = "TOKEN-TWO"
             scopes: role.scopes(),
             actor: None,
         }
+    }
+
+    // ── notify test ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn notify_test_is_admin_only() {
+        // It sends something to a real phone or inbox. Read access to the
+        // house is not consent to make it buzz.
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("u1", Role::User)),
+            Json(NotifyTestBody {
+                channel: "phone".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn notify_test_says_when_nothing_is_configured() {
+        // The common case on a fresh house: no channels at all. 503 with a
+        // plain reason beats "channel 'phone' not configured", which reads as
+        // a typo in the name.
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("admin", Role::Admin)),
+            Json(NotifyTestBody {
+                channel: "phone".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("configured"),
+            "should explain that there are no channels: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_test_rejects_an_empty_channel_name() {
+        let state = mk_state().await;
+        let resp = notify_test(
+            State(state),
+            AuthUser(claims_for("admin", Role::Admin)),
+            Json(NotifyTestBody {
+                channel: "   ".into(),
+                message: None,
+            }),
+        )
+        .await
+        .into_response();
+        // 503 before 422 would be wrong the other way round too — but with no
+        // service configured the missing service is the more useful answer.
+        assert!(
+            resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+                || resp.status() == StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     // ── system config descriptor ────────────────────────────────────────

@@ -1333,6 +1333,7 @@ dependencies = [
  "hc-core",
  "hc-logging",
  "hc-mqtt-client",
+ "hc-notify",
  "hc-scripting",
  "hc-state",
  "hc-time",

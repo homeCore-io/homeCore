@@ -617,14 +617,17 @@ async fn main() -> Result<()> {
     // `homecore/#`, otherwise those early deliveries (plugin capability
     // manifests in particular) are broadcast to zero subscribers and lost.
     // tokio::broadcast does not buffer for future subscribers.
+    // Held so the API layer gets the same instance the rule executor uses.
+    let mut notify_service: Option<std::sync::Arc<NotificationService>> = None;
     if !config.notify.channels.is_empty() {
         let count = config.notify.channels.len();
-        let svc = NotificationService::from_configs(config.notify.channels)?;
+        let svc = std::sync::Arc::new(NotificationService::from_configs(config.notify.channels)?);
         info!(
             channels = count,
             registered = svc.channel_names().len(),
             "Notification service ready"
         );
+        notify_service = Some(svc.clone());
         core = core.with_notify(svc);
     }
 
@@ -1066,6 +1069,13 @@ async fn main() -> Result<()> {
     ))
     .with_refresh_token_expiry_days(config.auth.refresh_token_expiry_days)
     .with_metrics_whitelist(metrics_whitelist);
+
+    // The same notification service the rule executor holds, so a send-test
+    // exercises the channel that actually delivers.
+    let app_state = match notify_service {
+        Some(svc) => app_state.with_notify(svc),
+        None => app_state,
+    };
 
     // Enable the plugin registry when `[registry]` has both a url and a pubkey.
     let app_state = match (&config.registry.url, &config.registry.public_key) {
