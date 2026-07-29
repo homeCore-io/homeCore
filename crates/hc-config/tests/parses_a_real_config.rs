@@ -122,3 +122,20 @@ fn the_coverage_rule_reads_this_schema() {
         "and into a struct nested two deep: {missing:?}"
     );
 }
+
+/// Prints every leaf of the config schema. Not a test of anything — a way to
+/// get the authoritative key list (serde names, nesting and all) out of the
+/// types rather than reading 600 lines of struct by eye.
+/// `cargo test -p hc-config --features schema,descriptor -- --ignored --nocapture list_every`
+#[cfg(all(feature = "schema", feature = "descriptor"))]
+#[test]
+#[ignore]
+fn list_every_config_key() {
+    use hc_types::config_descriptor::{missing_schema_coverage, Descriptor};
+    let schema = serde_json::to_value(schemars::schema_for!(AppConfig)).unwrap();
+    let keys = missing_schema_coverage(&schema, &Descriptor::new("homecore").build(), &[]);
+    println!("{} keys", keys.len());
+    for k in keys {
+        println!("{k}");
+    }
+}

@@ -9,6 +9,11 @@
 //!
 //! See `claude-notes/plans/system_config_descriptor.md`.
 
+/// `homecore.toml` described in the config-descriptor vocabulary, so a client
+/// renders it with the renderer it already has for plugins.
+#[cfg(feature = "descriptor")]
+pub mod descriptor;
+
 use hc_influx::InfluxConfig;
 use hc_logging::LoggingConfig;
 use hc_notify::ChannelConfig;
