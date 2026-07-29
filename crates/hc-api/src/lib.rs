@@ -1183,6 +1183,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/system/config",
             get(handlers::get_system_config).put(handlers::put_system_config),
         )
+        .route(
+            "/system/config/descriptor",
+            get(handlers::get_system_config_descriptor),
+        )
         .route("/system/restart", post(handlers::system_restart))
         // WebSocket connection registry (OPS-1 piece 3). Admin-only;
         // role check is in the handler itself, the route_layer below

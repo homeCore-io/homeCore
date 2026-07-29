@@ -1329,6 +1329,7 @@ dependencies = [
  "ed25519-dalek",
  "hc-api-types",
  "hc-auth",
+ "hc-config",
  "hc-core",
  "hc-logging",
  "hc-mqtt-client",

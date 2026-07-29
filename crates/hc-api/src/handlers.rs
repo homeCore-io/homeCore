@@ -8275,6 +8275,35 @@ pub async fn list_calendar_events(
 // System config + restart  (admin-only; modify homecore.toml at runtime)
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/system/config/descriptor`
+///
+/// How to *present* homecore.toml: sections in a sensible order, a typed kind
+/// per field, help text, and conditionals — the same vocabulary a plugin
+/// publishes for its own config, so a client renders both with one renderer.
+///
+/// Values still come from `GET /system/config`; this says nothing about them.
+/// Admin-only, matching the endpoint that serves the values.
+pub async fn get_system_config_descriptor(AuthUser(claims): AuthUser) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+
+    // Same envelope as GET /plugins/:id/config/descriptor, so a client can
+    // hand either to the same renderer without unwrapping them differently.
+    (
+        StatusCode::OK,
+        Json(json!({
+            "plugin_id": "homecore",
+            "descriptor": hc_config::descriptor::system_config_descriptor(),
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /api/v1/system/config`
 ///
 /// Returns the current homecore.toml — both the raw text (for the raw
@@ -8843,6 +8872,38 @@ token = "TOKEN-TWO"
             scopes: role.scopes(),
             actor: None,
         }
+    }
+
+    // ── system config descriptor ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_descriptor_is_admin_only() {
+        // The values behind it are admin-only, and the descriptor names every
+        // path, port and secret field in the file — it should not be a map of
+        // the deployment handed to anyone who can sign in.
+        let resp = get_system_config_descriptor(AuthUser(claims_for("u1", Role::User)))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn config_descriptor_matches_the_plugin_envelope() {
+        let resp = get_system_config_descriptor(AuthUser(claims_for("admin", Role::Admin)))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = parse_json(resp).await;
+        // Same two keys GET /plugins/:id/config/descriptor returns, so one
+        // client-side renderer can consume either without special-casing.
+        assert_eq!(body["plugin_id"], "homecore");
+        let d = &body["descriptor"];
+        assert_eq!(d["descriptor_version"], 1);
+        assert!(
+            d["sections"].as_array().is_some_and(|s| s.len() >= 15),
+            "every section of homecore.toml should be described"
+        );
     }
 
     fn sample_dashboard(id: &str, owner_user_id: &str) -> DashboardDefinition {
