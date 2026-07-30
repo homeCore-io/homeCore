@@ -91,6 +91,39 @@ fn is_zero(v: &i32) -> bool {
     *v == 0
 }
 
+/// One end of a solar window: which sun event, and how far from it.
+///
+/// The two always travel together — an `on_event` means nothing without its
+/// `on_offset_minutes` — but they were passed as four loose parameters, which
+/// is what made [`solar_mode_is_on`] an eight-argument function and made every
+/// call site a column of bare values whose order was the only thing keeping
+/// "on" and "off" apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SolarEdge {
+    event: SunEventType,
+    offset_minutes: i32,
+}
+
+impl SolarEdge {
+    const fn new(event: SunEventType, offset_minutes: i32) -> Self {
+        Self {
+            event,
+            offset_minutes,
+        }
+    }
+}
+
+impl ModeConfig {
+    /// The window this mode is on across, when it is a solar mode with both
+    /// ends configured. `None` for a manual mode, or a half-declared solar one.
+    fn solar_window(&self) -> Option<(SolarEdge, SolarEdge)> {
+        Some((
+            SolarEdge::new(self.on_event?, self.on_offset_minutes),
+            SolarEdge::new(self.off_event?, self.off_offset_minutes),
+        ))
+    }
+}
+
 // Internal wrapper for TOML array-of-tables serialisation.
 #[derive(Debug, Serialize, Deserialize)]
 struct ModesFile {
@@ -215,13 +248,11 @@ fn solar_mode_is_on(
     lon: f64,
     today: NaiveDate,
     now_time: chrono::NaiveTime,
-    on_ev: SunEventType,
-    off_ev: SunEventType,
-    on_off: i32,
-    off_off: i32,
+    on: SolarEdge,
+    off: SolarEdge,
 ) -> Option<bool> {
-    let on_t = solar_event_time(lat, lon, today, on_ev, on_off)?;
-    let off_t = solar_event_time(lat, lon, today, off_ev, off_off)?;
+    let on_t = solar_event_time(lat, lon, today, on.event, on.offset_minutes)?;
+    let off_t = solar_event_time(lat, lon, today, off.event, off.offset_minutes)?;
     // Overnight window (sunset → sunrise): on_t is later in the day than off_t.
     Some(if on_t > off_t {
         now_time >= on_t || now_time < off_t
@@ -247,17 +278,14 @@ fn next_solar_transition(
         if mode.kind != ModeKind::Solar {
             continue;
         }
-        let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else {
+        let Some((on_edge, off_edge)) = mode.solar_window() else {
             continue;
         };
 
         for days_ahead in 0i64..=1 {
             let date = now.date_naive() + chrono::Duration::days(days_ahead);
-            for (ev, offset, new_on) in [
-                (on_ev, mode.on_offset_minutes, true),
-                (off_ev, mode.off_offset_minutes, false),
-            ] {
-                if let Some(t) = solar_event_time(lat, lon, date, ev, offset) {
+            for (edge, new_on) in [(on_edge, true), (off_edge, false)] {
+                if let Some(t) = solar_event_time(lat, lon, date, edge.event, edge.offset_minutes) {
                     let naive = NaiveDateTime::new(date, t);
                     if let Some(local_dt) = tz.from_local_datetime(&naive).latest() {
                         if local_dt > now {
@@ -448,20 +476,11 @@ impl ModeManager {
         for mode in modes {
             match mode.kind {
                 ModeKind::Solar => {
-                    let (Some(on_ev), Some(off_ev)) = (mode.on_event, mode.off_event) else {
+                    let Some((on_edge, off_edge)) = mode.solar_window() else {
                         continue;
                     };
-                    let on = solar_mode_is_on(
-                        lat,
-                        lon,
-                        today,
-                        now_time,
-                        on_ev,
-                        off_ev,
-                        mode.on_offset_minutes,
-                        mode.off_offset_minutes,
-                    )
-                    .unwrap_or(false);
+                    let on = solar_mode_is_on(lat, lon, today, now_time, on_edge, off_edge)
+                        .unwrap_or(false);
                     self.write_mode_state(mode, on, None).await;
                 }
                 ModeKind::Manual => {
@@ -683,19 +702,9 @@ impl ModeManager {
             if !existed || changed {
                 let on = match new_mode.kind {
                     ModeKind::Solar => {
-                        if let (Some(on_ev), Some(off_ev)) = (new_mode.on_event, new_mode.off_event)
-                        {
-                            solar_mode_is_on(
-                                lat,
-                                lon,
-                                today,
-                                now_time,
-                                on_ev,
-                                off_ev,
-                                new_mode.on_offset_minutes,
-                                new_mode.off_offset_minutes,
-                            )
-                            .unwrap_or(false)
+                        if let Some((on_edge, off_edge)) = new_mode.solar_window() {
+                            solar_mode_is_on(lat, lon, today, now_time, on_edge, off_edge)
+                                .unwrap_or(false)
                         } else {
                             false
                         }
@@ -776,10 +785,8 @@ mod tests {
             LON,
             date,
             naive_time(16, 0), // noon EDT ≈ 16:00 UTC
-            SunEventType::Sunrise,
-            SunEventType::Sunset,
-            0,
-            0,
+            SolarEdge::new(SunEventType::Sunrise, 0),
+            SolarEdge::new(SunEventType::Sunset, 0),
         );
         assert_eq!(on, Some(true), "day mode should be ON at solar noon");
     }
@@ -795,10 +802,8 @@ mod tests {
             LON,
             date,
             naive_time(3, 0),
-            SunEventType::Sunset,
-            SunEventType::Sunrise,
-            0,
-            0,
+            SolarEdge::new(SunEventType::Sunset, 0),
+            SolarEdge::new(SunEventType::Sunrise, 0),
         );
         assert_eq!(on, Some(true), "night mode should be ON at 03:00 UTC");
     }
@@ -820,10 +825,8 @@ mod tests {
             LON,
             date,
             sunrise,
-            SunEventType::Sunrise,
-            SunEventType::Sunset,
-            0,
-            0,
+            SolarEdge::new(SunEventType::Sunrise, 0),
+            SolarEdge::new(SunEventType::Sunset, 0),
         );
         assert_eq!(
             on_at_edge,
@@ -852,20 +855,16 @@ mod tests {
             LON,
             pre,
             probe,
-            SunEventType::Sunrise,
-            SunEventType::Sunset,
-            0,
-            0,
+            SolarEdge::new(SunEventType::Sunrise, 0),
+            SolarEdge::new(SunEventType::Sunset, 0),
         );
         let post_on = solar_mode_is_on(
             LAT,
             LON,
             post,
             probe,
-            SunEventType::Sunrise,
-            SunEventType::Sunset,
-            0,
-            0,
+            SolarEdge::new(SunEventType::Sunrise, 0),
+            SolarEdge::new(SunEventType::Sunset, 0),
         );
         assert_eq!(
             pre_on, post_on,
