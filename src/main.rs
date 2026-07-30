@@ -1008,19 +1008,17 @@ async fn main() -> Result<()> {
         hc_influx::spawn(config.influx.clone(), pub_bus.subscribe());
     }
 
-    let app_state = AppState::new_with_plugins_and_raw_bus(
-        store,
-        pub_bus,
-        internal_bus.clone(),
-        Some(publish_handle),
-        Some(source_rules_handle),
-        Some(rules_handle),
-        Some(rule_file_store),
-        jwt,
+    let app_state = AppState::new(hc_api::AppStateParams {
+        raw_bus: Some(internal_bus.clone()),
+        publish: Some(publish_handle),
+        source_rules_handle: Some(source_rules_handle),
+        rules_handle: Some(rules_handle),
+        rule_file_store: Some(rule_file_store),
         whitelist,
-        Some(modes_path),
-        plugin_registry.clone(),
-    );
+        modes_path: Some(modes_path),
+        plugins: plugin_registry.clone(),
+        ..hc_api::AppStateParams::new(store, pub_bus, jwt)
+    });
 
     let app_state = if config.logging.stream.enabled {
         app_state.with_log_stream(LogStreamState {

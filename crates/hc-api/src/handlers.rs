@@ -8806,7 +8806,7 @@ mod tests {
         let dashboard_store = DashboardStore::new(
             std::env::temp_dir().join(format!("hc_api_dashboards_{}.json", Uuid::new_v4())),
         );
-        AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
+        AppState::new(crate::AppStateParams::new(store, bus, jwt))
             .with_dashboard_store(dashboard_store, DashboardStoreData::default())
     }
 
