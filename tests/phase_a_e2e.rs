@@ -12,7 +12,7 @@
 //! If this passes, Phase A ships.
 
 use anyhow::Result;
-use hc_api::AppState;
+use hc_api::{AppState, AppStateParams};
 use hc_api_types::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse};
 use hc_api_types::auth::{CreateUserRequest, LoginRequest, LoginResponse};
 use hc_auth::{JwtService, Role};
@@ -65,7 +65,7 @@ impl Harness {
         .await?;
 
         let bus = EventBus::new(256);
-        let state = AppState::new(store, bus, None, None, None, None, jwt, vec![], None)
+        let state = AppState::new(AppStateParams::new(store, bus, jwt))
             .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]));
 
         let tcp_port = free_port();
@@ -280,7 +280,7 @@ async fn phase_a_e2e() -> Result<()> {
     )
     .await?;
     let bus = EventBus::new(256);
-    let state = AppState::new(store, bus, None, None, None, None, jwt, vec![], None);
+    let state = AppState::new(AppStateParams::new(store, bus, jwt));
     let tcp_port2 = free_port();
     let (shutdown_tx2, shutdown_rx2) = tokio::sync::watch::channel(false);
     let state_clone = state.clone();

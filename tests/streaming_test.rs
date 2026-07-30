@@ -435,7 +435,7 @@ struct HttpHarness {
 
 async fn boot_http_harness() -> Result<HttpHarness> {
     use chrono::Utc;
-    use hc_api::{management_rpc::ManagementRpc, AppState, PluginRecord};
+    use hc_api::{management_rpc::ManagementRpc, AppState, AppStateParams, PluginRecord};
     use hc_auth::{JwtService, Role};
     use hc_core::EventBus;
     use hc_mqtt_client::{MqttClient, MqttClientConfig};
@@ -546,17 +546,10 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     let admin_token = jwt.issue("uid-admin", "root", Role::Admin)?;
 
     // AppState.
-    let state = AppState::new(
-        store,
-        bus.clone(),
-        Some(publish_handle.clone()),
-        None,
-        None,
-        None,
-        jwt,
-        vec![],
-        None,
-    );
+    let state = AppState::new(AppStateParams {
+        publish: Some(publish_handle.clone()),
+        ..AppStateParams::new(store, bus.clone(), jwt)
+    });
     // Wire management_rpc so post_plugin_command forwards commands.
     let rpc = ManagementRpc::new(publish_handle.clone(), &bus);
     let state = AppState {

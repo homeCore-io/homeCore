@@ -527,86 +527,81 @@ pub fn spawn_plugin_state_listener(raw_bus: EventBus, store: StateStore, publish
     });
 }
 
-impl AppState {
-    pub fn new(
-        store: StateStore,
-        event_bus: EventBus,
-        publish: Option<PublishHandle>,
-        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rule_file_store: Option<RuleFileStore>,
-        jwt: JwtService,
-        whitelist: Vec<IpNet>,
-        modes_path: Option<std::path::PathBuf>,
-    ) -> Self {
-        // Default single-bus construction — suitable for test harnesses
-        // that merge raw MqttMessage and typed events onto one channel.
-        let raw_bus = event_bus.clone();
-        Self::new_with_plugins_and_raw_bus(
-            store,
-            event_bus,
-            raw_bus,
-            publish,
-            source_rules_handle,
-            rules_handle,
-            rule_file_store,
-            jwt,
-            whitelist,
-            modes_path,
-            Arc::new(RwLock::new(HashMap::new())),
-        )
-    }
+/// Everything [`AppState::new`] needs.
+///
+/// A struct rather than a parameter list because there were three
+/// constructors taking nine, ten and eleven arguments, each delegating to the
+/// next to supply the defaults — and because these values cannot be set after
+/// construction. `new` spawns background tasks that capture `plugins`,
+/// `event_bus`, `raw_bus` and `publish`: a heartbeat sweep that marks plugins
+/// offline, the event-log feeder, the streaming terminal observer and cache
+/// populator, and a plugin-offline injector that is only spawned when
+/// `publish` is already present. Handing those in afterwards through builder
+/// methods would leave the tasks holding the values they were built with,
+/// which fails silently — plugins that never go offline, streams watching a
+/// bus nothing publishes to.
+///
+/// Everything optional here has a working default, so a caller names only what
+/// it has: `AppStateParams::new(store, bus, jwt)`, or that as the tail of a
+/// struct literal.
+pub struct AppStateParams {
+    pub store: StateStore,
+    /// Carries typed events. In production this is `pub_bus`.
+    pub event_bus: EventBus,
+    pub jwt: JwtService,
+    /// Carries `Event::MqttMessage`. In production this is `internal_bus`,
+    /// which is distinct from [`Self::event_bus`]; the plugin-stream SSE
+    /// handler and the terminal observer subscribe to it. Defaults to
+    /// `event_bus`, which is what a single-bus test harness wants.
+    pub raw_bus: Option<EventBus>,
+    pub publish: Option<PublishHandle>,
+    pub source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+    pub rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
+    pub rule_file_store: Option<RuleFileStore>,
+    pub whitelist: Vec<IpNet>,
+    pub modes_path: Option<std::path::PathBuf>,
+    /// Pre-populated in production: the registry listener is spawned *before*
+    /// plugins do, so retained manifests published on CONNACK are not missed.
+    pub plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
+}
 
-    /// Back-compat: creates with a pre-populated plugin registry, using
-    /// `event_bus` for the raw bus as well. Prefer
-    /// `new_with_plugins_and_raw_bus` in production where internal_bus
-    /// (MqttMessage only) is distinct from pub_bus (typed events only).
-    pub fn new_with_plugins(
-        store: StateStore,
-        event_bus: EventBus,
-        publish: Option<PublishHandle>,
-        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rule_file_store: Option<RuleFileStore>,
-        jwt: JwtService,
-        whitelist: Vec<IpNet>,
-        modes_path: Option<std::path::PathBuf>,
-        plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
-    ) -> Self {
-        let raw_bus = event_bus.clone();
-        Self::new_with_plugins_and_raw_bus(
+impl AppStateParams {
+    /// The three an `AppState` cannot be built without; everything else
+    /// defaults to absent, empty, or the same bus.
+    pub fn new(store: StateStore, event_bus: EventBus, jwt: JwtService) -> Self {
+        Self {
             store,
             event_bus,
+            jwt,
+            raw_bus: None,
+            publish: None,
+            source_rules_handle: None,
+            rules_handle: None,
+            rule_file_store: None,
+            whitelist: Vec::new(),
+            modes_path: None,
+            plugins: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl AppState {
+    pub fn new(params: AppStateParams) -> Self {
+        let AppStateParams {
+            store,
+            event_bus,
+            jwt,
             raw_bus,
             publish,
             source_rules_handle,
             rules_handle,
             rule_file_store,
-            jwt,
             whitelist,
             modes_path,
             plugins,
-        )
-    }
-
-    /// Primary constructor used by production. `raw_bus` carries
-    /// `Event::MqttMessage` (in production this is `internal_bus`);
-    /// `event_bus` carries typed events (production = `pub_bus`). The
-    /// plugin-stream SSE handler and terminal observer subscribe to
-    /// `raw_bus`.
-    pub fn new_with_plugins_and_raw_bus(
-        store: StateStore,
-        event_bus: EventBus,
-        raw_bus: EventBus,
-        publish: Option<PublishHandle>,
-        source_rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rules_handle: Option<Arc<RwLock<Vec<Rule>>>>,
-        rule_file_store: Option<RuleFileStore>,
-        jwt: JwtService,
-        whitelist: Vec<IpNet>,
-        modes_path: Option<std::path::PathBuf>,
-        plugins: Arc<RwLock<HashMap<String, PluginRecord>>>,
-    ) -> Self {
+        } = params;
+        // One bus unless the caller separates them.
+        let raw_bus = raw_bus.unwrap_or_else(|| event_bus.clone());
         // Plugin-registry sync listener is spawned by the caller BEFORE
         // plugins spawn (see `spawn_plugin_registry_listener`), so the
         // retained manifest events aren't missed. Spawning it here is too
