@@ -372,6 +372,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tempfile::TempDir;
 
     fn fresh() -> (TempDir, AuditStore) {
@@ -550,5 +551,51 @@ mod tests {
         assert_eq!(page2.len(), 2);
         // No overlap between pages.
         assert_ne!(page1[0].id, page2[0].id);
+    }
+
+    /// `GET /system/status` reports `last_backup_at` by asking for the most
+    /// recent `system.backup_created` with `limit: 1`. That is only correct if
+    /// the newest row comes back first — an ordering the handler cannot see and
+    /// would fail silently on, reporting the *first* backup a house ever made
+    /// and never changing again.
+    #[test]
+    fn newest_first_so_limit_one_is_the_latest() {
+        let (_d, s) = fresh();
+        for day in [3, 21, 9] {
+            let mut e = AuditEntry::success(
+                AuditActorType::User,
+                Some(Uuid::new_v4()),
+                "admin",
+                "system.backup_created",
+            );
+            e.ts = Utc.with_ymd_and_hms(2026, 5, day, 1, 0, 0).unwrap();
+            s.record(&e).unwrap();
+        }
+        // Something else, newer than every backup: the filter must not let it
+        // through, or "last backed up" becomes "last did anything".
+        let mut other = AuditEntry::success(
+            AuditActorType::User,
+            Some(Uuid::new_v4()),
+            "admin",
+            "auth.login",
+        );
+        other.ts = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        s.record(&other).unwrap();
+
+        let rows = s
+            .query(&AuditQuery {
+                event_type: Some("system.backup_created".to_string()),
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_type, "system.backup_created");
+        assert_eq!(
+            rows[0].ts,
+            Utc.with_ymd_and_hms(2026, 5, 21, 1, 0, 0).unwrap(),
+            "expected the newest backup, not the first or the last inserted"
+        );
     }
 }

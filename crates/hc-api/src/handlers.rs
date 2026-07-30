@@ -251,6 +251,34 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         (0, 0)
     };
 
+    // When this house was last backed up.
+    //
+    // Read back out of the audit log rather than kept as a second copy: the
+    // backup handler already records `system.backup_created`, and a dedicated
+    // counter beside it would be one more thing that can disagree with the
+    // trail. `event_type` is indexed and the query is ordered `ts DESC`, so
+    // this is a single indexed lookup on a status endpoint that is polled.
+    //
+    // `null` therefore means "no backup recorded", not "never backed up" —
+    // the audit log is pruned to `[auth] audit_retention_days` (365 by
+    // default), so a backup older than that window is gone from it. Clients
+    // must not word this as "never".
+    let last_backup_at = match s
+        .store
+        .query_audit(&hc_state::AuditQuery {
+            event_type: Some("system.backup_created".to_string()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(rows) => rows.first().map(|e| e.ts),
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not read last backup time from the audit log");
+            None
+        }
+    };
+
     Json(json!({
         // Read from AppState rather than `env!()` so this reports the
         // binary crate's version (homecore), not hc-api's. See
@@ -265,6 +293,7 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         "state_db_bytes":    state_db_bytes,
         "history_db_bytes":  history_db_bytes,
         "timezone":          hc_time::configured_tz().to_string(),
+        "last_backup_at":    last_backup_at,
     }))
 }
 
