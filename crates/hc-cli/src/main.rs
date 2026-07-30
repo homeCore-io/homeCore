@@ -1,7 +1,7 @@
 //! `hc-cli` — command-line administration tool for homeCore.
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use hc_api_types::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse};
 use hc_api_types::auth::{CreateUserRequest, LoginRequest, LoginResponse};
 use hc_auth::Role;
@@ -29,44 +29,53 @@ struct Cli {
     cmd: Command,
 }
 
+/// Everything `hc-cli setup` takes.
+///
+/// A struct rather than seven fields on the enum variant: `cmd_setup` was
+/// taking ten arguments, seven of which were these, forwarded one at a time
+/// from a destructured match arm. clap flattens `Args` into the subcommand
+/// identically, so the command line is unchanged.
+#[derive(Args, Debug)]
+struct SetupArgs {
+    /// Admin username (default `admin`).
+    #[arg(long, default_value = "admin")]
+    admin_username: String,
+    /// Admin password. If not provided, prompts interactively.
+    #[arg(long)]
+    admin_password: Option<String>,
+    /// Also create a service user + API key in one step. Use this when
+    /// you know the first consumer up front (a script, a bridge, hc-mcp);
+    /// otherwise run `hc-cli api-key create` later to mint keys as needed.
+    #[arg(long, default_value = "false")]
+    create_service_key: bool,
+    /// Label for the service user and key (required when
+    /// `--create-service-key` is set). Used as both the username and
+    /// the key's display label.
+    #[arg(long, default_value = "api-service")]
+    service_label: String,
+    /// Comma-separated scopes for the service key. Must be a subset of
+    /// the service user's role scopes (controlled by `--service-role`).
+    #[arg(
+        long,
+        default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read"
+    )]
+    service_scopes: String,
+    /// Role for the service user: `read_only` or `user`. Defaults to the
+    /// safer `read_only` — bump to `user` for service accounts that
+    /// command devices or edit automations.
+    #[arg(long, default_value = "read_only")]
+    service_role: String,
+    /// Skip all prompts; fail if input would be required.
+    #[arg(long, default_value = "false")]
+    non_interactive: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
     /// First-run bootstrap: create an admin user, optionally mint one
     /// service API key in the same step. For additional keys later, use
     /// `hc-cli api-key create`.
-    Setup {
-        /// Admin username (default `admin`).
-        #[arg(long, default_value = "admin")]
-        admin_username: String,
-        /// Admin password. If not provided, prompts interactively.
-        #[arg(long)]
-        admin_password: Option<String>,
-        /// Also create a service user + API key in one step. Use this when
-        /// you know the first consumer up front (a script, a bridge, hc-mcp);
-        /// otherwise run `hc-cli api-key create` later to mint keys as needed.
-        #[arg(long, default_value = "false")]
-        create_service_key: bool,
-        /// Label for the service user and key (required when
-        /// `--create-service-key` is set). Used as both the username and
-        /// the key's display label.
-        #[arg(long, default_value = "api-service")]
-        service_label: String,
-        /// Comma-separated scopes for the service key. Must be a subset of
-        /// the service user's role scopes (controlled by `--service-role`).
-        #[arg(
-            long,
-            default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read"
-        )]
-        service_scopes: String,
-        /// Role for the service user: `read_only` or `user`. Defaults to the
-        /// safer `read_only` — bump to `user` for service accounts that
-        /// command devices or edit automations.
-        #[arg(long, default_value = "read_only")]
-        service_role: String,
-        /// Skip all prompts; fail if input would be required.
-        #[arg(long, default_value = "false")]
-        non_interactive: bool,
-    },
+    Setup(SetupArgs),
 
     /// Auth-related commands.
     #[command(subcommand)]
@@ -283,29 +292,7 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&config_path)?;
 
     match &cli.cmd {
-        Command::Setup {
-            admin_username,
-            admin_password,
-            create_service_key,
-            service_label,
-            service_scopes,
-            service_role,
-            non_interactive,
-        } => {
-            cmd_setup(
-                &cli,
-                &cfg,
-                &config_path,
-                admin_username,
-                admin_password.as_deref(),
-                *create_service_key,
-                service_label,
-                service_scopes,
-                service_role,
-                *non_interactive,
-            )
-            .await
-        }
+        Command::Setup(args) => cmd_setup(&cli, &cfg, &config_path, args).await,
         Command::Auth(cmd) => match cmd {
             AuthCommand::Login { username, password } => {
                 cmd_auth_login(&cli, &cfg, &config_path, username, password.as_deref()).await
@@ -430,14 +417,18 @@ async fn cmd_setup(
     cli: &Cli,
     cfg: &Config,
     _config_path: &std::path::Path,
-    admin_username: &str,
-    admin_password: Option<&str>,
-    create_service_key: bool,
-    service_label: &str,
-    service_scopes_csv: &str,
-    service_role: &str,
-    non_interactive: bool,
+    args: &SetupArgs,
 ) -> Result<()> {
+    // Bound to the shapes the body already used, so this stayed a change of
+    // signature rather than a rewrite of the command.
+    let admin_username = args.admin_username.as_str();
+    let admin_password = args.admin_password.as_deref();
+    let create_service_key = args.create_service_key;
+    let service_label = args.service_label.as_str();
+    let service_scopes_csv = args.service_scopes.as_str();
+    let service_role = args.service_role.as_str();
+    let non_interactive = args.non_interactive;
+
     let client = make_client(cli, cfg).await?;
 
     // Check current user count. If no users exist, we need to bootstrap;
