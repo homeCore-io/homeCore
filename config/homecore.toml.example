@@ -213,23 +213,19 @@ token_expiry_hours = 24
 # history_db_path = "data/history.db"    # relative to base_dir (default)
 
 # ---------------------------------------------------------------------------
-# Web admin UI
+# Web admin UI — off, because core no longer ships one
 #
-# When enabled, hc-core serves the bundled Leptos/WASM admin UI as
-# static files at `/`, with the API still under `/api/v1`. dist_path
-# points at the `trunk build --release` output directory; relative
-# paths resolve against base_dir.
+# hc-core is the API and the embedded broker. The UI is hc-web: its own
+# image, serving the app and reverse-proxying /api/v1 to core. Core stopped
+# baking a UI bundle in when the appliance model was retired, so there is
+# nothing at `dist_path` to serve and enabling this only produces 404s at `/`.
 #
-# - Container deployments (hc-core image, appliance image) bake the UI
-#   bundle in and create a `ui` symlink at base_dir, so the default
-#   below works out of the box.
-# - Standalone tarball installs: drop your hc-web-leptos `dist/` at
-#   base_dir/ui (or set dist_path explicitly) before enabling.
-# - To run headless / API-only: set enabled = false.
+# It remains for a standalone install that wants core to serve some static
+# bundle itself: point dist_path at the directory and flip enabled.
 # ---------------------------------------------------------------------------
 [web_admin]
-enabled   = true
-dist_path = "ui"
+enabled   = false
+# dist_path = "ui"
 
 # ---------------------------------------------------------------------------
 # Automation rules
@@ -317,84 +313,45 @@ app_name  = "homecore"
 # ---------------------------------------------------------------------------
 # Plugins
 #
-# HomeCore spawns each enabled plugin as a child process and supervises it
-# with exponential-backoff restarts (2 s → 4 → 8 → … → 60 s max).
-# Paths may be absolute or relative to base_dir.
+# There is deliberately no [[plugins]] here.
+#
+# This file used to declare yolink, lutron, sonos and zwave as enabled, with
+# paths into `plugins/<name>/bin/`. That described the appliance image, which
+# baked every plugin in — and it has not been true since plugins became
+# registry artifacts. Shipped as the container's default config it meant a
+# fresh install spent its first minutes supervising four binaries that were
+# never there, restarting each on the 2s→60s backoff and logging a failure
+# per attempt, before the operator had done anything at all.
+#
+# Plugins are installed at runtime instead: Plugins → Add in hc-web, or
+# POST /api/v1/plugins/install. Core fetches the signed artifact from the
+# registry below, verifies its ed25519 signature against `public_key`,
+# unpacks it under base_dir, and records it in config/plugins/managed.toml.
+# Adding hardware support never means editing this file.
+#
+# A [[plugins]] entry is still honoured for a plugin you build yourself and
+# want core to supervise from a path you control:
+#
+#   [[plugins]]
+#   id      = "plugin.custom"
+#   binary  = "plugins/hc-custom/bin/hc-custom"
+#   config  = "plugins/hc-custom/config/config.toml"
+#   enabled = true
 # ---------------------------------------------------------------------------
 
-[[plugins]]
-id      = "plugin.yolink"
-binary  = "plugins/hc-yolink/bin/hc-yolink"
-config  = "plugins/hc-yolink/config/config.toml"
-enabled = true
-
-[[plugins]]
-id      = "plugin.lutron"
-binary  = "plugins/hc-lutron/bin/hc-lutron"
-config  = "plugins/hc-lutron/config/config.toml"
-enabled = true
-
-[[plugins]]
-id      = "plugin.sonos"
-binary  = "plugins/hc-sonos/bin/hc-sonos"
-config  = "plugins/hc-sonos/config/config.toml"
-enabled = true
-
-[[plugins]]
-id      = "plugin.zwave"
-binary  = "plugins/hc-zwave/bin/hc-zwave"
-config  = "plugins/hc-zwave/config/config.toml"
-enabled = true
-
-[[plugins]]
-id      = "plugin.hue"
-binary  = "plugins/hc-hue/bin/hc-hue"
-config  = "plugins/hc-hue/config/config.toml"
-enabled = false
-
-[[plugins]]
-id      = "plugin.matter"
-binary  = "plugins/hc-matter/bin/hc-matter"
-config  = "plugins/hc-matter/config/config.toml"
-enabled = false
-
 # ---------------------------------------------------------------------------
-# Notifications
+# Plugin registry
 #
-# Named channels used by `Notify` rule actions.  The `name` field is what
-# you reference in rules: `channel = "telegram"`.
-# `channel = "all"` fans out to every registered channel.
+# Where "Add plugin" fetches from. `public_key` is the ed25519 key the index
+# is signed with — an artifact whose signature does not verify is refused, so
+# leaving this unset means no plugin can be installed from the UI at all.
 #
-# Supported types: telegram | pushover | email
-#
-# Telegram setup:
-#   1. Message @BotFather on Telegram → /newbot → get token
-#   2. Send a message to your new bot
-#   3. GET https://api.telegram.org/bot<TOKEN>/getUpdates → find chat.id
-#   Group/channel IDs are negative integers; personal chat IDs are positive.
+# Point both at your own host to run a private registry; `url` also accepts a
+# local path or a file:// URL.
 # ---------------------------------------------------------------------------
-# [[notify.channels]]
-# name      = "telegram"
-# type      = "telegram"
-# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-# chat_id   = "-100123456789"   # group/channel (negative) or user ID (positive)
-# markdown  = false             # optional: enable MarkdownV2 formatting
-
-# [[notify.channels]]
-# name      = "pushover"
-# type      = "pushover"
-# app_token = "azGDORePK8gMaC0QOYAMyEEuzJnyUi"
-# user_key  = "uQiRzpo4DXghDmr9QzzfQu27cmVRsG"
-
-# [[notify.channels]]
-# name          = "email"
-# type          = "email"
-# smtp_host     = "smtp.example.com"
-# smtp_port     = 587
-# username      = "homecore@example.com"
-# password      = "smtp-app-password"
-# from          = "homecore@example.com"
-# to            = ["you@example.com"]
+[registry]
+url        = "https://homecore.io/registry/index.json"
+public_key = "d64zXOo99GE+uYAPbtbIwLUJHtBaACJB73cUppj93I8="
 
 # ---------------------------------------------------------------------------
 # Topic maps for non-standard devices (Tasmota, Shelly, ESPHome, etc.)
