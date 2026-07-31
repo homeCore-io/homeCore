@@ -947,6 +947,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/auth/users/:id", delete(auth_handlers::delete_user))
         .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
+        .route(
+            "/auth/users/:id/password",
+            patch(auth_handlers::set_user_password),
+        )
         // API keys
         .route(
             "/auth/api-keys",

@@ -57,6 +57,21 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// An admin setting *someone else's* password.
+///
+/// Deliberately not [`ChangePasswordRequest`] with an optional current
+/// password: the two are different operations with different authority. Change
+/// is something you do to your own account by proving you already know the
+/// secret; reset is something an admin does to an account they cannot log into,
+/// which is the only way back in for a user who has forgotten theirs. Sharing
+/// one struct would mean one handler branching on whether a field was present,
+/// and "current_password omitted" is a bad thing for an auth path to treat as a
+/// mode switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetPasswordRequest {
+    pub new_password: String,
+}
+
 // ── User CRUD ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
