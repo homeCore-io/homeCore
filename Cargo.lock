@@ -253,7 +253,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -448,7 +448,7 @@ dependencies = [
 [[package]]
 name = "hc-logging"
 version = "0.1.4"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#9412ff37e6313bf21e11dc7a23240d6cfe33be49"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#5199fd5ff0f59e57ed72a0638ecca3bcbeb4bbfe"
 dependencies = [
  "anyhow",
  "chrono",
@@ -466,7 +466,7 @@ dependencies = [
 [[package]]
 name = "hc-time"
 version = "0.1.4"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#9412ff37e6313bf21e11dc7a23240d6cfe33be49"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#5199fd5ff0f59e57ed72a0638ecca3bcbeb4bbfe"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -476,7 +476,7 @@ dependencies = [
 [[package]]
 name = "hc-types"
 version = "0.1.4"
-source = "git+https://github.com/homeCore-io/homeCore?branch=main#9412ff37e6313bf21e11dc7a23240d6cfe33be49"
+source = "git+https://github.com/homeCore-io/homeCore?branch=main#5199fd5ff0f59e57ed72a0638ecca3bcbeb4bbfe"
 dependencies = [
  "chrono",
  "ron",
@@ -866,7 +866,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -980,8 +980,8 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.3.4"
-source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.4#15e80f75d42b7dbf6789b7e778936a736f6cc84c"
+version = "0.3.6"
+source = "git+https://github.com/homeCore-io/hc-plugin-sdk-rs?tag=v0.3.6#c511e52d11bf8b2ca8d3db0cb96fae2f119b0797"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1573,7 +1573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
