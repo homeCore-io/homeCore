@@ -40,6 +40,11 @@ pub struct LogStreamQuery {
     #[serde(default = "default_level")]
     pub level: String,
     pub target: Option<String>,
+    /// Only lines forwarded by this plugin. Exact match on the id core stamps
+    /// from the MQTT topic, so it catches everything the plugin's process
+    /// emitted — its own modules, the SDK's and its dependencies' — which a
+    /// `target` prefix cannot.
+    pub plugin_id: Option<String>,
     #[serde(default = "default_history")]
     pub history: usize,
     /// Optional per-tab fingerprint, mirrors `/events/stream`. Surfaces
@@ -113,6 +118,7 @@ pub async fn log_stream_handler(
 
     let min_level = parse_level(&params.level);
     let target_filter = params.target.clone();
+    let plugin_filter = params.plugin_id.clone();
     let history_count = params.history.min(500);
     let client_id = params.client_id.clone();
     let user_agent = headers
@@ -128,6 +134,7 @@ pub async fn log_stream_handler(
             log_stream,
             min_level,
             target_filter,
+            plugin_filter,
             history_count,
             connections,
             client_id,
@@ -145,6 +152,7 @@ async fn handle_socket(
     state: LogStreamState,
     min_level: u8,
     target_filter: Option<String>,
+    plugin_filter: Option<String>,
     history_count: usize,
     connections: WsConnections,
     client_id: Option<String>,
@@ -181,7 +189,12 @@ async fn handle_socket(
             ring.iter().skip(start).cloned().collect()
         };
         for line in history {
-            if !passes_filter(&line, min_level, target_filter.as_deref()) {
+            if !passes_filter(
+                &line,
+                min_level,
+                target_filter.as_deref(),
+                plugin_filter.as_deref(),
+            ) {
                 continue;
             }
             if let Ok(json) = serde_json::to_string(&line) {
@@ -198,7 +211,12 @@ async fn handle_socket(
                 result = rx.recv() => {
                     match result {
                         Ok(line) => {
-                            if !passes_filter(&line, min_level, target_filter.as_deref()) {
+                            if !passes_filter(
+                &line,
+                min_level,
+                target_filter.as_deref(),
+                plugin_filter.as_deref(),
+            ) {
                                 continue;
                             }
                             match serde_json::to_string(&line) {
@@ -247,6 +265,10 @@ pub struct LogTailQuery {
     /// Optional target prefix filter (matches `starts_with`, same as
     /// `/logs/stream`). Example: `target=hc_api::ws`.
     pub target: Option<String>,
+    /// Only lines forwarded by this plugin — same exact match as
+    /// `/logs/stream`, so a pane can load history and then stream with one
+    /// filter rather than two that disagree.
+    pub plugin_id: Option<String>,
     /// Optional RFC3339 timestamp; only lines newer than this are
     /// returned. Useful for incremental polling.
     pub since: Option<chrono::DateTime<chrono::Utc>>,
@@ -287,6 +309,7 @@ pub async fn list_logs(
 
     let min_level = parse_level(&params.level);
     let target = params.target.as_deref();
+    let plugin_id = params.plugin_id.as_deref();
     let since = params.since;
     let limit = params
         .limit
@@ -302,7 +325,7 @@ pub async fn list_logs(
 
     let filtered: Vec<LogLine> = snapshot
         .into_iter()
-        .filter(|l| passes_filter(l, min_level, target))
+        .filter(|l| passes_filter(l, min_level, target, plugin_id))
         .filter(|l| since.map(|t| l.timestamp > t).unwrap_or(true))
         .collect();
 
@@ -317,12 +340,24 @@ pub async fn list_logs(
     .into_response()
 }
 
-fn passes_filter(line: &LogLine, min_level: u8, target: Option<&str>) -> bool {
+fn passes_filter(
+    line: &LogLine,
+    min_level: u8,
+    target: Option<&str>,
+    plugin_id: Option<&str>,
+) -> bool {
     if level_to_u8(&line.level) < min_level {
         return false;
     }
     if let Some(t) = target {
         if !line.target.starts_with(t) {
+            return false;
+        }
+    }
+    // Exact, and absent means core's own logging — so asking for one plugin
+    // never yields core lines that merely share a module prefix.
+    if let Some(p) = plugin_id {
+        if line.plugin_id() != Some(p) {
             return false;
         }
     }
