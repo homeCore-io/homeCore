@@ -59,10 +59,18 @@ impl RuleFileStore {
         // was manually named never produces a duplicate.
         let path = match self.find_file(rule.id)? {
             Some(existing) => existing,
-            None => {
-                let slug = slugify(&rule.name);
-                self.dir.join(format!("{slug}.ron"))
-            }
+            // No file for this id yet, so the name decides the filename — and
+            // the name is not unique. Two rules may legitimately share one:
+            // `POST /automations/import` assigns every imported rule a fresh
+            // id, so importing a house's own export gives every rule a twin
+            // with the same name and therefore the same slug.
+            //
+            // Writing there anyway silently destroyed the original: one file
+            // held the new rule, core held both in memory, and a restart
+            // dropped the one that no longer had a file. Deleting the import
+            // removed the shared file and took the original with it. Neither
+            // step logged anything.
+            None => self.free_path(&slugify(&rule.name)),
         };
 
         let content = serialize_rule(rule, &path)?;
@@ -71,6 +79,27 @@ impl RuleFileStore {
             .with_context(|| format!("writing rule file {}", path.display()))?;
 
         Ok(path)
+    }
+
+    /// `{slug}.ron`, or the first `{slug}-2.ron`, `{slug}-3.ron`… that is free.
+    ///
+    /// Only called when no file holds this rule's id, so anything already at
+    /// the path belongs to a different rule and must not be written over.
+    fn free_path(&self, slug: &str) -> PathBuf {
+        let first = self.dir.join(format!("{slug}.ron"));
+        if !first.exists() {
+            return first;
+        }
+        // Bounded: a name colliding thousands of times is a bug elsewhere, and
+        // an unbounded loop here would hang the request rather than report it.
+        for n in 2..1000 {
+            let candidate = self.dir.join(format!("{slug}-{n}.ron"));
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        // Give up on a readable name rather than overwrite someone's rule.
+        self.dir.join(format!("{slug}-{}.ron", Uuid::new_v4()))
     }
 
     /// Delete the `.toml` file whose `id` field matches `id`.
@@ -545,5 +574,68 @@ mod tests {
         assert_eq!(slugify("front_door_arrival"), "front_door_arrival");
         assert_eq!(slugify("  My Rule!  "), "my_rule");
         assert_eq!(slugify("CO2 Sensor"), "co2_sensor");
+    }
+
+    /// Two rules, same name, different ids — which is exactly what
+    /// `POST /automations/import` produces from a house's own export, since it
+    /// assigns every imported rule a fresh id.
+    ///
+    /// Before this was fixed, the second write landed on the first rule's
+    /// file. Core then held both rules in memory over a single file, so a
+    /// restart dropped the original, and deleting the import deleted the file
+    /// the original was living in. A rule the operator never touched
+    /// disappeared, and nothing logged it.
+    #[test]
+    fn an_imported_twin_does_not_overwrite_the_original() {
+        use super::{Rule, RuleFileStore, Trigger};
+        use uuid::Uuid;
+
+        fn named(name: &str) -> Rule {
+            Rule {
+                id: Uuid::new_v4(),
+                name: name.to_string(),
+                enabled: true,
+                priority: 0,
+                tags: vec![],
+                trigger: Trigger::ManualTrigger,
+                conditions: vec![],
+                actions: vec![],
+                error: None,
+                cooldown_secs: None,
+                log_events: false,
+                log_triggers: false,
+                log_actions: false,
+                required_expression: None,
+                cancel_on_false: false,
+                trigger_condition: None,
+                variables: Default::default(),
+                trigger_label: None,
+                run_mode: Default::default(),
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = RuleFileStore::new(dir.path());
+
+        let original = named("All Deck Doors Closed");
+        let first = store.write_rule(&original).unwrap();
+
+        // The import: same name, new id.
+        let twin = named("All Deck Doors Closed");
+        let second = store.write_rule(&twin).unwrap();
+
+        assert_ne!(
+            first, second,
+            "the twin took the original's filename and overwrote it"
+        );
+        assert!(first.exists(), "the original's file is gone");
+        assert!(second.exists());
+
+        // And the original's file still holds the original.
+        let kept = std::fs::read_to_string(&first).unwrap();
+        assert!(
+            kept.contains(&original.id.to_string()),
+            "the original's file no longer contains the original rule"
+        );
     }
 }
