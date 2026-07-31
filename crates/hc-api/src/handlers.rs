@@ -5373,10 +5373,29 @@ async fn remove_plugin_devices(s: &AppState, plugin_id: &str) -> (usize, Vec<Str
 /// NOTE (Phase A limit): a plugin still declared in `[[plugins]]` respawns on the
 /// next core restart — removing the *declaration* needs the managed-plugin store
 /// (Phase A slice 2). Returns a summary of what was torn down.
+/// `?keep_config=true` leaves the operator's config file in place.
+///
+/// Default is to purge. Uninstall used to remove a plugin from the registry and
+/// nothing else, so its config file and installed binaries stayed on disk — a
+/// removed plugin still had its bridge host, credentials and every device row,
+/// and reinstalling silently adopted them, which reads as a fresh install
+/// arriving pre-broken.
+///
+/// Binaries always go: they are a verified download from the registry and cost
+/// nothing to fetch again. Config is the operator's own work — a bridge
+/// address, a password, nine hand-classified device rows — so removing it is
+/// the default but never the only option.
+#[derive(serde::Deserialize, Default)]
+pub struct UninstallQuery {
+    #[serde(default)]
+    pub keep_config: bool,
+}
+
 pub async fn deregister_plugin(
     State(s): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
     Path(id): Path<String>,
+    Query(q): Query<UninstallQuery>,
 ) -> impl IntoResponse {
     // 1. Stop the managed child if we supervise it (best-effort). Stopping first
     //    prevents the plugin re-registering devices we're about to delete.
@@ -5424,6 +5443,44 @@ pub async fn deregister_plugin(
         }
     }
 
+    // 5. Remove what is left on disk. Last, deliberately: everything above is
+    //    recoverable state, and this is the part that is not.
+    let mut config_removed = false;
+    let mut binaries_removed = false;
+    if let Some(ctx) = &s.plugin_install {
+        if !q.keep_config {
+            let store = crate::PluginConfigStore::new(ctx.config_plugins_dir.clone());
+            match store.remove(&id) {
+                Ok(gone) => config_removed = gone,
+                Err(e) => {
+                    tracing::warn!(plugin_id = %id, error = %e, "Failed to delete plugin config")
+                }
+            }
+        }
+        // Slugged with the same helper the config store uses, so the id in the
+        // URL cannot walk out of the install root and take a directory with it.
+        let dir = ctx.plugins_dir.join(crate::plugin_config_store::slug(&id));
+        if dir.is_dir() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => binaries_removed = true,
+                Err(e) => {
+                    tracing::warn!(plugin_id = %id, path = %dir.display(), error = %e,
+                        "Failed to delete plugin binaries")
+                }
+            }
+        }
+    }
+
+    let mut e =
+        audit::entry_from_claims(&claims, "plugin.uninstalled").with_target("plugin", id.clone());
+    e.detail = json!({
+        "devices_removed": devices_removed,
+        "config_removed": config_removed,
+        "binaries_removed": binaries_removed,
+        "kept_config": q.keep_config,
+    });
+    audit::emit(&s, e).await;
+
     (
         StatusCode::OK,
         Json(json!({
@@ -5432,6 +5489,8 @@ pub async fn deregister_plugin(
             "devices_removed": devices_removed,
             "device_ids": device_ids,
             "affected_rules": affected_rules,
+            "config_removed": config_removed,
+            "binaries_removed": binaries_removed,
         })),
     )
         .into_response()
