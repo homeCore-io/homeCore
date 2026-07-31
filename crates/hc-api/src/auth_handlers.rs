@@ -8,7 +8,7 @@ use axum::{
 };
 use hc_api_types::auth::{
     ChangePasswordRequest, CreateUserRequest, LoginRequest, LoginResponse, RefreshRequest,
-    RefreshResponse, SetRoleRequest,
+    RefreshResponse, SetPasswordRequest, SetRoleRequest,
 };
 use hc_auth::refresh;
 use hc_auth::{hash_password, verify_password, User, UserInfo};
@@ -423,7 +423,15 @@ pub async fn change_password(
 
     user.password_hash = new_hash;
     match s.store.update_user(&user).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            // user.created, user.deleted and user.role_changed were all audited;
+            // a password change was the one account change that left no trace.
+            let mut e = audit::entry_from_claims(&claims, "user.password_changed")
+                .with_target("user", uid.to_string());
+            e.detail = json!({ "username": user.username });
+            audit::emit(&s, e).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -622,6 +630,107 @@ pub async fn set_user_role(
             e.detail = json!({ "from": old_role, "to": user.role });
             audit::emit(&s, e).await;
             (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `PATCH /api/v1/auth/users/:id/password` — admin only
+///
+/// An admin setting a password for an account they cannot log into. This is the
+/// only way back in for a user who has forgotten theirs: there is no email on a
+/// user record and so no reset-link flow, and until this existed the answer was
+/// to delete the account and make a new one, which loses its id and every audit
+/// entry pointing at it.
+///
+/// No current-password check, by definition — the admin does not know it. The
+/// authority is the admin role, exactly as it is for changing someone's role or
+/// deleting them outright, and it is audited for the same reason.
+///
+/// Existing sessions are NOT invalidated. Tokens carry no password generation,
+/// so a JWT issued before this call stays valid until it expires. That is worth
+/// knowing when the reason for the reset is a compromised account rather than a
+/// forgotten password; closing it needs a token version on the user record and
+/// a check in the validator, which is a larger change than this.
+pub async fn set_user_password(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetPasswordRequest>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    // Same floor as create_user and change_password. Stated here rather than
+    // shared, because a validator that drifts between the three is worse than
+    // three that agree.
+    if body.new_password.len() < 8 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "password must be at least 8 characters" })),
+        )
+            .into_response();
+    }
+
+    let mut user = match s.store.get_user_by_id(id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "user not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    let new_pass = body.new_password.clone();
+    let new_hash = match tokio::task::spawn_blocking(move || hash_password(&new_pass)).await {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    user.password_hash = new_hash;
+    match s.store.update_user(&user).await {
+        Ok(_) => {
+            // Records who reset whose, never the password. `self` distinguishes
+            // an admin resetting their own account from an admin reaching into
+            // someone else's, which is the case worth being able to find later.
+            let mut e = audit::entry_from_claims(&claims, "user.password_reset")
+                .with_target("user", id.to_string());
+            e.detail = json!({
+                "username": user.username,
+                "self": claims.uid == id.to_string(),
+            });
+            audit::emit(&s, e).await;
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
