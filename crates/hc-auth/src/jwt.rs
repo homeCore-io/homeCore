@@ -25,6 +25,19 @@ pub struct Claims {
     /// variant from `uid`/`sub` on first access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<Actor>,
+    /// The `User::token_version` that was current when this token was minted.
+    /// The auth middleware compares it against the stored value and rejects a
+    /// mismatch, which is what makes a password change invalidate live
+    /// sessions.
+    ///
+    /// `serde(default)` so tokens issued before this field existed decode as
+    /// version 0 and keep working against a user record still at version 0.
+    /// The first password change bumps the record past them and they die.
+    ///
+    /// Meaningless for synthetic claims (API key, UDS, whitelist) — those are
+    /// not backed by a password, so the middleware skips the check for them.
+    #[serde(default)]
+    pub tv: u64,
 }
 
 impl Claims {
@@ -74,7 +87,18 @@ impl JwtService {
     }
 
     /// Issue a JWT for the given user ID, username, and role.
-    pub fn issue(&self, uid: &str, username: &str, role: Role) -> Result<String> {
+    ///
+    /// `token_version` must be the issuing user's current
+    /// [`User::token_version`](crate::user::User::token_version). It is a
+    /// required parameter rather than an optional one so that a new call site
+    /// cannot quietly mint a token that outlives a password change.
+    pub fn issue(
+        &self,
+        uid: &str,
+        username: &str,
+        role: Role,
+        token_version: u64,
+    ) -> Result<String> {
         let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -91,6 +115,7 @@ impl JwtService {
                 uid: actor_uid,
                 username: username.to_string(),
             }),
+            tv: token_version,
         };
         encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
             .context("JWT encoding failed")
@@ -118,7 +143,7 @@ mod tests {
     #[test]
     fn issue_and_validate_admin_token() {
         let uid = Uuid::new_v4().to_string();
-        let token = svc().issue(&uid, "alice", Role::Admin).unwrap();
+        let token = svc().issue(&uid, "alice", Role::Admin, 0).unwrap();
         let claims = svc().validate(&token).unwrap();
         assert_eq!(claims.sub, "alice");
         assert_eq!(claims.uid, uid);
@@ -130,7 +155,7 @@ mod tests {
 
     #[test]
     fn user_role_lacks_admin_scopes() {
-        let token = svc().issue("uid", "bob", Role::User).unwrap();
+        let token = svc().issue("uid", "bob", Role::User, 0).unwrap();
         let claims = svc().validate(&token).unwrap();
         assert!(!claims.is_admin());
         assert!(!claims.has_scope("users:write"));
@@ -139,7 +164,7 @@ mod tests {
 
     #[test]
     fn readonly_role_has_only_read_scopes() {
-        let token = svc().issue("uid", "carol", Role::ReadOnly).unwrap();
+        let token = svc().issue("uid", "carol", Role::ReadOnly, 0).unwrap();
         let claims = svc().validate(&token).unwrap();
         assert!(!claims.is_admin());
         assert!(!claims.has_scope("devices:write"));
@@ -148,14 +173,14 @@ mod tests {
 
     #[test]
     fn wrong_secret_fails_validation() {
-        let token = svc().issue("uid", "alice", Role::Admin).unwrap();
+        let token = svc().issue("uid", "alice", Role::Admin, 0).unwrap();
         let other = JwtService::new_hs256(b"completely-different-secret-here!", 24);
         assert!(other.validate(&token).is_err());
     }
 
     #[test]
     fn tampered_token_rejected() {
-        let token = svc().issue("uid", "alice", Role::Admin).unwrap();
+        let token = svc().issue("uid", "alice", Role::Admin, 0).unwrap();
         let tampered = format!("{token}x");
         assert!(svc().validate(&tampered).is_err());
     }
@@ -171,6 +196,7 @@ mod tests {
             role: Role::Admin,
             scopes: Role::Admin.scopes(),
             actor: None,
+            tv: 0,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

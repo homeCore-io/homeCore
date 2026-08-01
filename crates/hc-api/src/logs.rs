@@ -93,7 +93,17 @@ pub async fn log_stream_handler(
                 .into_response();
         }
         match state.jwt.validate(token) {
-            Ok(claims) => claims.sub,
+            Ok(claims) => {
+                // Validated here rather than by `require_auth`, so the
+                // token-version check has to be repeated — otherwise a session
+                // killed by a password change could still tail the log stream.
+                if let Err(resp) =
+                    crate::auth_middleware::token_version_current(&state, &claims).await
+                {
+                    return resp;
+                }
+                claims.sub
+            }
             Err(_) => {
                 return (
                     StatusCode::UNAUTHORIZED,

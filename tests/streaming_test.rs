@@ -542,8 +542,32 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     // JwtService with fixed test secret.
     let jwt_secret = b"test-secret-fixed-bytes-for-streaming-tests-32b";
     let jwt = JwtService::new_hs256(jwt_secret, 24);
-    let user_token = jwt.issue("uid-user", "alice", Role::User)?;
-    let admin_token = jwt.issue("uid-admin", "root", Role::Admin)?;
+
+    // Real user records behind the tokens. The auth middleware checks a
+    // token's `tv` claim against `User::token_version`, so a token minted for
+    // a uid with no record — as these two used to be ("uid-user", which isn't
+    // even a UUID) — is now correctly refused.
+    let user_uid = Uuid::new_v4();
+    let admin_uid = Uuid::new_v4();
+    for (id, username, role) in [
+        (user_uid, "alice", Role::User),
+        (admin_uid, "root", Role::Admin),
+    ] {
+        store
+            .create_user(&hc_auth::User {
+                id,
+                username: username.into(),
+                // Never used: these tests authenticate with the JWT directly
+                // and never hit the login endpoint.
+                password_hash: hc_auth::hash_password("unused-by-these-tests")?,
+                role,
+                created_at: chrono::Utc::now(),
+                token_version: 0,
+            })
+            .await?;
+    }
+    let user_token = jwt.issue(&user_uid.to_string(), "alice", Role::User, 0)?;
+    let admin_token = jwt.issue(&admin_uid.to_string(), "root", Role::Admin, 0)?;
 
     // AppState.
     let state = AppState::new(AppStateParams {
