@@ -121,6 +121,8 @@ async fn try_start(
         &cfg.logging.log_forward_level,
     );
     let publisher = client.device_publisher();
+    // Conditions for the plugin page, not only the log.
+    let client_notices = client.notices();
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
 
     // Manual-refresh channel — `refresh_devices` and
@@ -280,6 +282,7 @@ async fn try_start(
         publisher,
         learned_state.clone(),
         state_writer,
+        client_notices,
     );
     bridge_runtime
         .run(cmd_rx, refresh_rx, new_bridge_rx, unpair_rx)

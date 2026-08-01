@@ -13,7 +13,8 @@ use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
 use crate::hue::registry::{HueRegistry, RegisteredLight};
 use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
-use plugin_sdk_rs::DevicePublisher;
+use plugin_sdk_rs::types::PluginNotice;
+use plugin_sdk_rs::{DevicePublisher, PluginNotices};
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
@@ -128,6 +129,10 @@ pub struct Bridge {
     /// channel the streaming `pair_bridge` action uses.
     learned_state: crate::pairing::LearnedState,
     state_writer: plugin_sdk_rs::PluginStateWriter,
+    /// What the operator sees when a bridge stops answering. A Hue bridge that
+    /// goes away leaves its lights registered but frozen, and the plugin keeps
+    /// reading "active" — the log line alone scrolls past.
+    notices: PluginNotices,
 }
 
 impl Bridge {
@@ -137,6 +142,7 @@ impl Bridge {
         publisher: DevicePublisher,
         learned_state: crate::pairing::LearnedState,
         state_writer: plugin_sdk_rs::PluginStateWriter,
+        notices: PluginNotices,
     ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         let sync_cfg = SyncConfig {
@@ -158,6 +164,7 @@ impl Bridge {
             metrics: EventstreamMetrics::default(),
             learned_state,
             state_writer,
+            notices,
         }
     }
 
@@ -231,6 +238,23 @@ impl Bridge {
             if let Err(e) = self.refresh(&api).await {
                 warn!(bridge = %api.target().bridge_id, error = %e, "Initial bridge refresh failed");
                 all_bridges_succeeded = false;
+                self.notices.raise(
+                    PluginNotice::error(
+                        "bridge_unreachable",
+                        format!(
+                            "Cannot reach the Hue bridge at {} — {e}. Its lights stay \
+                             listed but will not respond or report state.",
+                            api.target().host
+                        ),
+                    )
+                    .with_remedy(
+                        "Check the bridge is powered and on the network. If its IP has \
+                         changed, re-run Discover; if it was factory reset, pair it \
+                         again — the stored app key will no longer be accepted.",
+                    ),
+                );
+            } else {
+                self.notices.clear("bridge_unreachable");
             }
         }
         // Cross-restart cleanup runs once after the startup sync. If a
@@ -2008,6 +2032,7 @@ mod tests {
             publisher,
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             plugin_sdk_rs::PluginStateWriter::test_instance("plugin.hue"),
+            plugin_sdk_rs::PluginNotices::test_instance(),
         )
     }
 
