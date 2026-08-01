@@ -329,41 +329,35 @@ impl StateBridge {
             let plugin_id = parts[2];
             if let Ok(hb) = serde_json::from_slice::<serde_json::Value>(payload) {
                 let sdk_version = hb["sdk_version"].as_str().map(str::to_string);
+                let protocol_version = hb["protocol_version"].as_str();
 
-                // First-heartbeat-per-plugin: log + check SDK compat.
-                // Component versioning plan, Phase B. Warn-only for v0.1.x —
-                // refusing on mismatch locks operators out of recoverable
-                // states (core upgraded, plugin not yet rebuilt).
+                // First-heartbeat-per-plugin protocol check. Warn-only for
+                // v0.1.x — refusing on mismatch locks operators out of
+                // recoverable states (core upgraded, plugin not yet rebuilt).
                 {
                     let mut seen = self.seen_sdk_versions.lock().unwrap();
                     if seen.insert(plugin_id.to_string()) {
-                        match sdk_version.as_deref() {
-                            Some(v) => {
-                                if !sdk_versions_compatible(v, hc_types::PROTOCOL_VERSION) {
-                                    warn!(
-                                        plugin_id,
-                                        plugin_sdk_version = v,
-                                        core_compat_version = hc_types::PROTOCOL_VERSION,
-                                        "Plugin SDK version differs from core's expected SDK \
-                                         major/minor — protocol changes may not be visible. \
-                                         Rebuild the plugin against a matching SDK if rules \
-                                         or device events misbehave."
-                                    );
-                                } else {
-                                    debug!(
-                                        plugin_id,
-                                        plugin_sdk_version = v,
-                                        "Plugin SDK version matches core (compat check passed)"
-                                    );
-                                }
-                            }
-                            None => {
-                                debug!(
-                                    plugin_id,
-                                    "Plugin heartbeat carries no sdk_version field — \
-                                     plugin built against pre-Phase-B SDK (≤ 0.1.2)"
-                                );
-                            }
+                        match check_protocol(protocol_version, hc_types::PROTOCOL_VERSION) {
+                            ProtocolCheck::Mismatch => warn!(
+                                plugin_id,
+                                plugin_protocol_version = protocol_version.unwrap_or("?"),
+                                core_protocol_version = hc_types::PROTOCOL_VERSION,
+                                plugin_sdk_version = sdk_version.as_deref().unwrap_or("?"),
+                                "Plugin was built against a different hc-types wire protocol — \
+                                 protocol changes may not be visible. Rebuild the plugin against \
+                                 an SDK matching this core if rules or device events misbehave."
+                            ),
+                            ProtocolCheck::Match => debug!(
+                                plugin_id,
+                                plugin_protocol_version = protocol_version.unwrap_or("?"),
+                                "Plugin protocol version matches core"
+                            ),
+                            ProtocolCheck::Unknown => debug!(
+                                plugin_id,
+                                plugin_sdk_version = sdk_version.as_deref().unwrap_or("?"),
+                                "Plugin heartbeat carries no protocol_version — built against an \
+                                 SDK older than 0.3.9, so compatibility cannot be determined"
+                            ),
                         }
                     }
                 }
@@ -834,7 +828,44 @@ fn parse_plugin_notices(
         .collect()
 }
 
-/// Compare two SemVer-shaped strings for SDK protocol compatibility.
+/// Outcome of comparing a plugin's wire protocol against core's.
+#[derive(Debug, PartialEq, Eq)]
+enum ProtocolCheck {
+    /// Same protocol — safe to talk.
+    Match,
+    /// Divergent protocol; the plugin may not see everything core sends.
+    Mismatch,
+    /// The plugin did not say, so there is nothing to compare.
+    Unknown,
+}
+
+/// Decide whether a plugin's wire protocol matches core's.
+///
+/// **Both sides must be the same version line.** This used to compare the
+/// plugin's `plugin-sdk-rs` version against `hc_types::PROTOCOL_VERSION` —
+/// two crates versioned independently, so 0.3.x was measured against 0.1.x and,
+/// with MINOR breaking below 1.0, the check could never pass. It warned on every
+/// heartbeat from every plugin, including ones working perfectly, which is worse
+/// than not checking: a warning that is always on carries no information and
+/// trains you to ignore the one that matters.
+///
+/// The plugin now reports the `hc-types` version it was compiled against, which
+/// is the thing that actually defines the wire format, and core compares that
+/// against its own.
+///
+/// `None` means the plugin is on an SDK older than 0.3.9 and did not send the
+/// field. That is [`ProtocolCheck::Unknown`], not a mismatch — we genuinely
+/// cannot tell, and guessing "broken" would recreate the false positive this
+/// replaces.
+fn check_protocol(plugin: Option<&str>, core: &str) -> ProtocolCheck {
+    match plugin {
+        None => ProtocolCheck::Unknown,
+        Some(v) if sdk_versions_compatible(v, core) => ProtocolCheck::Match,
+        Some(_) => ProtocolCheck::Mismatch,
+    }
+}
+
+/// Compare two SemVer-shaped strings for wire-protocol compatibility.
 ///
 /// Pre-1.0 (`0.x.y`) treats MINOR as the breaking position — a 0.1.x →
 /// 0.2.x bump is a wire-protocol change, but 0.1.2 → 0.1.5 stays
@@ -889,8 +920,8 @@ fn apply_partial_merge_patch(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_partial_merge_patch, is_generic_plugin_external_change, parse_plugin_notices,
-        sdk_versions_compatible,
+        apply_partial_merge_patch, check_protocol, is_generic_plugin_external_change,
+        parse_plugin_notices, sdk_versions_compatible, ProtocolCheck,
     };
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
@@ -938,6 +969,46 @@ mod tests {
         );
         let codes: Vec<&str> = got.iter().map(|n| n.code.as_str()).collect();
         assert_eq!(codes, vec!["good", "also_good"]);
+    }
+
+    #[test]
+    fn protocol_check_compares_like_against_like() {
+        // The bug this replaces: the plugin's plugin-sdk-rs version (0.3.x) was
+        // compared against hc_types::PROTOCOL_VERSION (0.1.x). Independent
+        // version lines, MINOR breaking below 1.0 — so it never passed, and
+        // warned on every heartbeat from every plugin, including hc-caseta
+        // while it drove nine devices correctly.
+        assert_eq!(check_protocol(Some("0.1.5"), "0.1.5"), ProtocolCheck::Match);
+        assert_eq!(check_protocol(Some("0.1.2"), "0.1.5"), ProtocolCheck::Match);
+        // An SDK version in the old namespace is a genuine mismatch now, not a
+        // permanent false alarm.
+        assert_eq!(
+            check_protocol(Some("0.3.8"), "0.1.5"),
+            ProtocolCheck::Mismatch
+        );
+        assert_eq!(
+            check_protocol(Some("0.2.0"), "0.1.5"),
+            ProtocolCheck::Mismatch
+        );
+    }
+
+    #[test]
+    fn protocol_check_is_silent_when_the_plugin_did_not_say() {
+        // Every plugin on an SDK older than 0.3.9. We cannot tell, and calling
+        // that "broken" would recreate the false positive being removed.
+        assert_eq!(check_protocol(None, "0.1.5"), ProtocolCheck::Unknown);
+    }
+
+    #[test]
+    fn protocol_check_tolerates_garbage() {
+        // sdk_versions_compatible returns true on unparseable input by design —
+        // do not refuse on garbage. Confirm that path lands on Match, not a
+        // spurious warning.
+        assert_eq!(
+            check_protocol(Some("not-a-version"), "0.1.5"),
+            ProtocolCheck::Match
+        );
+        assert_eq!(check_protocol(Some(""), "0.1.5"), ProtocolCheck::Match);
     }
 
     #[test]
