@@ -1,0 +1,80 @@
+# homeCore core image — alpine, optimized for size.
+# (hc-core + embedded MQTT broker. No UI, no plugins.)
+#
+# THIS IS THE PUBLISHED IMAGE — ghcr.io/homecore-io/hc-core. It lived in
+# homeCore-io/docker until 2026-08-01, which meant that repo had to carry a tag
+# matching core's on every release, tagged first or the release failed at
+# docker-publish. It sits here now so the recipe is versioned with the binary it
+# wraps: this repo's tag alone reproduces the image, and there is no second repo
+# in the release ordering. See ../Dockerfile for the local-dev build, which is a
+# different recipe with a different layout and is NOT what ships.
+#
+# The web UI is NOT in this image. It is hc-web — its own image, built from
+# clients/hc-web — which serves the Flutter app and reverse-proxies /api/v1
+# (including the WebSocket and SSE streams) here. Core used to carry a Leptos
+# WASM bundle at /opt/homecore/ui; that is gone, and [web_admin] is off in the
+# shipped default config to match. Plugins are not baked in either: they install
+# at runtime from the signed registry and run as child processes of core.
+#
+# Designed to be built by homeCore-io/homeCore's release.yml AFTER the
+# per-arch musl binaries have been produced. The build context is expected
+# to contain:
+#
+#   ./homecore-amd64          — prebuilt x86_64 static musl binary
+#   ./homecore-arm64          — prebuilt aarch64 static musl binary  (not built today)
+#   ./config.toml.example     — default config (homecore.toml.example)
+#   ./entrypoint-core.sh      — this directory, staged alongside this file
+#
+# Single base directory layout — everything operator-mutable lives
+# under /homecore (one bind-mount). hc-core reads $HOMECORE_HOME and
+# resolves storage / rules / dist_path / jwt_secret_file relative to
+# it. Matches the appliance image's convention.
+#
+# Size targets (after strip + Cargo release profile):
+#   alpine base + ca-certs + tini + su-exec   ~8 MB
+#   hc-core binary (stripped, LTO)            ~10-15 MB
+#   ────────────────────────────────────────────────────
+#   total                                      ~18-23 MB
+#
+# Example invocation:
+#
+#   docker buildx build \
+#       --platform linux/amd64 \
+#       --tag ghcr.io/homecore-io/hc-core:0.1.0 \
+#       --push \
+#       ./build-context
+
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+
+ARG TARGETARCH
+
+# `apk upgrade` first to pull CVE patches for packages baked into
+# the alpine:3.23 base (busybox, musl, libssl) since the base image
+# was last rebuilt. Without this, the image inherits whatever
+# upstream digest cached in our runner — fine on the day the base
+# was bumped, increasingly stale every day after.
+#
+# ca-certificates: outbound HTTPS for plugins/notifications.
+# tini: PID-1 signal handling + zombie reaping under `docker stop`.
+# su-exec: drop privileges to bind-mount owner from the entrypoint.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tini su-exec
+
+COPY homecore-${TARGETARCH}  /usr/local/bin/homecore
+COPY config.toml.example     /opt/homecore/defaults/config.toml
+COPY entrypoint-core.sh      /entrypoint.sh
+
+RUN chmod +x /usr/local/bin/homecore /entrypoint.sh
+
+# Embedded broker on 1883, REST + WebSocket API on 8080. Nothing serves a UI
+# from this image — hc-web does that and proxies /api/v1 to 8080.
+EXPOSE 1883 8080
+
+# Single base directory. Operator bind-mounts a host dir here; the
+# entrypoint detects the owner UID and drops privileges to match
+# before the daemon writes anything.
+ENV HOMECORE_HOME=/homecore
+
+VOLUME ["/homecore"]
+
+ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]

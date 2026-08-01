@@ -368,6 +368,8 @@ impl StateBridge {
                     }
                 }
 
+                let notices = parse_plugin_notices(hb.get("notices"), plugin_id);
+
                 let _ = self.pub_bus.publish(Event::PluginHeartbeat {
                     timestamp: Utc::now(),
                     plugin_id: plugin_id.to_string(),
@@ -375,6 +377,7 @@ impl StateBridge {
                     sdk_version,
                     uptime_secs: hb["uptime_secs"].as_u64(),
                     device_count: hb["device_count"].as_u64().map(|n| n as u32),
+                    notices,
                 });
             }
             return Ok(());
@@ -802,6 +805,35 @@ fn is_generic_plugin_external_change(change: &DeviceChange) -> bool {
         && change.actor_name.is_none()
 }
 
+/// Decode the `notices` array from a plugin heartbeat.
+///
+/// Tolerant on purpose, in two directions. A missing or non-array field yields
+/// an empty list — that is every plugin built against an SDK without notices,
+/// and it is indistinguishable from "nothing to report", which is the correct
+/// reading. And a single malformed entry is dropped rather than failing the
+/// batch: notices are advisory, while the heartbeat carrying them is how core
+/// knows the plugin is alive. Refusing the whole beat over a bad diagnostic
+/// would mark a healthy plugin offline — the diagnostic causing an outage it
+/// was meant to describe.
+fn parse_plugin_notices(
+    raw: Option<&serde_json::Value>,
+    plugin_id: &str,
+) -> Vec<hc_types::PluginNotice> {
+    let Some(serde_json::Value::Array(items)) = raw else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|v| {
+            serde_json::from_value::<hc_types::PluginNotice>(v.clone())
+                .map_err(
+                    |e| warn!(plugin_id, error = %e, "Discarding an unparseable plugin notice"),
+                )
+                .ok()
+        })
+        .collect()
+}
+
 /// Compare two SemVer-shaped strings for SDK protocol compatibility.
 ///
 /// Pre-1.0 (`0.x.y`) treats MINOR as the breaking position — a 0.1.x →
@@ -857,11 +889,56 @@ fn apply_partial_merge_patch(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_partial_merge_patch, is_generic_plugin_external_change, sdk_versions_compatible,
+        apply_partial_merge_patch, is_generic_plugin_external_change, parse_plugin_notices,
+        sdk_versions_compatible,
     };
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn notices_absent_or_wrong_shape_yields_empty() {
+        // Every plugin on an SDK without notices lands here. "No field" and
+        // "nothing to report" must be the same thing, with no warning noise.
+        assert!(parse_plugin_notices(None, "p").is_empty());
+        assert!(parse_plugin_notices(Some(&json!("not-an-array")), "p").is_empty());
+        assert!(parse_plugin_notices(Some(&json!({})), "p").is_empty());
+        assert!(parse_plugin_notices(Some(&json!([])), "p").is_empty());
+    }
+
+    #[test]
+    fn notices_decode_with_and_without_remedy() {
+        let got = parse_plugin_notices(
+            Some(&json!([
+                {"level": "warning", "code": "a", "message": "m1", "remedy": "do x"},
+                {"level": "error",   "code": "b", "message": "m2"}
+            ])),
+            "p",
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].code, "a");
+        assert_eq!(got[0].remedy.as_deref(), Some("do x"));
+        assert_eq!(got[1].level, hc_types::NoticeLevel::Error);
+        assert!(got[1].remedy.is_none());
+    }
+
+    #[test]
+    fn one_bad_notice_does_not_discard_the_others() {
+        // The heartbeat is how core knows the plugin is alive. Failing the
+        // batch over a malformed diagnostic would mark a healthy plugin
+        // offline — the notice causing the outage it was meant to report.
+        let got = parse_plugin_notices(
+            Some(&json!([
+                {"level": "warning", "code": "good", "message": "m"},
+                {"level": "nonsense", "code": "bad", "message": "m"},
+                {"code": "missing-level", "message": "m"},
+                {"level": "info", "code": "also_good", "message": "m"}
+            ])),
+            "p",
+        );
+        let codes: Vec<&str> = got.iter().map(|n| n.code.as_str()).collect();
+        assert_eq!(codes, vec!["good", "also_good"]);
+    }
 
     #[test]
     fn sdk_compat_pre_1_0_minor_is_breaking() {

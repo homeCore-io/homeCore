@@ -84,6 +84,13 @@ pub enum Event {
         uptime_secs: Option<u64>,
         /// Number of devices managed by this plugin.
         device_count: Option<u32>,
+        /// Conditions the plugin is currently reporting about itself — the
+        /// full set each beat, replacing whatever core held. Empty for
+        /// plugins on SDKs that predate notices, which is the same shape as
+        /// "nothing to report", so no special case is needed.
+        /// See [`crate::plugin_notice`].
+        #[serde(default)]
+        notices: Vec<crate::plugin_notice::PluginNotice>,
     },
     /// A plugin's status changed (started, stopped, offline, etc.).
     PluginStatusChanged {

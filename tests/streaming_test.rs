@@ -606,6 +606,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 capabilities: Some(hc_captest::capabilities_manifest()),
                 config_schema: None,
                 config_descriptor: None,
+                notices: Vec::new(),
                 installed_version: None,
             },
         );

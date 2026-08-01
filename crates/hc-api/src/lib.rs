@@ -121,6 +121,19 @@ pub struct PluginRecord {
     /// Plugin has responded to the management protocol (heartbeat, etc.).
     #[serde(default)]
     pub supports_management: bool,
+    /// Conditions the plugin is reporting about itself, refreshed wholesale on
+    /// every heartbeat.
+    ///
+    /// `status` says whether the process is alive; this says whether it can
+    /// actually do its job. A plugin can be `active` and completely unable to
+    /// function — an Ecowitt receiver bound to loopback heartbeats happily
+    /// while every gateway upload is dropped — and before this the only trace
+    /// was a startup line in the log.
+    ///
+    /// Empty for plugins on SDKs predating notices, which is indistinguishable
+    /// from "nothing to report" and needs no special handling.
+    #[serde(default)]
+    pub notices: Vec<hc_types::PluginNotice>,
     /// Capability manifest last published on
     /// `homecore/plugins/{id}/capabilities`. `None` until the plugin
     /// publishes, or if the published manifest failed to decode.
@@ -172,6 +185,7 @@ impl PluginRecord {
             log_level: None,
             version: None,
             supports_management: false,
+            notices: Vec::new(),
             capabilities: None,
             config_schema: None,
             config_descriptor: None,
@@ -361,6 +375,7 @@ pub fn spawn_plugin_registry_listener(
                             capabilities: None,
                             config_schema: None,
                             config_descriptor: None,
+                            notices: Vec::new(),
                             installed_version: None,
                         });
                     rec.status = "active".into();
@@ -379,6 +394,7 @@ pub fn spawn_plugin_registry_listener(
                     sdk_version: _,
                     uptime_secs,
                     device_count,
+                    notices,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -402,10 +418,15 @@ pub fn spawn_plugin_registry_listener(
                             capabilities: None,
                             config_schema: None,
                             config_descriptor: None,
+                            notices: Vec::new(),
                             installed_version: None,
                         });
                     rec.last_heartbeat = Some(timestamp);
                     rec.supports_management = true;
+                    // Replace wholesale rather than merge: the heartbeat is the
+                    // plugin's current belief, so a condition it stops
+                    // reporting has cleared and must disappear.
+                    rec.notices = notices;
                     if let Some(v) = version {
                         rec.version = Some(v);
                     }
@@ -448,6 +469,7 @@ pub fn spawn_plugin_registry_listener(
                             capabilities: None,
                             config_schema: None,
                             config_descriptor: None,
+                            notices: Vec::new(),
                             installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);

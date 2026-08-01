@@ -5,9 +5,10 @@
 #
 # THIS IS NOT THE PUBLISHED IMAGE. It builds core from source, here, as a local
 # convenience. The image on ghcr.io/homecore-io/hc-core is built by this repo's
-# release.yml from `images/Dockerfile.core` in homeCore-io/docker, against
-# prebuilt musl binaries — a different recipe with a different layout
-# (/homecore, not /opt/homecore) and a privilege-dropping entrypoint.
+# release.yml from `docker/Dockerfile.core`, against prebuilt musl binaries — a
+# different recipe with a different layout (/homecore, not /opt/homecore) and a
+# privilege-dropping entrypoint. (That file lived in homeCore-io/docker until
+# 2026-08-01; it moved here so the recipe is versioned with the binary.)
 #
 # So do not treat a change here as changing what ships, and do not expect the
 # base-image pin below to affect the released image. To run homeCore in
