@@ -878,6 +878,7 @@ async fn main() -> Result<()> {
             password_hash: hash,
             role: Role::Admin,
             created_at: chrono::Utc::now(),
+            token_version: 0,
         };
         store.create_user(&admin).await?;
 

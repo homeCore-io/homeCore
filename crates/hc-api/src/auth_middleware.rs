@@ -112,6 +112,12 @@ pub async fn require_auth(
 
         match state.jwt.validate(&token) {
             Ok(claims) => {
+                // Signature and expiry are good; the token may still have been
+                // invalidated server-side by a password change. See
+                // `token_version_current`.
+                if let Err(resp) = token_version_current(&state, &claims).await {
+                    return resp;
+                }
                 request.extensions_mut().insert(claims);
                 return next.run(request).await;
             }
@@ -249,7 +255,73 @@ async fn verify_api_key(
             owner_uid: record.owner_uid,
             label: record.label,
         }),
+        // Not password-backed; `token_version_current` skips API-key claims.
+        tv: 0,
     })
+}
+
+/// Reject a JWT that a password change has invalidated.
+///
+/// A signed, unexpired JWT is not sufficient on its own: changing a password
+/// bumps `User::token_version`, and every token minted before that carries the
+/// older `Claims::tv`. Comparing the two is what turns a password change into
+/// an actual session revocation rather than a cosmetic one.
+///
+/// Only password-backed tokens are checked. API keys are a separate credential
+/// with their own revocation path (`revoke_api_key`) and are deliberately left
+/// alive by a password change; UDS and whitelist claims are synthetic and have
+/// no user record behind them. Those all short-circuit before the store read,
+/// so the common machine-to-machine paths stay lookup-free.
+///
+/// Costs one redb read per authenticated user request. If that ever shows up in
+/// a profile, the fix is a uid→version cache in `AppState` invalidated on bump,
+/// not dropping the check.
+///
+/// Fails closed: a user record that cannot be read, or no longer exists, denies
+/// the request. A deleted user's outstanding tokens die here too, which they
+/// previously did not.
+pub(crate) async fn token_version_current(
+    state: &AppState,
+    claims: &Claims,
+) -> Result<(), Response> {
+    // Synthetic principals carry no password and no user record.
+    if !claims.actor().is_user() {
+        return Ok(());
+    }
+
+    let deny = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "token has been invalidated — sign in again" })),
+        )
+            .into_response()
+    };
+
+    let Ok(uid) = uuid::Uuid::parse_str(&claims.uid) else {
+        tracing::warn!(uid = %claims.uid, "user token carries an unparseable uid");
+        return Err(deny());
+    };
+
+    match state.store.get_user_by_id(uid).await {
+        Ok(Some(user)) if user.token_version == claims.tv => Ok(()),
+        Ok(Some(user)) => {
+            tracing::debug!(
+                %uid,
+                token_tv = claims.tv,
+                current_tv = user.token_version,
+                "rejected a token predating a password change"
+            );
+            Err(deny())
+        }
+        Ok(None) => {
+            tracing::debug!(%uid, "rejected a token for a user that no longer exists");
+            Err(deny())
+        }
+        Err(e) => {
+            tracing::error!(%uid, error = %e, "user lookup failed during token validation");
+            Err(deny())
+        }
+    }
 }
 
 /// Synthetic Admin claims for a request arriving on the admin UDS.
@@ -262,6 +334,7 @@ pub fn local_admin_claims(peer_uid: Option<u32>) -> Claims {
         role: Role::Admin,
         scopes: Role::Admin.scopes(),
         actor: Some(Actor::LocalAdmin { peer_uid }),
+        tv: 0,
     }
 }
 
@@ -278,6 +351,7 @@ pub fn whitelist_claims() -> Claims {
         // meaningful user identity; LocalAdmin with peer_uid=None captures
         // "trusted transport, no known principal" for audit purposes.
         actor: Some(hc_auth::Actor::LocalAdmin { peer_uid: None }),
+        tv: 0,
     }
 }
 
@@ -443,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn admin_token_passes_devices_read() {
         let svc = jwt();
-        let token = svc.issue("uid", "alice", Role::Admin).unwrap();
+        let token = svc.issue("uid", "alice", Role::Admin, 0).unwrap();
         let app = make_router(svc);
 
         let resp = app
@@ -462,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn user_token_passes_devices_read() {
         let svc = jwt();
-        let token = svc.issue("uid", "bob", Role::User).unwrap();
+        let token = svc.issue("uid", "bob", Role::User, 0).unwrap();
         let app = make_router(svc);
 
         let resp = app
@@ -481,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn readonly_token_passes_devices_read() {
         let svc = jwt();
-        let token = svc.issue("uid", "carol", Role::ReadOnly).unwrap();
+        let token = svc.issue("uid", "carol", Role::ReadOnly, 0).unwrap();
         let app = make_router(svc);
 
         let resp = app
@@ -554,6 +628,7 @@ mod tests {
             role: hc_auth::user::Role::ReadOnly,
             scopes: vec![], // no scopes
             actor: None,
+            tv: 0,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -597,6 +672,7 @@ mod tests {
             role: hc_auth::user::Role::ReadOnly,
             scopes: vec!["devices:read".into()],
             actor: None,
+            tv: 0,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

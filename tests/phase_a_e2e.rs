@@ -39,10 +39,8 @@ struct Harness {
     tcp_port: u16,
     uds_path: PathBuf,
     jwt_secret_path: PathBuf,
-    // Held for tempdir lifetime; not read after construction.
-    #[allow(dead_code)]
+    // Reused by the restart phase, which reopens the same DB.
     state_db_path: PathBuf,
-    #[allow(dead_code)]
     history_db_path: PathBuf,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     serve_task: tokio::task::JoinHandle<()>,
@@ -259,19 +257,35 @@ async fn phase_a_e2e() -> Result<()> {
     });
     let _: serde_json::Value = tcp_jwt.get("/devices").await?;
 
-    // ── 9. Shutdown and "restart"; admin JWT must still validate ──────────
+    // ── 9. Shutdown and restart; admin JWT must still validate ────────────
     //
-    // We stop the first server and simulate a restart with a fresh state
-    // DB but the SAME jwt_secret file. The point of the test isn't that
-    // the user database persists (that's covered by redb directly), but
-    // that tokens issued before a restart continue to validate afterwards
-    // — which is the single most visible win from A1 (secret persistence).
+    // We stop the first server and restart against the same jwt_secret file
+    // and the same user records. The claim under test is that tokens issued
+    // before a restart continue to validate afterwards — the single most
+    // visible win from A1 (secret persistence).
+    //
+    // This used to point at a fresh, empty state dir, on the reasoning that
+    // user persistence was redb's problem and not this test's. That shortcut
+    // stopped being valid once tokens gained a `tv` claim checked against the
+    // user record: with no record to check, the token is now correctly
+    // refused.
+    //
+    // We restart against a *copy* of the state DB rather than the original,
+    // because `serve` spawns the admin-UDS listener as a detached task holding
+    // an AppState clone and nothing signals it on shutdown — so the redb lock
+    // outlives `h.stop()` for the life of the test process. That only bites an
+    // in-process restart; a real one exits the process and releases it.
     let jwt_secret_path = h.jwt_secret_path.clone();
+    let old_state_db = h.state_db_path.clone();
+    let old_history_db = h.history_db_path.clone();
     h.stop().await;
 
-    let fresh_dir = TempDir::new()?;
-    let state_db_path = fresh_dir.path().join("state.redb");
-    let history_db_path = fresh_dir.path().join("history.db");
+    let restart_dir = TempDir::new()?;
+    let state_db_path = restart_dir.path().join("state.redb");
+    let history_db_path = restart_dir.path().join("history.db");
+    std::fs::copy(&old_state_db, &state_db_path)?;
+    std::fs::copy(&old_history_db, &history_db_path)?;
+
     let jwt_bytes = jwt_secret::load_or_create(None, &jwt_secret_path)?;
     let jwt = JwtService::new_hs256(&jwt_bytes, 24);
     let store = StateStore::open(

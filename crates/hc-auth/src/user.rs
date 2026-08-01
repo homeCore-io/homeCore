@@ -278,6 +278,17 @@ pub struct User {
     pub password_hash: String,
     pub role: Role,
     pub created_at: DateTime<Utc>,
+    /// Generation counter for issued access tokens. Every JWT carries the
+    /// value that was current when it was minted (`Claims::tv`); the auth
+    /// middleware rejects a token whose `tv` no longer matches. Bumping this
+    /// is therefore how a session is invalidated server-side — a password
+    /// change or admin reset does exactly that.
+    ///
+    /// `serde(default)` so user records written before this field existed
+    /// load as version 0. That is deliberate: upgrading the binary must not
+    /// log everyone out, only a subsequent password change should.
+    #[serde(default)]
+    pub token_version: u64,
 }
 
 /// Public-facing user record (no password hash).

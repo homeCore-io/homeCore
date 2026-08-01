@@ -20,6 +20,41 @@ const REFRESH_MAX_RETRIES: u32 = 3;
 
 use crate::{audit, auth_middleware::AuthUser, AppState};
 
+/// Revoke every refresh token belonging to `user_id`.
+///
+/// Bumping `token_version` only kills *access* tokens. A surviving refresh
+/// token would mint a fresh one on the next `/auth/refresh` and hand the
+/// session straight back, so a password change has to sweep both. Best-effort
+/// per token: one failure should not abort the sweep, since a partial
+/// revocation still beats none.
+///
+/// Returns the number revoked, for the audit record.
+async fn revoke_all_sessions(s: &AppState, user_id: Uuid) -> usize {
+    let records = match s.store.list_refresh_by_user(user_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(%user_id, error = %e, "could not list refresh tokens to revoke");
+            return 0;
+        }
+    };
+    let now = chrono::Utc::now();
+    let mut revoked = 0usize;
+    for rec in records {
+        // Already dead — don't churn the store or inflate the count.
+        if rec.revoked_at.is_some() || rec.expires_at <= now {
+            continue;
+        }
+        match s.store.revoke_refresh(rec.id).await {
+            Ok(true) => revoked += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(%user_id, token_id = %rec.id, error = %e, "refresh revoke failed");
+            }
+        }
+    }
+    revoked
+}
+
 // ---------- Login ----------
 
 /// `POST /api/v1/auth/login`
@@ -71,7 +106,12 @@ pub async fn login(State(s): State<AppState>, Json(body): Json<LoginRequest>) ->
     }
 
     audit::login_success(&s, user.id, &user.username).await;
-    match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
+    match s.jwt.issue(
+        &user.id.to_string(),
+        &user.username,
+        user.role,
+        user.token_version,
+    ) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
             // Mint a refresh token alongside. If minting fails, still return
@@ -264,7 +304,12 @@ pub async fn refresh(
         }
     };
 
-    let access = match s.jwt.issue(&user.id.to_string(), &user.username, user.role) {
+    let access = match s.jwt.issue(
+        &user.id.to_string(),
+        &user.username,
+        user.role,
+        user.token_version,
+    ) {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -422,13 +467,23 @@ pub async fn change_password(
     };
 
     user.password_hash = new_hash;
+    // Invalidates every access token issued before this moment, including the
+    // one that authenticated this very request — the caller must sign in again.
+    // That is the point: "change my password" is worthless as a response to a
+    // stolen session if the stolen session survives it.
+    user.token_version += 1;
     match s.store.update_user(&user).await {
         Ok(_) => {
+            let revoked = revoke_all_sessions(&s, uid).await;
             // user.created, user.deleted and user.role_changed were all audited;
             // a password change was the one account change that left no trace.
             let mut e = audit::entry_from_claims(&claims, "user.password_changed")
                 .with_target("user", uid.to_string());
-            e.detail = json!({ "username": user.username });
+            e.detail = json!({
+                "username": user.username,
+                "token_version": user.token_version,
+                "refresh_tokens_revoked": revoked,
+            });
             audit::emit(&s, e).await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -507,6 +562,7 @@ pub async fn create_user(
         password_hash: hash,
         role: body.role,
         created_at: chrono::Utc::now(),
+        token_version: 0,
     };
     match s.store.create_user(&user).await {
         Ok(_) => {
@@ -651,11 +707,16 @@ pub async fn set_user_role(
 /// authority is the admin role, exactly as it is for changing someone's role or
 /// deleting them outright, and it is audited for the same reason.
 ///
-/// Existing sessions are NOT invalidated. Tokens carry no password generation,
-/// so a JWT issued before this call stays valid until it expires. That is worth
-/// knowing when the reason for the reset is a compromised account rather than a
-/// forgotten password; closing it needs a token version on the user record and
-/// a check in the validator, which is a larger change than this.
+/// Existing sessions ARE invalidated: this bumps `User::token_version`, which
+/// kills every access token issued before now, and revokes the target's refresh
+/// tokens so none can be minted back. The target is signed out everywhere and
+/// must log in with the new password — which is what makes this a usable
+/// response to a compromised account, not just a forgotten one.
+///
+/// API keys owned by the user are deliberately left alive. They are a separate
+/// credential with their own revocation path (`DELETE /auth/api-keys/:id`);
+/// silently killing a service account's key because a human changed their
+/// password would break integrations with no obvious cause.
 pub async fn set_user_password(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
@@ -718,8 +779,12 @@ pub async fn set_user_password(
     };
 
     user.password_hash = new_hash;
+    // An admin reset is the compromised-account path, so it must terminate the
+    // target's live sessions rather than just change what they'd type next time.
+    user.token_version += 1;
     match s.store.update_user(&user).await {
         Ok(_) => {
+            let revoked = revoke_all_sessions(&s, id).await;
             // Records who reset whose, never the password. `self` distinguishes
             // an admin resetting their own account from an admin reaching into
             // someone else's, which is the case worth being able to find later.
@@ -728,6 +793,8 @@ pub async fn set_user_password(
             e.detail = json!({
                 "username": user.username,
                 "self": claims.uid == id.to_string(),
+                "token_version": user.token_version,
+                "refresh_tokens_revoked": revoked,
             });
             audit::emit(&s, e).await;
             StatusCode::NO_CONTENT.into_response()

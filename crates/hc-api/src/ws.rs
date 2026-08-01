@@ -176,6 +176,13 @@ pub async fn ws_events_handler(
         Err(resp) => return *resp,
     };
 
+    // This handler validates the JWT itself rather than going through
+    // `require_auth`, so the token-version check has to be repeated here or a
+    // session invalidated by a password change could still open a stream.
+    if let Err(resp) = crate::auth_middleware::token_version_current(&state, &claims).await {
+        return resp;
+    }
+
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
@@ -411,7 +418,7 @@ mod tests {
     }
 
     fn valid_token(svc: &JwtService) -> String {
-        svc.issue("uid-1", "alice", Role::User).unwrap()
+        svc.issue("uid-1", "alice", Role::User, 0).unwrap()
     }
 
     #[test]
@@ -454,6 +461,7 @@ mod tests {
             role: Role::User,
             scopes: Role::User.scopes(),
             actor: None,
+            tv: 0,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
