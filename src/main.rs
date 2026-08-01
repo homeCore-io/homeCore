@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::json;
 use tokio::sync::{mpsc, RwLock};
@@ -123,6 +124,8 @@ async fn try_start(
     );
 
     let publisher = client.device_publisher();
+    // Conditions for the plugin page, not only the log.
+    let notices = client.notices();
     let state_writer = client.state_writer();
     let devices: bridge::Devices = Arc::new(RwLock::new(HashMap::new()));
 
@@ -229,6 +232,25 @@ async fn try_start(
 
     if let Err(e) = publisher.publish_plugin_status("active").await {
         warn!(error = %e, "Failed to publish plugin status");
+    }
+
+    // Zero devices looks exactly like a healthy plugin from the outside, so
+    // say why. SSDP is multicast, which a container bridge network drops.
+    if cfg.devices.is_empty() {
+        notices.raise(
+            PluginNotice::warning(
+                "no_devices_configured",
+                "No Roku devices are configured, so this plugin publishes nothing.",
+            )
+            .with_remedy(
+                "Run the discovery action, which sweeps for Rokus over SSDP. If it \
+                 finds nothing and homeCore runs in a container on a bridge network, \
+                 that is expected — SSDP is multicast and does not cross the bridge. \
+                 Add each Roku by IP under Configuration instead.",
+            ),
+        );
+    } else {
+        notices.clear("no_devices_configured");
     }
 
     info!(

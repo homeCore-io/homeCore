@@ -1,6 +1,6 @@
 [package]
 name        = "hc-roku"
-version     = "0.1.0"
+version     = "0.1.1"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Roku streaming player / Roku TV plugin for homeCore (External Control Protocol)"
@@ -18,7 +18,7 @@ schema = ["dep:schemars"]
 
 [dependencies]
 schemars           = { version = "0.8", optional = true }
-plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.3.6" }
+plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.3.10" }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
