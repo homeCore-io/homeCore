@@ -19,7 +19,8 @@ use crate::lip::protocol::{
     is_led_state, led_component_for_button, query_device_led, query_output, DeviceAction,
     LipMessage, OccupancyState, OutputAction,
 };
-use plugin_sdk_rs::DevicePublisher;
+use plugin_sdk_rs::types::PluginNotice;
+use plugin_sdk_rs::{DevicePublisher, PluginNotices};
 
 // ---------------------------------------------------------------------------
 // Bridge
@@ -46,6 +47,10 @@ pub struct Bridge {
     lutron_cfg: LutronConfig,
     global_fade: f64,
     hold_threshold_ms: u64,
+    /// What to tell the operator on the plugin page when the repeater is not
+    /// answering. The reconnect loop below is silent apart from a log line, so
+    /// without this the plugin reads "active" while controlling nothing.
+    notices: PluginNotices,
 }
 
 impl Bridge {
@@ -55,6 +60,7 @@ impl Bridge {
         time_clocks: Vec<TimeclockEntry>,
         publisher: DevicePublisher,
         lutron_cfg: LutronConfig,
+        notices: PluginNotices,
     ) -> Self {
         let global_fade = lutron_cfg.default_fade_secs;
         let hold_threshold_ms = lutron_cfg.hold_threshold_ms;
@@ -96,6 +102,7 @@ impl Bridge {
             lutron_cfg,
             global_fade,
             hold_threshold_ms,
+            notices,
         }
     }
 
@@ -115,6 +122,25 @@ impl Bridge {
                 }
                 Err(e) => {
                     error!(error = %e, backoff_secs = backoff.as_secs(), "LIP connection lost — reconnecting");
+                    // Every load, scene and keypad this plugin owns is now
+                    // inert. That is worth a page-level notice, not just a log
+                    // line that scrolls: the plugin stays "active" throughout.
+                    self.notices.raise(
+                        PluginNotice::error(
+                            "repeater_unreachable",
+                            format!(
+                                "Cannot reach the Main Repeater at {}:{} — {e}. Lights, \
+                                 scenes and keypads served by this plugin will not respond.",
+                                self.lutron_cfg.host, self.lutron_cfg.port
+                            ),
+                        )
+                        .with_remedy(
+                            "Check that the repeater is powered and on the network, that \
+                             [lutron].host is its address, and that Telnet Support is \
+                             enabled in the RadioRA 2 software's Integration tab — the \
+                             plugin speaks LIP on port 23.",
+                        ),
+                    );
                     // Cancel any pending hold timers before reconnecting
                     self.hold_timers.clear();
                     tokio::time::sleep(backoff).await;
@@ -139,6 +165,11 @@ impl Bridge {
             &self.lutron_cfg.password,
         )
         .await?;
+
+        // Connected and logged in: whatever the last failure was, it is over.
+        // Clearing here rather than in the caller means a repeater that drops
+        // and recovers leaves nothing stale on the page.
+        self.notices.clear("repeater_unreachable");
 
         // Reset backoff to minimum on successful connect
         // (done in caller after Ok return — here we just proceed)

@@ -7,6 +7,7 @@ mod logging;
 mod schema;
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -121,6 +122,9 @@ async fn try_start(
         &cfg.logging.log_forward_level,
     );
     let publisher = client.device_publisher();
+    // Conditions the operator needs on the plugin page, not only in the log.
+    // Taken before run() consumes the client.
+    let notices = client.notices();
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
 
     // Enable management protocol (heartbeat + remote config/log commands).
@@ -324,8 +328,45 @@ async fn try_start(
         warn!(error = %e, "reconcile_devices failed");
     }
 
+    // Two ways to be "active" and do nothing at all, both of which used to be
+    // visible only as a log line at startup — and the second not even that.
+    if cfg.lutron.host.trim().is_empty() {
+        notices.raise(
+            PluginNotice::error(
+                "not_configured",
+                "No Main Repeater address is set, so this plugin cannot connect to \
+                 anything. It will keep retrying against an empty address.",
+            )
+            .with_remedy(
+                "Set the Main Repeater's IP under Configuration → Main Repeater, along \
+                 with the telnet integration username and password. The plugin restarts \
+                 itself when the config is saved.",
+            ),
+        );
+    } else if devices.is_empty() && scenes.is_empty() && time_clocks.is_empty() {
+        notices.raise(
+            PluginNotice::warning(
+                "no_devices_configured",
+                "Connected to the repeater, but no devices, scenes or timeclock events \
+                 are configured — so nothing is published to homeCore.",
+            )
+            .with_remedy(
+                "Open Configuration → Devices and press Import to read the design \
+                 straight from the repeater, then save. The rows are not applied until \
+                 you save.",
+            ),
+        );
+    }
+
     // --- Build and run bridge (handles LIP reconnection internally) ----------
-    let bridge = bridge::Bridge::new(devices, scenes, time_clocks, publisher, cfg.lutron.clone());
+    let bridge = bridge::Bridge::new(
+        devices,
+        scenes,
+        time_clocks,
+        publisher,
+        cfg.lutron.clone(),
+        notices,
+    );
 
     bridge.run(cmd_rx).await;
     Ok(())
