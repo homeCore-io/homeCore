@@ -814,6 +814,7 @@ async fn main() -> Result<()> {
                         capabilities: None,
                         config_schema: None,
                         config_descriptor: None,
+                        notices: Vec::new(),
                         installed_version: None,
                     });
             }

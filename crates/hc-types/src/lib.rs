@@ -24,6 +24,7 @@ pub mod event;
 pub mod log_line;
 pub mod mqtt;
 pub mod plugin_capabilities;
+pub mod plugin_notice;
 pub mod rule;
 pub mod schema;
 
@@ -34,4 +35,5 @@ pub mod vocabulary;
 
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};
+pub use plugin_notice::{NoticeLevel, PluginNotice};
 pub use schema::{AttributeKind, AttributeSchema, DeviceSchema};
