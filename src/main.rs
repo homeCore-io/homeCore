@@ -221,6 +221,57 @@ fn default_admin_password_path(base_dir: &std::path::Path) -> std::path::PathBuf
     base_dir.join("INITIAL_ADMIN_PASSWORD")
 }
 
+/// Parse `[auth] whitelist` into single-address entries.
+///
+/// Accepts a bare IP (`10.0.10.200`) or an explicit single-host prefix
+/// (`10.0.10.200/32`, `::1/128`). **Ranges are refused.**
+///
+/// A whitelisted source gets synthetic Admin claims with no token at all, so a
+/// range hands unauthenticated admin to every host inside it. `10.0.10.0/24`
+/// reads like "my LAN" and means "254 devices may administer this house" — on a
+/// home-automation VLAN that population is mostly IoT gear, the least
+/// trustworthy set of hosts on the network.
+///
+/// Bad entries are skipped with a warning rather than failing startup, matching
+/// how a malformed entry has always been treated: a typo should not take the
+/// server down. Skipping is also the safe direction to fail here, since it
+/// grants *less* access than intended rather than more.
+///
+/// Deliberately not applied to `[metrics] whitelist`, which gates a read-only
+/// Prometheus endpoint and grants no admin — a range there is reasonable.
+fn parse_auth_whitelist(entries: &[String]) -> Vec<IpNet> {
+    entries
+        .iter()
+        .filter_map(|s| {
+            let net = s
+                .parse::<IpNet>()
+                .or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from))
+                .map_err(
+                    |e| tracing::warn!(entry = %s, error = %e, "Invalid whitelist entry — skipping"),
+                )
+                .ok()?;
+
+            if net.prefix_len() != net.max_prefix_len() {
+                // Computed, not counted: `net.hosts()` is an iterator, so
+                // counting it walks every address — 16M for a /8, worse for v6.
+                let width = 1u128
+                    .checked_shl((net.max_prefix_len() - net.prefix_len()) as u32)
+                    .unwrap_or(u128::MAX);
+                tracing::warn!(
+                    entry = %s,
+                    addresses = width,
+                    "[auth] whitelist entry covers a range — skipping. A whitelisted \
+                     source gets Admin with no token, so this would grant \
+                     unauthenticated admin to every host in it. List the addresses \
+                     explicitly instead (e.g. \"10.0.10.200\")."
+                );
+                return None;
+            }
+            Some(net)
+        })
+        .collect()
+}
+
 /// Write the auto-generated admin password to `path` with 0600 perms,
 /// creating the parent directory if needed. Body is a small banner so
 /// the file is self-explanatory if anyone opens it months later.
@@ -918,16 +969,7 @@ async fn main() -> Result<()> {
 
     // ── 19. REST + WebSocket API ───────────────────────────────────────────
 
-    // Parse IP whitelist CIDRs.  Invalid entries are skipped with a warning
-    // rather than failing startup — a typo in the whitelist shouldn't take
-    // down the server.
-    let whitelist: Vec<IpNet> = config.auth.whitelist.iter().filter_map(|s| {
-        // Accept both CIDR notation ("10.0.0.1/32") and bare IPs ("10.0.0.1").
-        s.parse::<IpNet>()
-            .or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from))
-            .map_err(|e| tracing::warn!(entry = %s, error = %e, "Invalid whitelist entry — skipping"))
-            .ok()
-    }).collect();
+    let whitelist = parse_auth_whitelist(&config.auth.whitelist);
 
     if !whitelist.is_empty() {
         info!(
@@ -1251,6 +1293,54 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_whitelist_accepts_single_addresses_in_either_notation() {
+        let got = parse_auth_whitelist(&[
+            "10.0.10.200".into(),
+            "10.0.10.201/32".into(),
+            "::1".into(),
+            "fe80::1/128".into(),
+        ]);
+        let rendered: Vec<String> = got.iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            rendered,
+            vec!["10.0.10.200/32", "10.0.10.201/32", "::1/128", "fe80::1/128"]
+        );
+    }
+
+    #[test]
+    fn auth_whitelist_refuses_ranges() {
+        // The live deployment briefly carried 10.0.10.0/24, which granted
+        // tokenless admin to every host on the VLAN. That must not parse.
+        let got = parse_auth_whitelist(&[
+            "10.0.10.0/24".into(),
+            "10.0.0.0/8".into(),
+            "0.0.0.0/0".into(),
+            "2001:db8::/32".into(),
+        ]);
+        assert!(got.is_empty(), "ranges must be refused, got: {got:?}");
+    }
+
+    #[test]
+    fn auth_whitelist_skips_bad_entries_without_dropping_good_ones() {
+        // One typo should not cost the operator the entries either side of it,
+        // and should not take startup down.
+        let got = parse_auth_whitelist(&[
+            "10.0.10.200".into(),
+            "not-an-ip".into(),
+            "10.0.10.0/24".into(),
+            "10.0.10.201".into(),
+        ]);
+        let rendered: Vec<String> = got.iter().map(|n| n.to_string()).collect();
+        assert_eq!(rendered, vec!["10.0.10.200/32", "10.0.10.201/32"]);
+    }
+
+    #[test]
+    fn auth_whitelist_empty_stays_empty() {
+        // Empty means "no bypass at all" — it must never widen to a default.
+        assert!(parse_auth_whitelist(&[]).is_empty());
+    }
 
     #[test]
     fn centralize_imports_legacy_and_returns_central_path() {
