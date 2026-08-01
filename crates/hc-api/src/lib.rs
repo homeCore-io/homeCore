@@ -158,6 +158,74 @@ pub struct PluginRecord {
     pub installed_version: Option<String>,
 }
 
+/// The volatile half of a [`PluginRecord`] — everything a live view needs to
+/// stay current, and nothing that never changes.
+///
+/// `GET /plugins` inlines `capabilities`, `config_schema` and
+/// `config_descriptor` for every plugin. On a three-plugin house that is 42 KB
+/// per call, ~95% of it static and already served by
+/// `/plugins/:id/{capabilities,config/schema,config/descriptor}`. A client that
+/// polls to keep a device count fresh was re-downloading all of it every few
+/// seconds, and the cost grows with the number of plugins installed.
+///
+/// Deliberately a superset of what the web client builds a plugin entry from,
+/// so a poller can rebuild its whole list from this and never need the fat
+/// endpoint at all. Adding a field here is cheap; adding a *large* one defeats
+/// the purpose.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginStatus {
+    pub plugin_id: String,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub status: String,
+    pub enabled: bool,
+    pub managed: bool,
+    pub device_count: u32,
+    pub restart_count: u32,
+    pub supports_management: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restart: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_started: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+    /// Carried because the config editor keys off it; it is one short string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// The reason this endpoint is worth polling at all — see
+    /// [`PluginRecord::notices`].
+    #[serde(default)]
+    pub notices: Vec<hc_types::PluginNotice>,
+}
+
+impl From<&PluginRecord> for PluginStatus {
+    fn from(r: &PluginRecord) -> Self {
+        Self {
+            plugin_id: r.plugin_id.clone(),
+            registered_at: r.registered_at,
+            status: r.status.clone(),
+            enabled: r.enabled,
+            managed: r.managed,
+            device_count: r.device_count,
+            restart_count: r.restart_count,
+            supports_management: r.supports_management,
+            last_heartbeat: r.last_heartbeat,
+            last_restart: r.last_restart,
+            uptime_started: r.uptime_started,
+            log_level: r.log_level.clone(),
+            version: r.version.clone(),
+            installed_version: r.installed_version.clone(),
+            config_path: r.config_path.clone(),
+            notices: r.notices.clone(),
+        }
+    }
+}
+
 impl PluginRecord {
     /// A seed record for a locally-managed plugin, before it registers/starts —
     /// used when a plugin is installed at runtime so it shows in the list
@@ -1147,6 +1215,9 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/scenes/:id/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
+        // Static, so it wins over `/plugins/:id` — a plugin literally named
+        // "status" would be unreachable here, but ids are `plugin.*`.
+        .route("/plugins/status", get(handlers::list_plugin_status))
         .route("/plugins/install", post(handlers::install_plugin))
         .route("/registry/plugins", get(handlers::browse_registry))
         .route("/registry/plugins/:id", get(handlers::get_registry_plugin))
@@ -1397,6 +1468,88 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
         "Admin UDS listener bound"
     );
     Ok(listener)
+}
+
+#[cfg(test)]
+mod plugin_status_tests {
+    use super::*;
+
+    fn fat_record() -> PluginRecord {
+        let mut r = PluginRecord::managed_seed(
+            "plugin.ecowitt".into(),
+            Some("/homecore/config/plugins/plugin.ecowitt.toml".into()),
+            Some("/homecore/plugins/plugin.ecowitt/0.1.7/hc-ecowitt".into()),
+            true,
+            Some("0.1.7".into()),
+        );
+        r.status = "active".into();
+        r.device_count = 9;
+        r.restart_count = 4;
+        r.supports_management = true;
+        r.version = Some("0.1.7".into());
+        r.log_level = Some("info".into());
+        r.last_heartbeat = Some(chrono::Utc::now());
+        r.uptime_started = Some(chrono::Utc::now());
+        r.notices = vec![hc_types::PluginNotice::warning(
+            "receiver_unreachable",
+            "Bound to loopback.",
+        )];
+        // The bulk: a realistic descriptor/schema/manifest is kilobytes each.
+        r.config_schema = Some(serde_json::json!({ "padding": "x".repeat(8000) }));
+        r.config_descriptor = Some(serde_json::json!({ "padding": "y".repeat(8000) }));
+        r
+    }
+
+    #[test]
+    fn status_keeps_every_field_a_live_view_reads() {
+        let slim = PluginStatus::from(&fat_record());
+        assert_eq!(slim.plugin_id, "plugin.ecowitt");
+        assert_eq!(slim.status, "active");
+        assert_eq!(slim.device_count, 9);
+        assert_eq!(slim.restart_count, 4);
+        assert_eq!(slim.installed_version.as_deref(), Some("0.1.7"));
+        assert_eq!(slim.log_level.as_deref(), Some("info"));
+        assert!(slim.enabled && slim.managed && slim.supports_management);
+        assert!(slim.last_heartbeat.is_some() && slim.uptime_started.is_some());
+        assert!(slim.config_path.is_some());
+        // Notices are the whole reason a client polls this at all.
+        assert_eq!(slim.notices.len(), 1);
+        assert_eq!(slim.notices[0].code, "receiver_unreachable");
+    }
+
+    #[test]
+    fn status_drops_the_parts_that_never_change() {
+        let json = serde_json::to_value(PluginStatus::from(&fat_record())).unwrap();
+        let obj = json.as_object().unwrap();
+        // Each of these has its own endpoint; re-sending them on every poll is
+        // exactly the cost this type exists to avoid.
+        for fat in [
+            "capabilities",
+            "config_schema",
+            "config_descriptor",
+            "binary_path",
+        ] {
+            assert!(
+                !obj.contains_key(fat),
+                "{fat} must not ride along on a poll"
+            );
+        }
+    }
+
+    #[test]
+    fn status_is_dramatically_smaller_than_the_full_record() {
+        let rec = fat_record();
+        let fat = serde_json::to_string(&rec).unwrap().len();
+        let slim = serde_json::to_string(&PluginStatus::from(&rec))
+            .unwrap()
+            .len();
+        // Guards the point of the endpoint: if someone adds a heavy field to
+        // PluginStatus, this fails rather than quietly undoing the saving.
+        assert!(
+            slim * 10 < fat,
+            "slim {slim} bytes vs fat {fat} — the saving has been eroded"
+        );
+    }
 }
 
 #[cfg(test)]
