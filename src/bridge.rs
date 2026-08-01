@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use plugin_sdk_rs::{DevicePublisher, PluginStateWriter};
+use plugin_sdk_rs::types::PluginNotice;
+use plugin_sdk_rs::{DevicePublisher, PluginNotices, PluginStateWriter};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
@@ -92,6 +93,11 @@ pub struct Bridge {
     /// new device id (and losing its rules, name and room) every time
     /// DHCP moves it or the plugin restarts.
     known_ids: Arc<RwLock<HashMap<String, String>>>,
+    /// Whether this plugin has anything to control, said on the plugin page.
+    /// Re-evaluated from the live device map rather than decided once at
+    /// startup — devices arrive from discovery minutes later, and a notice is
+    /// current state, not a record of how things looked at boot.
+    notices: PluginNotices,
 }
 
 impl Bridge {
@@ -100,6 +106,7 @@ impl Bridge {
         publisher: DevicePublisher,
         state_writer: PluginStateWriter,
         devices: Devices,
+        notices: PluginNotices,
     ) -> Self {
         Self {
             cfg,
@@ -107,6 +114,29 @@ impl Bridge {
             devices,
             state_writer,
             known_ids: Arc::new(RwLock::new(HashMap::new())),
+            notices,
+        }
+    }
+
+    /// Raise or clear the "nothing to control" notice from the live device
+    /// map. Call after anything that can change what is managed.
+    pub async fn refresh_device_notice(&self) {
+        if self.devices.read().await.is_empty() {
+            self.notices.raise(
+                PluginNotice::warning(
+                    "no_devices_configured",
+                    "No Roku devices are configured or discovered, so this plugin \
+                     publishes nothing.",
+                )
+                .with_remedy(
+                    "Run the Discover Rokus action, which sweeps over SSDP. If it finds \
+                     nothing and homeCore runs in a container on a bridge network, that \
+                     is expected — SSDP is multicast and does not cross the bridge. Add \
+                     each Roku by IP under Configuration instead.",
+                ),
+            );
+        } else {
+            self.notices.clear("no_devices_configured");
         }
     }
 
@@ -165,6 +195,9 @@ impl Bridge {
             let d = Arc::clone(&this);
             tokio::spawn(async move { d.discovery_loop().await });
         }
+
+        // Covers the discovery-disabled case, where no sweep will ever run.
+        this.refresh_device_notice().await;
 
         info!(
             configured = this.cfg.devices.len(),
@@ -368,6 +401,8 @@ impl Bridge {
         for hit in &hits {
             self.integrate_hit(hit.clone()).await;
         }
+        // A sweep is exactly when "nothing to control" can stop being true.
+        self.refresh_device_notice().await;
         hits
     }
 
