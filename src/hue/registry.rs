@@ -327,6 +327,74 @@ impl HueRegistry {
         }
         out
     }
+
+    /// Forget every registration belonging to one bridge — the bridge device
+    /// itself (`bridge_device_id`, i.e. `target.device_id()`) plus all of its
+    /// lights, groups, scenes and aux devices (and their compact-publish
+    /// targets). Returns the removed device_ids, deduped, so the caller can
+    /// reconcile them out of homeCore. Bridge id is matched case-insensitively
+    /// (Hue reports uppercase; config stores lowercase). Used by
+    /// `unpair_bridge` to delete a bridge's devices when it's removed.
+    pub fn remove_all_for_bridge(
+        &mut self,
+        bridge_id: &str,
+        bridge_device_id: &str,
+    ) -> Vec<String> {
+        let mut removed: HashSet<String> = HashSet::new();
+        let matches = |b: &str| b.eq_ignore_ascii_case(bridge_id);
+
+        if self.by_device_id.remove(bridge_device_id).is_some() {
+            removed.insert(bridge_device_id.to_string());
+        }
+
+        let light_ids: Vec<String> = self
+            .lights_by_device_id
+            .iter()
+            .filter(|(_, b)| matches(&b.bridge_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in light_ids {
+            self.lights_by_device_id.remove(&id);
+            removed.insert(id);
+        }
+
+        let group_ids: Vec<String> = self
+            .groups_by_device_id
+            .iter()
+            .filter(|(_, b)| matches(&b.bridge_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in group_ids {
+            self.groups_by_device_id.remove(&id);
+            removed.insert(id);
+        }
+
+        let scene_ids: Vec<String> = self
+            .scenes_by_device_id
+            .iter()
+            .filter(|(_, b)| matches(&b.bridge_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in scene_ids {
+            self.scenes_by_device_id.remove(&id);
+            removed.insert(id);
+        }
+
+        let aux_ids: Vec<String> = self
+            .aux_by_device_id
+            .iter()
+            .filter(|(_, b)| matches(&b.bridge_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in aux_ids {
+            if let Some(binding) = self.aux_by_device_id.remove(&id) {
+                removed.insert(id);
+                removed.insert(binding.publish_device_id);
+            }
+        }
+
+        removed.into_iter().collect()
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +408,7 @@ mod tests {
         (
             HueAuxDevice {
                 bridge_id: "bridge-1".to_string(),
+                area: None,
                 owner_rid: "owner-1".to_string(),
                 resource_type: "grouped_motion".to_string(),
                 resource_id: format!("rid-{device_id}"),
@@ -386,5 +455,45 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].publish_device_id, "publish-1");
         assert_eq!(registry.aux_count(), 1);
+    }
+
+    #[test]
+    fn remove_all_for_bridge_removes_only_that_bridge_case_insensitively() {
+        let mut registry = HueRegistry::default();
+
+        // Two bridges' aux devices; bridge-1 stored uppercase (as Hue reports).
+        let (mut aux_a, _) = aux("aux-a", "pub-a");
+        aux_a.bridge_id = "AABBCC".to_string();
+        let (mut aux_b, _) = aux("aux-b", "pub-b");
+        aux_b.bridge_id = "ddeeff".to_string();
+        registry.upsert_aux(&aux_a, "pub-a");
+        registry.upsert_aux(&aux_b, "pub-b");
+        // The bridge's own device row for bridge-1.
+        registry.upsert_bridge(
+            "hue_aabbcc_bridge".to_string(),
+            BridgeSnapshot {
+                online: true,
+                summary: json!({}),
+            },
+        );
+
+        // Request lowercase — must still match the uppercase-stored bridge_id.
+        let removed: HashSet<String> = registry
+            .remove_all_for_bridge("aabbcc", "hue_aabbcc_bridge")
+            .into_iter()
+            .collect();
+
+        assert!(removed.contains("hue_aabbcc_bridge")); // bridge device
+        assert!(removed.contains("aux-a")); // its aux device
+        assert!(removed.contains("pub-a")); // its aux compact-publish target
+        assert_eq!(removed.len(), 3);
+
+        // The other bridge is untouched.
+        assert_eq!(registry.bridge_count(), 0);
+        assert_eq!(registry.aux_count(), 1);
+        assert_eq!(
+            registry.find_aux_device_id("ddeeff", "grouped_motion", "rid-aux-b"),
+            Some("pub-b".to_string())
+        );
     }
 }

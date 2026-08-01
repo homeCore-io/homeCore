@@ -9,7 +9,9 @@ use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
-use plugin_sdk_rs::types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::types::schema::{
+    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 use plugin_sdk_rs::DevicePublisher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +67,11 @@ pub async fn refresh_bridge_state(
                             &light.device_id,
                             &light.name,
                             Some("light"),
-                            None,
+                            // The Hue room, so moving a light between rooms in
+                            // the Hue app moves it in homeCore too. Core keeps
+                            // this as the plugin-delivered area; a user's
+                            // `area_override` still wins.
+                            light.area.as_deref(),
                             Some(translator::light_capabilities(&light)),
                         )
                         .await?;
@@ -238,7 +244,7 @@ pub async fn refresh_bridge_state(
                                     .map(|spec| spec.device_type.as_str())
                                     .unwrap_or(aux_device_type(&aux.resource_type)),
                             ),
-                            None,
+                            aux.area.as_deref(),
                             registration
                                 .map(|spec| Value::Object(spec.capabilities.clone()))
                                 .or_else(|| Some(translator::aux_capabilities(&aux))),
@@ -329,7 +335,7 @@ fn make_attr(
         min,
         max,
         step,
-        options: None,
+        ..Default::default()
     }
 }
 
@@ -337,7 +343,14 @@ fn build_light_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
     attrs.insert(
         "on".into(),
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+        // Both directions named. A boolean attribute is two events, and a
+        // client given only "on" needs a Not gate to catch a light going off.
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
+            BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            },
+        ),
     );
     attrs.insert(
         "brightness_pct".into(),
@@ -369,21 +382,27 @@ fn build_light_schema() -> DeviceSchema {
             kind: AttributeKind::ColorXy,
             writable: true,
             display_name: Some("Colour".into()),
-            unit: None,
-            min: None,
-            max: None,
-            step: None,
-            options: None,
+            ..Default::default()
         },
     );
-    DeviceSchema { attributes: attrs }
+    DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 fn build_group_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
     attrs.insert(
         "on".into(),
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+        // Both directions named. A boolean attribute is two events, and a
+        // client given only "on" needs a Not gate to catch a light going off.
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
+            BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            },
+        ),
     );
     attrs.insert(
         "brightness_pct".into(),
@@ -397,7 +416,10 @@ fn build_group_schema() -> DeviceSchema {
             Some(1.0),
         ),
     );
-    DeviceSchema { attributes: attrs }
+    DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 /// Map a Hue auxiliary resource type to the canonical homeCore device
@@ -647,10 +669,17 @@ async fn apply_event_item(
                 saw_known_type = true;
                 if let Some(device_id) = registry.find_scene_device_id(bridge_id, rid) {
                     applied = true;
+                    // `status.active` is a string enum
+                    // ("inactive" | "static" | "dynamic_palette"), not a bool —
+                    // a recall flips the previous scene to "inactive" and the
+                    // new one to "static", and the bridge emits both events, so
+                    // this stays in sync even when the change came from the Hue
+                    // app rather than homeCore.
                     if let Some(active) = item
                         .get("status")
                         .and_then(|s| s.get("active"))
-                        .and_then(|v| v.as_bool())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s != "inactive")
                     {
                         publisher
                             .publish_state_partial(&device_id, &json!({ "active": active }))
@@ -1485,6 +1514,38 @@ fn apply_display_preferences_to_patch(
 
 #[cfg(test)]
 mod tests {
+
+    /// Every boolean names both of its states.
+    ///
+    /// A boolean attribute is two events, not one: a client given only one
+    /// name offers one row, and the other direction needs a Not gate wrapped
+    /// round the trigger. Half-declaring is worse than not declaring, because
+    /// the client's own fallback lexicon is skipped for an attribute that then
+    /// has no second name.
+    #[test]
+    fn every_boolean_names_both_of_its_states() {
+        let schemas = [
+            ("light", build_light_schema()),
+            ("group", build_group_schema()),
+        ];
+        for (label, schema) in schemas {
+            for (name, attr) in &schema.attributes {
+                if !matches!(attr.kind, AttributeKind::Bool) {
+                    continue;
+                }
+                let s = attr
+                    .states
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{label}.{name} is a bool with no state names"));
+                assert!(!s.when_true.label.is_empty(), "{label}.{name}");
+                assert!(!s.when_false.label.is_empty(), "{label}.{name}");
+                assert_ne!(
+                    s.when_true.label, s.when_false.label,
+                    "{label}.{name} names both states the same thing"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use crate::hue::models::HueAuxDevice;
@@ -1592,6 +1653,7 @@ mod tests {
     fn compacts_temp_lux_battery_to_motion_device() {
         let motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "motion".to_string(),
             resource_id: "rid-motion".to_string(),
@@ -1601,6 +1663,7 @@ mod tests {
         };
         let temp = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "temperature".to_string(),
             resource_id: "rid-temp".to_string(),
@@ -1625,6 +1688,7 @@ mod tests {
     fn compacts_zigbee_connectivity_to_owner_light_when_no_motion_device() {
         let zigbee = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-2".to_string(),
             resource_type: "zigbee_connectivity".to_string(),
             resource_id: "rid-zigbee".to_string(),
@@ -1647,6 +1711,7 @@ mod tests {
     fn compacts_grouped_sensor_resources_to_motion_device() {
         let grouped_motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_motion".to_string(),
             resource_id: "rid-grouped-motion".to_string(),
@@ -1656,6 +1721,7 @@ mod tests {
         };
         let grouped_light = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_light_level".to_string(),
             resource_id: "rid-grouped-light".to_string(),
@@ -1665,6 +1731,7 @@ mod tests {
         };
         let motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "motion".to_string(),
             resource_id: "rid-motion".to_string(),
@@ -1690,6 +1757,7 @@ mod tests {
     fn skips_standalone_grouped_sensor_devices_and_bridge_home_by_default() {
         let grouped_motion = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-1".to_string(),
             resource_type: "grouped_motion".to_string(),
             resource_id: "rid-grouped-motion".to_string(),
@@ -1699,6 +1767,7 @@ mod tests {
         };
         let bridge_home = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "bridge-owner".to_string(),
             resource_type: "bridge_home".to_string(),
             resource_id: "rid-bridge-home".to_string(),
@@ -1731,6 +1800,7 @@ mod tests {
     fn compacts_remote_facets_to_button_owner_device() {
         let button = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "button".to_string(),
             resource_id: "rid-button".to_string(),
@@ -1740,6 +1810,7 @@ mod tests {
         };
         let rotary = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "relative_rotary".to_string(),
             resource_id: "rid-rotary".to_string(),
@@ -1749,6 +1820,7 @@ mod tests {
         };
         let battery = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-remote".to_string(),
             resource_type: "device_power".to_string(),
             resource_id: "rid-battery".to_string(),
@@ -1778,6 +1850,7 @@ mod tests {
     fn skips_standalone_support_facets_without_owner_device() {
         let battery = HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            area: None,
             owner_rid: "owner-support".to_string(),
             resource_type: "device_power".to_string(),
             resource_id: "rid-battery".to_string(),

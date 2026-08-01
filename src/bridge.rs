@@ -13,9 +13,14 @@ use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
 use crate::hue::registry::{HueRegistry, RegisteredLight};
 use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
-use plugin_sdk_rs::DevicePublisher;
+use plugin_sdk_rs::types::PluginNotice;
+use plugin_sdk_rs::{DevicePublisher, PluginNotices};
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
+
+/// Prefix shared by every device_id this plugin publishes
+/// (`hue_{bridge_id}_{kind}_{rid}` — see `BridgeTarget` in `hue::models`).
+const HUE_DEVICE_ID_PREFIX: &str = "hue_";
 
 /// Request sent by the management `refresh_devices` (or
 /// `cleanup_stale_devices`) action. Carries an optional progress
@@ -23,6 +28,23 @@ const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 /// to the operator while the refresh is in flight.
 pub struct RefreshRequest {
     pub progress: Option<mpsc::Sender<RefreshEvent>>,
+}
+
+/// Request sent by the management `unpair_bridge` action to forget one bridge:
+/// drop it from the runtime, unregister every device it owns, and report back
+/// how many were removed. The runtime replies exactly once through `resp`.
+pub struct UnpairRequest {
+    pub bridge_id: String,
+    pub resp: tokio::sync::oneshot::Sender<UnpairOutcome>,
+}
+
+/// The result of an [`UnpairRequest`], sent back to the streaming action.
+pub struct UnpairOutcome {
+    /// Whether a matching runtime bridge was found and dropped (false if it was
+    /// only in config/learned state, or already gone).
+    pub matched: bool,
+    /// Number of homeCore devices unregistered as a result.
+    pub devices_removed: usize,
 }
 
 /// Per-bridge progress emitted during a refresh. The streaming
@@ -96,21 +118,31 @@ struct EventstreamMetrics {
 
 pub struct Bridge {
     cfg: HuePluginConfig,
-    config_path: String,
     publisher: DevicePublisher,
     sync_cfg: SyncConfig,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
     command_started_at: Option<Instant>,
     metrics: EventstreamMetrics,
+    /// Core's durable learned-state view + writer, for persisting app_keys
+    /// discovered by the device-command-triggered pairing path (D8) — the same
+    /// channel the streaming `pair_bridge` action uses.
+    learned_state: crate::pairing::LearnedState,
+    state_writer: plugin_sdk_rs::PluginStateWriter,
+    /// What the operator sees when a bridge stops answering. A Hue bridge that
+    /// goes away leaves its lights registered but frozen, and the plugin keeps
+    /// reading "active" — the log line alone scrolls past.
+    notices: PluginNotices,
 }
 
 impl Bridge {
     pub fn new(
         cfg: HuePluginConfig,
-        config_path: String,
         bridges: Vec<BridgeTarget>,
         publisher: DevicePublisher,
+        learned_state: crate::pairing::LearnedState,
+        state_writer: plugin_sdk_rs::PluginStateWriter,
+        notices: PluginNotices,
     ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         let sync_cfg = SyncConfig {
@@ -124,13 +156,15 @@ impl Bridge {
         };
         Self {
             cfg,
-            config_path,
             publisher,
             sync_cfg,
             apis,
             registry: HueRegistry::default(),
             command_started_at: None,
             metrics: EventstreamMetrics::default(),
+            learned_state,
+            state_writer,
+            notices,
         }
     }
 
@@ -142,7 +176,13 @@ impl Bridge {
     /// unreachable bridge.
     async fn reconcile_published_ids(&self, all_bridges_succeeded: bool) {
         if !all_bridges_succeeded {
-            debug!("Skipping cross-restart reconcile — not all bridges responded");
+            // Skipping is the safe choice, but a bridge that fails every sync
+            // means stale devices are never cleaned up and nothing says so.
+            warn!(
+                "Skipping cross-restart reconcile — not all bridges responded. \
+                 Devices dropped from config stay registered in homeCore until a \
+                 sync in which every bridge succeeds."
+            );
             return;
         }
         let live = self.registry.all_device_ids();
@@ -151,6 +191,7 @@ impl Bridge {
                 if !report.stale_unregistered.is_empty() {
                     info!(
                         count = report.stale_unregistered.len(),
+                        devices = ?report.stale_unregistered,
                         "Cleaned up stale Hue devices via SDK reconcile"
                     );
                 }
@@ -172,6 +213,7 @@ impl Bridge {
         mut hc_rx: mpsc::Receiver<(String, Value)>,
         mut refresh_rx: mpsc::Receiver<RefreshRequest>,
         mut new_bridge_rx: mpsc::Receiver<crate::hue::models::BridgeTarget>,
+        mut unpair_rx: mpsc::Receiver<UnpairRequest>,
     ) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
 
@@ -196,6 +238,23 @@ impl Bridge {
             if let Err(e) = self.refresh(&api).await {
                 warn!(bridge = %api.target().bridge_id, error = %e, "Initial bridge refresh failed");
                 all_bridges_succeeded = false;
+                self.notices.raise(
+                    PluginNotice::error(
+                        "bridge_unreachable",
+                        format!(
+                            "Cannot reach the Hue bridge at {} — {e}. Its lights stay \
+                             listed but will not respond or report state.",
+                            api.target().host
+                        ),
+                    )
+                    .with_remedy(
+                        "Check the bridge is powered and on the network. If its IP has \
+                         changed, re-run Discover; if it was factory reset, pair it \
+                         again — the stored app key will no longer be accepted.",
+                    ),
+                );
+            } else {
+                self.notices.clear("bridge_unreachable");
             }
         }
         // Cross-restart cleanup runs once after the startup sync. If a
@@ -351,30 +410,132 @@ impl Bridge {
                 new = new_bridge_rx.recv() => {
                     match new {
                         Some(target) => {
-                            info!(
-                                bridge_id = %target.bridge_id,
-                                host = %target.host,
-                                "New bridge added at runtime via pair action"
-                            );
-                            let api = HueApiClient::new(target.clone());
-                            self.apis.push(api.clone());
-                            // Spawn eventstream task for the new bridge if enabled.
-                            if self.cfg.hue.eventstream_enabled && api.has_app_key() {
-                                let api_for_es = api.clone();
-                                let tx = event_tx.clone();
-                                let reconnect_secs = self.cfg.hue.eventstream_reconnect_secs;
-                                tokio::spawn(async move {
-                                    let _ = api_for_es.run_eventstream(tx, reconnect_secs).await;
-                                });
-                            }
-                            if let Err(e) = self.refresh(&api).await {
-                                warn!(error = %e, "Initial refresh of newly-paired bridge failed");
+                            // Dedup: re-pairing an already-running bridge (possibly
+                            // with a different-case bridge_id, or targeted by host)
+                            // must not add a second runtime bridge / device.
+                            // Distinct new bridges (no match by id or host) are
+                            // still added — multi-bridge.
+                            let running = self.apis.iter().position(|a| {
+                                let t = a.target();
+                                crate::config::same_bridge(
+                                    &t.bridge_id, &t.host, &target.bridge_id, &target.host,
+                                )
+                            });
+                            if let Some(idx) = running {
+                                // "Already running" does not mean "already working":
+                                // discovery registers every bridge it finds, including
+                                // unpaired ones (auth_required, no app_key). That is
+                                // the normal case for a first pairing, so the existing
+                                // entry must ADOPT the new key — dropping it here left
+                                // the bridge unauthorized with no devices until the
+                                // plugin was restarted, which looked like pairing had
+                                // silently failed.
+                                let api = self.apis[idx].clone();
+                                let was_authorized = api.has_app_key();
+                                if let Some(app_key) = target.app_key.clone() {
+                                    api.set_app_key(app_key);
+                                }
+                                info!(
+                                    bridge_id = %target.bridge_id,
+                                    host = %target.host,
+                                    newly_authorized = !was_authorized && api.has_app_key(),
+                                    "Re-paired an already-running bridge; adopted the new app key"
+                                );
+                                // Going unauthorized → authorized is the moment this
+                                // bridge becomes usable: start its eventstream and pull
+                                // its devices now rather than waiting for the next
+                                // resync tick.
+                                if !was_authorized && api.has_app_key() {
+                                    if self.cfg.hue.eventstream_enabled {
+                                        let api_for_es = api.clone();
+                                        let tx = event_tx.clone();
+                                        let reconnect_secs =
+                                            self.cfg.hue.eventstream_reconnect_secs;
+                                        tokio::spawn(async move {
+                                            let _ = api_for_es
+                                                .run_eventstream(tx, reconnect_secs)
+                                                .await;
+                                        });
+                                    }
+                                    if let Err(e) = self.refresh(&api).await {
+                                        warn!(
+                                            error = %e,
+                                            "Initial refresh of newly-authorized bridge failed"
+                                        );
+                                    }
+                                }
+                            } else {
+                                info!(
+                                    bridge_id = %target.bridge_id,
+                                    host = %target.host,
+                                    "New bridge added at runtime via pair action"
+                                );
+                                let api = HueApiClient::new(target.clone());
+                                self.apis.push(api.clone());
+                                // Spawn eventstream task for the new bridge if enabled.
+                                if self.cfg.hue.eventstream_enabled && api.has_app_key() {
+                                    let api_for_es = api.clone();
+                                    let tx = event_tx.clone();
+                                    let reconnect_secs = self.cfg.hue.eventstream_reconnect_secs;
+                                    tokio::spawn(async move {
+                                        let _ = api_for_es.run_eventstream(tx, reconnect_secs).await;
+                                    });
+                                }
+                                if let Err(e) = self.refresh(&api).await {
+                                    warn!(error = %e, "Initial refresh of newly-paired bridge failed");
+                                }
                             }
                         }
                         None => {
                             // Sender dropped — fine.
                         }
                     }
+                }
+                req = unpair_rx.recv() => {
+                    if let Some(req) = req {
+                        let requested = req.bridge_id;
+                        // Find the runtime bridge (by id or host, case-insensitive)
+                        // and drop it so it stops syncing + eventstreaming. Its
+                        // spawned eventstream task keeps its own api clone until the
+                        // config-PUT restart that follows an unpair tears it down.
+                        let idx = self.apis.iter().position(|a| {
+                            let t = a.target();
+                            crate::config::same_bridge(&t.bridge_id, &t.host, &requested, "")
+                        });
+                        let target = match idx {
+                            Some(i) => self.apis.remove(i).target().clone(),
+                            // Not running (config-only, or already gone). Build a
+                            // target from the requested id so we can still compute
+                            // its device id and clear any lingering registry rows.
+                            None => crate::hue::models::BridgeTarget {
+                                name: String::new(),
+                                bridge_id: requested.clone(),
+                                host: String::new(),
+                                app_key: None,
+                                verify_tls: true,
+                                allow_self_signed: true,
+                            },
+                        };
+                        let bridge_device_id = target.device_id();
+                        let removed = self
+                            .registry
+                            .remove_all_for_bridge(&target.bridge_id, &bridge_device_id);
+                        let devices_removed = removed.len();
+                        info!(
+                            bridge_id = %target.bridge_id,
+                            matched = idx.is_some(),
+                            devices_removed,
+                            "Unpair: dropped bridge and removed its devices"
+                        );
+                        // Reconcile so the SDK unregisters the now-absent devices
+                        // from homeCore and persists the smaller published set.
+                        self.reconcile_published_ids(true).await;
+                        let _ = req.resp.send(UnpairOutcome {
+                            matched: idx.is_some(),
+                            devices_removed,
+                        });
+                    }
+                    // Sender dropped → this arm just won't fire again.
                 }
                 _ = heartbeat_tick.tick() => {
                     self.publisher.publish_plugin_status("active").await?;
@@ -524,13 +685,25 @@ impl Bridge {
                         match api.pair_bridge("homecore#hc_hue").await {
                             Ok(app_key) => {
                                 paired = true;
-                                // Persist the new app_key to config so it survives restarts.
-                                self.cfg.upsert_bridge_app_key(api.target(), &app_key);
-                                match self.cfg.save(&self.config_path) {
+                                // Persist the new app_key to core's durable learned
+                                // state (D8) — NOT the config file — so it survives
+                                // restarts without self-writing the core-owned config.
+                                let delta = {
+                                    let mut cell = self.learned_state.lock().unwrap();
+                                    let current =
+                                        cell.clone().unwrap_or_else(|| serde_json::json!({}));
+                                    let delta = crate::config::build_bridge_state_delta(
+                                        &current,
+                                        api.target(),
+                                        &app_key,
+                                    );
+                                    *cell = Some(delta.clone());
+                                    delta
+                                };
+                                match self.state_writer.persist(&delta).await {
                                     Ok(()) => info!(
                                         bridge_id = %api.target().bridge_id,
-                                        config = %self.config_path,
-                                        "Bridge app_key saved to config"
+                                        "Bridge app_key persisted to core learned state"
                                     ),
                                     Err(e) => warn!(
                                         bridge_id = %api.target().bridge_id,
@@ -1412,9 +1585,52 @@ impl Bridge {
             return Ok(());
         }
 
-        // Ignore commands for devices this plugin doesn't own.  With the
-        // SDK wildcard subscription (homecore/devices/+/cmd), commands for
-        // other plugins' devices arrive here too — silently skip them.
+        // A device_id carrying our own `hue_` prefix but with no registry binding
+        // — we published it at some point and have since stopped managing it.
+        // Dropping it as "not ours" makes the command vanish with no error
+        // anywhere, so say so loudly.
+        //
+        // This fires only when the subscription outlives the binding, i.e. the
+        // device was registered earlier in *this* process and later pruned (a
+        // group deleted from the bridge mid-run).  It does NOT catch a device
+        // orphaned across a restart: the SDK subscribes per-device, so we never
+        // subscribe to that device's cmd topic at all and the broker drops the
+        // command before it reaches us.  Core detects that case instead —
+        // see `GET /api/v1/devices/orphaned`.
+        if Self::is_own_device_id(device_id) {
+            warn!(
+                device_id,
+                "Command for an unmanaged Hue device — it is still registered in \
+                 homeCore but this plugin has no binding for it, so the command was \
+                 dropped.  Check publish_grouped_lights / publish_bridge_home, or \
+                 remove the stale device."
+            );
+            // Deliberately not `observe_command_result` — that publishes a state
+            // patch, which would refresh this device's `last_seen` and disguise the
+            // very staleness that marks it as unmanaged.  Emit the event only.
+            let payload = translator::command_result_event(translator::CommandResult {
+                plugin_id: self.publisher.plugin_id(),
+                device_id,
+                operation: "unrouted",
+                success: false,
+                error: Some("device not managed by this plugin"),
+                error_code: Some("unmanaged_device"),
+                latency_ms: 0,
+                retry_count: 0,
+            });
+            if let Err(e) = self
+                .publisher
+                .publish_event("plugin_command_result", &payload)
+                .await
+            {
+                warn!(device_id, error = %e, "Failed to publish unrouted-command event");
+            }
+            return Ok(());
+        }
+
+        // Defensive only.  The SDK subscribes per-device
+        // (`homecore/devices/{id}/cmd`) for devices we registered — there is no
+        // wildcard subscription, so another plugin's command never reaches us.
         debug!(device_id, "Ignoring command for non-Hue device");
 
         Ok(())
@@ -1599,6 +1815,13 @@ impl Bridge {
         {
             warn!(device_id, operation, error = %e, "Failed to publish command result event");
         }
+    }
+
+    /// Whether `device_id` is one this plugin publishes.  True even for devices
+    /// it no longer has a registry binding for — that gap is exactly what makes
+    /// an unroutable command worth reporting rather than silently dropping.
+    fn is_own_device_id(device_id: &str) -> bool {
+        device_id.starts_with(HUE_DEVICE_ID_PREFIX)
     }
 
     fn classify_command_error(error: Option<&str>) -> Option<&'static str> {
@@ -1805,9 +2028,11 @@ mod tests {
         };
         Bridge::new(
             HuePluginConfig::default(),
-            "config/config.toml".to_string(),
             vec![bridge],
             publisher,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+            plugin_sdk_rs::PluginStateWriter::test_instance("plugin.hue"),
+            plugin_sdk_rs::PluginNotices::test_instance(),
         )
     }
 
@@ -1841,6 +2066,21 @@ mod tests {
             motion_sensitivity: None,
         };
         assert!(Bridge::validate_accessory_command("motion", &cmd).is_err());
+    }
+
+    #[test]
+    fn recognizes_own_device_ids_even_without_a_binding() {
+        // A grouped light dropped from config keeps its registration in
+        // homeCore and still routes commands here.  It must be recognized as
+        // ours so the command is reported rather than silently discarded.
+        assert!(Bridge::is_own_device_id(
+            "hue_001788fffe6841b3_group_f891081e"
+        ));
+        assert!(Bridge::is_own_device_id(
+            "hue_001788fffe6841b3_light_03113f8a"
+        ));
+        assert!(!Bridge::is_own_device_id("lutron_72"));
+        assert!(!Bridge::is_own_device_id("caseta_10"));
     }
 
     #[test]

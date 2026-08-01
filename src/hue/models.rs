@@ -66,6 +66,10 @@ pub struct BridgeSnapshot {
 pub struct HueLight {
     pub bridge_id: String,
     pub owner_rid: String,
+    /// The Hue room this light's device sits in, slugified as a homeCore area.
+    /// `None` when the light is in no room. Follows the bridge: move the light
+    /// to another room in the Hue app and this follows.
+    pub area: Option<String>,
     pub resource_id: String,
     pub device_id: String,
     pub name: String,
@@ -132,6 +136,10 @@ pub struct HueScene {
 #[derive(Debug, Clone)]
 pub struct HueAuxDevice {
     pub bridge_id: String,
+    /// The Hue room this accessory's owning device sits in, slugified as a
+    /// homeCore area. Same source as [`HueLight::area`] — a sensor belongs to
+    /// a room just as much as a lamp does.
+    pub area: Option<String>,
     pub owner_rid: String,
     pub resource_type: String,
     pub resource_id: String,
