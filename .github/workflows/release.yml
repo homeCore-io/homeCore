@@ -40,19 +40,20 @@ jobs:
       publish_docker_image: true
       image_name: hc-core
       dockerfile_name: Dockerfile.core
-      # The Dockerfile and entrypoint that build the published image come from
-      # homeCore-io/docker at this ref, so it is part of the build recipe — not
-      # just orchestration. Hardcoding `develop` meant a *tagged* image was built
-      # from whatever that branch happened to be at the time, so the image could
-      # not be rebuilt from the component's tag alone: its recipe was unrecorded.
+      # The Dockerfile and entrypoint that build the published image live in
+      # this repo, so they are versioned with the binary they wrap: this tag
+      # alone reproduces the image, and the release has NO cross-repo ordering
+      # constraint at all.
       #
-      # On a tag push, pin to the identical tag. homeCore-io/docker is versioned
-      # in lockstep (it carries v0.1.0-v0.1.5), so tagging this component v0.1.6
-      # builds against docker v0.1.6. Everything else keeps tracking develop,
-      # which is what a dev image wants.
+      # They used to come from homeCore-io/docker, pinned to core's own tag name
+      # so the recipe behind a tagged image was recorded. That worked, but it
+      # required tagging that repo before this one on every release — and since
+      # it has no version of its own, those tags were empty re-cuts whose only
+      # purpose was to satisfy this pin. The coupling dated from when core baked
+      # the Leptos WASM UI in and three repos genuinely had to agree; core builds
+      # one binary and one image now.
       #
-      # This is now the ONLY cross-repo ordering constraint a release has: tag
-      # homeCore-io/docker before tagging core. If the tag is missing the release
-      # fails — hc-scripts' pre-flight names the cause — rather than silently
-      # building from develop.
-      docker_repo_ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'develop' }}
+      # Provenance is recorded in the image instead of inferred from matching tag
+      # names: hc-scripts stamps org.opencontainers.image.revision with the
+      # commit, which pins the Dockerfile and the source together.
+      docker_context_dir: docker
