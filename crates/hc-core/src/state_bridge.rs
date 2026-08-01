@@ -256,7 +256,13 @@ impl StateBridge {
         // homecore/plugins/{id}/logs — forward plugin logs to the log stream
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "plugins" && parts[3] == "logs"
         {
-            if let Ok(line) = serde_json::from_slice::<LogLine>(payload) {
+            if let Ok(mut line) = serde_json::from_slice::<LogLine>(payload) {
+                // The topic already says who sent this; it used to be thrown
+                // away, leaving the tracing target as the only handle on a
+                // plugin's logs — and that names the *module*, so a filter
+                // built from it keeps hc_caseta's lines and loses the SDK's
+                // and rumqttc's from the same process.
+                line = line.with_plugin_id(parts[2]);
                 if let Some(ref tx) = self.log_tx {
                     // Push into ring buffer for late subscribers.
                     if let Some(ref ring) = self.log_ring {

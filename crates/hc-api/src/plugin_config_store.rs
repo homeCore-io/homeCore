@@ -67,6 +67,25 @@ impl PluginConfigStore {
         write_atomic(&path, raw.as_bytes()).with_context(|| format!("write {}", path.display()))
     }
 
+    /// Delete a plugin's config file. `Ok(false)` if there was nothing there.
+    ///
+    /// Uninstall used to leave this behind. Nothing in core removed it, so a
+    /// removed plugin kept its bridge host, its credentials and every device
+    /// row it had been given — and reinstalling silently adopted them, which
+    /// looks like the new install arriving pre-broken.
+    ///
+    /// Goes through [`Self::path_for`] rather than joining a name directly, so
+    /// the same slugging that stops `../../etc/passwd` becoming a read also
+    /// stops it becoming a *delete*.
+    pub fn remove(&self, plugin_id: &str) -> Result<bool> {
+        let path = self.path_for(plugin_id);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+
     /// One-time import: byte-copy `legacy` into the canonical location **iff**
     /// no central file exists yet.  Returns `Ok(true)` if a copy was made,
     /// `Ok(false)` if the central file already existed (idempotent — the central
@@ -88,7 +107,11 @@ impl PluginConfigStore {
 
 /// Collapse anything that isn't a safe filename character to `_`, guaranteeing
 /// the result stays a single path component inside the store directory.
-fn slug(id: &str) -> String {
+///
+/// `pub(crate)` so the uninstall path can slug a plugin id the same way before
+/// deleting its *binary* directory. Two different sanitisers guarding two
+/// deletes that take the same untrusted id is how one of them ends up weaker.
+pub(crate) fn slug(id: &str) -> String {
     id.chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
@@ -128,6 +151,48 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "atomic write left a tmp file");
+    }
+
+    #[test]
+    fn remove_deletes_the_config_and_is_idempotent() {
+        // Uninstall left this file behind, so a reinstall silently adopted the
+        // removed plugin's bridge host, credentials and device rows.
+        let dir = tempfile::tempdir().unwrap();
+        let store = PluginConfigStore::new(dir.path());
+        store
+            .write("plugin.caseta", "[caseta]\nhost = \"10.0.0.5\"\n")
+            .unwrap();
+        assert!(store.exists("plugin.caseta"));
+
+        assert!(
+            store.remove("plugin.caseta").unwrap(),
+            "first remove deletes"
+        );
+        assert!(!store.exists("plugin.caseta"));
+        // Uninstalling something already gone is not an error — the handler
+        // reports what it removed rather than failing the whole operation.
+        assert!(
+            !store.remove("plugin.caseta").unwrap(),
+            "second remove is a no-op"
+        );
+    }
+
+    #[test]
+    fn remove_cannot_escape_the_store_directory() {
+        // The id arrives in a URL path. A delete that joined it raw would let
+        // `../../` reach outside the store; slugging keeps it one component.
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("passwd");
+        std::fs::write(&victim, "do not delete me").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = PluginConfigStore::new(dir.path());
+        let _ = store.remove("../../../../../../../../..{}/passwd");
+
+        assert!(
+            victim.exists(),
+            "traversal in a plugin id must not delete outside the store"
+        );
     }
 
     #[test]
