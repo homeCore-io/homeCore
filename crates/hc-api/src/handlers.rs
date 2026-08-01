@@ -5307,6 +5307,16 @@ pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl Int
     (StatusCode::OK, Json(json!(list)))
 }
 
+/// `GET /plugins/status` — the same list, minus the parts that never change.
+///
+/// For clients that poll to keep a view current. See [`crate::PluginStatus`]
+/// for why this exists rather than everyone re-reading `GET /plugins`.
+pub async fn list_plugin_status(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    let list: Vec<crate::PluginStatus> = map.values().map(crate::PluginStatus::from).collect();
+    (StatusCode::OK, Json(json!(list)))
+}
+
 /// Delete every device belonging to `plugin_id`, emitting a `device_deleted`
 /// event for each so live clients drop the tile without a manual refresh (the
 /// same event shape the plugin-unregister path in state_bridge emits), and
