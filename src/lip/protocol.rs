@@ -138,10 +138,15 @@ impl LipMessage {
             4 => DeviceAction::Release,
             6 => DeviceAction::DoubleClick,
             9 => {
-                let state = parts
-                    .get(4)
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .unwrap_or(255);
+                // No invented value. A keypad that does not answer must not
+                // appear to report an LED level: 255 is not a state the
+                // protocol defines, and publishing it put `led_6: 255` on
+                // devices whose sixth button is simply unprogrammed — and
+                // every LED of a HOMEOWNER (virtual) keypad, which has no
+                // physical LEDs at all.
+                let Some(state) = parts.get(4).and_then(|v| v.parse::<u8>().ok()) else {
+                    return Self::Unknown(parts.join(","));
+                };
                 DeviceAction::Led(state)
             }
             _ => return Self::Unknown(parts.join(",")),
@@ -159,13 +164,11 @@ impl LipMessage {
             return Self::Unknown(parts.join(","));
         };
         // parts[2] = action (always "3" for occupancy state queries/updates)
-        let state_val = parts
-            .get(3)
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(255);
-        let state = match state_val {
-            3 => OccupancyState::Occupied,
-            4 => OccupancyState::Vacant,
+        let state = match parts.get(3).and_then(|v| v.parse::<u32>().ok()) {
+            Some(3) => OccupancyState::Occupied,
+            Some(4) => OccupancyState::Vacant,
+            // Anything else is genuinely unknown, and the bridge must not
+            // publish it as vacancy — "we did not hear" is not "nobody home".
             _ => OccupancyState::Unknown,
         };
         Self::Group {
@@ -194,9 +197,33 @@ pub fn cmd_shade_action(integration_id: u32, action: u8) -> String {
     format!("#OUTPUT,{integration_id},{action}")
 }
 
+/// `#OUTPUT,{id},6` — pulse a momentary CCO.
+///
+/// Action 6 with no parameters, per the RA2 Integration Guide's CCO table.
+/// The relay closes for its configured pulse time (one second by default) and
+/// opens itself; there is nothing to set back. Levelling it with action 1
+/// would latch a *maintained* CCO instead, which is a different device.
+pub fn cmd_pulse_output(integration_id: u32) -> String {
+    format!("#OUTPUT,{integration_id},6")
+}
+
 /// `#DEVICE,{id},{component},{action}` for press(3)/release(4)
 pub fn cmd_device_action(integration_id: u32, component: u32, action: u8) -> String {
     format!("#DEVICE,{integration_id},{component},{action}")
+}
+
+/// Is this a real LED state?
+///
+/// The Integration Guide defines exactly four: 0 Off, 1 On, 2 Normal Flash,
+/// 3 Rapid Flash. A live repeater answers **255** for a button with no LED
+/// assigned — every button of a HOMEOWNER (virtual) keypad, and any
+/// unprogrammed button on a physical one. It is not in the guide's table, so
+/// anything outside 0-3 is treated as "no LED here" rather than a level.
+///
+/// This matters beyond tidiness: scene state is derived with `state > 0`, so
+/// an unassigned 255 read as *on*.
+pub fn is_led_state(state: u8) -> bool {
+    state <= 3
 }
 
 /// LED component number for a given button component.
@@ -390,6 +417,45 @@ mod tests {
     fn cmd_led_format() {
         assert_eq!(cmd_device_led(72, 83, 1), "#DEVICE,72,83,9,1");
         assert_eq!(cmd_device_led(72, 83, 0), "#DEVICE,72,83,9,0");
+    }
+
+    /// The guide defines four LED states. A live repeater answers 255 for a
+    /// button with no LED — and scene state is derived with `state > 0`, so
+    /// that read as *on*.
+    #[test]
+    fn only_the_four_documented_led_states_are_states() {
+        for real in 0..=3u8 {
+            assert!(is_led_state(real), "{real} is documented");
+        }
+        assert!(!is_led_state(255), "255 means no LED assigned");
+        assert!(!is_led_state(4));
+    }
+
+    /// A keypad that does not answer must not look like one reporting a level.
+    /// `255` used to be invented here, and reached homeCore as `led_6: 255` on
+    /// unprogrammed buttons — and on every button of a virtual keypad.
+    #[test]
+    fn an_unanswered_led_query_is_not_a_state() {
+        let msg = LipMessage::parse("~DEVICE,52,81,9");
+        assert!(
+            matches!(msg, LipMessage::Unknown(_)),
+            "expected Unknown, got {msg:?}"
+        );
+        let msg = LipMessage::parse("~DEVICE,52,81,9,notanumber");
+        assert!(matches!(msg, LipMessage::Unknown(_)));
+    }
+
+    /// "We did not hear" is not "nobody is home".
+    #[test]
+    fn an_unparseable_occupancy_state_stays_unknown() {
+        let LipMessage::Group { state, .. } = LipMessage::parse("~GROUP,62,3,9") else {
+            panic!("expected a Group message");
+        };
+        assert_eq!(state, OccupancyState::Unknown);
+        let LipMessage::Group { state, .. } = LipMessage::parse("~GROUP,62,3") else {
+            panic!("expected a Group message");
+        };
+        assert_eq!(state, OccupancyState::Unknown);
     }
 
     #[test]

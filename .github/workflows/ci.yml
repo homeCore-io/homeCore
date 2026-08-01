@@ -16,6 +16,9 @@ permissions:
 
 jobs:
   ci:
+    # No rust_version override — take rust-ci.yml's pinned default so CI
+    # compiles with the same toolchain that ships (the Dockerfiles pin
+    # rust:1.95-alpine by digest). Tracking "stable" here gated merges on a
+    # compiler we never ship with, and turned CI red on Rust release day with
+    # no code change. Bump the pin in hc-scripts deliberately.
     uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
-    with:
-      rust_version: "stable"

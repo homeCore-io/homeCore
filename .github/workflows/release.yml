@@ -7,29 +7,27 @@ on:
     paths-ignore:
       - '**/*.md'
       - '.github/dependabot.yml'
-  workflow_dispatch:
-    inputs:
-      fast:
-        description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
-        type: boolean
-        default: true
-      refresh_deps:
-        description: "Run cargo update for in-org git deps (plugin-sdk-rs, hc-types, hc-logging, hc-time) before build. SDK fanout passes this so the rebuild actually carries new SDK code instead of the SHA Cargo.lock pins."
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 permissions:
   contents: write
+  # The shared rust-release.yml still has a docker-publish job (core uses it)
+  # that declares packages: write. A reusable job can't request more than the
+  # caller grants, so this must be granted even though plugins build no image
+  # (publish_docker_image defaults false, so docker-publish never runs).
   packages: write
 
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    # Inherit org secrets (REGISTRY_DISPATCH_PAT) so the reusable workflow can
+    # notify homeCore-io/registry to index this release's artifact.
+    secrets: inherit
     with:
       binary_name: hc-lutron
       config_example: config/config.toml.example
       rust_version: "stable"
-      publish_docker_image: true
-      docker_repo_ref: develop  # remove once homeCore-io/docker is on main
-      fast: ${{ inputs.fast || false }}
-      refresh_deps: ${{ inputs.refresh_deps || false }}
+      # Plugins ship as signed registry artifacts (tar.zst), not containers: on
+      # a tag release, package the binary, attach it to the GitHub Release, and
+      # notify the plugin registry to index it.
+      publish_registry: true

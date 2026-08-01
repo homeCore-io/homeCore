@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::config::{DeviceConfig, DeviceKind, SceneConfig, TimeclockConfig};
 use crate::lip::protocol::{
-    cmd_device_led, cmd_set_level, cmd_shade_action, led_component_for_button,
+    cmd_device_led, cmd_pulse_output, cmd_set_level, cmd_shade_action, led_component_for_button,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,14 +33,22 @@ impl DeviceEntry {
             DeviceKind::Pico => "pico_remote",
             DeviceKind::OccupancyGroup => "occupancy_sensor",
             DeviceKind::Vcrx => "vcrx",
+            DeviceKind::FanControl => "fan",
+            // A momentary trigger, not a switch: it accepts `activate` and
+            // never latches, which is what a scene already means here.
+            DeviceKind::CcoPulsed => "scene",
         }
     }
 
-    /// Whether this device is an OUTPUT (dimmer/switch/cover) that can be queried.
+    /// Whether this device is an OUTPUT that can be level-queried on connect.
+    ///
+    /// `CcoPulsed` is deliberately absent: the Integration Guide states plainly
+    /// that "momentary outputs should not be queried", and a pulse has no
+    /// resting level to report.
     pub fn is_output(&self) -> bool {
         matches!(
             self.config.kind,
-            DeviceKind::Dimmer | DeviceKind::Switch | DeviceKind::Shade
+            DeviceKind::Dimmer | DeviceKind::Switch | DeviceKind::Shade | DeviceKind::FanControl
         )
     }
 
@@ -107,6 +115,24 @@ impl DeviceEntry {
                 };
                 Some(serde_json::json!({ "position": (pos * 10.0).round() / 10.0 }))
             }
+            // Bands per the Integration Guide's Maestro Fan Speed Control
+            // table. It prints Medium High as 56-75, leaving 51-55 undefined —
+            // almost certainly a typo, so 51 is treated as medium-high here,
+            // matching hc-caseta.
+            DeviceKind::FanControl => {
+                let speed = match level as u32 {
+                    0 => "off",
+                    1..=25 => "low",
+                    26..=50 => "medium",
+                    51..=75 => "medium-high",
+                    _ => "high",
+                };
+                Some(serde_json::json!({
+                    "on":        level > 0.0,
+                    "speed":     speed,
+                    "speed_pct": (level * 10.0).round() / 10.0,
+                }))
+            }
             _ => None,
         }
     }
@@ -132,6 +158,39 @@ impl DeviceEntry {
         let id = self.config.integration_id;
 
         match self.config.kind {
+            // Discrete speeds ride the same zone-level command a dimmer uses;
+            // the guide's own example sets Medium High with `#OUTPUT,1,1,75`.
+            DeviceKind::FanControl => {
+                let level = if let Some(speed) = cmd["speed"].as_str() {
+                    match speed {
+                        "off" => 0.0,
+                        "low" => 25.0,
+                        "medium" => 50.0,
+                        "medium-high" => 75.0,
+                        "high" => 100.0,
+                        _ => return vec![],
+                    }
+                } else if let Some(pct) = cmd["speed_pct"].as_f64() {
+                    pct.clamp(0.0, 100.0)
+                } else if let Some(on) = cmd["on"].as_bool() {
+                    if on {
+                        100.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    return vec![];
+                };
+                vec![cmd_set_level(id, level, fade)]
+            }
+            // Momentary: one pulse, no level, nothing to turn back off.
+            DeviceKind::CcoPulsed => {
+                if cmd["activate"].as_bool() == Some(true) || cmd["on"].as_bool() == Some(true) {
+                    vec![cmd_pulse_output(id)]
+                } else {
+                    vec![]
+                }
+            }
             DeviceKind::Dimmer => {
                 let level = if let Some(b) = cmd["brightness_pct"].as_f64() {
                     b.clamp(0.0, 100.0)
@@ -247,5 +306,83 @@ impl TimeclockEntry {
     pub fn new(config: TimeclockConfig) -> Self {
         let hc_id = config.hc_id();
         Self { config, hc_id }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DeviceConfig;
+
+    fn dev(kind: DeviceKind) -> DeviceEntry {
+        DeviceEntry::new(DeviceConfig {
+            integration_id: 7,
+            name: "Test".into(),
+            kind,
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons: vec![],
+            all_buttons: vec![],
+            button_names: vec![],
+            ccis: vec![],
+        })
+    }
+
+    /// Bands from the Integration Guide's Maestro Fan Speed Control table.
+    #[test]
+    fn fan_levels_map_to_named_speeds() {
+        let f = dev(DeviceKind::FanControl);
+        let speed = |lvl: f64| f.translate_output_state(lvl).unwrap()["speed"].clone();
+        assert_eq!(speed(0.0), "off");
+        assert_eq!(speed(25.0), "low");
+        assert_eq!(speed(50.0), "medium");
+        assert_eq!(speed(75.0), "medium-high");
+        assert_eq!(speed(100.0), "high");
+    }
+
+    #[test]
+    fn fan_speed_commands_use_the_guides_levels() {
+        let f = dev(DeviceKind::FanControl);
+        // The guide's own worked example: Medium High is #OUTPUT,<id>,1,75.
+        let cmds = f.translate_command(&serde_json::json!({"speed": "medium-high"}), 0.0);
+        assert!(cmds[0].starts_with("#OUTPUT,7,1,75"), "got {:?}", cmds);
+        // An unknown speed is refused rather than guessed at.
+        assert!(f
+            .translate_command(&serde_json::json!({"speed": "turbo"}), 0.0)
+            .is_empty());
+    }
+
+    /// A pulsed CCO is action 6 with no parameters — *not* a level. Levelling
+    /// it would latch a maintained CCO, which is a different device.
+    #[test]
+    fn pulsed_cco_pulses_and_never_latches() {
+        let c = dev(DeviceKind::CcoPulsed);
+        assert_eq!(
+            c.translate_command(&serde_json::json!({"activate": true}), 0.0),
+            vec!["#OUTPUT,7,6".to_string()]
+        );
+        assert_eq!(
+            c.translate_command(&serde_json::json!({"on": true}), 0.0),
+            vec!["#OUTPUT,7,6".to_string()]
+        );
+        // There is no "off" for a momentary contact.
+        assert!(c
+            .translate_command(&serde_json::json!({"on": false}), 0.0)
+            .is_empty());
+    }
+
+    /// "Momentary outputs should not be queried" — Integration Guide.
+    #[test]
+    fn a_pulsed_cco_is_not_queried_on_connect() {
+        assert!(!dev(DeviceKind::CcoPulsed).is_output());
+        assert!(dev(DeviceKind::FanControl).is_output());
+    }
+
+    #[test]
+    fn new_kinds_publish_sensible_device_types() {
+        assert_eq!(dev(DeviceKind::FanControl).homecore_device_type(), "fan");
+        // Momentary trigger, so a scene rather than a switch that never latches.
+        assert_eq!(dev(DeviceKind::CcoPulsed).homecore_device_type(), "scene");
     }
 }
