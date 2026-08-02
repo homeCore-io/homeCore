@@ -33,7 +33,7 @@ homeCore is written in async Rust (Tokio), stores device state in an embedded [r
 | **History & metrics** | Per-attribute time series in SQLite, Prometheus text at `/metrics`, optional InfluxDB v2 export |
 | **Backup & restore** | `POST /system/backup` streams a zip of state, history, config, and rules; `POST /system/restore` puts one back |
 | **REST + WebSocket API** | Every route is specified in [`docs/openapi.yaml`](docs/openapi.yaml), and a test fails the build if the two drift apart; live event and log streams over WebSocket |
-| **Multi-user** | User CRUD with `admin`, `user`, and `read_only` roles; JWT auth, API keys, and an audit log |
+| **Multi-user** | Seven roles — `admin`, `user`, `read_only`, `observer`, `device_operator`, `rule_editor`, `service_operator` — with JWT auth, API keys, and an audit log |
 | **No GC pauses** | Async Tokio runtime — zero garbage collection, predictable latency |
 
 ---
