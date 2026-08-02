@@ -10,7 +10,7 @@ homeCore is a home automation platform designed around three principles:
 
 - **Local-first** — all automation logic runs on your hardware. Solar events are computed from your configured lat/lon. No cloud accounts, no subscriptions, no internet dependency.
 - **MQTT as the fabric** — an embedded [rumqttd](https://github.com/bytebeamio/rumqtt) broker ships with the binary. Every device, plugin, and rule communicates over MQTT — the universal language of IoT.
-- **API-first** — every operation the system can perform is available over REST or WebSocket. The rule engine, device state, scenes, and system management are all accessible via a clean OpenAPI-documented API.
+- **API-first** — every operation the system can perform is available over REST or WebSocket. The rule engine, device state, scenes, and system management are all accessible via a documented API. The web UI, [hc-web](https://github.com/homeCore-io/hc-web), is just another client.
 
 homeCore is written in async Rust (Tokio), stores device state in an embedded [redb](https://github.com/cberner/redb) database, and runs comfortably on a Raspberry Pi 4.
 
@@ -21,25 +21,40 @@ homeCore is written in async Rust (Tokio), stores device state in an embedded [r
 | Feature | Details |
 |---|---|
 | **Embedded MQTT broker** | rumqttd ships in the binary — no external broker needed for basic installs |
-| **Rule engine** | 16+ trigger types, compound conditions, 40+ action types, Rhai scripting, per-rule fire history |
-| **Plugin architecture** | Connect devices via Rust, Python, or Node.js SDKs; plugins run as isolated processes with per-plugin MQTT credentials (topic ACL enforcement when paired with an external Mosquitto broker — see `mqttAuthzPlan.md`) |
+| **Rule engine** | 18 trigger types, 13 condition types (including `Not`/`And`/`Or`/`Xor` nesting), 34 action types, Rhai scripting, per-rule fire history |
+| **Plugin architecture** | Connect devices via Rust, Python, Node.js, or .NET SDKs; plugins run as isolated processes with per-plugin MQTT credentials (topic ACL enforcement when paired with an external Mosquitto broker) |
+| **Plugin registry** | Browse and install signed plugins over the API from the [registry](https://homecore.io/registry/) — ed25519 signature plus per-artifact SHA-256, verified before install |
+| **Plugin notices** | Plugins surface actionable problems (missing credentials, unreachable hub, no devices yet) as structured notices the UI renders inline |
 | **Scenes** | Native homeCore scenes + plugin-managed scenes (Hue, Lutron, etc.) |
-| **Solar events** | Sunrise/sunset triggers computed locally from lat/lon — no API key needed |
-| **Virtual devices** | Software timers, switches, and mode flags usable in rules |
-| **REST + WebSocket API** | Full OpenAPI 3.1 spec at `GET /api/v1/openapi.json`; live event stream via WebSocket |
-| **Multi-user** | User CRUD with `admin`, `user`, and `read_only` roles; JWT auth |
+| **Solar events & modes** | Sunrise/sunset triggers computed locally from lat/lon; solar and named boolean modes, hot-reloaded from `modes.toml` |
+| **Virtual devices** | Software timers, switches, and glue devices — creatable over the API and usable in rules like any other device |
+| **Calendars** | `.ics` calendars — local files or subscribed URLs — become `CalendarEvent` triggers and `CalendarActive` conditions |
+| **Dashboards** | Per-breakpoint dashboard layouts stored server-side, so any client sees the same thing |
+| **History & metrics** | Per-attribute time series in SQLite, Prometheus text at `/metrics`, optional InfluxDB v2 export |
+| **Backup & restore** | `POST /system/backup` streams a zip of state, history, config, and rules; `POST /system/restore` puts one back |
+| **REST + WebSocket API** | Every route is specified in [`docs/openapi.yaml`](docs/openapi.yaml), and a test fails the build if the two drift apart; live event and log streams over WebSocket |
+| **Multi-user** | Seven roles — `admin`, `user`, `read_only`, `observer`, `device_operator`, `rule_editor`, `service_operator` — with JWT auth, API keys, and an audit log |
 | **No GC pauses** | Async Tokio runtime — zero garbage collection, predictable latency |
 
 ---
 
 ## Quick start
 
-### Prerequisites
+### Docker
 
-- Rust stable toolchain (`rustup install stable`)
-- Cargo
+The quickest path is the published image, which runs core and the hc-web UI together:
 
-### Build and run
+```sh
+git clone https://github.com/homeCore-io/docker homecore-docker
+cd homecore-docker
+docker compose up -d
+```
+
+See the [docker](https://github.com/homeCore-io/docker) repo for the compose files, volumes, and upgrade notes.
+
+### From source
+
+Prerequisites: Rust stable toolchain (`rustup install stable`) and Cargo.
 
 ```sh
 git clone https://github.com/homeCore-io/homeCore
@@ -57,16 +72,19 @@ cargo run --release
 
 ### First steps
 
-On first run, homeCore creates an `admin` account and prints the generated password to the console:
+On first run — meaning the user store is empty, not the first launch of a given build — homeCore creates an `admin` account, writes the generated password to `INITIAL_ADMIN_PASSWORD` next to the state DB (mode `0600`), and prints it once:
 
 ```
-[INFO] First run detected — admin account created
-[INFO] Username: admin
-[INFO] Password: <generated-password>
-[INFO] Change this password after first login
+WARN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WARN   Default admin account created.
+WARN   Username : admin
+WARN   Password : <generated-password>
+WARN   Saved to : /var/lib/homecore/INITIAL_ADMIN_PASSWORD
+WARN   Change this password immediately after first login!
+WARN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Use those credentials to get a token, then make authenticated requests:
+Delete that file once you've logged in; homeCore does not write it again.
 
 ```sh
 # Check system health (no auth required)
@@ -88,25 +106,29 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/devices
 wscat -c "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
 ```
 
-Connect your first device by installing one of the [device plugins](#plugins) and pointing it at your homeCore instance.
+Connect your first device by installing one of the [plugins](#plugins) — from the UI, or by POSTing to `/api/v1/plugins/install`.
 
 ---
 
 ## Plugins
 
-Plugins are separate processes that bridge device protocols to homeCore via MQTT. Official plugins:
+Plugins are separate processes that bridge device protocols to homeCore via MQTT. Each is its own repository and releases its own signed artifacts; core installs them from the [signed registry](https://homecore.io/registry/).
 
 | Plugin | Protocol |
 |---|---|
 | [hc-hue](https://github.com/homeCore-io/hc-hue) | Philips Hue bridge |
+| [hc-lutron](https://github.com/homeCore-io/hc-lutron) | Lutron RadioRA2 / HomeWorks main repeater |
+| [hc-caseta](https://github.com/homeCore-io/hc-caseta) | Lutron Caséta Smart Bridge Pro |
 | [hc-yolink](https://github.com/homeCore-io/hc-yolink) | YoLink cloud MQTT |
-| [hc-lutron](https://github.com/homeCore-io/hc-lutron) | Lutron RadioRA2 |
 | [hc-zwave](https://github.com/homeCore-io/hc-zwave) | Z-Wave JS WebSocket |
+| [hc-isy](https://github.com/homeCore-io/hc-isy) | Universal Devices ISY/IoX (Insteon, Z-Wave) |
 | [hc-wled](https://github.com/homeCore-io/hc-wled) | WLED LED controllers |
-| [hc-isy](https://github.com/homeCore-io/hc-isy) | Universal Devices ISY/IoX |
 | [hc-sonos](https://github.com/homeCore-io/hc-sonos) | Sonos speakers |
+| [hc-roku](https://github.com/homeCore-io/hc-roku) | Roku TVs and players (ECP) |
+| [hc-ecowitt](https://github.com/homeCore-io/hc-ecowitt) | Ecowitt weather gateways |
+| [hc-thermostat](https://github.com/homeCore-io/hc-thermostat) | Virtual thermostat — sensors + actuator with hysteresis |
 
-Plugin SDKs are available for [Rust](plugins/plugin-sdk-rs/), [Python](plugins/plugin-sdk-py/), and [Node.js](plugins/plugin-sdk-js/).
+Plugin SDKs: [Rust](https://github.com/homeCore-io/hc-plugin-sdk-rs) (primary), [Python](https://github.com/homeCore-io/hc-plugin-sdk-py), [Node.js](https://github.com/homeCore-io/hc-plugin-sdk-js), and [.NET](https://github.com/homeCore-io/hc-plugin-sdk-dotnet). Start from [hc-plugin-template](https://github.com/homeCore-io/hc-plugin-template) — a working virtual-light plugin — then read [hc-wled](https://github.com/homeCore-io/hc-wled) for the smallest real one.
 
 ---
 
@@ -125,17 +147,22 @@ Physical devices (Zigbee, Z-Wave, WiFi, cloud APIs)
   homeCore core kernel
   ├── Rule engine      (triggers → conditions → actions)
   ├── State store      (redb — device registry + canonical state)
-  ├── Scheduler        (time, solar, delays)
+  ├── History          (SQLite time series; optional InfluxDB v2 export)
+  ├── Scheduler        (time, cron, solar, calendars, delays)
   ├── Script runtime   (Rhai — sandboxed custom logic)
   ├── Mode manager     (solar modes, named boolean flags)
-  └── Auth             (JWT for REST, bcrypt credentials for MQTT)
+  ├── Glue devices     (timers, switches, virtual state for rules)
+  ├── Plugin supervisor (spawn, health, config, notices, registry install)
+  └── Auth             (JWT + API keys for REST, bcrypt credentials for MQTT)
         │
         ▼
   REST + WebSocket API  (axum)
         │
         ▼
-  Clients  (web dashboard, TUI, mobile apps, voice assistants)
+  Clients  (hc-web dashboard, hc-tui, hc-cli, hc-mcp, voice assistants)
 ```
+
+The workspace lives under `core/crates/`: `hc-types` (shared types and the plugin-facing ABI), `hc-broker`, `hc-mqtt-client`, `hc-topic-map`, `hc-core` (rule engine and managers), `hc-state`, `hc-api`, `hc-auth`, `hc-scripting`, `hc-notify`, `hc-logging`, `hc-influx`, `hc-config`, `hc-time`, and `hc-cli`.
 
 ---
 
@@ -149,7 +176,7 @@ The embedded `rumqttd` broker enforces **CONNECT authentication only**. The `all
 
 Implications:
 - A compromised or malicious plugin connected to the embedded broker can publish to any topic, including command topics for devices it doesn't own and core management topics.
-- Topic isolation between plugins requires deploying against an **external Mosquitto broker**. Generate a deployment-ready config with `hc-cli broker generate-mosquitto-config`. See `mqttAuthzPlan.md` for the full plan.
+- Topic isolation between plugins requires deploying against an **external Mosquitto broker**. Generate a deployment-ready config with `hc-cli broker generate-mosquitto-config`, and see the [broker guide](https://homecore.io/docs/administration/broker) for the whole flow.
 
 ### Broker bind address — default loopback
 
@@ -161,37 +188,50 @@ If you set `[broker].host` to a non-loopback address (e.g. `0.0.0.0` for remote 
 
 - Authentication is JWT HS256 with a persistent 32-byte secret auto-generated on first boot to `<state-db-parent>/jwt_secret` (mode `0600`). Tokens survive restarts.
 - Passwords are Argon2id (m=64MiB, t=3, p=4) with a per-password salt.
+- Changing or resetting a password bumps that user's `token_version`, which **invalidates every access token already issued to them**, and revokes their refresh tokens outright. A revoked token can no longer call the API or open a new event stream; a WebSocket that is already connected is authorised at upgrade time and lives until it disconnects.
 - The first-boot admin password is generated with the OS CSPRNG and written 0600 to `INITIAL_ADMIN_PASSWORD` next to the state DB. Delete it after first login; homeCore does not regenerate it.
-- `POST /api/v1/auth/login` is per-IP rate-limited (5 attempts per 60 s; further requests get HTTP 429 with `Retry-After`).
+- `POST /api/v1/auth/login` is per-IP rate-limited (5 attempts per 60 s; further requests get HTTP 429 with `Retry-After`). Behind a reverse proxy that doesn't forward the client IP, this degrades to a global cap — pass the real IP through, or rate-limit at the proxy.
 - Refresh tokens rotate on every `/auth/refresh` and detect parent-chain reuse (token theft).
 - API keys (prefix `hc_sk_`) are hashed with Argon2id and verified per-request with lighter parameters.
+- Admin actions are recorded to an audit log (`GET /api/v1/audit`), pruned on `[auth].audit_retention_days` (default 365).
+
+### `[auth].whitelist` — tokenless admin, deprecated
+
+Any request whose source IP matches `[auth].whitelist` gets **full Admin access with no token at all**. It exists for same-host tooling and it is deprecated.
+
+Two things about it bite people:
+
+- **List explicit addresses, never a CIDR range.** `whitelist = ["10.0.10.0/24"]` hands unauthenticated admin to every device on that subnet — including anything that joins it later. Write out the individual hosts.
+- **It applies to the core port, wherever that is.** If a reverse proxy sits in front of homeCore, the proxy's own port may look authenticated-only while core's port is wide open to the whitelist. Check what is listening, not just what you browse to.
+
+Prefer `[auth.admin_uds]` — an admin-only Unix socket (default `/run/homecore/admin.sock`, group `homecore-admin`, mode `0660`) that gives `hc-cli` the same access with filesystem permissions instead of network identity.
 
 ### Prometheus metrics — IP whitelist, default deny
 
-`GET /api/v1/metrics` is gated by source IP via `[metrics].whitelist` (CIDR or bare IP). The whitelist defaults to **empty**, which means every caller gets `403`. Prometheus scrapers can't easily set `Authorization` headers, so network identity is the access control. Example:
+`GET /api/v1/metrics` is gated by source IP via `[metrics].whitelist` (CIDR or bare IP). The whitelist defaults to **empty**, which means every caller gets `403`. Prometheus scrapers can't easily set `Authorization` headers, so network identity is the access control. Unlike `[auth].whitelist`, this one grants nothing but the metrics text. Example:
 
 ```toml
 [metrics]
-whitelist = ["127.0.0.1/32", "10.0.0.0/24"]
+whitelist = ["127.0.0.1/32", "10.0.0.5/32"]
 ```
 
-### Web admin clients — token storage trade-off
+### Web UI — token storage trade-off
 
-The Leptos and React admin clients store the JWT in browser `localStorage`. This is a deliberate choice for v0.1.0:
+[hc-web](https://github.com/homeCore-io/hc-web), the Flutter web dashboard, stores the JWT in browser `localStorage`. This is a deliberate choice for the 0.1.x series:
 
 - API requests carry the token via `Authorization: Bearer`. Cross-origin requests can't set custom headers, so this is CSRF-safe by browser CORS without needing a CSRF token flow.
-- WebSocket and Server-Sent Events streams pass the token as a `?token=…` query parameter because `EventSource` can't set custom headers on the upgrade request.
-- `localStorage` is JavaScript-readable. If an XSS bug is ever introduced in the admin UI, an attacker could exfiltrate the token. We have no XSS sinks today (no `dangerouslySetInnerHTML`, no `inner_html` on user-controlled fields), but this remains a class of risk worth naming.
+- WebSocket streams pass the token as a `?token=…` query parameter because the browser WebSocket API can't set custom headers on the upgrade request.
+- `localStorage` is JavaScript-readable. If an XSS bug is ever introduced in the UI, an attacker could exfiltrate the token. This remains a class of risk worth naming.
 
-For homeCore's primary deployment model — single-operator homelab, one admin account — this trade-off is reasonable. An XSS in the admin UI would let the attacker act as the admin during the session regardless of where the token lives; token exfiltration only changes the recovery story, not the in-the-moment blast radius.
+For homeCore's primary deployment model — single-operator homelab, one admin account — this trade-off is reasonable. An XSS in the UI would let the attacker act as the admin during the session regardless of where the token lives; token exfiltration only changes the recovery story, not the in-the-moment blast radius. Password change now revokes issued tokens (see above), so recovery is a password reset rather than a secret rotation.
 
-If your deployment doesn't match the single-operator model — multi-user with reduced-trust roles, admin UI exposed on a less-trusted browsing context (work laptop, kiosk), or any internet-facing surface — consider waiting for v0.2.0, which is planned to migrate to an HttpOnly + Secure cookie flow with CSRF protection. That migration also retires the `?token=` query-param mechanism on streaming endpoints (cookies auto-attach to WebSocket and EventSource connections without it).
+If your deployment doesn't match the single-operator model — multi-user with reduced-trust roles, UI exposed on a less-trusted browsing context (work laptop, kiosk), or any internet-facing surface — the planned 0.2.0 migration to HttpOnly + Secure cookies with CSRF protection is the fix, and it also retires the `?token=` query-param mechanism on streaming endpoints.
 
 ### Plugin secrets in config
 
-Each plugin reads its config from a `config.toml` next to its binary. These files are gitignored by default and contain credentials for the device side (Hue app keys, YoLink client secrets, Lutron integration passwords, etc.). Treat them as secrets:
-- File mode `0600` recommended on shared hosts.
-- The `config.toml.example` files in each plugin repo use placeholder values; the real values land only in your local `config.toml`.
+Plugin configuration is owned by core, not by the plugin: each plugin's `config.toml` lives at `<base>/config/plugins/<plugin_id>.toml` and the supervisor passes that path to the plugin at launch. Keeping it outside the plugin's own tree means a plugin upgrade can't clobber it, and the API, the settings editor, and an operator editing by hand all agree on one file. These files hold device-side credentials — Hue app keys, YoLink client secrets, Lutron integration passwords. Treat them as secrets:
+- Restrict `<base>/config/plugins/` on shared hosts.
+- The `config.toml.example` files in each plugin repo use placeholder values.
 - Plugin logs are forwarded over MQTT to `homecore/plugins/<id>/logs` for the live log stream. Do not log credentials from plugin code — they will be re-broadcast.
 
 ### Reporting issues
@@ -202,7 +242,7 @@ If you find a vulnerability, please report it through GitHub's private vulnerabi
 
 ## Configuration
 
-The main config file is `config/homecore.toml`. Key sections:
+The main config file is `config/homecore.toml`; `config/homecore.toml.example` is the annotated starting point. Key sections:
 
 ```toml
 [server]
@@ -210,7 +250,7 @@ host = "0.0.0.0"
 port = 8080
 
 [broker]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 1883
 
 [location]
@@ -221,22 +261,33 @@ timezone  = "America/New_York"
 [storage]
 state_db_path   = "/var/lib/homecore/state.redb"
 history_db_path = "/var/lib/homecore/history.db"
+
+# Browse and install signed plugins. Both fields must be set;
+# otherwise the registry endpoints return 503.
+[registry]
+url        = "https://homecore.io/registry/index.json"
+public_key = "<base64 ed25519 key from the registry repo>"
 ```
+
+Config is also readable and writable over the API (`/api/v1/system/config`), with a field descriptor (`/api/v1/system/config/descriptor`) that drives the UI's settings forms — so the file is the source of truth, not the only interface.
 
 ---
 
 ## Documentation
 
-Full documentation is at **[homeCore-io.github.io](https://homeCore-io.github.io)**, including:
+Full documentation is at **[homecore.io](https://homecore.io)**, including:
 
-- [Quickstart guide](https://homeCore-io.github.io/docs/getting-started/quickstart)
-- [Configuration reference](https://homeCore-io.github.io/docs/getting-started/configuration)
-- [Rule engine](https://homeCore-io.github.io/docs/rules/overview)
-- [Plugin development](https://homeCore-io.github.io/docs/plugins/developing-plugins)
-- [REST API reference](https://homeCore-io.github.io/docs/development/architecture)
+- [Quickstart guide](https://homecore.io/docs/getting-started/quickstart)
+- [Configuration reference](https://homecore.io/docs/getting-started/configuration)
+- [Rule engine](https://homecore.io/docs/rules/overview)
+- [Plugin development](https://homecore.io/docs/plugins/developing-plugins)
+- [Architecture](https://homecore.io/docs/development/architecture)
+
+The REST API is specified in [`docs/openapi.yaml`](docs/openapi.yaml), which is checked against the router on every build — see `tests/openapi_covers_router_test.rs`.
 
 ---
 
 ## License
 
-MIT
+Dual-licensed under **MIT** or **Apache-2.0**, at your option. Both texts
+are in the repository as `LICENSE-MIT` and `LICENSE-APACHE`.
