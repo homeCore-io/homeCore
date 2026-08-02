@@ -73,17 +73,17 @@ curl -X PATCH localhost:8080/api/v1/devices/roku_living_room/state \
   -d '{"on": true, "source": "Netflix"}'
 
 # Deep-link to a title
-curl -X POST localhost:8080/api/v1/devices/roku_living_room/actions \
+curl -X PATCH localhost:8080/api/v1/devices/roku_living_room/state \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"action":"launch_app","app":"Netflix","content_id":"80100172","media_type":"movie"}'
 
 # Type into a search box and submit
-curl -X POST localhost:8080/api/v1/devices/roku_living_room/actions \
+curl -X PATCH localhost:8080/api/v1/devices/roku_living_room/state \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"action":"text","text":"the expanse","submit":true}'
 
 # Tune a Roku TV to 14.3
-curl -X POST localhost:8080/api/v1/devices/roku_tv/actions \
+curl -X PATCH localhost:8080/api/v1/devices/roku_tv/state \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"action":"tune","channel":"14.3"}'
 ```
