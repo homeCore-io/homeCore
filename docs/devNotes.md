@@ -1037,7 +1037,7 @@ external_url = "mqtt://mosquitto-host:1883"
 ```
 
 A runnable compose file lives at `docker/docker-compose.external-broker.yml`.
-Full design and rollout plan: `mqttAuthzPlan.md` at the repo root.
+Full design and rollout plan: <https://homecore.io/docs/administration/broker>.
 
 ---
 

@@ -103,7 +103,7 @@ enum Command {
 enum BrokerCommand {
     /// Generate Mosquitto `mosquitto.conf`, `aclfile`, and a `passwd.setup.sh`
     /// helper from a homeCore config. Use when deploying an external broker
-    /// for real topic authz (see `mqttAuthzPlan.md`).
+    /// for real topic authz (see <https://homecore.io/docs/administration/broker>).
     GenerateMosquittoConfig {
         /// Path to `homecore.toml`. Default: ./config/homecore.toml.
         #[arg(long, default_value = "config/homecore.toml")]
@@ -605,7 +605,7 @@ fn cmd_broker_gen_mosquitto(
          password_file /mosquitto/config/passwd\n\
          \n\
          # Per-user topic ACLs — the real reason we're running Mosquitto\n\
-         # instead of rumqttd (see mqttAuthzPlan.md).\n\
+         # instead of rumqttd. See https://homecore.io/docs/administration/broker\n\
          acl_file /mosquitto/config/aclfile\n\
          \n\
          # Standard logging; adjust as needed for your deployment.\n\
@@ -684,7 +684,7 @@ fn cmd_broker_gen_mosquitto(
     println!("     to produce the hashed `passwd` file Mosquitto wants.");
     println!("  3. Deploy Mosquitto with all three files mounted, then set");
     println!("     `[broker].external_url` in homecore.toml to point at it.");
-    println!("     See mqttAuthzPlan.md for the full recipe.");
+    println!("     See https://homecore.io/docs/administration/broker for the full recipe.");
     Ok(())
 }
 

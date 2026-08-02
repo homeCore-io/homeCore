@@ -25,6 +25,32 @@ fn it_finds_every_variant_the_rule_types_declare() {
 }
 
 #[test]
+fn the_readme_states_the_counts_the_types_actually_have() {
+    // The README advertises the size of the rule vocabulary, and it had already
+    // rotted: it claimed "16+ triggers" and "40+ action types" against 18 and 34.
+    // A reader counts on that number to decide whether the engine is expressive
+    // enough, so it is a claim, not decoration — and nothing was checking it.
+    let readme = include_str!("../../../README.md");
+    let v = Vocabulary::derive();
+
+    for (noun, want) in [
+        ("trigger types", v.triggers.len()),
+        ("condition types", v.conditions.len()),
+        ("action types", v.actions.len()),
+    ] {
+        let claim = format!("{want} {noun}");
+        assert!(
+            readme.contains(&claim),
+            "core/README.md should say {claim:?}; it says {:?}",
+            readme
+                .lines()
+                .find(|l| l.contains(noun))
+                .unwrap_or("<nothing about them at all>")
+        );
+    }
+}
+
+#[test]
 fn a_unit_variant_has_no_fields_and_a_struct_variant_does() {
     let v = Vocabulary::derive();
 
