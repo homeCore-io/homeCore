@@ -102,14 +102,24 @@ curl -X PATCH localhost:8080/api/v1/devices/roku_tv/state \
 
 ## Setup
 
-1. Copy `config/config.toml.example` to `config/config.toml` and set the
-   broker connection.
-2. Add a `[[plugins]]` entry in `homecore.toml`.
-3. Start homeCore. Rokus on the subnet register themselves within a few
-   seconds; run `discover_devices` to sweep on demand.
+Install it from the web UI — **Plugins → Add**. Rokus on the subnet register
+themselves within a few seconds; run `discover_devices` to sweep on demand.
+There is no `[[plugins]]` block to write, and homeCore owns the config file
+(`config/plugins/plugin.roku.toml`).
 
 `[[devices]]` is optional — use it to pin a device id, to reach a Roku
 across a VLAN, or when running with `discovery_enabled = false`.
+
+## Notices
+
+Problems are reported as **notices**, shown on the plugin's card in the web
+UI. They are state rather than log lines — `no_devices_configured` clears as
+soon as a discovery sweep finds something, rather than being decided once at
+startup.
+
+| Code | Means |
+|---|---|
+| `no_devices_configured` | Nothing discovered and nothing pinned in `[[devices]]`. |
 
 ## Notes on the protocol
 
