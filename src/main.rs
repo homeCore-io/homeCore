@@ -8,12 +8,16 @@
 //!
 //!   1. Read the config path from `argv[1]` — core hands it to you.
 //!   2. Connect to the broker with the credentials in `[homecore]`.
-//!   3. `enable_management`, so core can heartbeat, restart, and reconfigure
+//!   3. Forward logs, so they land in homeCore's live log stream and not only
+//!      in this process's stderr.
+//!   4. `enable_management`, so core can heartbeat, restart, and reconfigure
 //!      you, and so the UI can render your actions as buttons.
-//!   4. Register devices, then publish their state retained.
-//!   5. Raise notices for conditions an operator can act on, and CLEAR them
+//!   5. Remember which devices you registered, so a device that disappears
+//!      while the plugin is down can still be retired.
+//!   6. Register devices, then publish their state retained.
+//!   7. Raise notices for conditions an operator can act on, and CLEAR them
 //!      when they stop being true.
-//!   6. `run_managed`, which owns the process from then on.
+//!   8. `run_managed`, which owns the process from then on.
 //!
 //! Read <https://github.com/homeCore-io/hc-wled> next — it is the smallest
 //! complete plugin — then <https://github.com/homeCore-io/hc-roku> for
@@ -22,23 +26,38 @@
 mod config;
 
 use anyhow::Result;
+use plugin_sdk_rs::mqtt_log_layer::{MqttLogHandle, MqttLogLayer};
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use config::Config;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "hc_plugin_template=info".into()),
+    // Two layers: stderr for whoever is watching the process, and the SDK's
+    // MQTT layer so the same lines reach homeCore's live log stream. The MQTT
+    // layer starts inactive and is switched on once we have a connection.
+    let (mqtt_layer, mqtt_logs) = MqttLogLayer::new();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // The SDK's own target is included on purpose: reconnects,
+                // subscription restores and event-loop trouble are logged by
+                // `plugin_sdk_rs`, and filtering to your own crate hides
+                // exactly the lines you need when a plugin misbehaves.
+                "hc_plugin_template=info,plugin_sdk_rs=info".into()
+            }),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(mqtt_layer)
         .init();
 
     // Core passes the config path as the first argument. The fallback is only
@@ -47,13 +66,24 @@ async fn main() {
         .nth(1)
         .unwrap_or_else(|| "config/config.toml".to_string());
 
-    if let Err(e) = run(&config_path).await {
+    if let Err(e) = run(&config_path, mqtt_logs).await {
         error!(error = %e, "plugin exited with an error");
         std::process::exit(1);
     }
 }
 
-async fn run(config_path: &str) -> Result<()> {
+/// Where the device snapshot lives: beside the config file core handed us.
+///
+/// The SDK inserts this plugin's id into the filename, so plugins sharing a
+/// config directory cannot share a snapshot and retire each other's devices.
+fn snapshot_path(config_path: &str) -> PathBuf {
+    Path::new(config_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".published-device-ids.json")
+}
+
+async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
     let cfg = Config::load(config_path)?;
 
     let client = PluginClient::connect(PluginConfig {
@@ -62,7 +92,19 @@ async fn run(config_path: &str) -> Result<()> {
         plugin_id: cfg.homecore.plugin_id.clone(),
         password: cfg.homecore.password.clone(),
     })
-    .await?;
+    .await?
+    // Remember what we registered, across restarts. Without this, the
+    // reconcile below can only see devices registered in *this* process, so a
+    // device dropped from config while the plugin was down would linger in
+    // homeCore forever — visible, and accepting commands nothing executes.
+    .with_device_persistence(snapshot_path(config_path));
+
+    // Now that there is a connection, start shipping logs down it.
+    mqtt_logs.connect(
+        client.mqtt_client(),
+        &cfg.homecore.plugin_id,
+        &cfg.logging.forward_level,
+    );
 
     let publisher = client.device_publisher();
     let notices = client.notices();
@@ -124,6 +166,30 @@ async fn run(config_path: &str) -> Result<()> {
         publisher.publish_availability(&device.id, true).await?;
 
         info!(device_id = %device.id, "registered");
+    }
+
+    // Retire anything homeCore still holds for us that is no longer live.
+    //
+    // For this template the live set is simply what config lists, so the
+    // reconcile is safe to run unconditionally. A real plugin whose devices
+    // come from a bridge or a cloud API must only do this after a sync it
+    // trusts: on a partial fetch, reconcile unregisters devices that are
+    // perfectly healthy behind a hub that happened to be unreachable. The
+    // usual shape is an `all_sources_succeeded` flag tracked across the
+    // per-source loop, with the reconcile inside the `if`.
+    //
+    // Plugins whose upstream reports irregularly — battery sensors that go
+    // quiet for hours — should keep the persistence and skip the reconcile
+    // entirely. An operator can clear zombies with
+    // `DELETE /api/v1/plugins/{id}/devices`.
+    let live: HashSet<String> = cfg.template.devices.iter().map(|d| d.id.clone()).collect();
+    match publisher.reconcile_devices(live).await {
+        Ok(report) => {
+            for id in &report.stale_unregistered {
+                info!(device_id = %id, "retired a device that is no longer configured");
+            }
+        }
+        Err(e) => warn!(error = %e, "reconcile failed; stale devices may linger"),
     }
 
     // Commands arrive on the SDK's callback, which is synchronous. Hand them
