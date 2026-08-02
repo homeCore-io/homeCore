@@ -15,9 +15,24 @@ Bridges Philips Hue devices into HomeCore via the CLIP v2 API with real-time eve
 
 ## Setup
 
-1. Copy `config/config.toml.example` to `config/config.toml`
-2. Set `bridge_id`, `host`, and `app_key` (press the bridge link button, then use the Hue API to generate an app key)
-3. Add a `[[plugins]]` entry in `homecore.toml`
+Install it from the web UI — **Plugins → Add** — then open its
+**Configuration** tab and set `host`, `bridge_id`, and `app_key`. Press the
+link button on the bridge, then use the Hue API to generate the app key.
+
+homeCore records the install in `config/plugins/managed.toml`, so there is no
+`[[plugins]]` block to write. It owns the config file too — `config/plugins/plugin.hue.toml`
+under homeCore's home directory — and watches it, restarting this plugin, and
+only this plugin, when it changes.
+
+## Notices
+
+The plugin reports its own problems as **notices**, shown on its card in the
+web UI. They are state rather than log lines — each clears when the condition
+stops being true.
+
+| Code | Means |
+|---|---|
+| `bridge_unreachable` | The bridge stopped answering. Clears on the next successful poll. |
 
 ## Configuration highlights
 
