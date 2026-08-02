@@ -289,4 +289,5 @@ The REST API is specified in [`docs/openapi.yaml`](docs/openapi.yaml), which is 
 
 ## License
 
-MIT
+Dual-licensed under **MIT** or **Apache-2.0**, at your option. Both texts
+are in the repository as `LICENSE-MIT` and `LICENSE-APACHE`.
