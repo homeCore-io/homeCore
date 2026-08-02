@@ -5265,34 +5265,106 @@ pub async fn import_automations(
         );
     };
 
-    let mut saved = Vec::with_capacity(rules.len());
-    for mut rule in rules {
+    // ── Phase 1: validate everything, write nothing ──────────────────────
+    //
+    // An import is one operation, not N. Compiling and committing rule-by-rule
+    // meant the first bad reference aborted mid-file, leaving the rules before
+    // it already on disk and live, with no record of which had landed — a
+    // half-imported ruleset is worse than a rejected one, because the half
+    // that ran is automation the operator did not knowingly enable.
+    //
+    // One device snapshot for the whole batch, rather than re-reading the
+    // registry per rule: 42 rules previously meant 42 full device listings,
+    // and rules validated against subtly different views of the world.
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let mut prepared: Vec<(Rule, Rule)> = Vec::with_capacity(rules.len());
+    let mut failures: Vec<serde_json::Value> = Vec::new();
+    for (index, mut rule) in rules.into_iter().enumerate() {
+        // Import always creates; the ids in the file are not honoured.
         rule.id = Uuid::new_v4();
-        let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
-            Ok(rule) => rule,
-            Err(e) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": e.to_string() })),
-                );
-            }
-        };
-
-        if let Some(fs) = &s.rule_file_store {
-            if let Err(e) = fs.write_rule(&rule) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                );
-            }
+        match rule_resolver::compile_rule(&rule, &devices) {
+            Ok(compiled) => prepared.push((rule, compiled)),
+            // Collect every failure rather than the first. An export that
+            // predates a device rename can have dozens, and fixing them one
+            // round-trip at a time is its own kind of broken.
+            Err(e) => failures.push(json!({
+                "index": index,
+                "name": rule.name,
+                "error": e.to_string(),
+            })),
         }
-
-        source_rh.write().await.push(rule.clone());
-        if let Some(rh) = &s.rules_handle {
-            rh.write().await.push(compiled_rule);
-        }
-        saved.push(rule);
     }
+
+    if !failures.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": format!(
+                    "{} of {} rules could not be resolved; nothing was imported",
+                    failures.len(),
+                    failures.len() + prepared.len()
+                ),
+                "failures": failures,
+                "imported": 0,
+            })),
+        );
+    }
+
+    // ── Phase 2: commit to disk, rolling back on failure ─────────────────
+    if let Some(fs) = &s.rule_file_store {
+        let mut written: Vec<Uuid> = Vec::with_capacity(prepared.len());
+        for (rule, _) in &prepared {
+            match fs.write_rule(rule) {
+                Ok(_) => written.push(rule.id),
+                Err(e) => {
+                    // Undo the files already written so a disk error leaves the
+                    // rules directory as it was found.
+                    let mut rollback_failed = Vec::new();
+                    for id in &written {
+                        if let Err(re) = fs.delete_rule(*id) {
+                            rollback_failed.push(format!("{id}: {re}"));
+                        }
+                    }
+                    if !rollback_failed.is_empty() {
+                        tracing::error!(
+                            failures = ?rollback_failed,
+                            "Import rollback could not remove every rule file"
+                        );
+                    }
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": e.to_string(),
+                            "imported": 0,
+                            "rollback_incomplete": rollback_failed,
+                        })),
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Phase 3: publish ─────────────────────────────────────────────────
+    //
+    // One lock acquisition each, so a concurrent reader sees the batch whole
+    // or not at all rather than catching it partway through.
+    let saved: Vec<Rule> = prepared.iter().map(|(rule, _)| rule.clone()).collect();
+    source_rh.write().await.extend(saved.iter().cloned());
+    if let Some(rh) = &s.rules_handle {
+        rh.write()
+            .await
+            .extend(prepared.into_iter().map(|(_, compiled)| compiled));
+    }
+
     (
         StatusCode::CREATED,
         Json(json!({ "imported": saved.len(), "rules": saved })),
