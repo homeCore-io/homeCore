@@ -21,10 +21,26 @@ Bridges Lutron RadioRA2 devices into HomeCore via the Lutron Integration Protoco
 
 ## Setup
 
-1. Copy `config/config.toml.example` to `config/config.toml`
-2. Set the repeater IP and integration credentials
-3. Add device entries with integration IDs from RadioStar or `http://{repeater_ip}/DbXmlInfo.xml`
-4. Add a `[[plugins]]` entry in `homecore.toml`
+Install it from the web UI — **Plugins → Add** — then open its
+**Configuration** tab and set the main repeater's IP and integration
+credentials. Add device entries with the integration IDs from RadioRA2
+Designer, or from `http://{repeater_ip}/DbXmlInfo.xml`.
+
+Saving credentials restarts the plugin so it logs in with them. Core itself
+does not restart and no other plugin is touched — homeCore owns the config
+file (`config/plugins/plugin.lutron.toml`), watches it, and restarts just the
+plugin whose file changed.
+
+## Notices
+
+Problems are reported as **notices**, shown on the plugin's card in the web
+UI. They are state rather than log lines.
+
+| Code | Means |
+|---|---|
+| `not_configured` | No repeater address or credentials yet. |
+| `repeater_unreachable` | The repeater is not answering on the telnet port. Clears on reconnect. |
+| `no_devices_configured` | Connected, but no `[[devices]]` entries — nothing to bridge. |
 
 ## Configuration highlights
 
