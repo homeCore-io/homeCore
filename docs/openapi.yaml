@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.5"
+  version: "0.1.18"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -19,7 +19,13 @@ info:
     default**, so every caller gets `403` until it is configured.
 
     A local-network IP whitelist (`[auth].whitelist`) can bypass authentication
-    entirely; a Bearer token always takes priority when one is present.
+    entirely; a Bearer token always takes priority when one is present. Entries
+    must be **single addresses** — `10.0.0.5` or `10.0.0.5/32`. A range such as
+    `10.0.0.0/24` is refused at startup with a warning naming the entry and
+    skipped, because a whitelist that silently covers a whole subnet is not a
+    whitelist. Note the bypass is evaluated against the socket peer only:
+    `X-Forwarded-For` is never consulted, so a reverse proxy in front of core
+    presents *its own* address, not the client's.
 
     **Authorization** is by scope, not role. Handlers declare a required scope
     such as `devices:read` or `automations:write`, and roles map onto sets of
@@ -106,6 +112,65 @@ paths:
                 $ref: "#/components/schemas/UserInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /auth/roles:
+    get:
+      operationId: listRoles
+      summary: List the roles and the scopes each grants
+      description: |
+        Authorization is by scope; roles are named sets of scopes. This is the
+        mapping, so a client can show what a role can actually do rather than
+        hard-coding it.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Roles with their scopes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /auth/users/{id}/password:
+    patch:
+      operationId: setUserPassword
+      summary: Set another user's password (admin)
+      description: |
+        Admin-only. Like changing your own password, this **revokes every
+        existing session** for that user: their token version is bumped so
+        outstanding access tokens stop validating, and their refresh tokens are
+        swept. A password reset that left the old sessions alive would not be
+        a password reset.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+      responses:
+        "204":
+          description: Password set; that user's sessions are now invalid
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /auth/change-password:
     post:
@@ -566,6 +631,29 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /devices/{id}/media/art:
+    get:
+      operationId: getDeviceMediaArt
+      summary: Album or channel art for a media device
+      description: |
+        Proxied from the device so a browser can render it without reaching the
+        device directly, and without the device's own URL leaking into a page.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "200":
+          description: Image bytes
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /devices/{id}/history:
     get:
       operationId: getDeviceHistory
@@ -856,7 +944,21 @@ paths:
   /automations/import:
     post:
       operationId: importAutomations
-      summary: Import rules from a JSON array (assigns fresh UUIDs to each)
+      summary: Import rules from a JSON array (always creates; assigns fresh UUIDs)
+      description: |
+        **Adds** rules. Every rule is given a new UUID, so the `id` values in
+        the payload are ignored and importing a file this house produced leaves
+        you with two of everything. There is no replace.
+
+        **Atomic.** Every rule is resolved against the device registry before
+        anything is written. If any rule references a device that does not
+        exist — or matches more than one — nothing is imported at all, and the
+        response names every failure rather than only the first. A disk error
+        during the write rolls back the files already created.
+
+        The request body must be sent as `application/json`. A top-level array
+        is the one shape some HTTP clients will not infer a content type for;
+        without the header this returns `415` before the handler is reached.
       tags: [automations]
       security:
         - bearerAuth: []
@@ -869,14 +971,69 @@ paths:
               items:
                 $ref: "#/components/schemas/Rule"
       responses:
-        "200":
-          description: Array of imported rules with new UUIDs
+        "201":
+          description: All rules imported
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Rule"
+                type: object
+                required: [imported, rules]
+                properties:
+                  imported:
+                    type: integer
+                  rules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Rule"
+        "415":
+          description: Body was not sent as `application/json`
+        "422":
+          description: |
+            One or more rules could not be resolved. **Nothing was imported.**
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, failures, imported]
+                properties:
+                  error:
+                    type: string
+                  imported:
+                    type: integer
+                    enum: [0]
+                  failures:
+                    type: array
+                    items:
+                      type: object
+                      required: [index, name, error]
+                      properties:
+                        index:
+                          type: integer
+                          description: Position in the submitted array.
+                        name:
+                          type: string
+                        error:
+                          type: string
+
+  /automations/vocabulary:
+    get:
+      operationId: getRuleVocabulary
+      summary: The trigger, condition and action vocabulary the rule engine accepts
+      description: |
+        Every trigger, condition and action kind with its fields, so an editor
+        can offer exactly what this core version supports instead of a
+        hard-coded list that drifts.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Vocabulary document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
 
   /automations/export:
     get:
@@ -1169,6 +1326,38 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /dashboards/{id}/access:
+    put:
+      operationId: setDashboardAccess
+      summary: Replace the access grants on a dashboard
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [access]
+              properties:
+                access:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+      responses:
+        "204":
+          description: Grants replaced
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /dashboards/{id}/export:
     get:
       operationId: exportDashboard
@@ -1449,13 +1638,166 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Array of plugin status objects
+          description: Array of plugin records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PluginRecord"
+
+  /plugins/status:
+    get:
+      operationId: listPluginStatus
+      summary: The volatile subset of the plugin list, for polling
+      description: |
+        The same records as `GET /plugins` minus `capabilities`,
+        `config_schema` and `config_descriptor` — the three fields that never
+        change and each have their own endpoint. On an eleven-plugin house that
+        is ~5 KB rather than ~127 KB.
+
+        Intended for clients that poll to keep a view current: device counts,
+        notices, heartbeat and uptime all move, and none of them arrive over
+        the event stream. `plugin_registered` and `plugin_offline` carry the
+        status and nothing else, and `plugin_heartbeat` is dropped for any
+        client that has not named it in an `event_types` filter.
+
+        Added in core 0.1.16. Older cores answer `404`.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of slim plugin status objects
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/PluginStatus"
+
+  /plugins/install:
+    post:
+      operationId: installPlugin
+      summary: Install a plugin from the signed registry
+      description: |
+        Fetches, verifies and unpacks the artifact, writes a seed config, and
+        starts supervising the process. The plugin appears in `GET /plugins`
+        immediately, before it has registered.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plugin_id]
+              properties:
+                plugin_id:
+                  type: string
+                version:
+                  type: string
+                  description: Defaults to the newest version in the registry.
+      responses:
+        "200":
+          description: Plugin installed and starting
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "422":
+          description: Unknown plugin, bad signature, or unpack failure
+
+  /plugins/{id}/config/schema:
+    get:
+      operationId: getPluginConfigSchema
+      summary: JSON Schema for a plugin's operator config
+      description: |
+        Carried on the plugin's capability manifest. Drives the typed config
+        form; absent means the client falls back to raw TOML editing.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: JSON Schema document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /plugins/{id}/config/descriptor:
+    get:
+      operationId: getPluginConfigDescriptor
+      summary: A plugin's own description of its configuration
+      description: |
+        Sections, field kinds, conditionals and data sources, rendered directly
+        by the config editor. Richer than the JSON Schema and preferred when
+        present; absent means the client derives a baseline from the schema.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Descriptor document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /registry/plugins:
+    get:
+      operationId: browseRegistry
+      summary: Browse the signed plugin registry
+      description: |
+        The catalogue this house can install from. Each entry lists its
+        published versions and the signed artifact for each platform.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Registry catalogue
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /registry/plugins/{id}:
+    get:
+      operationId: getRegistryPlugin
+      summary: One registry entry, with its published versions
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: Registry entry
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /plugins/{id}:
     delete:
@@ -5771,6 +6113,57 @@ paths:
               example:
                 core: "0.1.4"
 
+  /system/config/descriptor:
+    get:
+      operationId: getSystemConfigDescriptor
+      summary: A rendered description of homecore.toml's own settings
+      description: |
+        The same shape a plugin publishes for its config, but for core: the
+        sections and fields of `homecore.toml`, so the settings UI is generated
+        rather than hand-maintained against a file it cannot see.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Descriptor document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /notify/test:
+    post:
+      operationId: notifyTest
+      summary: Send a test notification through a configured channel
+      description: |
+        Delivers a message through `[[notify.channels]]` so a channel can be
+        proven before a rule depends on it. `all` fans out to every channel.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel:
+                  type: string
+                  description: Channel name, or `all`.
+                message:
+                  type: string
+      responses:
+        "200":
+          description: Delivery attempted; body reports per-channel outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
   /system/config:
     get:
       operationId: getSystemConfig
@@ -6989,8 +7382,40 @@ components:
 
     # ---- Plugins ----
 
-    PluginStatus:
+    PluginNotice:
       type: object
+      description: |
+        A condition a plugin reports about itself. `status` says whether the
+        process is alive; a notice says whether it can actually do its job — a
+        plugin can be `active` and completely unable to function, and before
+        notices the only trace was a line in the log.
+
+        Notices are **current state, not an event log**: each heartbeat
+        replaces the set wholesale, and a condition that clears simply stops
+        being sent. Keyed by `code`, so a plugin re-raising the same condition
+        updates in place rather than accumulating duplicates.
+      required: [level, code, message]
+      properties:
+        level:
+          type: string
+          enum: [info, warning, error]
+        code:
+          type: string
+          description: Stable identifier, e.g. `receiver_unreachable`.
+        message:
+          type: string
+          description: What is wrong, in the operator's terms.
+        remedy:
+          type: string
+          description: What to do about it. Omitted when there is nothing useful to say.
+
+    PluginRecord:
+      type: object
+      description: |
+        Everything core knows about a registered plugin. Returned by
+        `GET /plugins`. Includes the capability manifest, config schema and
+        config descriptor, which are large and never change — see
+        `GET /plugins/status` for the volatile subset.
       required: [plugin_id, status, registered_at]
       properties:
         plugin_id:
@@ -7000,7 +7425,105 @@ components:
           format: date-time
         status:
           type: string
-          enum: [active, offline]
+          enum: [active, offline, stopped, starting]
+        enabled:
+          type: boolean
+        managed:
+          type: boolean
+          description: true = a local child process core supervises; false = remote, MQTT only.
+        device_count:
+          type: integer
+        restart_count:
+          type: integer
+        supports_management:
+          type: boolean
+        last_heartbeat:
+          type: string
+          format: date-time
+        last_restart:
+          type: string
+          format: date-time
+        uptime_started:
+          type: string
+          format: date-time
+        log_level:
+          type: string
+        version:
+          type: string
+          description: Self-reported by the plugin.
+        installed_version:
+          type: string
+          description: Artifact version for plugins installed from the registry.
+        config_path:
+          type: string
+        binary_path:
+          type: string
+        notices:
+          type: array
+          description: Empty for plugins built against an SDK predating notices.
+          items:
+            $ref: "#/components/schemas/PluginNotice"
+        capabilities:
+          type: object
+          additionalProperties: true
+        config_schema:
+          type: object
+          additionalProperties: true
+        config_descriptor:
+          type: object
+          additionalProperties: true
+
+    PluginStatus:
+      type: object
+      description: |
+        The volatile half of a `PluginRecord` — everything a live view needs to
+        stay current, and nothing that never changes. Returned by
+        `GET /plugins/status`.
+
+        Deliberately a superset of what a client needs to build its whole
+        plugin list, so a poller never has to touch `GET /plugins` at all. On an
+        eleven-plugin house this is ~5 KB against ~127 KB.
+      required: [plugin_id, status, registered_at]
+      properties:
+        plugin_id:
+          type: string
+        registered_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, offline, stopped, starting]
+        enabled:
+          type: boolean
+        managed:
+          type: boolean
+        device_count:
+          type: integer
+        restart_count:
+          type: integer
+        supports_management:
+          type: boolean
+        last_heartbeat:
+          type: string
+          format: date-time
+        last_restart:
+          type: string
+          format: date-time
+        uptime_started:
+          type: string
+          format: date-time
+        log_level:
+          type: string
+        version:
+          type: string
+        installed_version:
+          type: string
+        config_path:
+          type: string
+        notices:
+          type: array
+          items:
+            $ref: "#/components/schemas/PluginNotice"
 
     MatterNode:
       type: object
