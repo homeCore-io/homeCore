@@ -128,7 +128,7 @@ Plugins are separate processes that bridge device protocols to homeCore via MQTT
 | [hc-ecowitt](https://github.com/homeCore-io/hc-ecowitt) | Ecowitt weather gateways |
 | [hc-thermostat](https://github.com/homeCore-io/hc-thermostat) | Virtual thermostat — sensors + actuator with hysteresis |
 
-Plugin SDKs: [Rust](https://github.com/homeCore-io/hc-plugin-sdk-rs) (primary), [Python](https://github.com/homeCore-io/hc-plugin-sdk-py), [Node.js](https://github.com/homeCore-io/hc-plugin-sdk-js), and [.NET](https://github.com/homeCore-io/hc-plugin-sdk-dotnet). Start from [hc-plugin-template](https://github.com/homeCore-io/hc-plugin-template).
+Plugin SDKs: [Rust](https://github.com/homeCore-io/hc-plugin-sdk-rs) (primary), [Python](https://github.com/homeCore-io/hc-plugin-sdk-py), [Node.js](https://github.com/homeCore-io/hc-plugin-sdk-js), and [.NET](https://github.com/homeCore-io/hc-plugin-sdk-dotnet). [hc-wled](https://github.com/homeCore-io/hc-wled) is the smallest complete plugin to read first; [hc-roku](https://github.com/homeCore-io/hc-roku) shows discovery, notices, and capability actions together.
 
 ---
 
