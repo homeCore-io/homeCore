@@ -16,6 +16,13 @@ broker_port = 1883
 plugin_id   = "plugin.template"
 password    = ""            # set when the broker has [[broker.clients]] auth
 
+# ── Logging ──────────────────────────────────────────────────────────────────
+# What this plugin sends to homeCore's live log stream, so its lines appear
+# next to core's own rather than only in this process's stderr. An operator can
+# also change this at runtime from the UI without restarting the plugin.
+[logging]
+forward_level = "info"      # trace | debug | info | warn | error
+
 # ── Your plugin's own settings ───────────────────────────────────────────────
 # Rename this section and replace the fields. With no devices the plugin raises
 # a `no_devices_configured` notice rather than sitting there looking healthy.

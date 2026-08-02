@@ -15,7 +15,30 @@ use serde::Deserialize;
 pub struct Config {
     pub homecore: HomeCoreSection,
     #[serde(default)]
+    pub logging: LoggingSection,
+    #[serde(default)]
     pub template: TemplateSection,
+}
+
+/// What this plugin sends to homeCore's live log stream.
+#[derive(Debug, Deserialize)]
+pub struct LoggingSection {
+    /// Minimum level forwarded over MQTT. An operator can also change this at
+    /// runtime from the UI, without restarting the plugin.
+    #[serde(default = "default_forward_level")]
+    pub forward_level: String,
+}
+
+fn default_forward_level() -> String {
+    "info".into()
+}
+
+impl Default for LoggingSection {
+    fn default() -> Self {
+        Self {
+            forward_level: default_forward_level(),
+        }
+    }
 }
 
 /// The broker connection. Every plugin has this section, spelled this way.
