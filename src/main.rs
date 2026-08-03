@@ -9,7 +9,6 @@ mod discovery;
 mod discovery_action;
 mod ecp;
 mod keys;
-mod logging;
 mod schema;
 mod state;
 #[cfg(test)]
@@ -91,13 +90,13 @@ fn init_logging(
     #[derive(serde::Deserialize, Default)]
     struct Bootstrap {
         #[serde(default)]
-        logging: logging::LoggingConfig,
+        logging: plugin_sdk_rs::logging::LoggingConfig,
     }
     let bootstrap: Bootstrap = std::fs::read_to_string(config_path)
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
-    logging::init_logging(config_path, "hc-roku", "hc_roku=info", &bootstrap.logging)
+    plugin_sdk_rs::logging::init_logging(config_path, "hc-roku", "hc_roku=info", &bootstrap.logging)
 }
 
 async fn try_start(
