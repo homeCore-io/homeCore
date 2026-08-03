@@ -11,7 +11,7 @@ name = "hc-lutron"
 path = "src/main.rs"
 
 [dependencies]
-schemars           = { version = "0.8", optional = true }
+schemars           = { version = "1", optional = true }
 plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio        = { version = "1", features = ["full"] }
 serde        = { version = "1", features = ["derive"] }
@@ -27,7 +27,7 @@ uuid         = { version = "1", features = ["v4"] }
 # DbXmlInfo.xml discovery. reqwest matches the fleet's HTTP client; roxmltree
 # is hc-sonos's DOM parser, and this parse is ancestry-heavy (a device's room
 # is its nearest enclosing <Area>), which a streaming reader makes painful.
-reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest      = { version = "0.13", default-features = false, features = ["rustls"] }
 roxmltree    = "0.18"
 
 [features]

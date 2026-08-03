@@ -1,6 +1,6 @@
 [package]
 name        = "homecore"
-version     = "0.1.19"
+version     = "0.1.20"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Home automation platform — MQTT-native, API-first, fully local"
@@ -52,5 +52,5 @@ hc-captest    = { path = "../plugins/hc-captest" }
 plugin-sdk-rs = { path = "../sdk/rust" }
 # HTTP client for streaming tests — needed for raw status code / body
 # assertions that hc-cli's bail-on-non-2xx wrapper would swallow.
-reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest       = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tokio-stream  = "0.1"

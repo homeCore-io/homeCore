@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,7 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
-schemars         = { version = "0.8", optional = true }
+schemars         = { version = "1", optional = true }
 
 [features]
 # On by default so the shipped plugin publishes its config JSON Schema to core

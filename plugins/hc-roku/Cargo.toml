@@ -17,7 +17,7 @@ default = ["schema"]
 schema = ["dep:schemars", "plugin-sdk-rs/schema"]
 
 [dependencies]
-schemars           = { version = "0.8", optional = true }
+schemars           = { version = "1", optional = true }
 plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }
@@ -29,6 +29,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender   = "0.2"
 flate2             = "1"
 chrono             = "0.4"
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest            = { version = "0.13", default-features = false, features = ["rustls"] }
 roxmltree          = "0.18"
 futures-util       = "0.3"

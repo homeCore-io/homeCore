@@ -19,11 +19,22 @@
 //!
 //! Requires the `schema` feature (schemars). It is off by default, so wasm
 //! clients never compile it.
+//!
+//! # Why this walks JSON rather than schemars' own types
+//!
+//! It used to walk `schemars::schema::{SchemaObject, InstanceType, SingleOrVec}`
+//! — a typed AST that schemars 1.0 deleted outright, `Schema` there being a
+//! thin wrapper over `serde_json::Value`. Walking the JSON directly is what
+//! that upgrade would have forced anyway, and it leaves this module indifferent
+//! to which draft the generator emits: draft-07 put reusable subschemas under
+//! `definitions`, draft 2020-12 puts them under `$defs`, and both are read
+//! here. The emitted `Vocabulary` is unchanged either way — it is a shape we
+//! define, not a schema we pass through.
 
 use std::collections::BTreeMap;
 
-use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One field of one variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,9 +69,9 @@ impl Vocabulary {
     /// Reads it straight out of the types. This is the whole point: no list.
     pub fn derive() -> Self {
         Self {
-            triggers: variants_of(&schemars::schema_for!(crate::rule::Trigger)),
-            conditions: variants_of(&schemars::schema_for!(crate::rule::Condition)),
-            actions: variants_of(&schemars::schema_for!(crate::rule::Action)),
+            triggers: variants_of(&schema_json::<crate::rule::Trigger>()),
+            conditions: variants_of(&schema_json::<crate::rule::Condition>()),
+            actions: variants_of(&schema_json::<crate::rule::Action>()),
         }
     }
 
@@ -82,29 +93,59 @@ impl Vocabulary {
     }
 }
 
+fn schema_json<T: schemars::JsonSchema>() -> Value {
+    // Infallible in practice: a generated schema is plain JSON by construction.
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or(Value::Null)
+}
+
+/// The document a `$ref` is resolved against: the root schema, plus its
+/// reusable-subschema map under whichever key the generator used
+/// (`definitions` in draft-07, `$defs` in 2020-12).
+struct Doc<'a> {
+    root: &'a Value,
+    defs: Option<&'a serde_json::Map<String, Value>>,
+}
+
+impl<'a> Doc<'a> {
+    fn new(root: &'a Value) -> Self {
+        Self {
+            root,
+            defs: root
+                .get("$defs")
+                .or_else(|| root.get("definitions"))
+                .and_then(Value::as_object),
+        }
+    }
+
+    fn def(&self, name: &str) -> Option<&'a Value> {
+        self.defs.and_then(|d| d.get(name))
+    }
+}
+
 /// Walks an externally-tagged enum's schema.
 ///
 /// serde renders these as a `oneOf` of two shapes: a bare string (a unit
 /// variant like `ManualTrigger`) and a single-key object (a struct variant,
 /// where the key is the tag and the value holds the fields).
-fn variants_of(root: &schemars::schema::RootSchema) -> Vec<VariantSpec> {
-    let defs = &root.definitions;
+fn variants_of(root: &Value) -> Vec<VariantSpec> {
+    let doc = Doc::new(root);
     let mut out = Vec::new();
 
-    let Some(subs) = root.schema.subschemas.as_ref() else {
-        return out;
-    };
-    let Some(one_of) = subs.one_of.as_ref() else {
+    let Some(one_of) = root.get("oneOf").and_then(Value::as_array) else {
         return out;
     };
 
     for schema in one_of {
-        let Schema::Object(obj) = schema else {
-            continue;
-        };
-
-        // A unit variant: `"enum": ["ManualTrigger"]`.
-        if let Some(values) = obj.enum_values.as_ref() {
+        // A unit variant, in any of the three spellings a generator may pick:
+        //
+        //   {"enum": ["ManualTrigger"]}                  schemars 0.8, always
+        //   {"enum": ["ManualTrigger", "SystemStarted"]} 1.x, adjacent and undocumented
+        //   {"const": "SystemStarted", "description": …} 1.x, carrying a doc comment
+        //
+        // Reading only the first two silently drops every documented unit
+        // variant — which is how `SystemStarted` went missing from the
+        // vocabulary and the count tests caught it.
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
             for v in values {
                 if let Some(tag) = v.as_str() {
                     out.push(VariantSpec {
@@ -115,15 +156,22 @@ fn variants_of(root: &schemars::schema::RootSchema) -> Vec<VariantSpec> {
             }
             continue;
         }
+        if let Some(tag) = schema.get("const").and_then(Value::as_str) {
+            out.push(VariantSpec {
+                tag: tag.to_string(),
+                fields: Vec::new(),
+            });
+            continue;
+        }
 
         // A struct variant: one property, named for the tag.
-        let Some(o) = obj.object.as_ref() else {
+        let Some(props) = schema.get("properties").and_then(Value::as_object) else {
             continue;
         };
-        for (tag, body) in &o.properties {
+        for (tag, body) in props {
             out.push(VariantSpec {
                 tag: tag.clone(),
-                fields: fields_of(body, defs),
+                fields: fields_of(body, &doc),
             });
         }
     }
@@ -132,21 +180,23 @@ fn variants_of(root: &schemars::schema::RootSchema) -> Vec<VariantSpec> {
     out
 }
 
-fn fields_of(body: &Schema, defs: &schemars::Map<String, Schema>) -> Vec<FieldSpec> {
-    let Schema::Object(obj) = resolve(body, defs) else {
+fn fields_of(body: &Value, doc: &Doc<'_>) -> Vec<FieldSpec> {
+    let resolved = resolve(body, doc);
+    let Some(props) = resolved.get("properties").and_then(Value::as_object) else {
         return Vec::new();
     };
-    let Some(o) = obj.object.as_ref() else {
-        return Vec::new();
-    };
+    let required: Vec<&str> = resolved
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
 
-    let mut fields: Vec<FieldSpec> = o
-        .properties
+    let mut fields: Vec<FieldSpec> = props
         .iter()
         .map(|(name, schema)| FieldSpec {
             name: name.clone(),
-            r#type: type_of(schema, defs),
-            required: o.required.contains(name),
+            r#type: type_of(schema, doc),
+            required: required.contains(&name.as_str()),
         })
         .collect();
 
@@ -156,14 +206,25 @@ fn fields_of(body: &Schema, defs: &schemars::Map<String, Schema>) -> Vec<FieldSp
 
 /// Follows a `$ref` into the definitions, so a field typed as another enum
 /// reports that enum's shape rather than an opaque reference.
-fn resolve(schema: &Schema, defs: &schemars::Map<String, Schema>) -> Schema {
-    if let Schema::Object(o) = schema {
-        if let Some(r) = o.reference.as_ref() {
-            if let Some(name) = r.rsplit('/').next() {
-                if let Some(target) = defs.get(name) {
-                    return target.clone();
-                }
-            }
+///
+/// `"#"` is the whole document — how a self-referential type like
+/// `Not { condition: Box<Condition> }` is written under draft 2020-12, where
+/// draft-07 named the definition (`#/definitions/Condition`). Missing that
+/// case costs a field its type rather than failing: it degrades to `any`.
+///
+/// Returns a clone rather than a borrow because the target lives in the
+/// document while the source may be a temporary; these schemas are small and
+/// this runs once per server start.
+fn resolve(schema: &Value, doc: &Doc<'_>) -> Value {
+    let Some(r) = schema.get("$ref").and_then(Value::as_str) else {
+        return schema.clone();
+    };
+    if r == "#" {
+        return doc.root.clone();
+    }
+    if let Some(name) = r.rsplit('/').next() {
+        if let Some(target) = doc.def(name) {
+            return target.clone();
         }
     }
     schema.clone()
@@ -171,34 +232,31 @@ fn resolve(schema: &Schema, defs: &schemars::Map<String, Schema>) -> Schema {
 
 /// A coarse JSON type. An `Option<T>` shows up as `[T, null]`, so the null is
 /// stripped — optionality is already carried by `required`.
-fn type_of(schema: &Schema, defs: &schemars::Map<String, Schema>) -> String {
-    let resolved = resolve(schema, defs);
-    let Schema::Object(o) = resolved else {
-        return "any".into();
-    };
+fn type_of(schema: &Value, doc: &Doc<'_>) -> String {
+    let resolved = resolve(schema, doc);
 
-    if let Some(t) = o.instance_type.as_ref() {
-        return match t {
-            SingleOrVec::Single(one) => name_of(one),
-            SingleOrVec::Vec(many) => many
+    match resolved.get("type") {
+        Some(Value::String(one)) => return one.clone(),
+        Some(Value::Array(many)) => {
+            return many
                 .iter()
-                .find(|t| !matches!(t, InstanceType::Null))
-                .map(name_of)
-                .unwrap_or_else(|| "any".into()),
-        };
+                .filter_map(Value::as_str)
+                .find(|t| *t != "null")
+                .unwrap_or("any")
+                .to_string();
+        }
+        _ => {}
     }
 
     // `Option<SomeEnum>` becomes an anyOf of [ref, null].
-    if let Some(subs) = o.subschemas.as_ref() {
-        for items in [&subs.any_of, &subs.one_of, &subs.all_of]
-            .into_iter()
-            .flatten()
-        {
-            for item in items {
-                let named = type_of_object(item, defs);
-                if named != "null" && named != "any" {
-                    return named;
-                }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        let Some(items) = resolved.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let named = type_of_object(item, doc);
+            if named != "null" && named != "any" {
+                return named;
             }
         }
     }
@@ -206,26 +264,12 @@ fn type_of(schema: &Schema, defs: &schemars::Map<String, Schema>) -> String {
     "any".into()
 }
 
-fn type_of_object(schema: &Schema, defs: &schemars::Map<String, Schema>) -> String {
-    match resolve(schema, defs) {
-        Schema::Object(SchemaObject {
-            instance_type: Some(SingleOrVec::Single(one)),
-            ..
-        }) => name_of(&one),
-        Schema::Object(o) if o.enum_values.is_some() => "string".into(),
+fn type_of_object(schema: &Value, doc: &Doc<'_>) -> String {
+    let resolved = resolve(schema, doc);
+    match resolved.get("type") {
+        Some(Value::String(one)) => one.clone(),
+        // A bare `enum` with no `type` is a string enum.
+        _ if resolved.get("enum").is_some() => "string".into(),
         _ => "any".into(),
     }
-}
-
-fn name_of(t: &InstanceType) -> String {
-    match t {
-        InstanceType::Null => "null",
-        InstanceType::Boolean => "boolean",
-        InstanceType::Object => "object",
-        InstanceType::Array => "array",
-        InstanceType::Number => "number",
-        InstanceType::String => "string",
-        InstanceType::Integer => "integer",
-    }
-    .to_string()
 }

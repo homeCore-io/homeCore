@@ -11,7 +11,7 @@ name = "hc-ecowitt"
 path = "src/main.rs"
 
 [dependencies]
-schemars           = { version = "0.8", optional = true }
+schemars           = { version = "1", optional = true }
 plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio        = { version = "1", features = ["full"] }
 serde        = { version = "1", features = ["derive"] }
@@ -24,8 +24,8 @@ tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
 uuid         = { version = "1", features = ["v4"] }
-axum         = "0.7"
-reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum         = "0.8"
+reqwest      = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 
 [features]
 default = ["schema"]

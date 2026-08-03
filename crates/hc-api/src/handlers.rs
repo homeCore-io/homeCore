@@ -9934,7 +9934,7 @@ token = "TOKEN-TWO"
         assert_ne!(
             response.status(),
             StatusCode::BAD_REQUEST,
-            "/automations/vocabulary was swallowed by /automations/:id"
+            "/automations/vocabulary was swallowed by /automations/{{id}}"
         );
         assert_ne!(
             response.status(),

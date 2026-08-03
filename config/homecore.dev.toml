@@ -5,9 +5,9 @@
 #   homecore --home /home/john/RustroverProjects/homeCore/homeCore \
 #            --config config/homecore.dev.toml
 #
-# Plugin binary paths are relative to HOMECORE_HOME and point directly into
-# the shared plugins workspace target/debug/ directory (per the meta-layout
-# at ../plugins/Cargo.toml) so no install step is needed during development.
+# Plugin binary paths are relative to HOMECORE_HOME, which in development is
+# this repo. Plugins are workspace members now, so `cargo build` puts every one
+# of them in this repo's target/debug/ and no install step is needed.
 #
 # DO NOT use this config in production — use config/homecore.toml instead.
 
@@ -153,80 +153,86 @@ enabled = true
 catchup_window_minutes = 15
 
 # ---------------------------------------------------------------------------
-# Plugins — paths relative to HOMECORE_HOME = homeCore/homeCore/
-# Plugin repos sit one level up at homeCore/hc-*/
+# Plugins — paths relative to HOMECORE_HOME, i.e. this repo.
+# Each plugin is a workspace member under plugins/; its binary lands in the
+# shared target/debug/. config.dev.toml is gitignored and holds real
+# credentials, so it exists only on a developer's machine.
 # ---------------------------------------------------------------------------
 
 [[plugins]]
 id      = "plugin.yolink"
-binary  = "../plugins/target/debug/hc-yolink"
-config  = "../plugins/hc-yolink/config/config.dev.toml"
+binary  = "target/debug/hc-yolink"
+config  = "plugins/hc-yolink/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.lutron"
-binary  = "../plugins/target/debug/hc-lutron"
-config  = "../plugins/hc-lutron/config/config.dev.toml"
+binary  = "target/debug/hc-lutron"
+config  = "plugins/hc-lutron/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.caseta"
-binary  = "../plugins/target/debug/hc-caseta"
-config  = "../plugins/hc-caseta/config/config.dev.toml"
+binary  = "target/debug/hc-caseta"
+config  = "plugins/hc-caseta/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.sonos"
-binary  = "../plugins/target/debug/hc-sonos"
-config  = "../plugins/hc-sonos/config/config.dev.toml"
+binary  = "target/debug/hc-sonos"
+config  = "plugins/hc-sonos/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.zwave"
-binary  = "../plugins/target/debug/hc-zwave"
-config  = "../plugins/hc-zwave/config/config.dev.toml"
+binary  = "target/debug/hc-zwave"
+config  = "plugins/hc-zwave/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.hue"
-binary  = "../plugins/target/debug/hc-hue"
-config  = "../plugins/hc-hue/config/config.dev.toml"
+binary  = "target/debug/hc-hue"
+config  = "plugins/hc-hue/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.wled"
-binary  = "../plugins/target/debug/hc-wled"
-config  = "../plugins/hc-wled/config/config.dev.toml"
+binary  = "target/debug/hc-wled"
+config  = "plugins/hc-wled/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.roku"
-binary  = "../plugins/target/debug/hc-roku"
-config  = "../plugins/hc-roku/config/config.dev.toml"
+binary  = "target/debug/hc-roku"
+config  = "plugins/hc-roku/config/config.dev.toml"
 enabled = true
 
 [[plugins]]
 id      = "plugin.isy"
-binary  = "../plugins/target/debug/hc-isy"
-config  = "../plugins/hc-isy/config/config.dev.toml"
+binary  = "target/debug/hc-isy"
+config  = "plugins/hc-isy/config/config.dev.toml"
 enabled = false
 
 [[plugins]]
 id      = "plugin.thermostat"
-binary  = "../plugins/target/debug/hc-thermostat"
-config  = "../plugins/hc-thermostat/config/config.dev.toml"
+binary  = "target/debug/hc-thermostat"
+config  = "plugins/hc-thermostat/config/config.dev.toml"
 enabled = true
 
+# hc-matter is TypeScript (matter.js), so it is not a member of this workspace
+# and nothing here builds it — it stays its own repo, like hc-web and hc-mcp.
+# Paths are left as the meta-layout ones they always were; the entry has been
+# disabled since it was added. See docs/matterPlan.md.
 [[plugins]]
 id      = "plugin.matter"
-binary  = "../plugins/hc-matter/target/debug/hc-matter"
-config  = "../plugins/hc-matter/config/config.dev.toml"
+binary  = "../plugins/hc-matter/dist/main.js"
+config  = "../plugins/hc-matter/config/config.toml"
 enabled = false
 
 [[plugins]]
 id      = "plugin.ecowitt"
-binary  = "../plugins/target/debug/hc-ecowitt"
-config  = "../plugins/hc-ecowitt/config/config.dev.toml"
+binary  = "target/debug/hc-ecowitt"
+config  = "plugins/hc-ecowitt/config/config.dev.toml"
 enabled = true
 
 # hc-captest — conformance plugin for the capability/streaming contract.
@@ -235,8 +241,8 @@ enabled = true
 # of the Leptos ActionDrawer.
 [[plugins]]
 id      = "hc-captest"
-binary  = "../plugins/target/debug/hc-captest"
-config  = "../plugins/hc-captest/config/config.dev.toml"
+binary  = "target/debug/hc-captest"
+config  = "plugins/hc-captest/config/config.dev.toml"
 enabled = true
 
 # ---------------------------------------------------------------------------
