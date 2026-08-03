@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 schemars           = { version = "0.8", optional = true }
-plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.4.0" }
+plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio              = { version = "1",   features = ["full"] }
 rumqttc            = "0.25"
 serde              = { version = "1",   features = ["derive"] }
