@@ -47,12 +47,14 @@ RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev pkgconfig
 
 WORKDIR /build
 
-# Fetch dependencies before copying source for better layer caching
+# Fetch dependencies before copying source for better layer caching.
+#
+# `plugins/plugin-sdk-rs/` and `plugins/examples/` used to be copied here too.
+# Neither has existed in this repo for some time — the SDK is its own repo and
+# the example plugins were removed — so those lines failed the build outright.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
-COPY src/ ./src/
-COPY plugins/plugin-sdk-rs/ ./plugins/plugin-sdk-rs/
-COPY plugins/examples/ ./plugins/examples/
+COPY homecore/ ./homecore/
 
 RUN cargo build --release --bin homecore
 

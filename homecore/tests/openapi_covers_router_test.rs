@@ -42,7 +42,7 @@ fn normalise(path: &str) -> String {
 }
 
 fn router_paths() -> BTreeSet<String> {
-    let src = include_str!("../crates/hc-api/src/lib.rs");
+    let src = include_str!("../../crates/hc-api/src/lib.rs");
     let mut found = BTreeSet::new();
     for (idx, _) in src.match_indices(".route(") {
         // The path literal is the first string after `.route(`, which may sit
@@ -62,7 +62,7 @@ fn router_paths() -> BTreeSet<String> {
 }
 
 fn spec_paths() -> BTreeSet<String> {
-    let spec = include_str!("../docs/openapi.yaml");
+    let spec = include_str!("../../docs/openapi.yaml");
     let mut found = BTreeSet::new();
     let mut in_paths = false;
     for line in spec.lines() {
@@ -116,7 +116,7 @@ fn nothing_is_documented_that_does_not_exist() {
 fn the_spec_is_stamped_with_the_crate_version() {
     // The spec said 0.1.5 while core shipped 0.1.18 — thirteen releases of
     // silent drift, and the version is the first thing a reader trusts.
-    let spec = include_str!("../docs/openapi.yaml");
+    let spec = include_str!("../../docs/openapi.yaml");
     let want = format!("version: \"{}\"", env!("CARGO_PKG_VERSION"));
     assert!(
         spec.contains(&want),

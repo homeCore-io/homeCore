@@ -325,15 +325,13 @@ homeCore/                          # container dir (no git)
 │   │   ├── hc-scripting/          # Rhai sandboxed runtime (conditions + action scripts)
 │   │   ├── hc-logging/            # tracing setup, rolling files, log stream ring buffer
 │   │   └── hc-notify/             # notification delivery (Pushover, email)
-│   ├── src/                       # homecore binary crate (main.rs)
-│   ├── plugins/
-│   │   └── examples/
-│   │       ├── virtual-device/    # software-only test device (Rust)
-│   │       └── http-poller/       # generic HTTP polling adapter (Rust)
+│   ├── homecore/                  # the server binary — a workspace member like
+│   │   ├── src/                   #   any other; the root is a pure [workspace]
+│   │   │   └── main.rs
+│   │   └── tests/
+│   │       └── integration_test.rs  # end-to-end: virtual device → rule → command
 │   ├── rules/                     # live automation rules (RON, hot-reloaded)
 │   │   └── examples/              # documented rule patterns (OR/AND, multi-trigger…)
-│   ├── tests/
-│   │   └── integration_test.rs    # end-to-end: virtual device → rule → command
 │   └── docs/
 │       └── devNotes.md            # developer reference (API, rule patterns, device types)
 │
