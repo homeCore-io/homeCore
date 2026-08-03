@@ -1,0 +1,39 @@
+# hc-plugin-template — example configuration.
+#
+# In a normal install you never copy this file. homeCore seeds the real one at
+# `config/plugins/<plugin_id>.toml` when the plugin is installed, hands that
+# path to the process, and restarts the plugin when it changes. This copy is
+# for running the binary by hand during development:
+#
+#   cargo run -- config/config.toml
+
+# ── Broker connection ────────────────────────────────────────────────────────
+# Every plugin has this section, spelled exactly this way. `plugin_id` must
+# match the id homeCore knows the plugin by.
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.template"
+password    = ""            # set when the broker has [[broker.clients]] auth
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+# What this plugin sends to homeCore's live log stream, so its lines appear
+# next to core's own rather than only in this process's stderr. An operator can
+# also change this at runtime from the UI without restarting the plugin.
+[logging]
+forward_level = "info"      # trace | debug | info | warn | error
+
+# ── Your plugin's own settings ───────────────────────────────────────────────
+# Rename this section and replace the fields. With no devices the plugin raises
+# a `no_devices_configured` notice rather than sitting there looking healthy.
+[template]
+
+[[template.devices]]
+# The homeCore device id. Keep it stable: rules and history are keyed to it, so
+# changing it later orphans both.
+id   = "template_light_1"
+name = "Template Light"
+
+# [[template.devices]]
+# id   = "template_light_2"
+# name = "Another Light"
