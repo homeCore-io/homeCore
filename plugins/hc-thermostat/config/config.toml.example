@@ -1,0 +1,52 @@
+# hc-thermostat — virtual thermostat plugin.
+#
+# Copy this file to config.toml and fill in credentials + your thermostats.
+
+[homecore]
+plugin_id      = "plugin.thermostat"
+broker_host    = "127.0.0.1"
+broker_port    = 1883
+# Empty password = anonymous (dev broker). For production set a bcrypt hash in
+# homecore.toml's [[broker.clients]] entry and the matching plain text here.
+password       = ""
+heartbeat_secs = 60
+
+[logging]
+level              = "info"       # stderr + file filter; RUST_LOG overrides
+rotation           = "daily"      # daily | hourly | weekly | never
+max_size_mb        = 100          # rotate when active log exceeds N MB (0 = time-only)
+compress           = true         # gzip rotated files
+prune_after_days   = 5            # delete rotated files older than N days (0 = never)
+log_forward_level  = "info"       # minimum level forwarded to HomeCore via MQTT
+
+# ── Thermostats ────────────────────────────────────────────────────────────
+#
+# One [[thermostat]] block per virtual thermostat. Each entry registers a
+# device under `plugin.thermostat` with id = thermostat_<id>.
+#
+# Fields:
+#   sensor_device_ids  list of HomeCore device IDs whose `sensor_attribute`
+#                      is read (averaged/min/max'd per `aggregation`)
+#   sensor_attribute   which attribute on the sensor device (default "temperature")
+#   aggregation        "average" | "min" | "max" (default "average")
+#   setpoint           target temperature (unit-agnostic — matches sensor units)
+#   hysteresis         deadband width (actuator flips at setpoint ± hyst/2)
+#   mode               "heat" | "cool" | "off"
+#   actuator_device_id HomeCore device to command on/off
+#   min_on_secs        short-cycle protection — min time between OFF→ON→OFF
+#   min_off_secs       short-cycle protection — min time between ON→OFF→ON
+#   actuator_on_cmd    optional override (default { on = true })
+#   actuator_off_cmd   optional override (default { on = false })
+
+[[thermostat]]
+id                 = "living_room"
+name               = "Living Room Thermostat"
+sensor_device_ids  = ["yolink_lr_temp_a", "yolink_lr_temp_b"]
+sensor_attribute   = "temperature"
+aggregation        = "average"
+setpoint           = 70.0
+hysteresis         = 1.0
+mode               = "heat"
+actuator_device_id = "switch_furnace_relay"
+min_on_secs        = 300
+min_off_secs       = 180

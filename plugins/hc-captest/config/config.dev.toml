@@ -1,0 +1,16 @@
+# hc-captest configuration (dev).
+#
+# hc-captest reads its broker connection from env vars, not this file —
+# the file exists only because the HomeCore PluginManager passes a
+# `--config <path>` arg to every managed plugin binary, and it's cleaner
+# to point at a real (if inert) file than a phantom path.
+#
+# Env vars recognised by hc-captest:
+#   HC_BROKER_HOST     (default "127.0.0.1")
+#   HC_BROKER_PORT     (default 1883)
+#   HC_BROKER_PASSWORD (default "")
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "hc-captest"

@@ -1,0 +1,93 @@
+# hc-ecowitt — Ecowitt Weather Station plugin for HomeCore
+# Copy to config.toml and fill in your values.
+#
+# Supports two data ingestion modes:
+# 1. HTTP POST receiver: Gateway POSTs data to this plugin (primary)
+# 2. HTTP GET polling: Plugin polls the gateway API (fallback/bootstrap)
+#
+# Devices are dynamically discovered from the data — no manual sensor listing needed.
+# Configure the Ecowitt gateway's "Customized" upload to point to this plugin:
+#   Protocol: Ecowitt
+#   Server IP: <this machine's IP>
+#   Path: /data/report/
+#   Port: 8888
+#   Upload interval: 60 seconds
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.ecowitt"
+password    = ""
+
+[ecowitt]
+# Port for the HTTP server receiving POSTs from the Ecowitt gateway
+listen_port = 8888
+
+# Address the receiver binds to.
+#
+# READ THIS BEFORE LEAVING IT AT THE DEFAULT. The default is loopback
+# (127.0.0.1), which accepts POSTs only from this host. Your gateway is
+# a separate box on the network, so with the default its uploads are
+# dropped by the kernel: the gateway reports no error, this plugin sees
+# no request, and your sensors silently never update. If you are using
+# POST mode — the normal setup — you almost certainly need to set both
+# of the lines below.
+#
+# The loopback default is deliberate, not an oversight: Ecowitt's
+# "custom server" upload protocol carries no real authentication
+# (PASSKEY is the gateway's MAC, sent in cleartext), so an open 0.0.0.0
+# bind would let any host on the LAN forge weather readings.
+# `allowed_source_ips` is what buys that protection back.
+#
+# bind_addr = "0.0.0.0"                    # or a specific NIC IP
+# allowed_source_ips = ["10.0.10.50"]      # your gateway's IP
+
+# Source-IP allowlist. Empty (default) accepts any source — fine while
+# `bind_addr` is loopback, and NOT fine once it isn't. When binding to a
+# routable address, list the gateway IP(s) here so packets from anything
+# else on the LAN are dropped with 403. Give the gateway a static DHCP
+# lease so this entry doesn't go stale on the next renewal.
+#
+# Prefer no inbound listener at all? Leave bind_addr on loopback and set
+# `gateway_ip` below — the plugin will poll the gateway instead.
+
+# Optional: gateway IP for polling mode (GET /get_livedata_info)
+# Uncomment to enable polling as a supplement or alternative to POST mode.
+# Also used as the default target for the manifest's cgi-bin actions
+# (refresh_sensors, get_gateway_info, set_custom_server, etc.).
+# gateway_ip = "10.0.10.50"
+# poll_interval_secs = 60
+
+# Optional: explicit list of console IPs the manifest's
+# `discover_gateways` action should HTTP-probe alongside the UDP
+# CMD_BROADCAST scan. Use this when consoles live on a VLAN this
+# plugin's host can route to but UDP broadcast can't reach (typical
+# for IoT segments behind a managed switch). Each listed host is
+# queried via `/get_device_info?` whenever an action needs to
+# resolve a gateway IP and the in-memory cache is empty.
+# manual_hosts = ["10.0.20.5", "10.0.30.5"]
+
+# Prefix for HomeCore device IDs (e.g., "ecowitt_weather", "ecowitt_temp_1")
+# device_prefix = "ecowitt"
+
+# Optional: gateway local web-UI credentials. Required for the
+# `set_custom_server` action on firmware revisions that gate writes
+# behind the login (e.g., GW1100 with a password configured). Leave
+# `gateway_password` blank if no password is set on the gateway.
+# Username defaults to "admin" — most firmware ignores this field
+# (the gateway hard-codes "admin") but it's exposed for forward
+# compatibility.
+# gateway_username = "admin"
+# gateway_password = ""
+
+# The plugin persists its successfully-resolved gateway IP into
+# `.cached-gateway-ip` next to this config file, so a once-discovered
+# console survives plugin restarts. Delete the file to force a
+# fresh discovery on next startup.
+
+# [logging]
+# dir = "logs"
+# max_bytes = 10485760
+# max_files = 5
+# compress = true
+# log_forward_level = "info"

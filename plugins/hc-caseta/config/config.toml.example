@@ -1,0 +1,67 @@
+# hc-caseta — Lutron Caseta Pro Bridge plugin for HomeCore
+#
+# Copy to config.toml and fill in your values.
+#
+# Connects to a Caseta Smart Bridge Pro (L-BDGPRO2-WH) via the Lutron
+# Integration Protocol (LIP) over telnet.  The standard Caseta bridge
+# does NOT support telnet integration — only the Pro model does.
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.caseta"
+password    = ""
+
+[caseta]
+host     = "192.168.1.100"        # Caseta Pro bridge IP
+port     = 23                      # Telnet port (fixed, cannot change)
+username = "lutron"                # Factory default
+password = "integration"           # Factory default
+
+# Optional: global fade time for dimmers (seconds).
+# Individual devices can override with fade_secs.
+# default_fade_secs = 1.0
+
+# Optional: delay between reconnection attempts (seconds).
+# reconnect_delay_secs = 5
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+
+# [logging]
+# dir = "logs"
+# max_bytes = 10485760       # 10 MB per file
+# max_files = 5
+# compress = true
+# log_forward_level = "info" # Forward logs to HomeCore via MQTT
+
+# ── Devices ──────────────────────────────────────────────────────────────────
+#
+# Each device needs an integration_id from the Caseta Pro bridge.
+# Find IDs in the Lutron app or at http://{bridge_ip}/DbXmlInfo.xml
+#
+# Supported kinds: dimmer, switch, shade, fan_control, pico, occupancy_sensor
+
+[[devices]]
+integration_id = 2
+name           = "Living Room Dimmer"
+kind           = "dimmer"
+area           = "living_room"
+
+[[devices]]
+integration_id = 3
+name           = "Kitchen Switch"
+kind           = "switch"
+area           = "kitchen"
+
+# [[devices]]
+# integration_id = 5
+# name           = "Bedroom Shade"
+# kind           = "shade"
+# area           = "bedroom"
+
+# [[devices]]
+# integration_id = 6
+# name           = "Living Room Pico"
+# kind           = "pico"
+# area           = "living_room"
+# buttons        = [2, 3, 4, 5, 6]

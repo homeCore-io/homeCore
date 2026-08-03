@@ -1,0 +1,8 @@
+debug
+target
+**/*.rs.bk
+*.pdb
+.idea/
+config/config.toml
+config/config.dev.toml
+logs/

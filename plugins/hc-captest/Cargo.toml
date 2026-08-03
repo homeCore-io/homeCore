@@ -1,0 +1,25 @@
+[package]
+name        = "hc-captest"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Conformance test plugin for the capability-streaming contract (Phase 2a)"
+repository  = "https://github.com/homeCore-io/hc-captest"
+
+[lib]
+name = "hc_captest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hc-captest"
+path = "src/main.rs"
+
+[dependencies]
+plugin-sdk-rs    = { path = "../../sdk/rust" }
+tokio            = { version = "1",    features = ["full"] }
+serde            = { version = "1",    features = ["derive"] }
+serde_json       = "1"
+anyhow           = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono           = { version = "0.4",  features = ["serde"] }

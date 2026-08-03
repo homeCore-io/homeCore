@@ -1,0 +1,81 @@
+# hc-hue plugin configuration
+# Copy to config/config.toml and fill in your values.
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id = "plugin.hue"
+password = "change_me"
+
+[hue]
+# Enable bridge discovery hooks (currently scaffolded).
+discovery_enabled = true
+
+# Allow cloud fallback via N-UPnP endpoint (https://discovery.meethue.com).
+discovery_cloud_fallback = true
+
+# Discovery HTTP timeout in seconds.
+discovery_timeout_secs = 5
+
+# Subscribe to Hue v2 eventstream and trigger incremental refreshes.
+eventstream_enabled = true
+
+# Delay before reconnect attempt when eventstream disconnects.
+eventstream_reconnect_secs = 3
+
+# Periodic refresh cadence for bridge summaries.
+resync_interval_secs = 60
+
+# Plugin heartbeat/status publish cadence.
+heartbeat_secs = 30
+# When true, collapse Hue sensor/support facets onto the owning physical device
+# where possible so motion sensors do not appear as multiple HomeCore devices.
+compact_motion_facets = true
+# When true, publish Hue room/zone grouped-light resources as standalone devices.
+publish_grouped_lights = false
+# Optionally publish only selected grouped lights by room/zone selector even when
+# publish_grouped_lights is false. Selectors match room/zone names or slugs, and
+# can be scoped as "room:kitchen" or "zone:downstairs".
+publish_grouped_lights_for = ["room:living_room"]
+# Optionally suppress selected grouped lights when publish_grouped_lights is true.
+skip_grouped_lights_for = []
+# When true, publish the Hue bridge_home resource as a standalone device.
+publish_bridge_home = false
+# When true, publish Hue entertainment configurations as standalone devices.
+publish_entertainment_configurations = false
+
+[hue.display]
+# Temperature display unit in published state: "c" or "f".
+temperature_unit = "c"
+# Illuminance display value in published state: "lux" or "raw".
+illuminance_display = "lux"
+
+[[bridges]]
+name = "main"
+bridge_id = "001788fffe123456" # replace with your bridge ID
+host = "192.168.1.55"          # replace with your bridge IP/host
+app_key = "YOUR_HUE_APP_KEY"   # optional for read-only discovery; required for control/eventstream
+verify_tls = true
+allow_self_signed = true
+
+# ---------------------------------------------------------------------------
+# Log rotation and compression
+# ---------------------------------------------------------------------------
+
+[logging]
+# Stderr log level when RUST_LOG is not set.
+# Accepts tracing filter directives, e.g. "debug" or "hc_hue=debug,rumqttc=warn".
+level = "info"
+
+# Time-based rotation strategy.
+# "daily" (default) | "hourly" | "weekly" | "never"
+rotation = "daily"
+
+# Rotate the active log file when it exceeds this many megabytes.
+# Combined with `rotation` as "whichever comes first".
+# Set to 0 to disable size-based rotation (time-only).
+max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread.
+# Active log file is never compressed; only rotated files are compressed.
+compress = true

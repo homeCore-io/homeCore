@@ -1,0 +1,43 @@
+# hc-wled — WLED LED-controller plugin for HomeCore
+# Copy to config.toml and fill in your devices.
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.wled"
+# password  = ""
+
+[wled]
+# Fallback poll interval when a device doesn't expose WebSocket.
+poll_interval_secs = 30
+
+# Optional: extra hosts the manifest's `discover_devices` action
+# probes via `/json/nodes` alongside the configured [[devices]] hosts.
+# Use this when the WLED-Sync mesh spans VLANs and you don't yet have
+# configured devices on the far side. Each seed is queried in parallel;
+# results are merged + deduped by IP.
+# discovery_hosts = ["10.0.20.5", "10.0.30.5"]
+
+# Each WLED instance you want as a homeCore device gets its own block.
+# `host` is the WLED IP / hostname. Per-device `poll_interval_secs`
+# overrides the global one.
+#[[devices]]
+#host  = "10.0.10.74"
+#hc_id = "wled_deck"
+#name  = "Deck LED Strip"
+#area  = "deck"
+# poll_interval_secs = 60
+
+# [[devices]]
+# host  = "10.0.10.75"
+# hc_id = "wled_kitchen"
+# name  = "Kitchen Toe-Kick"
+# area  = "kitchen"
+
+[logging]
+level             = "info"   # stderr log level (info | debug | warn | error | trace)
+rotation          = "daily"  # daily | hourly | weekly | never
+max_size_mb       = 100      # rotate when file exceeds this MB; 0 = time-only
+compress          = true     # gzip rotated files in background thread
+prune_after_days  = 5        # delete rotated logs older than N days (0 = never)
+log_forward_level = "info"   # min level forwarded to core over MQTT (info|warn|error|off)

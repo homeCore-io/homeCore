@@ -1,5 +1,18 @@
 name: CI
 
+# This is the only CI in the tree, and it needed no change to become that.
+#
+# rust-ci.yml runs `cargo fmt --all`, `cargo clippy --all-targets
+# --all-features` and `cargo test --all-features` at the repo root. The root is
+# a virtual workspace, so each of those already covers every member — the
+# server, the 17 crates, the SDK and all thirteen plugins. The thirteen
+# per-plugin copies of this file were deleted in phase 2 as redundant, not as a
+# gap to fill later.
+#
+# It also means feature unification is now honest: a plugin that compiled only
+# because a sibling happened to enable a feature fails here, which is exactly
+# how hc-hue's missing `schema` feature escaped local builds and reached CI.
+
 on:
   push:
     branches: [main, develop]
