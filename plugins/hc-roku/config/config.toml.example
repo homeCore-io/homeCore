@@ -1,0 +1,65 @@
+# hc-roku — Roku plugin for homeCore
+# Copy to config.toml and adjust. On a flat network the defaults are
+# usually enough: Rokus announce themselves over SSDP and are registered
+# automatically, so [[devices]] is optional.
+#
+# ⚠ On the Roku itself, set
+#     Settings → System → Advanced system settings → Control by mobile apps
+#       → Network access = "Default" (or "Permissive")
+# "Disabled" blocks every keypress while still answering status queries,
+# so the device appears online but ignores all control.
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.roku"
+# password  = ""              # must match [[mqtt.clients]] in homecore.toml
+
+[roku]
+# ── Discovery ───────────────────────────────────────────────────────────
+discovery_enabled       = true   # SSDP search for `roku:ecp`
+auto_add_discovered     = true   # register what discovery finds
+discovery_interval_secs = 900    # re-scan; also catches DHCP address changes
+discovery_timeout_secs  = 4      # how long to listen for SSDP replies
+
+# SSDP is link-local and cannot cross a VLAN. List the address of any Roku
+# the homeCore host can route to but multicast cannot reach. Probed
+# directly on every sweep, in addition to whatever SSDP found.
+# manual_hosts = ["10.0.20.50"]
+
+# ── Polling ─────────────────────────────────────────────────────────────
+# ECP has no push channel, so every state change is found by asking.
+poll_interval_secs         = 10    # while the device is powered on
+standby_poll_interval_secs = 60    # while it reports standby / is unreachable
+request_timeout_secs       = 5
+app_refresh_interval_secs  = 3600  # installed channels + TV channel lineup
+
+# ── Control ─────────────────────────────────────────────────────────────
+# A Roku TV that is fully off has no network stack, so `power_on` has
+# nothing to reach over HTTP. With this on, an unreachable device is sent
+# a Wake-on-LAN magic packet to the MAC learned while it was last online.
+wake_on_lan  = true
+key_hold_ms  = 500   # default duration of a `key_hold` command
+type_delay_ms = 50   # gap between characters when sending text; Roku's
+                     # on-screen keyboards drop keys sent faster than this
+
+# ── Devices ─────────────────────────────────────────────────────────────
+# Optional. Add a block to pin a device's homeCore id (so rules keep
+# working no matter what discovery decides), to reach a Roku SSDP can't
+# see, or to run with discovery_enabled = false.
+#
+#[[devices]]
+#host  = "10.0.10.40"
+#hc_id = "roku_living_room"
+#name  = "Living Room Roku"
+#area  = "living_room"
+# port               = 8060   # only if reached through a port-forward
+# poll_interval_secs = 5      # per-device override
+
+[logging]
+level             = "info"   # stderr log level (info | debug | warn | error | trace)
+rotation          = "daily"  # daily | hourly | weekly | never
+max_size_mb       = 100      # rotate when file exceeds this MB; 0 = time-only
+compress          = true     # gzip rotated files in background thread
+prune_after_days  = 5        # delete rotated logs older than N days (0 = never)
+log_forward_level = "info"   # min level forwarded to core over MQTT (info|warn|error|off)
