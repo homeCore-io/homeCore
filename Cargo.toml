@@ -31,4 +31,4 @@ schemars         = { version = "0.8", optional = true }
 # (→ the config editor renders a typed form). Build --no-default-features to drop
 # the schemars dependency for a lean build.
 default = ["schema"]
-schema  = ["dep:schemars"]
+schema  = ["dep:schemars", "plugin-sdk-rs/schema"]
