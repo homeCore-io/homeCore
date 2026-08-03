@@ -219,13 +219,14 @@ binary  = "target/debug/hc-thermostat"
 config  = "plugins/hc-thermostat/config/config.dev.toml"
 enabled = true
 
-# hc-matter was never written — the repo was an empty stub and was archived
-# rather than folded in, so neither path below exists. Kept, disabled, as the
-# placeholder it always was; see docs/matterPlan.md.
+# hc-matter is TypeScript (matter.js), so it is not a member of this workspace
+# and nothing here builds it — it stays its own repo, like hc-web and hc-mcp.
+# Paths are left as the meta-layout ones they always were; the entry has been
+# disabled since it was added. See docs/matterPlan.md.
 [[plugins]]
 id      = "plugin.matter"
-binary  = "target/debug/hc-matter"
-config  = "plugins/hc-matter/config/config.dev.toml"
+binary  = "../plugins/hc-matter/dist/main.js"
+config  = "../plugins/hc-matter/config/config.toml"
 enabled = false
 
 [[plugins]]
