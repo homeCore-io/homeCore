@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    branches: [develop]
+    tags: ['v*']
+    paths-ignore:
+      - '**/*.md'
+      - '.github/dependabot.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  # The shared rust-release.yml still has a docker-publish job (core uses it)
+  # that declares packages: write. A reusable job can't request more than the
+  # caller grants, so this must be granted even though plugins build no image
+  # (publish_docker_image defaults false, so docker-publish never runs).
+  packages: write
+
+jobs:
+  release:
+    uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    # Inherit org secrets (REGISTRY_DISPATCH_PAT) so the reusable workflow can
+    # notify homeCore-io/registry to index this release's artifact.
+    secrets: inherit
+    with:
+      binary_name: hc-zwave
+      config_example: config/config.toml.example
+      rust_version: "stable"
+      # Plugins ship as signed registry artifacts (tar.zst), not containers: on
+      # a tag release, package the binary, attach it to the GitHub Release, and
+      # notify the plugin registry to index it.
+      publish_registry: true

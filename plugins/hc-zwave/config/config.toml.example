@@ -1,0 +1,48 @@
+# hc-zwave plugin configuration
+# Copy to config/config.toml and fill in your values.
+#
+# Prerequisites:
+#   - ZwaveJS UI (or standalone zwave-js-server) running with WebSocket enabled
+#   - Default WebSocket port is 3000 — check ZwaveJS UI Settings → WS Server
+
+# ---------------------------------------------------------------------------
+# HomeCore broker connection
+# ---------------------------------------------------------------------------
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.zwave"
+# Password must match the entry in homecore's [[mqtt.clients]] section.
+# Leave empty string if the broker has no auth configured.
+password = ""
+
+# ---------------------------------------------------------------------------
+# zwave-js-server WebSocket endpoint
+# ---------------------------------------------------------------------------
+[server]
+url = "ws://localhost:3000"
+# Schema version to negotiate with the server.
+# The bridge clamps this to the server's advertised min/max automatically.
+schema_version = 32
+
+# ---------------------------------------------------------------------------
+# Log rotation and compression
+# ---------------------------------------------------------------------------
+
+[logging]
+# Stderr log level when RUST_LOG is not set.
+# Accepts tracing filter directives, e.g. "debug" or "hc_hue=debug,rumqttc=warn".
+level = "info"
+
+# Time-based rotation strategy.
+# "daily" (default) | "hourly" | "weekly" | "never"
+rotation = "daily"
+
+# Rotate the active log file when it exceeds this many megabytes.
+# Combined with `rotation` as "whichever comes first".
+# Set to 0 to disable size-based rotation (time-only).
+max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread.
+# Active log file is never compressed; only rotated files are compressed.
+compress = true
