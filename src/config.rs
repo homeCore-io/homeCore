@@ -11,7 +11,7 @@ pub struct HuePluginConfig {
     #[serde(default)]
     pub hue: HueConfig,
     #[serde(default)]
-    pub logging: crate::logging::LoggingConfig,
+    pub logging: plugin_sdk_rs::logging::LoggingConfig,
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
 }
