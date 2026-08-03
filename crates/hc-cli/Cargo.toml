@@ -32,7 +32,7 @@ http-body-util = "0.1"
 hyperlocal   = "0.9"
 bytes        = "1"
 rpassword    = "7"
-dirs         = "5"
+dirs         = "6"
 rand               = { workspace = true }
 tracing-subscriber = { workspace = true }
 percent-encoding   = "2"
