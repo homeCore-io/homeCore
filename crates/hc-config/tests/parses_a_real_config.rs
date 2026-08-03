@@ -67,8 +67,12 @@ fn an_empty_config_is_all_defaults() {
 #[test]
 fn the_schema_covers_the_nested_sections() {
     let schema = serde_json::to_value(schemars::schema_for!(AppConfig)).unwrap();
+    // `$defs` under draft 2020-12 (schemars 1.x), `definitions` under draft-07
+    // (0.8). Accept either, so this asserts the schema's *content* rather than
+    // which draft the generator happened to emit.
     let defs = schema
-        .get("definitions")
+        .get("$defs")
+        .or_else(|| schema.get("definitions"))
         .and_then(|d| d.as_object())
         .expect("schemars emits definitions for the section structs");
 

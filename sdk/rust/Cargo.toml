@@ -23,7 +23,7 @@ flate2           = "1"
 # `logging::LoggingConfig` and derive JsonSchema for the config descriptor, so
 # LoggingConfig has to derive it too — under the SAME feature, or the plugin's
 # `--features schema` build fails on a field whose type does not implement it.
-schemars = { version = "0.8", optional = true }
+schemars = { version = "1", optional = true }
 hc-logging = { path = "../../crates/hc-logging" }
 hc-time    = { path = "../../crates/hc-time" }
 

@@ -24,7 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
-schemars         = { version = "0.8", optional = true }
+schemars         = { version = "1", optional = true }
 
 [features]
 # On by default so the shipped plugin publishes its config JSON Schema to core
