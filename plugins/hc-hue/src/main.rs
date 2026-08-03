@@ -92,7 +92,15 @@ async fn try_start(
     log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
-    let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
+    // Discovery blocks startup, and when the config already names every
+    // bridge by host AND id its results are thrown away by
+    // `effective_bridges`. Skip it rather than pay for it.
+    let discovered = if cfg.discovery_would_be_discarded() {
+        info!("Every configured bridge names its host and id — skipping discovery");
+        Vec::new()
+    } else {
+        hue::discovery::discover_bridges(&cfg.hue).await?
+    };
     let mut bridges = cfg.effective_bridges(&discovered);
 
     if bridges.is_empty() {

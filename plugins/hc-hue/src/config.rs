@@ -280,6 +280,25 @@ impl HuePluginConfig {
     // (D8): they're plugin-learned secrets that live in core's learned state.
     // See `build_bridge_state_delta` + `pairing::persist_app_key`.
 
+    /// True when every configured bridge names both its host and its id, so
+    /// `to_target` will never consult the discovered list.
+    ///
+    /// Discovery is a fixed cost paid before the plugin can register — an SSDP
+    /// sweep plus an HTTP probe of everything that answers — and when this is
+    /// true, every byte of it is discarded by `effective_bridges` below. A
+    /// fully-specified config should start immediately.
+    ///
+    /// Deliberately all-or-nothing: one entry given by IP alone still needs
+    /// discovery to learn its bridge id, and a partial skip would resolve some
+    /// bridges and silently drop others.
+    pub fn discovery_would_be_discarded(&self) -> bool {
+        !self.bridges.is_empty()
+            && self
+                .bridges
+                .iter()
+                .all(|b| !b.host.is_empty() && !b.bridge_id.is_empty())
+    }
+
     pub fn effective_bridges(&self, discovered: &[DiscoveredBridge]) -> Vec<BridgeTarget> {
         if !self.bridges.is_empty() {
             let resolved = self
@@ -613,6 +632,89 @@ fn default_eventstream_reconnect_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bridge(name: &str, host: &str, id: &str) -> BridgeConfig {
+        BridgeConfig {
+            name: name.into(),
+            bridge_id: id.into(),
+            host: host.into(),
+            app_key: String::new(),
+            verify_tls: true,
+            allow_self_signed: true,
+        }
+    }
+
+    fn cfg_with(bridges: Vec<BridgeConfig>) -> HuePluginConfig {
+        HuePluginConfig {
+            bridges,
+            ..Default::default()
+        }
+    }
+
+    /// Discovery is a fixed cost paid before the plugin can register, and its
+    /// results are discarded whenever every configured bridge resolves without
+    /// them. Skipping it is worth well over a minute on a network with a lot of
+    /// UPnP devices, so these cases decide whether that startup wait happens.
+    #[test]
+    fn a_fully_specified_config_needs_no_discovery() {
+        let c = cfg_with(vec![
+            bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C"),
+            bridge("downstairs", "10.0.10.22", "001788FFFE4D5E6F"),
+        ]);
+        assert!(c.discovery_would_be_discarded());
+    }
+
+    #[test]
+    fn a_bridge_given_by_host_alone_still_needs_discovery() {
+        // to_target() consults the discovered list to learn the bridge id.
+        let c = cfg_with(vec![bridge("upstairs", "10.0.10.21", "")]);
+        assert!(!c.discovery_would_be_discarded());
+    }
+
+    #[test]
+    fn a_bridge_given_by_id_alone_still_needs_discovery() {
+        let c = cfg_with(vec![bridge("upstairs", "", "001788FFFE1A2B3C")]);
+        assert!(!c.discovery_would_be_discarded());
+    }
+
+    #[test]
+    fn one_incomplete_entry_makes_the_whole_run_necessary() {
+        // All-or-nothing on purpose: skipping for the complete entries would
+        // resolve those and silently drop the incomplete one.
+        let c = cfg_with(vec![
+            bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C"),
+            bridge("downstairs", "10.0.10.22", ""),
+        ]);
+        assert!(!c.discovery_would_be_discarded());
+    }
+
+    #[test]
+    fn no_configured_bridges_means_discovery_is_the_only_source() {
+        assert!(!cfg_with(Vec::new()).discovery_would_be_discarded());
+    }
+
+    /// The skip must never change which bridges are used — only how long it
+    /// takes to decide. With a complete config, resolving against an empty
+    /// discovery list gives the same answer as resolving against a populated
+    /// one.
+    #[test]
+    fn skipping_discovery_resolves_the_same_bridges() {
+        let c = cfg_with(vec![bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C")]);
+        let discovered = vec![DiscoveredBridge {
+            name: "upstairs".into(),
+            bridge_id: "001788FFFE1A2B3C".into(),
+            host: "10.0.10.21".into(),
+        }];
+
+        let with = c.effective_bridges(&discovered);
+        let without = c.effective_bridges(&[]);
+
+        assert_eq!(with.len(), 1);
+        assert_eq!(with.len(), without.len());
+        assert_eq!(with[0].host, without[0].host);
+        assert_eq!(with[0].bridge_id, without[0].bridge_id);
+    }
+
     /// A published descriptor is *authoritative* — the editor renders it
     /// instead of deriving from the schema — so any config field it omits
     /// becomes uneditable (the class of bug that dropped four hc-sonos logging
