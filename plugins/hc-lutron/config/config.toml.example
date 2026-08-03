@@ -1,0 +1,138 @@
+# hc-lutron plugin configuration
+# Copy to config/config.toml and fill in your values.
+
+# ---------------------------------------------------------------------------
+# HomeCore broker connection
+# ---------------------------------------------------------------------------
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.lutron"
+# Password must match the entry in homecore's [[mqtt.clients]] section.
+# Leave empty string if the broker has no auth configured.
+password = ""
+
+# ---------------------------------------------------------------------------
+# Lutron Radio RA2 Main Repeater
+# ---------------------------------------------------------------------------
+[lutron]
+host = "192.168.1.100"    # IP address of the RA2 Main Repeater
+port = 23                  # default — do not change unless redirected
+
+# Integration account credentials — fill in your own.
+# Factory defaults are well-known (lutron/integration, rti/integration);
+# change the integration account password in RadioRA Setup before you
+# rely on this LIP connection for anything.
+username = ""
+password = ""
+
+# Global fade time for dimmers and switches (seconds, 0.0 = instant).
+# Can be overridden per device with fade_secs in [[devices]].
+default_fade_secs = 1.0
+
+# How long a button must be held (ms) before a "hold" event fires.
+# After hold fires, "release" still fires when the button is released.
+hold_threshold_ms = 500
+
+# Reconnect backoff start (doubles each attempt, max 60 s).
+reconnect_delay_secs = 5
+
+# ---------------------------------------------------------------------------
+# Devices
+#
+# Each [[devices]] entry maps a Lutron integration ID to a HomeCore device.
+# Integration IDs are assigned in Lutron RadioStar / Inclusive programming
+# software and are visible in the XML database at http://{repeater_ip}/DbXmlInfo.xml
+#
+# Kinds:
+#   dimmer          — dimmable load (on, brightness 0–100)
+#   switch          — non-dimmable load (on/off only)
+#   shade           — motorized shade (published as HomeCore `cover`) [STUB — phase 2]
+#   keypad          — wall keypad or Pico remote (button events, read-only)
+#   occupancy_group — occupancy sensor group (occupied, read-only)
+# ---------------------------------------------------------------------------
+
+# --- Dimmers ---
+[[devices]]
+integration_id = 7
+name           = "Living Room Dimmer"
+kind           = "dimmer"
+area           = "living_room"
+# fade_secs    = 2.0   # override global default for this device
+
+# --- Switches ---
+[[devices]]
+integration_id = 12
+name           = "Kitchen Switch"
+kind           = "switch"
+area           = "kitchen"
+
+# --- Shades (phase 2 — stubbed) ---
+# [[devices]]
+# integration_id   = 15
+# name             = "Office Shade"
+# kind             = "shade"
+# area             = "office"
+# invert_position  = false   # false = Lutron native (0=open, 100=closed)
+#                            # true  = inverted    (0=closed, 100=open)
+
+# --- Keypads ---
+# Button events are published as device state attributes:
+#   button_1 = "press" | "release" | "hold" | "double_click"
+# Use in rules: trigger on device_state_changed, condition button_1 eq "press"
+[[devices]]
+integration_id = 10
+name           = "Living Room Keypad"
+kind           = "keypad"
+area           = "living_room"
+
+# --- Occupancy groups ---
+[[devices]]
+integration_id = 20
+name           = "Office Occupancy"
+kind           = "occupancy_group"
+area           = "office"
+
+# ---------------------------------------------------------------------------
+# Scenes (Phantom Buttons)
+#
+# Each [[scenes]] entry maps a Lutron phantom button on the Main Repeater to
+# a HomeCore device.  Sending {"activate": true} to the device triggers the
+# phantom button press+release, activating the scene.
+#
+# main_repeater_id is almost always 1 — verify in RadioStar programming software.
+# button_component is the phantom button number assigned in RadioStar.
+#
+# HomeCore device ID: lutron_scene_{name_slug}
+# ---------------------------------------------------------------------------
+[[scenes]]
+name             = "Movie Mode"
+main_repeater_id = 1
+button_component = 1
+
+[[scenes]]
+name             = "Good Night"
+main_repeater_id = 1
+button_component = 2
+
+# ---------------------------------------------------------------------------
+# Log rotation and compression
+# ---------------------------------------------------------------------------
+
+[logging]
+# Stderr log level when RUST_LOG is not set.
+# Accepts tracing filter directives, e.g. "debug" or "hc_hue=debug,rumqttc=warn".
+level = "info"
+
+# Time-based rotation strategy.
+# "daily" (default) | "hourly" | "weekly" | "never"
+rotation = "daily"
+
+# Rotate the active log file when it exceeds this many megabytes.
+# Combined with `rotation` as "whichever comes first".
+# Set to 0 to disable size-based rotation (time-only).
+max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread.
+# Active log file is never compressed; only rotated files are compressed.
+compress = true

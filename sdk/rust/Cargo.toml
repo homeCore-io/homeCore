@@ -1,0 +1,33 @@
+[package]
+name    = "plugin-sdk-rs"
+version    = "0.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rumqttc    = "0.25"
+tokio      = { version = "1", features = ["full"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow     = "1"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "fmt"] }
+chrono     = { version = "0.4", features = ["serde"] }
+toml       = "1"
+hc-types   = { path = "../../crates/hc-types", features = ["descriptor"] }
+# Log rotation lives here now (see src/logging.rs), so the file sink and gzip
+# compression it needs are SDK dependencies rather than eleven plugins'.
+tracing-appender = "0.2"
+flate2           = "1"
+# Optional, behind the `schema` feature. Plugin config structs embed
+# `logging::LoggingConfig` and derive JsonSchema for the config descriptor, so
+# LoggingConfig has to derive it too — under the SAME feature, or the plugin's
+# `--features schema` build fails on a field whose type does not implement it.
+schemars = { version = "0.8", optional = true }
+hc-logging = { path = "../../crates/hc-logging" }
+hc-time    = { path = "../../crates/hc-time" }
+
+[features]
+default = []
+# Enabled by plugins via `plugin-sdk-rs/schema` from their own `schema` feature.
+schema = ["dep:schemars"]

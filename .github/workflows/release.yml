@@ -1,26 +1,112 @@
 name: Release
 
+# One pipeline for every releasable crate in this repo. It replaced thirteen
+# near-identical copies of itself, one per plugin repo, which is the whole
+# reason those repos were folded in — see docs/monorepo-plan.md.
+#
+# The tag says what is being released:
+#
+#   v0.1.20              the server        -> tar.gz + sha256 + ghcr.io image
+#   hc-yolink-v0.1.11    a plugin          -> tar.gz + sha256 + tar.zst + registry
+#
+# Pushing to develop builds the server and publishes a :dev image, exactly as
+# before; no Release is created and no plugin is built.
+#
+# Releasing a plugin is now: bump its Cargo.toml on develop, merge to main, push
+# one tag. No SDK tag first, no thirteen-manifest update, no cross-repo ordering.
+
 on:
   push:
     branches: [develop]
-    tags: ['v*']
+    tags:
+      - 'v*'
+      - 'hc-*-v*'
     paths-ignore:
       - '**/*.md'
       - '.github/dependabot.yml'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: >-
+          Dry-run a plugin build without tagging: name it here (e.g. hc-yolink)
+          and the pipeline builds and archives it but creates no Release and
+          notifies no registry. Leave empty to dry-run the server instead.
+        required: false
+        default: ''
+        type: string
 
-# contents: write — reusable workflow's release job creates a GH Release.
-# packages: write — reusable workflow's docker-publish job pushes to ghcr.io.
+# contents: write — the reusable workflow's release job creates a GH Release.
+# packages: write — its docker-publish job pushes to ghcr.io. A called workflow
+# can never hold more than its caller, so both are granted here even though any
+# single run uses only one of them.
 permissions:
   contents: write
   packages: write
 
 jobs:
-  release:
+  # Which crate does this ref release? Everything downstream keys off this, so
+  # an unrecognised tag stops here rather than half-building something.
+  resolve:
+    name: Resolve component
+    runs-on: ubuntu-latest
+    outputs:
+      component: ${{ steps.id.outputs.component }}
+      name: ${{ steps.id.outputs.name }}
+      prefix: ${{ steps.id.outputs.prefix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Identify the component from the ref
+        id: id
+        run: |
+          set -eu
+          COMPONENT=core NAME=homecore PREFIX=""
+          DISPATCH_PLUGIN="${{ inputs.plugin }}"
+
+          if [ -n "$DISPATCH_PLUGIN" ]; then
+            # Dispatch dry run. No tag is in flight, so the reusable workflow
+            # skips its Release/registry jobs on its own and versions the
+            # archive dev-<sha>; nothing here has to suppress them.
+            COMPONENT=plugin
+            NAME="$DISPATCH_PLUGIN"
+            PREFIX="${NAME}-"
+            if [ ! -d "plugins/${NAME}" ]; then
+              echo "::error::no such plugin: plugins/${NAME}"
+              exit 1
+            fi
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "$TAG" =~ ^v[0-9] ]]; then
+              :                                  # core, defaults above
+            elif [[ "$TAG" =~ ^(hc-[a-z0-9-]+)-v[0-9] ]]; then
+              COMPONENT=plugin
+              NAME="${BASH_REMATCH[1]}"
+              PREFIX="${NAME}-"
+              # A typo in a tag would otherwise fail deep inside the build with
+              # a confusing cargo error about an unknown --bin.
+              if [ ! -d "plugins/${NAME}" ]; then
+                echo "::error::tag '$TAG' names plugin '${NAME}', but plugins/${NAME} does not exist."
+                exit 1
+              fi
+            else
+              echo "::error::tag '$TAG' matches no component. Use v<version> for the server or hc-<name>-v<version> for a plugin."
+              exit 1
+            fi
+          fi
+
+          echo "Releasing: $COMPONENT ($NAME)"
+          { echo "component=$COMPONENT"; echo "name=$NAME"; echo "prefix=$PREFIX"; } >> "$GITHUB_OUTPUT"
+
+  # ── The server ────────────────────────────────────────────────────────────
+  core:
+    needs: resolve
+    if: needs.resolve.outputs.component == 'core'
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
     secrets: inherit
     with:
       binary_name: homecore
+      # The repo root is a pure [workspace]; the binary's [package] lives here.
+      version_manifest: homecore/Cargo.toml
       config_example: config/homecore.toml.example
       extra_files: |
         config/profiles
@@ -28,32 +114,38 @@ jobs:
       rust_version: "stable"
       # Docker image: hc-core (binary is "homecore", image name diverges).
       #
-      # hc-core is the API and the embedded broker. Nothing else.
+      # hc-core is the API and the embedded broker. Nothing else. The UI is
+      # hc-web — its own image, its own repo, serving the app and proxying
+      # /api/v1 here. Plugins install at runtime from the signed registry.
       #
-      # It used to also clone hc-web-leptos, compile it to WASM, and bake the
-      # bundle in; and a second job merged core with every plugin's release
-      # tarball into an "appliance" image. Neither describes the product any
-      # more. The UI is hc-web — its own image, its own repo, serving the app
-      # and proxying /api/v1 to core. Plugins install at runtime from the signed
-      # registry. So core builds one binary and one image, and nothing here
-      # builds a UI core does not own.
+      # The Dockerfile and entrypoint live in this repo, so they are versioned
+      # with the binary they wrap: this tag alone reproduces the image, and the
+      # release has NO cross-repo ordering constraint at all.
       publish_docker_image: true
       image_name: hc-core
       dockerfile_name: Dockerfile.core
-      # The Dockerfile and entrypoint that build the published image live in
-      # this repo, so they are versioned with the binary they wrap: this tag
-      # alone reproduces the image, and the release has NO cross-repo ordering
-      # constraint at all.
-      #
-      # They used to come from homeCore-io/docker, pinned to core's own tag name
-      # so the recipe behind a tagged image was recorded. That worked, but it
-      # required tagging that repo before this one on every release — and since
-      # it has no version of its own, those tags were empty re-cuts whose only
-      # purpose was to satisfy this pin. The coupling dated from when core baked
-      # the Leptos WASM UI in and three repos genuinely had to agree; core builds
-      # one binary and one image now.
-      #
-      # Provenance is recorded in the image instead of inferred from matching tag
-      # names: hc-scripts stamps org.opencontainers.image.revision with the
-      # commit, which pins the Dockerfile and the source together.
       docker_context_dir: docker
+
+  # ── Any plugin ────────────────────────────────────────────────────────────
+  #
+  # One job for all thirteen. binary_name, tag_prefix and the two paths are
+  # derived from the tag, so adding a plugin needs no change here — only a
+  # directory under plugins/ and a workspace member entry.
+  plugin:
+    needs: resolve
+    if: needs.resolve.outputs.component == 'plugin'
+    uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    # Inherit org secrets (REGISTRY_DISPATCH_PAT) so the reusable workflow can
+    # notify homeCore-io/registry to index this release's artifact.
+    secrets: inherit
+    with:
+      binary_name: ${{ needs.resolve.outputs.name }}
+      tag_prefix: ${{ needs.resolve.outputs.prefix }}
+      source_dir: plugins/${{ needs.resolve.outputs.name }}
+      version_manifest: plugins/${{ needs.resolve.outputs.name }}/Cargo.toml
+      config_example: plugins/${{ needs.resolve.outputs.name }}/config/config.toml.example
+      rust_version: "stable"
+      # Plugins ship as signed registry artifacts (tar.zst), not containers: on
+      # a tag release, package the binary, attach it to the GitHub Release, and
+      # notify the plugin registry to index it.
+      publish_registry: true

@@ -1,39 +1,31 @@
-[package]
-name        = "homecore"
-version     = "0.1.19"
-edition     = "2021"
-license     = "MIT OR Apache-2.0"
-description = "Home automation platform — MQTT-native, API-first, fully local"
-repository  = "https://github.com/homeCore-io/homeCore"
+# The root of this repository is a workspace and nothing else. The server
+# binary is a member like any other crate — see `homecore/`.
+#
+# A workspace root that is *also* a package makes "build everything" and "build
+# the server" ambiguous: `cargo test` at the root tested the *current package*,
+# which was the binary, so every crate's tests were invisible to CI. That was
+# worked around with a `default-members` list duplicating `members`. With no
+# root package there is nothing to disambiguate and the list is gone — the
+# workspace is the default unit of work for build, test and clippy alike.
 
 [workspace]
 resolver = "2"
-# `cargo test` at the root tests the *current package* only, and the root
-# package is the binary — so every crate's tests (hc-api's 100+, hc-config's
-# coverage rule) were invisible to CI, which runs a bare
-# `cargo test --all-features`. Listing the members as defaults makes the
-# workspace the default unit of work for build, test and clippy alike.
-default-members = [
-    ".",
-    "crates/hc-types",
-    "crates/hc-broker",
-    "crates/hc-mqtt-client",
-    "crates/hc-topic-map",
-    "crates/hc-core",
-    "crates/hc-state",
-    "crates/hc-api",
-    "crates/hc-web-admin",
-    "crates/hc-auth",
-    "crates/hc-api-types",
-    "crates/hc-cli",
-    "crates/hc-scripting",
-    "crates/hc-notify",
-    "crates/hc-logging",
-    "crates/hc-influx",
-    "crates/hc-config",
-    "crates/hc-time",
-]
 members = [
+    "homecore",
+    "sdk/rust",
+    "plugins/hc-caseta",
+    "plugins/hc-captest",
+    "plugins/hc-ecowitt",
+    "plugins/hc-hue",
+    "plugins/hc-isy",
+    "plugins/hc-lutron",
+    "plugins/hc-plugin-template",
+    "plugins/hc-roku",
+    "plugins/hc-sonos",
+    "plugins/hc-thermostat",
+    "plugins/hc-wled",
+    "plugins/hc-yolink",
+    "plugins/hc-zwave",
     "crates/hc-types",
     "crates/hc-broker",
     "crates/hc-mqtt-client",
@@ -101,71 +93,11 @@ strip         = "symbols"
 lto           = "thin"
 codegen-units = 1
 
-[dependencies]
-hc-broker      = { path = "crates/hc-broker" }
-hc-mqtt-client = { path = "crates/hc-mqtt-client" }
-hc-state       = { path = "crates/hc-state" }
-hc-core        = { path = "crates/hc-core" }
-hc-auth        = { path = "crates/hc-auth" }
-hc-api         = { path = "crates/hc-api" }
-hc-types       = { path = "crates/hc-types" }
-hc-topic-map   = { path = "crates/hc-topic-map" }
-hc-notify      = { path = "crates/hc-notify" }
-hc-logging     = { path = "crates/hc-logging" }
-hc-influx      = { path = "crates/hc-influx" }
-hc-config      = { path = "crates/hc-config" }
-hc-time        = { path = "crates/hc-time" }
-ipnet              = { workspace = true }
-tokio              = { workspace = true }
-serde              = { workspace = true }
-toml               = { workspace = true }
-anyhow             = { workspace = true }
-tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
-uuid               = { workspace = true }
-chrono             = { workspace = true }
-serde_json         = { workspace = true }
-rumqttc            = { workspace = true }
-rand               = { workspace = true }
-# UDS admin listener — axum 0.7's serve() doesn't accept UnixListener,
-# so we serve HTTP/1.1 directly on Unix sockets via hyper-util.
-hyper              = { version = "1", features = ["server", "http1"] }
-hyper-util         = { version = "0.1", features = ["tokio", "server-auto"] }
-tower              = { version = "0.5", features = ["util"] }
-tower-service      = "0.3"
-nix                = { version = "0.29", features = ["user"] }
-
-[dev-dependencies]
-tempfile = "3"
-hc-cli        = { path = "crates/hc-cli" }
-hc-api-types  = { path = "crates/hc-api-types" }
-nix           = { version = "0.29", features = ["user"] }
-# Phase 2a streaming conformance. hc-captest is a sibling plugin crate
-# (own workspace); we consume its library form from streaming_test.rs
-# to drive the SDK end-to-end without a subprocess.
-hc-captest    = { git = "https://github.com/homeCore-io/hc-captest", branch = "main" }
-plugin-sdk-rs = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", branch = "main" }
-# HTTP client for streaming tests — needed for raw status code / body
-# assertions that hc-cli's bail-on-non-2xx wrapper would swallow.
-reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-tokio-stream  = "0.1"
-
-# ---------------------------------------------------------------------------
-# Cross-repo dep unification
+# There is no [patch] section any more, and that is the point of phase 2.
 #
-# hc-captest (git dep, dev-only) transitively depends on hc-types/hc-logging
-# from homeCore-io/homeCore. Without this patch, cargo would resolve those
-# as a separate copy of the crates from the git source and the in-workspace
-# copy from `crates/`, producing E0308 'expected hc_types::Capabilities,
-# found Capabilities' in streaming_test.rs.
-#
-# Path is relative to this Cargo.toml — the workspace crates always exist
-# in any homeCore-io/homeCore checkout, so the patch works in standalone CI
-# as well as in the meta-layout.
-# ---------------------------------------------------------------------------
-[patch."https://github.com/homeCore-io/homeCore"]
-hc-types     = { path = "crates/hc-types" }
-hc-logging   = { path = "crates/hc-logging" }
-hc-api-types = { path = "crates/hc-api-types" }
-hc-auth      = { path = "crates/hc-auth" }
-hc-time      = { path = "crates/hc-time" }
+# It existed because hc-captest and the SDK reached back into this repo for
+# hc-types/hc-logging/hc-time over git, so cargo saw two copies of each — the
+# git one and the one in crates/ — and streaming_test.rs failed with
+# 'expected hc_types::Capabilities, found Capabilities'. The patch forced them
+# together. Now every one of those edges is a path dependency inside this
+# workspace, so there is nothing to unify.

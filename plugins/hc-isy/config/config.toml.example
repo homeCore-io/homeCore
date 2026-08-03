@@ -1,0 +1,77 @@
+# hc-isy plugin configuration
+# Copy to config/config.toml and fill in your values.
+#
+# Prerequisites:
+#   - ISY994i, eisy, or Polisy controller on your local network
+#   - Admin credentials (username/password used for the ISY Admin Console)
+#   - Firmware 4.2.3+ for WebSocket push (virtually all modern ISY units)
+#
+# Supported device types auto-detected from each node's UOM and type code:
+#   light         — Insteon dimmable switches/keypads (UOM 51, category 1)
+#   switch        — Insteon relays, outlet modules (UOM 78, category 2)
+#   contact_sensor / motion_sensor / water_sensor — known binary sensor classes
+#   binary_sensor — unknown binary sensors that cannot be classified precisely
+#   sensor        — Temperature, humidity, power, voltage, …
+#   lock          — Deadbolt locks (UOM 11)
+#   cover         — Garage doors, shades, motors (UOM 97, category 14)
+#   fan           — Insteon FanLinc (category 1.46)
+#   thermostat    — Insteon thermostats (category 5)
+#   scene         — ISY scenes / Insteon node groups
+
+# ---------------------------------------------------------------------------
+# HomeCore broker connection
+# ---------------------------------------------------------------------------
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.isy"
+# Must match the entry in homecore's [[mqtt.clients]] section when auth is on.
+# Leave empty if the broker has no auth configured.
+password = ""
+
+# ---------------------------------------------------------------------------
+# ISY/IoX controller connection
+# ---------------------------------------------------------------------------
+[isy]
+# IP address or hostname of your ISY/IoX controller.
+host = "192.168.1.50"
+
+# HTTP port — 80 for plain HTTP (default), 443 for TLS.
+port = 80
+
+# ISY administrator credentials.  These are the same credentials used
+# in the ISY Admin Console (Java Web Start application).
+# Replace with the credentials from your ISY — do not ship a unit
+# running the factory default admin/admin password.
+username = ""
+password = ""
+
+# Set to true to use HTTPS/WSS.  The ISY typically uses a self-signed
+# certificate; certificate verification is skipped automatically.
+tls = false
+
+# ---------------------------------------------------------------------------
+# Log rotation and compression
+# ---------------------------------------------------------------------------
+
+[logging]
+# Stderr log level when RUST_LOG is not set.
+# Accepts tracing filter directives, e.g. "debug" or "hc_hue=debug,rumqttc=warn".
+level = "info"
+
+# Time-based rotation strategy.
+# "daily" (default) | "hourly" | "weekly" | "never"
+rotation = "daily"
+
+# Rotate the active log file when it exceeds this many megabytes.
+# Combined with `rotation` as "whichever comes first".
+# Set to 0 to disable size-based rotation (time-only).
+max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread.
+# Active log file is never compressed; only rotated files are compressed.
+compress = true
+
+# Delete rotated log files older than this many days.  0 = never prune.
+prune_after_days = 5
+log_forward_level = "info" # min level forwarded to core over MQTT
