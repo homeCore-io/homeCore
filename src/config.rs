@@ -261,7 +261,7 @@ pub fn config_descriptor() -> serde_json::Value {
 pub struct RokuConfig {
     pub homecore: HomecoreConfig,
     #[serde(default)]
-    pub logging: crate::logging::LoggingConfig,
+    pub logging: plugin_sdk_rs::logging::LoggingConfig,
     #[serde(default)]
     pub roku: RokuGlobalConfig,
     /// Explicitly configured devices. Optional — with discovery on, this
