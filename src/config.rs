@@ -328,7 +328,7 @@ pub struct Config {
     #[serde(default)]
     pub lutron: LutronConfig,
     #[serde(default)]
-    pub logging: crate::logging::LoggingConfig,
+    pub logging: plugin_sdk_rs::logging::LoggingConfig,
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
     #[serde(default)]
