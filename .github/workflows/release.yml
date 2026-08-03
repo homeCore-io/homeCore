@@ -21,6 +21,9 @@ jobs:
     secrets: inherit
     with:
       binary_name: homecore
+      # The repo root is a pure [workspace]; the binary's [package] lives here.
+      # Without this the tag/version gate has no manifest to read.
+      version_manifest: homecore/Cargo.toml
       config_example: config/homecore.toml.example
       extra_files: |
         config/profiles

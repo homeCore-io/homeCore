@@ -11,7 +11,10 @@ case "$PROFILE" in
 esac
 
 echo "==> Building HomeCore ($PROFILE)"
-cargo build $CARGO_FLAG --manifest-path "$ROOT/Cargo.toml"
+# --bin homecore, not a bare build: the root is a pure [workspace] now, so an
+# unqualified `cargo build` here would build every member rather than the
+# server. Same output path either way; this just doesn't compile hc-cli twice.
+cargo build $CARGO_FLAG --manifest-path "$ROOT/Cargo.toml" --bin homecore
 
 # In the meta-layout, plugins live under ../plugins/ as a Cargo
 # workspace. If that workspace manifest is present, build everything
