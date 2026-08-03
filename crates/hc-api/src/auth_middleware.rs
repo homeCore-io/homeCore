@@ -21,7 +21,6 @@
 //! [`ScenesRead`], [`ScenesWrite`], [`AreasRead`], [`AreasWrite`],
 //! [`PluginsRead`], [`PluginsWrite`].
 
-use async_trait::async_trait;
 use axum::{
     extract::{ConnectInfo, Request, State},
     http::{header, StatusCode},
@@ -365,7 +364,8 @@ impl AuthUser {
     }
 }
 
-#[async_trait]
+// No #[async_trait]: axum 0.8 declares FromRequestParts with a native
+// `async fn` in trait, and the macro's desugaring no longer matches it.
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AuthUser {
     type Rejection = (StatusCode, Json<serde_json::Value>);
 
@@ -402,7 +402,6 @@ macro_rules! scope_extractor {
         #[doc = concat!("Scope guard: requires `", $scope, "` in the JWT claims.")]
         pub struct $name(pub Claims);
 
-        #[async_trait]
         impl<S: Send + Sync> axum::extract::FromRequestParts<S> for $name {
             type Rejection = (StatusCode, Json<serde_json::Value>);
 

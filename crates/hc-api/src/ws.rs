@@ -340,7 +340,7 @@ async fn handle_socket(
                     // Previous ping never got a pong — assume the socket is dead.
                     break "pong_timeout";
                 }
-                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
                     break "ping_send_failed";
                 }
                 outstanding_ping = true;
@@ -378,7 +378,7 @@ async fn handle_socket(
                                 continue;
                             }
                         };
-                        if socket.send(Message::Text(json)).await.is_err() {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
                             break "event_send_failed";
                         }
                     }

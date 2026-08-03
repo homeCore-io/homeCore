@@ -29,6 +29,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender   = "0.2"
 flate2             = "1"
 chrono             = "0.4"
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest            = { version = "0.13", default-features = false, features = ["rustls"] }
 roxmltree          = "0.18"
 futures-util       = "0.3"

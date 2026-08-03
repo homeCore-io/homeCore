@@ -15,7 +15,7 @@ schemars           = { version = "1", optional = true }
 plugin-sdk-rs      = { path = "../../sdk/rust" }
 tokio              = { version = "1", features = ["full"] }
 tokio-tungstenite  = "0.24"
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest            = { version = "0.13", default-features = false, features = ["rustls"] }
 quick-xml          = "0.36"
 futures-util       = "0.3"
 serde              = { version = "1", features = ["derive"] }

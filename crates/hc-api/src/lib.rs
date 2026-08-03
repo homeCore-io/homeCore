@@ -1015,12 +1015,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // Plugin command SSE — same ?token= pattern. Can't live behind the
         // Bearer middleware because EventSource can't send headers.
         .route(
-            "/plugins/:id/command/:request_id/stream",
+            "/plugins/{id}/command/{request_id}/stream",
             get(handlers::get_plugin_stream_sse),
         )
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
-        .route("/webhooks/:path", post(handlers::receive_webhook));
+        .route("/webhooks/{path}", post(handlers::receive_webhook));
 
     // Protected routes — require a valid Bearer JWT *or* a whitelisted source IP.
     let protected = Router::new()
@@ -1035,10 +1035,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/auth/users",
             get(auth_handlers::list_users).post(auth_handlers::create_user),
         )
-        .route("/auth/users/:id", delete(auth_handlers::delete_user))
-        .route("/auth/users/:id/role", patch(auth_handlers::set_user_role))
+        .route("/auth/users/{id}", delete(auth_handlers::delete_user))
+        .route("/auth/users/{id}/role", patch(auth_handlers::set_user_role))
         .route(
-            "/auth/users/:id/password",
+            "/auth/users/{id}/password",
             patch(auth_handlers::set_user_password),
         )
         // API keys
@@ -1047,11 +1047,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(api_key_handlers::list_api_keys).post(api_key_handlers::create_api_key),
         )
         .route(
-            "/auth/api-keys/:id",
+            "/auth/api-keys/{id}",
             delete(api_key_handlers::revoke_api_key).patch(api_key_handlers::update_api_key),
         )
         .route(
-            "/auth/api-keys/:id/rotate",
+            "/auth/api-keys/{id}/rotate",
             post(api_key_handlers::rotate_api_key),
         )
         // Audit log — Admin only (handler enforces).
@@ -1066,24 +1066,24 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // Must stay ahead of `/devices/:id` so "orphaned" is not read as an id.
         .route("/devices/orphaned", get(handlers::orphaned_devices))
         .route(
-            "/devices/:id",
+            "/devices/{id}",
             get(handlers::get_device)
                 .patch(handlers::update_device)
                 .delete(handlers::delete_device),
         )
-        .route("/devices/:id/state", patch(handlers::command_device))
-        .route("/devices/:id/history", get(handlers::device_history))
-        .route("/devices/:id/schema", get(handlers::get_device_schema))
+        .route("/devices/{id}/state", patch(handlers::command_device))
+        .route("/devices/{id}/history", get(handlers::device_history))
+        .route("/devices/{id}/schema", get(handlers::get_device_schema))
         // Artwork lives on the device (a Sonos speaker serves it from its own
         // LAN address), which a browser generally cannot reach. Core fetches it
         // and hands it back same-origin.
-        .route("/devices/:id/media/art", get(handlers::device_media_art))
+        .route("/devices/{id}/media/art", get(handlers::device_media_art))
         // Timers (timer devices are also visible via /devices)
         .route(
             "/timers",
             get(handlers::list_timers).post(handlers::create_timer),
         )
-        .route("/timers/:id", get(handlers::get_timer))
+        .route("/timers/{id}", get(handlers::get_timer))
         // Switches (switch devices are also visible via /devices)
         .route(
             "/switches",
@@ -1095,7 +1095,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_glue).post(handlers::create_glue),
         )
         .route(
-            "/glue/:id",
+            "/glue/{id}",
             delete(handlers::delete_glue).patch(handlers::update_glue),
         )
         // Modes (mode devices are also visible via /devices)
@@ -1104,11 +1104,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_modes).post(handlers::create_mode),
         )
         .route(
-            "/modes/:id",
+            "/modes/{id}",
             get(handlers::get_mode).delete(handlers::delete_mode),
         )
         .route(
-            "/modes/:id/definition",
+            "/modes/{id}/definition",
             get(handlers::get_mode_definition)
                 .put(handlers::put_mode_definition)
                 .delete(handlers::delete_mode_definition),
@@ -1119,10 +1119,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_areas).post(handlers::create_area),
         )
         .route(
-            "/areas/:id",
+            "/areas/{id}",
             patch(handlers::patch_area).delete(handlers::delete_area),
         )
-        .route("/areas/:id/devices", put(handlers::set_area_devices))
+        .route("/areas/{id}/devices", put(handlers::set_area_devices))
         // Automations
         .route(
             "/automations",
@@ -1131,23 +1131,23 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .patch(handlers::bulk_patch_automations),
         )
         .route(
-            "/automations/:id",
+            "/automations/{id}",
             get(handlers::get_automation)
                 .put(handlers::update_automation)
                 .patch(handlers::patch_automation)
                 .delete(handlers::delete_automation),
         )
-        .route("/automations/:id/test", post(handlers::test_automation))
+        .route("/automations/{id}/test", post(handlers::test_automation))
         .route(
             "/automations/vocabulary",
             get(handlers::get_rule_vocabulary),
         )
-        .route("/automations/:id/ron", get(handlers::get_automation_ron))
+        .route("/automations/{id}/ron", get(handlers::get_automation_ron))
         .route(
-            "/automations/:id/history",
+            "/automations/{id}/history",
             get(handlers::automation_history),
         )
-        .route("/automations/:id/clone", post(handlers::clone_automation))
+        .route("/automations/{id}/clone", post(handlers::clone_automation))
         .route("/automations/stale-refs", get(handlers::stale_refs))
         .route("/automations/import", post(handlers::import_automations))
         .route("/automations/export", get(handlers::export_automations))
@@ -1157,13 +1157,13 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_groups).post(handlers::create_group),
         )
         .route(
-            "/automations/groups/:id",
+            "/automations/groups/{id}",
             get(handlers::get_group)
                 .patch(handlers::patch_group)
                 .delete(handlers::delete_group),
         )
         .route(
-            "/automations/groups/:id/:action",
+            "/automations/groups/{id}/{action}",
             post(handlers::set_group_enabled),
         )
         // Scenes
@@ -1176,28 +1176,28 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_dashboard_templates),
         )
         .route(
-            "/dashboards/templates/:id",
+            "/dashboards/templates/{id}",
             post(handlers::create_dashboard_from_template),
         )
         .route("/dashboards/import", post(handlers::import_dashboard))
         .route("/dashboards/reload", post(handlers::reload_dashboards))
         .route(
-            "/dashboards/:id",
+            "/dashboards/{id}",
             get(handlers::get_dashboard)
                 .put(handlers::update_dashboard)
                 .delete(handlers::delete_dashboard),
         )
         .route(
-            "/dashboards/:id/access",
+            "/dashboards/{id}/access",
             put(handlers::set_dashboard_access),
         )
-        .route("/dashboards/:id/export", get(handlers::export_dashboard))
+        .route("/dashboards/{id}/export", get(handlers::export_dashboard))
         .route(
-            "/dashboards/:id/duplicate",
+            "/dashboards/{id}/duplicate",
             post(handlers::duplicate_dashboard),
         )
         .route(
-            "/dashboards/:id/default",
+            "/dashboards/{id}/default",
             post(handlers::set_default_dashboard),
         )
         .route(
@@ -1205,14 +1205,14 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::list_scenes).post(handlers::create_scene),
         )
         .route(
-            "/scenes/:id",
+            "/scenes/{id}",
             get(handlers::get_scene)
                 .put(handlers::update_scene)
                 .delete(handlers::delete_scene),
         )
         .route("/scenes/export", get(handlers::export_scenes))
         .route("/scenes/import", post(handlers::import_scenes))
-        .route("/scenes/:id/activate", post(handlers::activate_scene))
+        .route("/scenes/{id}/activate", post(handlers::activate_scene))
         // Plugins
         .route("/plugins", get(handlers::list_plugins))
         // Static, so it wins over `/plugins/:id` — a plugin literally named
@@ -1220,35 +1220,35 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/plugins/status", get(handlers::list_plugin_status))
         .route("/plugins/install", post(handlers::install_plugin))
         .route("/registry/plugins", get(handlers::browse_registry))
-        .route("/registry/plugins/:id", get(handlers::get_registry_plugin))
+        .route("/registry/plugins/{id}", get(handlers::get_registry_plugin))
         .route(
-            "/plugins/:id",
+            "/plugins/{id}",
             get(handlers::get_plugin)
                 .delete(handlers::deregister_plugin)
                 .patch(handlers::patch_plugin),
         )
-        .route("/plugins/:id/start", post(handlers::start_plugin))
-        .route("/plugins/:id/stop", post(handlers::stop_plugin))
-        .route("/plugins/:id/restart", post(handlers::restart_plugin))
+        .route("/plugins/{id}/start", post(handlers::start_plugin))
+        .route("/plugins/{id}/stop", post(handlers::stop_plugin))
+        .route("/plugins/{id}/restart", post(handlers::restart_plugin))
         .route(
-            "/plugins/:id/config",
+            "/plugins/{id}/config",
             get(handlers::get_plugin_config).put(handlers::put_plugin_config),
         )
         .route(
-            "/plugins/:id/config/schema",
+            "/plugins/{id}/config/schema",
             get(handlers::get_plugin_config_schema),
         )
         .route(
-            "/plugins/:id/config/descriptor",
+            "/plugins/{id}/config/descriptor",
             get(handlers::get_plugin_config_descriptor),
         )
-        .route("/plugins/:id/command", post(handlers::post_plugin_command))
+        .route("/plugins/{id}/command", post(handlers::post_plugin_command))
         .route(
-            "/plugins/:id/capabilities",
+            "/plugins/{id}/capabilities",
             get(handlers::get_plugin_capabilities),
         )
         .route(
-            "/plugins/:id/devices",
+            "/plugins/{id}/devices",
             delete(handlers::delete_plugin_devices),
         )
         .route(
@@ -1261,7 +1261,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             post(handlers::matter_reinterview),
         )
         .route(
-            "/plugins/matter/nodes/:id",
+            "/plugins/matter/nodes/{id}",
             delete(handlers::remove_matter_node),
         )
         // Events
@@ -1270,8 +1270,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/calendars", get(handlers::list_calendars))
         .route("/calendars/fetch", post(handlers::fetch_calendar))
         .route("/calendars/upload", post(handlers::upload_calendar))
-        .route("/calendars/:id", delete(handlers::delete_calendar))
-        .route("/calendars/:id/events", get(handlers::list_calendar_events))
+        .route("/calendars/{id}", delete(handlers::delete_calendar))
+        .route(
+            "/calendars/{id}/events",
+            get(handlers::list_calendar_events),
+        )
         // System
         .route("/system/status", get(handlers::system_status))
         .route("/system/battery_settings", get(handlers::battery_settings))

@@ -25,7 +25,7 @@ flate2             = "1"
 chrono             = "0.4"
 sonor              = "2.0"
 futures            = "0.3"
-axum               = "0.7"
+axum               = "0.8"
 tower              = "0.5"
 tower-http         = { version = "0.7", features = ["cors", "trace"] }
 roxmltree          = "0.18"

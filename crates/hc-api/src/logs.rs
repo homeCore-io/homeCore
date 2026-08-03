@@ -208,7 +208,7 @@ async fn handle_socket(
                 continue;
             }
             if let Ok(json) = serde_json::to_string(&line) {
-                if socket.send(Message::Text(json)).await.is_err() {
+                if socket.send(Message::Text(json.into())).await.is_err() {
                     break 'sock "history_send_failed";
                 }
             }
@@ -231,7 +231,7 @@ async fn handle_socket(
                             }
                             match serde_json::to_string(&line) {
                                 Ok(json) => {
-                                    if socket.send(Message::Text(json)).await.is_err() {
+                                    if socket.send(Message::Text(json.into())).await.is_err() {
                                         break 'sock "event_send_failed";
                                     }
                                 }
