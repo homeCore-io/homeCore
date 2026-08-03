@@ -204,6 +204,17 @@ fn host_from_location(location: &str) -> Option<String> {
     Some(host.to_string())
 }
 
+/// Ask every SSDP responder whether it is a Hue bridge — all of them at once.
+///
+/// The M-SEARCH above uses `ST:upnp:rootdevice`, so every UPnP device on the
+/// network answers: TVs, printers, the router, speakers. Nearly all of them
+/// then fail to serve `/api/config`, and most fail by not answering at all,
+/// which costs the full timeout each.
+///
+/// This used to be a serial `for` loop, so startup was
+/// `responders x timeout` — on a house with fifteen UPnP devices and the
+/// default 5s timeout, over a minute of dead wait before the plugin could
+/// register. Concurrently it is one timeout regardless of how many answer.
 async fn enrich_hosts_with_bridge_config(
     hosts: HashSet<String>,
     timeout_secs: u64,
@@ -212,36 +223,112 @@ async fn enrich_hosts_with_bridge_config(
         .timeout(Duration::from_secs(timeout_secs.max(1)))
         .build()?;
 
-    let mut bridges = Vec::new();
-    for host in hosts {
-        let url = format!("http://{host}/api/config");
-        let Ok(resp) = client.get(&url).send().await else {
-            continue;
-        };
-        let Ok(resp) = resp.error_for_status() else {
-            continue;
-        };
-        let Ok(cfg) = resp.json::<BridgeConfig>().await else {
-            continue;
-        };
+    let probes = hosts.into_iter().map(|host| {
+        let client = client.clone();
+        async move { probe_host(&client, host).await }
+    });
 
-        if cfg.bridgeid.is_empty() {
-            continue;
-        }
-
-        let name = if cfg.name.is_empty() {
-            let short = cfg.bridgeid.chars().take(8).collect::<String>();
-            format!("hue-{short}")
-        } else {
-            cfg.name
-        };
-
-        bridges.push(DiscoveredBridge {
-            name,
-            bridge_id: cfg.bridgeid,
-            host,
-        });
-    }
+    let bridges = futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     Ok(bridges)
+}
+
+/// `None` for anything that is not a Hue bridge — unreachable, wrong shape, or
+/// no bridge id. Never an error: one uncooperative device on the LAN must not
+/// fail discovery for the rest.
+async fn probe_host(client: &Client, host: String) -> Option<DiscoveredBridge> {
+    let url = format!("http://{host}/api/config");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let cfg = resp.json::<BridgeConfig>().await.ok()?;
+
+    if cfg.bridgeid.is_empty() {
+        return None;
+    }
+
+    let name = if cfg.name.is_empty() {
+        let short = cfg.bridgeid.chars().take(8).collect::<String>();
+        format!("hue-{short}")
+    } else {
+        cfg.name
+    };
+
+    Some(DiscoveredBridge {
+        name,
+        bridge_id: cfg.bridgeid,
+        host,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// Bind a socket that accepts connections and then says nothing, so every
+    /// request against it burns the full client timeout. That is exactly what
+    /// most SSDP responders do — a TV or a printer answers the M-SEARCH and
+    /// then ignores `GET /api/config`.
+    async fn silent_host() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock); // hold it open; never respond
+            }
+        });
+        addr.to_string()
+    }
+
+    /// The regression this guards: probing was a serial loop, so startup cost
+    /// `responders x timeout`. Eight silent hosts at a 1s timeout took 8s
+    /// before and takes ~1s now. The threshold is deliberately loose — this is
+    /// asserting concurrency, not benchmarking a machine.
+    #[tokio::test]
+    async fn silent_hosts_are_probed_concurrently_not_one_after_another() {
+        let mut hosts = HashSet::new();
+        for _ in 0..8 {
+            hosts.insert(silent_host().await);
+        }
+
+        let started = Instant::now();
+        let found = enrich_hosts_with_bridge_config(hosts, 1).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(found.is_empty(), "silent hosts are not Hue bridges");
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "8 hosts at a 1s timeout took {elapsed:?} — serial would be ~8s"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_does_not_sink_the_others() {
+        // Port 1 on loopback refuses immediately; the silent one times out.
+        // Neither may turn into an error for the whole discovery run.
+        let mut hosts = HashSet::new();
+        hosts.insert("127.0.0.1:1".to_string());
+        hosts.insert(silent_host().await);
+
+        let found = enrich_hosts_with_bridge_config(hosts, 1).await.unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_hosts_is_not_an_error() {
+        let found = enrich_hosts_with_bridge_config(HashSet::new(), 5)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
 }
