@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # Pin the SDK by tag. It re-exports core's `hc-types`, which is the plugin
 # ABI, so an unpinned dep means your build changes when core does.
-plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.3.10" }
+plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.4.0" }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
