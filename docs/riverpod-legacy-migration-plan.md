@@ -141,7 +141,39 @@ Also pin `clientErrorLogProvider`'s 100-entry cap and its FIFO eviction, and
 
 Green here, committed, before proceeding.
 
-### Phase 1 — cohort A, one provider per commit
+### Phase 1 — cohort A, one provider per commit — **DONE except `scenes_provider.dart`**
+
+`hc-web` `61db72b`..`e3ea37a`, one commit per provider as planned. Suite 905
+green throughout, `flutter analyze` and `dart format` clean, CI green.
+
+The plan's prediction held: **the seven ports touched only
+`lib/core/providers/`** — seven files, no call-site changes anywhere. Method
+names and `ref.watch` / `ref.read(p.notifier)` shapes were preserved exactly,
+and `preferences_test.dart` was never edited.
+
+Three things worth recording:
+
+- **`ref.mounted` is longer than `mounted`**, which pushed one guard past 80
+  columns and made `dart format` split it into a body-less two-line `if`.
+  Braced instead (`abc79d4`). Trivial, but it is the only place the port
+  changed the shape of a line rather than a name.
+- **Decision 2 was taken and fixed** (`e3ea37a`): `kLandingRouteKey` is now
+  public and `app.dart` imports it instead of spelling `'landing_route'` a
+  second time. The router still reads `SharedPreferences` directly — that part
+  is correct, since it can `await` and the provider cannot.
+- **The pinning tests still bite after the port.** Re-ran the mutation check
+  against the ported `timeUtc`: changing `build()`'s return from `false` to
+  `true` fails the fallback test. The tests are not passing vacuously against
+  the new API.
+
+**Still open: `scenes_provider.dart`.** It is the one remaining cohort-A file
+and it holds `sceneActivatedTimesProvider`, which decision 1 identified as
+dead — nothing watches it, so its `ref.listen` never runs. Porting dead code
+and deleting a feature that was intended to exist are both wrong defaults, so
+it is left as-is pending that call. It is the only thing blocking Phase 3.
+
+The original brief, kept for reference:
+
 
 Convert `StateNotifier<T>` → `Notifier<T>`, `StateNotifierProvider<N, T>` →
 `NotifierProvider<N, T>`. The mapping:
