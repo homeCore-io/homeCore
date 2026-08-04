@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use hc_types::device::DeviceState;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::sync::Arc;
 
 const DEVICES: TableDefinition<&str, &str> = TableDefinition::new("devices");

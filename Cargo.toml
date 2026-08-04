@@ -54,7 +54,11 @@ tokio             = { version = "1", features = ["full"] }
 rumqttd           = "0.20"
 rumqttc           = "0.25"
 axum              = { version = "0.8", features = ["ws"] }
-redb              = "2"
+redb              = "4"
+# redb 2 as well, under an alias, purely so the one-time v2 -> v3 file-format
+# migration can read the old database. redb 3+ refuses a v2 file outright and
+# offers no upgrade path. See crates/hc-state/src/migrate.rs.
+redb2             = { package = "redb", version = "2" }
 rusqlite          = { version = "0.31", features = ["bundled"] }
 rhai              = { version = "1", features = ["sync"] }
 serde             = { version = "1", features = ["derive"] }

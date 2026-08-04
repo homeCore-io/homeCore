@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use hc_auth::user::User;
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::sync::Arc;
 use uuid::Uuid;
 

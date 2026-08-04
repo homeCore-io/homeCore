@@ -13,7 +13,7 @@
 //! shape (that's between a plugin and its future self).
 
 use anyhow::Result;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde_json::Value;
 use std::sync::Arc;
 

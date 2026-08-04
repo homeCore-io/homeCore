@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use hc_types::DeviceSchema;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::sync::Arc;
 
 pub const DEVICE_SCHEMAS: TableDefinition<&str, &[u8]> = TableDefinition::new("device_schemas");

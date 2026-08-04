@@ -3,7 +3,7 @@
 use anyhow::Result;
 use hc_types::device::Area;
 use hc_types::rule::{Rule, Scene};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::sync::Arc;
 use uuid::Uuid;
 
