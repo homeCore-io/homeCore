@@ -467,7 +467,9 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // 3s UDP broadcast, then an HTTP probe per manual_host
+                // (8s client timeout each, now concurrent).
+                timeout_ms: Some(30_000),
             },
             Action {
                 id: "refresh_sensors".into(),
@@ -486,7 +488,9 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // Two pages, now fetched concurrently, at an 8s client
+                // timeout each.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "get_gateway_info".into(),
@@ -504,7 +508,9 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // One 8s call — but resolve_gateway_ip may first fall back
+                // to manual-host probes and UDP discovery to find the console.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "get_network".into(),
@@ -522,7 +528,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // As get_gateway_info: an 8s call behind gateway resolution.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "get_units".into(),
@@ -541,7 +548,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // As get_gateway_info: an 8s call behind gateway resolution.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "get_calibration".into(),
@@ -560,7 +568,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // As get_gateway_info: an 8s call behind gateway resolution.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "refresh_iot_devices".into(),
@@ -578,7 +587,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // As get_gateway_info: an 8s call behind gateway resolution.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "get_custom_server".into(),
@@ -598,7 +608,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // Dialect auto-detect can make more than one 8s request.
+                timeout_ms: Some(20_000),
             },
             Action {
                 id: "set_custom_server".into(),
@@ -699,7 +710,9 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
-                timeout_ms: None,
+                // Three candidate URLs tried in order, first 200 wins —
+                // deliberately serial, so up to 3x the 8s client timeout.
+                timeout_ms: Some(30_000),
             },
         ],
     }
@@ -731,16 +744,23 @@ async fn run_action(
         // consoles on VLANs the broadcast can't reach. Add their
         // /get_device_info responses to the result list, deduped by
         // IP.
-        for host in manual_hosts {
-            if found.iter().any(|v| {
-                v.get("ip").and_then(|s| s.as_str()) == Some(host)
-                    || v.get("host").and_then(|s| s.as_str()) == Some(host)
-            }) {
-                continue;
-            }
+        // Concurrently: the HTTP client allows 8s per request, so probing
+        // these one at a time meant a handful of unreachable manual_hosts
+        // could outlast any sane action timeout on their own.
+        let to_probe: Vec<&String> = manual_hosts
+            .iter()
+            .filter(|host| {
+                !found.iter().any(|v| {
+                    v.get("ip").and_then(|s| s.as_str()) == Some(host.as_str())
+                        || v.get("host").and_then(|s| s.as_str()) == Some(host.as_str())
+                })
+            })
+            .collect();
+
+        let probed = futures_util::future::join_all(to_probe.into_iter().map(|host| async move {
             let url = format!("http://{host}/get_device_info?");
             match http_get_json(&url).await {
-                Ok(info) => found.push(json!({
+                Ok(info) => Some(json!({
                     "host": host,
                     "ip": host,
                     "source": "manual_hosts",
@@ -748,9 +768,12 @@ async fn run_action(
                 })),
                 Err(e) => {
                     tracing::debug!(host, error = %e, "manual_hosts probe failed");
+                    None
                 }
             }
-        }
+        }))
+        .await;
+        found.extend(probed.into_iter().flatten());
 
         let selected = found
             .first()
@@ -826,10 +849,17 @@ async fn run_action(
 
     match action {
         "refresh_sensors" => {
-            let mut combined = serde_json::Map::new();
-            for page in 1..=2 {
+            // Both pages at once: sequentially this was two 8s requests, and
+            // a slow console spent the whole action budget on page 1.
+            let pages = futures_util::future::join_all((1..=2).map(|page| {
                 let url = format!("http://{ip}/get_sensors_info?page={page}");
-                match http_get_json(&url).await {
+                async move { (page, http_get_json(&url).await) }
+            }))
+            .await;
+
+            let mut combined = serde_json::Map::new();
+            for (page, res) in pages {
+                match res {
                     Ok(v) => {
                         combined.insert(format!("page_{page}"), v);
                     }
@@ -1638,6 +1668,42 @@ async fn push_custom_server(
             let url = format!("http://{ip}/set_ws_settings");
             let raw = http_post_json(&url, &body).await?;
             Ok((url, raw))
+        }
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    /// Core allows an action that declares no `timeout_ms` five seconds
+    /// (`management_rpc.rs::DEFAULT_TIMEOUT`). Every action here reaches the
+    /// gateway over HTTP behind an **8 second** client timeout — longer than
+    /// that window on its own — and `resolve_gateway_ip` may first fall back
+    /// through manual-host probes and UDP discovery just to find the console.
+    ///
+    /// So an undeclared action here does not merely risk a 504; it invites
+    /// one. The author knew: `set_custom_server` was moved to a streaming
+    /// action for exactly this reason. The other nine were left sync and
+    /// undeclared until 2026-08-03.
+    #[test]
+    fn every_action_outlasts_cores_default_window() {
+        const CORE_DEFAULT_MS: u64 = 5_000;
+        const HTTP_CLIENT_MS: u64 = 8_000;
+
+        let manifest = capabilities_manifest(8080);
+        assert!(!manifest.actions.is_empty(), "manifest declares no actions");
+
+        for a in &manifest.actions {
+            let declared = a.timeout_ms.unwrap_or(CORE_DEFAULT_MS);
+            assert!(
+                declared > HTTP_CLIENT_MS,
+                "action '{}' declares timeout_ms {:?}, which does not even \
+                 cover one {}ms HTTP request to the gateway",
+                a.id,
+                a.timeout_ms,
+                HTTP_CLIENT_MS
+            );
         }
     }
 }
