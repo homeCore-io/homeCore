@@ -23,7 +23,7 @@ thiserror          = "2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-appender   = "0.2"
-notify             = "6"
+notify             = "8"
 chrono             = { version = "0.4", features = ["serde"] }
 flate2             = "1"
 

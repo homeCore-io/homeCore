@@ -176,7 +176,9 @@ type WsStream = futures_util::stream::SplitStream<
 
 async fn ws_send(tx: &mut WsSink, msg: &Value) -> Result<()> {
     let text = serde_json::to_string(msg)?;
-    tx.send(Message::Text(text)).await.context("ws send")?;
+    tx.send(Message::Text(text.into()))
+        .await
+        .context("ws send")?;
     Ok(())
 }
 

@@ -571,3 +571,64 @@ fn apply_rule_diff(rules: &mut Vec<Rule>, new_rules: &[Rule], removed_ids: &Hash
     // Keep priority-desc ordering consistent with `load_all`.
     rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 }
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use notify::{EventKind, RecursiveMode, Watcher};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Rules hot-reload rests entirely on `notify` delivering a filesystem
+    /// event, and nothing else in this crate's tests actually waits for one —
+    /// they exercise the logic *around* the watcher with synthetic events. So a
+    /// major bump of notify could stop delivering and every test would still
+    /// pass while rule edits silently required a restart.
+    ///
+    /// This drives the real thing: watch a directory the way `spawn` does,
+    /// write a rule file, and wait for an event naming it.
+    #[test]
+    fn notify_still_delivers_an_event_for_a_written_rule_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            let Ok(event) = res else { return };
+            // The same filter spawn() applies.
+            if !matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
+                return;
+            }
+            for p in event.paths.iter().filter(|p| is_rule_file(p)) {
+                let _ = tx.send(p.clone());
+            }
+        })
+        .unwrap();
+        watcher
+            .watch(dir.path(), RecursiveMode::NonRecursive)
+            .unwrap();
+
+        let rule = dir.path().join("hot.ron");
+        std::fs::write(&rule, "(id: \"\", name: \"x\")\n").unwrap();
+
+        // Generous: inotify is prompt, but CI machines are not, and this test
+        // is about "does an event arrive at all", not how fast.
+        let got = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("no filesystem event within 10s — rules hot-reload is dead");
+        assert_eq!(got.file_name(), rule.file_name());
+    }
+
+    /// The filter is half the mechanism: an editor's swap file or a `.bak`
+    /// landing in the rules directory must not trigger a reload.
+    #[test]
+    fn only_rule_extensions_are_watched() {
+        assert!(is_rule_file(Path::new("/rules/a.ron")));
+        assert!(is_rule_file(Path::new("/rules/a.toml")));
+        assert!(!is_rule_file(Path::new("/rules/a.ron.swp")));
+        assert!(!is_rule_file(Path::new("/rules/a.bak")));
+        assert!(!is_rule_file(Path::new("/rules/README")));
+    }
+}
