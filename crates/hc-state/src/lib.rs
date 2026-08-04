@@ -20,7 +20,6 @@ pub mod audit_store;
 pub mod battery_store;
 pub mod device_store;
 pub mod history;
-pub mod migrate;
 pub mod plugin_state_store;
 pub mod refresh_token_store;
 pub mod rule_store;
@@ -113,13 +112,10 @@ impl StateStore {
                 })?;
             }
 
-            // A database written by redb 2 must be converted before it can be
-            // opened at all — redb 3+ refuses it. One-time, keeps a backup.
-            migrate::migrate_if_needed(std::path::Path::new(&state_path))
-                .context("migrating the state DB to the current redb format")?;
-
             // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
-            let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
+            let db = Arc::new(
+                Database::create(&state_path).map_err(|e| explain_open_failure(e, &state_path))?,
+            );
             let devices = DeviceStore::new(Arc::clone(&db))?;
             let rules = RuleStore::new(Arc::clone(&db))?;
             let history = HistoryStore::open(&history_path)?;
@@ -592,5 +588,77 @@ impl StateStore {
     pub async fn user_count(&self) -> Result<usize> {
         let store = Arc::clone(&self.users);
         tokio::task::spawn_blocking(move || store.user_count()).await?
+    }
+}
+
+/// Turn a failure to open the state database into something an operator can act on.
+///
+/// The case worth naming is `UpgradeRequired`: redb 3 changed its on-disk
+/// format, and redb 4 refuses a file written by redb 2 with
+/// `Expected file format version 3, but file is version 2`. That is accurate
+/// and tells you nothing about what to do.
+///
+/// homeCore 0.1.23 shipped a one-time converter for exactly this, and it was
+/// removed once the only installation had run it. Anyone who later restores a
+/// pre-0.1.23 backup lands here, and the way out is to run that version once —
+/// not to delete the database, which is the guess the raw message invites.
+fn explain_open_failure(err: redb::DatabaseError, path: &str) -> anyhow::Error {
+    match err {
+        redb::DatabaseError::UpgradeRequired(found) => anyhow::anyhow!(
+            "{path} is a redb v{found} database and this build reads v3.\n\
+             \n\
+             This is a state database from homeCore 0.1.22 or earlier. Install \
+             0.1.23 and start it once — it converts the file in place and keeps \
+             the original as {path}.v2-backup — then upgrade to this version. \
+             Do not delete the file; it is the device registry, users, API keys \
+             and rules."
+        ),
+        other => anyhow::Error::new(other).context(format!("failed to open state DB at {path}")),
+    }
+}
+
+#[cfg(test)]
+mod open_failure_tests {
+    use super::*;
+
+    /// The message has to name the version that converts the file. Without it
+    /// the operator gets redb's "expected file format version 3" and a
+    /// database they are tempted to delete.
+    #[test]
+    fn an_old_format_database_is_explained_not_just_reported() {
+        let e = explain_open_failure(
+            redb::DatabaseError::UpgradeRequired(2),
+            "/var/lib/state.redb",
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("0.1.23"),
+            "must name the converting release: {msg}"
+        );
+        assert!(
+            msg.contains("v2-backup"),
+            "must say a backup is kept: {msg}"
+        );
+        assert!(
+            msg.contains("Do not delete"),
+            "must warn against deleting: {msg}"
+        );
+        assert!(
+            msg.contains("/var/lib/state.redb"),
+            "must name the file: {msg}"
+        );
+    }
+
+    /// Anything else keeps redb's own wording — inventing an explanation for a
+    /// failure we do not understand would be worse than passing it through.
+    #[test]
+    fn other_failures_are_passed_through_with_context() {
+        let e = explain_open_failure(redb::DatabaseError::DatabaseAlreadyOpen, "/tmp/state.redb");
+        let msg = format!("{e:#}");
+        assert!(msg.contains("/tmp/state.redb"));
+        assert!(
+            !msg.contains("0.1.23"),
+            "must not claim a migration is needed: {msg}"
+        );
     }
 }
