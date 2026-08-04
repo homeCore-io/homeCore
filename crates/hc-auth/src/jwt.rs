@@ -140,6 +140,62 @@ mod tests {
         JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24)
     }
 
+    /// A token this code did not produce.
+    ///
+    /// Built by hand from the HS256 standard — base64url(header).base64url(
+    /// claims).HMAC-SHA256 — with a fixed secret, so it is what *any*
+    /// conforming issuer emits, including every version of jsonwebtoken we
+    /// have ever run. Sessions on a live box outlive a deploy, and an upgrade
+    /// that silently stopped accepting them would log every user out with the
+    /// server reporting nothing wrong.
+    ///
+    /// Regenerate only if the claim set changes, never to make a failure go
+    /// away: a failure here means already-issued tokens have been invalidated.
+    const EXTERNALLY_SIGNED_SECRET: &[u8] = b"a-fixed-test-secret-for-jwt-compat";
+    const EXTERNALLY_SIGNED_TOKEN: &str = concat!(
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.",
+        "eyJzdWIiOiJhbGljZSIsInVpZCI6IjExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1",
+        "NTU1NTU1NSIsImV4cCI6NDEwMjQ0NDgwMCwicm9sZSI6ImFkbWluIiwic2NvcGVzIjpb",
+        "ImRldmljZXM6cmVhZCIsImRldmljZXM6d3JpdGUiXSwidHYiOjd9.",
+        "EoYM5NsqoKQE511sQ9gX1IHQVaWaSthdtVwckpI3G-w"
+    );
+
+    #[test]
+    fn a_token_issued_before_this_build_still_validates() {
+        let svc = JwtService::new_hs256(EXTERNALLY_SIGNED_SECRET, 24);
+        let claims = svc
+            .validate(EXTERNALLY_SIGNED_TOKEN)
+            .expect("an HS256 token from any conforming issuer must validate");
+
+        assert_eq!(claims.sub, "alice");
+        assert_eq!(claims.uid, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(claims.role, Role::Admin);
+        assert_eq!(claims.tv, 7);
+        assert!(claims.scopes.iter().any(|s| s == "devices:write"));
+    }
+
+    #[test]
+    fn a_tampered_signature_is_rejected() {
+        // The same token with its last signature character changed — proves
+        // the test above passes because the signature verifies, not because
+        // verification was skipped.
+        let mut bad = EXTERNALLY_SIGNED_TOKEN.to_string();
+        bad.pop();
+        bad.push(if EXTERNALLY_SIGNED_TOKEN.ends_with('w') {
+            'x'
+        } else {
+            'w'
+        });
+        let svc = JwtService::new_hs256(EXTERNALLY_SIGNED_SECRET, 24);
+        assert!(svc.validate(&bad).is_err());
+    }
+
+    #[test]
+    fn the_wrong_secret_is_rejected() {
+        let svc = JwtService::new_hs256(b"not-the-secret-that-signed-it!!!", 24);
+        assert!(svc.validate(EXTERNALLY_SIGNED_TOKEN).is_err());
+    }
+
     #[test]
     fn issue_and_validate_admin_token() {
         let uid = Uuid::new_v4().to_string();

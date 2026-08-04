@@ -1,6 +1,6 @@
 [package]
 name        = "homecore"
-version     = "0.1.20"
+version     = "0.1.21"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Home automation platform — MQTT-native, API-first, fully local"
@@ -31,7 +31,7 @@ uuid               = { workspace = true }
 chrono             = { workspace = true }
 serde_json         = { workspace = true }
 rumqttc            = { workspace = true }
-rand               = { workspace = true }
+getrandom          = "0.4"
 # UDS admin listener — axum 0.7's serve() doesn't accept UnixListener,
 # so we serve HTTP/1.1 directly on Unix sockets via hyper-util.
 hyper              = { version = "1", features = ["server", "http1"] }

@@ -20,11 +20,10 @@
 
 use anyhow::{anyhow, Result};
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier},
     Algorithm, Argon2, Params, Version,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand_core::{OsRng, RngCore};
 
 /// Plaintext token prefix for API keys.
 pub const API_KEY_PREFIX: &str = "hc_sk_";
@@ -50,7 +49,7 @@ pub struct NewApiKey {
 /// and return `full_token` to the user once.
 pub fn generate() -> Result<NewApiKey> {
     let mut raw = [0u8; KEY_BYTES];
-    OsRng.fill_bytes(&mut raw);
+    getrandom::fill(&mut raw).map_err(|e| anyhow!("OS RNG unavailable: {e}"))?;
     let body = URL_SAFE_NO_PAD.encode(raw);
     let full_token = format!("{API_KEY_PREFIX}{body}");
     let lookup_prefix = body[..LOOKUP_PREFIX_LEN].to_string();
@@ -74,7 +73,7 @@ pub fn lookup_prefix_from_body(body: &str) -> Option<&str> {
 /// Hash a full token (`hc_sk_...`) with Argon2id using light params tuned
 /// for per-request verification.
 pub fn hash_token(full_token: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = crate::password::random_salt()?;
     // ~19 MiB, 1 iteration, parallelism 1 — roughly 5 ms verify on
     // commodity hardware. Tokens are 256-bit random, so brute force isn't
     // the threat model.
