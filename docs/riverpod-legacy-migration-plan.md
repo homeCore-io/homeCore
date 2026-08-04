@@ -203,7 +203,44 @@ Re-run Phase 0's tests unchanged after each commit. They were written against
 the old implementation and must pass against the new one without edits — that
 is the whole point of writing them first.
 
-### Phase 2 — cohort B
+### Phase 2 — cohort B — **DONE**
+
+`hc-web` `c790353`..`d633684`, six commits. Suite 905 green throughout,
+`flutter analyze` and `dart format` clean, CI green.
+
+Unlike Phase 1 this was not a rename: the 12 `.notifier).state = …` and
+`.notifier).update(…)` sites became named methods, and in four places that
+moved real logic off the call site and onto the notifier.
+
+- The events page's **200-entry cap** lived in the `ref.listen` callback that
+  pushed into the buffer. It is now `_LiveEvents.push()` — a property of the
+  buffer rather than of whoever feeds it — and the widget no longer knows the
+  number.
+- **Both type-filter chips** built their next `Set` by hand, identically, at two
+  call sites. One `_TypeFilter.toggle()` behind two providers, so live and
+  history still filter independently.
+- The device list's `initState` post-frame callback read `notifier.state`
+  **twice** to decide between scoping to a plugin and clearing a stale scope.
+  Now `_Query.scopeToPlugin()`.
+- The automations list had the same inline-`Set` duplication for its
+  trigger-category chip and its row-select callback.
+
+**The predicted test break happened, and only that one.**
+`skinOverrideProvider.overrideWith((ref) => HcSkin.controlRoom)` does not
+typecheck against `NotifierProvider`, whose `overrideWith` takes a notifier
+factory. The test now overrides `build()` in a `_FixedSkin` subclass, and that
+rewrite was mutation-checked: pointing its `build()` at `null` fails the test,
+so it still asserts what it used to.
+
+One judgement call worth flagging: `skinOverrideProvider` is only ever *read*
+in `lib/` — the sole writer is that test override — so a plain `Provider` would
+also have got it off the shim and left `shell_test.dart` untouched. It became a
+`NotifierProvider` with a `choose()` nobody calls yet, because narrowing it to
+a read-only injection point would quietly remove a capability the migration was
+not asked to remove.
+
+The original brief, kept for reference:
+
 
 `StateProvider<T>` → `NotifierProvider<X, T>` with a small named notifier and
 explicit mutators replacing the 12 `.state =` sites. File-private providers
