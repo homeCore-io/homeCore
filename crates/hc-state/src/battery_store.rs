@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

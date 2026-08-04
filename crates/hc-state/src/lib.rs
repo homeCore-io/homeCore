@@ -20,6 +20,7 @@ pub mod audit_store;
 pub mod battery_store;
 pub mod device_store;
 pub mod history;
+pub mod migrate;
 pub mod plugin_state_store;
 pub mod refresh_token_store;
 pub mod rule_store;
@@ -111,6 +112,11 @@ impl StateStore {
                     format!("failed to create audit DB directory: {}", parent.display())
                 })?;
             }
+
+            // A database written by redb 2 must be converted before it can be
+            // opened at all — redb 3+ refuses it. One-time, keeps a backup.
+            migrate::migrate_if_needed(std::path::Path::new(&state_path))
+                .context("migrating the state DB to the current redb format")?;
 
             // Single redb::Database shared between DeviceStore, RuleStore, and UserStore.
             let db = Arc::new(Database::create(&state_path).context("failed to open state DB")?);
