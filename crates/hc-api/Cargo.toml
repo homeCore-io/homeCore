@@ -36,7 +36,7 @@ toml_edit    = "0.22"
 ron          = { workspace = true }
 notify       = { workspace = true }
 prometheus   = { workspace = true }
-zip          = { version = "2", default-features = false, features = ["deflate"] }
+zip          = { version = "8", default-features = false, features = ["deflate"] }
 tar          = "0.4"
 zstd         = "0.13"
 tempfile     = "3"
