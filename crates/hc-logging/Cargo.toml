@@ -13,7 +13,7 @@ schema = ["dep:schemars"]
 [dependencies]
 tracing            = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
-tracing-appender   = "0.2"
+tracing-appender   = { workspace = true }
 flate2             = "1"
 serde              = { workspace = true }
 serde_json         = { workspace = true }

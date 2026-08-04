@@ -431,6 +431,41 @@ mod tests {
         }
     }
 
+    /// An archive written by the previous zip major must still restore.
+    ///
+    /// A backup is the thing an operator reaches for when something has
+    /// already gone wrong, and it may be months old — so "can this build read
+    /// what the last one wrote" is the property, not "can it read its own
+    /// output". The fixture was produced by the zip 2 build this repo shipped
+    /// through 0.1.26; regenerate it only when adding a *new* old-format case,
+    /// never to make a failure pass.
+    #[test]
+    fn an_archive_written_by_the_previous_zip_major_still_restores() {
+        let bytes = include_bytes!("../tests/fixtures/backup-written-by-zip2.zip");
+        let dir = tempdir().unwrap();
+        let paths = make_paths(dir.path(), Vec::new());
+
+        let report = extract_restore(&paths, bytes).expect("a zip-2 archive must restore");
+
+        let restored = report["restored"]
+            .as_array()
+            .expect("restored list")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(restored.contains("state.redb"), "{restored}");
+        assert!(restored.contains("history.db"), "{restored}");
+
+        // Contents, not just names — a restore that writes empty files would
+        // otherwise look like a success.
+        assert_eq!(
+            fs::read(&paths.state_db_path).unwrap(),
+            b"not-really-redb-but-bytes\x00\x01\x02".to_vec(),
+            "state.redb did not come back byte for byte"
+        );
+    }
+
     #[test]
     fn backup_archive_includes_plugin_configs() {
         let dir = tempdir().unwrap();

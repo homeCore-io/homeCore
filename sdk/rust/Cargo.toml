@@ -17,7 +17,7 @@ toml       = "1"
 hc-types   = { path = "../../crates/hc-types", features = ["descriptor"] }
 # Log rotation lives here now (see src/logging.rs), so the file sink and gzip
 # compression it needs are SDK dependencies rather than eleven plugins'.
-tracing-appender = "0.2"
+tracing-appender = { workspace = true }
 flate2           = "1"
 # Optional, behind the `schema` feature. Plugin config structs embed
 # `logging::LoggingConfig` and derive JsonSchema for the config descriptor, so
