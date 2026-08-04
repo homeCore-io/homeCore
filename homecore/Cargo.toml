@@ -31,7 +31,7 @@ uuid               = { workspace = true }
 chrono             = { workspace = true }
 serde_json         = { workspace = true }
 rumqttc            = { workspace = true }
-rand               = { workspace = true }
+getrandom          = "0.4"
 # UDS admin listener — axum 0.7's serve() doesn't accept UnixListener,
 # so we serve HTTP/1.1 directly on Unix sockets via hyper-util.
 hyper              = { version = "1", features = ["server", "http1"] }

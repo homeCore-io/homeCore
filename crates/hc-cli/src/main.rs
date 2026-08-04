@@ -1268,12 +1268,20 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn rand_password(len: usize) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
+    // `rand::rng()` is the CSPRNG `thread_rng()` was renamed to in 0.9 — still
+    // seeded from the OS and still what a generated password needs. Named to
+    // make that explicit, because `rng()` reads more like a toy than
+    // `thread_rng()` did.
+    let mut rng: rand::rngs::ThreadRng = rand::rng();
     (0..len)
         .map(|_| {
-            let i = rng.gen_range(0..CHARSET.len());
+            // random_range is the renamed gen_range, and is rejection-sampled
+            // rather than modulo-reduced — no bias across a 57-character set.
+            // Sampled as u32: rand 0.9 dropped `usize` from SampleUniform, so
+            // a range's type no longer varies with the target's pointer width.
+            let i = rng.random_range(0..CHARSET.len() as u32) as usize;
             CHARSET[i] as char
         })
         .collect()

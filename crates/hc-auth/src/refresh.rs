@@ -9,11 +9,10 @@
 
 use anyhow::{anyhow, Result};
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier},
     Algorithm, Argon2, Params, Version,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand_core::{OsRng, RngCore};
 
 /// Plaintext token prefix for refresh tokens.
 pub const REFRESH_TOKEN_PREFIX: &str = "hc_rt_";
@@ -37,7 +36,7 @@ pub struct NewRefreshToken {
 
 pub fn generate() -> Result<NewRefreshToken> {
     let mut raw = [0u8; REFRESH_BYTES];
-    OsRng.fill_bytes(&mut raw);
+    getrandom::fill(&mut raw).map_err(|e| anyhow!("OS RNG unavailable: {e}"))?;
     let body = URL_SAFE_NO_PAD.encode(raw);
     let full_token = format!("{REFRESH_TOKEN_PREFIX}{body}");
     let lookup_prefix = body[..LOOKUP_PREFIX_LEN].to_string();
@@ -57,7 +56,7 @@ pub fn lookup_prefix_from_body(body: &str) -> Option<&str> {
 }
 
 pub fn hash_token(full_token: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = crate::password::random_salt()?;
     let params =
         Params::new(19_456, 1, 1, None).map_err(|e| anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);

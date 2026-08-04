@@ -11,7 +11,9 @@
 //! every session without operator awareness.
 
 use anyhow::{anyhow, Context, Result};
-use rand::{rngs::OsRng, RngCore};
+// getrandom, not rand: this wants 32 bytes from the OS and nothing else, and
+// rand moved both `OsRng` and `RngCore` between 0.8 and 0.10.
+use getrandom::fill as os_random;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -86,7 +88,7 @@ fn create(file_path: &Path) -> Result<Vec<u8>> {
     }
 
     let mut bytes = vec![0u8; SECRET_BYTES];
-    OsRng.fill_bytes(&mut bytes);
+    os_random(&mut bytes).context("reading OS randomness for the JWT secret")?;
 
     let mut f = fs::OpenOptions::new()
         .write(true)

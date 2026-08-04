@@ -318,14 +318,30 @@ fn write_initial_admin_password(path: &std::path::Path, password: &str) -> std::
 }
 
 /// Generate a random alphanumeric password of the given length.
+///
+/// This is the initial admin password, so it is drawn from the OS CSPRNG and
+/// rejection-sampled — `% CHARSET.len()` on a 55-character set would skew the
+/// first few characters, and a bias in an admin credential is not academic.
 fn random_password(len: usize) -> String {
-    use rand::{rngs::OsRng, Rng};
-
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = OsRng;
-    (0..len)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
-        .collect()
+    // Largest multiple of the set size that fits in a byte; anything at or
+    // above it is discarded rather than folded in.
+    const LIMIT: u8 = u8::MAX - (u8::MAX % CHARSET.len() as u8);
+
+    let mut out = String::with_capacity(len);
+    let mut buf = [0u8; 64];
+    while out.len() < len {
+        getrandom::fill(&mut buf).expect("OS randomness unavailable");
+        for &b in &buf {
+            if b < LIMIT {
+                out.push(CHARSET[(b % CHARSET.len() as u8) as usize] as char);
+                if out.len() == len {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── main ────────────────────────────────────────────────────────────────────
