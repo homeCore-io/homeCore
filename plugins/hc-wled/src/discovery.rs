@@ -84,3 +84,49 @@ pub async fn mdns_discover(window: Duration) -> (Vec<Value>, Vec<Value>) {
     let _ = daemon.shutdown();
     (found, Vec::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// mdns-sd 0.11 -> 0.20 required no code change here, which is the reason
+    /// to test it rather than the reason not to: nine minor versions of a
+    /// discovery library, and the compiler had nothing to say.
+    ///
+    /// This does not assert that a WLED is found — that would depend on
+    /// whoever's network the tests run on, and would fail in CI for the wrong
+    /// reason. It asserts the two things the upgrade could actually have
+    /// broken: that the daemon still constructs, and that browsing the
+    /// `_wled._tcp.local.` service type is still accepted. Both surface as an
+    /// entry in the returned error list, which is how a failure would reach an
+    /// operator.
+    #[tokio::test]
+    async fn the_mdns_daemon_still_starts_and_browses() {
+        let (found, errors) = mdns_discover(Duration::from_millis(300)).await;
+
+        let fatal: Vec<&Value> = errors
+            .iter()
+            .filter(|e| e.get("source").and_then(|s| s.as_str()) == Some("mdns"))
+            .collect();
+        assert!(
+            fatal.is_empty(),
+            "mDNS browse failed to start: {fatal:?} — discovery is dead"
+        );
+
+        // Anything found on a developer's network must still be shaped the way
+        // the caller expects; on a quiet network this is vacuously true.
+        for node in &found {
+            assert!(node.get("ip").is_some(), "node without an ip: {node}");
+            assert_eq!(node.get("source").and_then(|s| s.as_str()), Some("mdns"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_window_returns_immediately_without_erroring() {
+        let (found, errors) = mdns_discover(Duration::from_millis(0)).await;
+        assert!(found.is_empty());
+        assert!(errors
+            .iter()
+            .all(|e| e.get("source").and_then(|s| s.as_str()) != Some("mdns")));
+    }
+}

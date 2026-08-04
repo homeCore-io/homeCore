@@ -232,7 +232,12 @@ impl IsyClient {
 /// Parse the `/rest/nodes` XML response into a list of [`IsyNode`]s.
 pub fn parse_nodes_xml(xml: &str) -> Result<Vec<IsyNode>> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // NOT trim_text(true). Once quick-xml 0.41 made entity references their own
+    // events, an element's content arrives in fragments, and trimming each one
+    // eats the spaces *around* the entity — `Kitchen &amp; Dining` came out as
+    // `Kitchen&Dining`. Fragments are accumulated verbatim and the finished
+    // field is trimmed when its element closes.
+    reader.config_mut().trim_text(false);
 
     let mut nodes: Vec<IsyNode> = Vec::new();
     let mut current: Option<IsyNode> = None;
@@ -274,18 +279,25 @@ pub fn parse_nodes_xml(xml: &str) -> Result<Vec<IsyNode>> {
             }
 
             Ok(XmlEvent::Text(ref e)) => {
-                let text = e.unescape().unwrap_or_default().trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
+                // quick-xml 0.41 split what 0.36's `BytesText::unescape()` did
+                // into two steps: `decode()` handles the character encoding,
+                // `escape::unescape` resolves the predefined entities. Doing
+                // only the first would leave `&amp;` literal in a device name.
+                let text = decode_and_unescape(e);
                 if let Some(ref mut node) = current {
-                    match current_elem.as_str() {
-                        "address" => node.address = text,
-                        "name" => node.name = text,
-                        "type" => node.node_type = text,
-                        "enabled" => node.enabled = text != "false",
-                        _ => {}
-                    }
+                    apply_node_text(node, &current_elem, &text);
+                }
+            }
+
+            // An entity reference is its own event in quick-xml 0.41; 0.36
+            // resolved it inline into the surrounding Text. `Kitchen &amp;
+            // Dining` now arrives as Text("Kitchen") + GeneralRef("amp") +
+            // Text("Dining") — which is why the fields above append rather
+            // than assign. Assigning kept only the last fragment, so a device
+            // named with an ampersand came through as "Dining".
+            Ok(XmlEvent::GeneralRef(ref e)) => {
+                if let Some(ref mut node) = current {
+                    apply_node_text(node, &current_elem, &resolve_ref(e));
                 }
             }
 
@@ -300,6 +312,11 @@ pub fn parse_nodes_xml(xml: &str) -> Result<Vec<IsyNode>> {
                         }
                     }
                     _ => {}
+                }
+                // Trim the field this element was filling — the fragments went
+                // in untrimmed so internal spacing survived.
+                if let Some(ref mut node) = current {
+                    trim_node_field(node, &tag);
                 }
                 current_elem.clear();
             }
@@ -382,16 +399,25 @@ pub fn parse_event_xml(xml: &str) -> Option<IsyEvent> {
                 cur_elem = tag;
             }
             Ok(XmlEvent::Text(ref e)) => {
-                let text = e.unescape().unwrap_or_default().trim().to_string();
+                // quick-xml 0.41 split what 0.36's `BytesText::unescape()` did
+                // into two steps: `decode()` handles the character encoding,
+                // `escape::unescape` resolves the predefined entities. Doing
+                // only the first would leave `&amp;` literal in a device name.
+                let text = decode_and_unescape(e).trim().to_string();
                 if text.is_empty() {
                     continue;
                 }
-                match cur_elem.as_str() {
-                    "control" => control = text,
-                    "node" => node_addr = text,
-                    "action" => value = text.parse().unwrap_or(0),
-                    _ => {}
-                }
+                apply_event_text(&mut control, &mut node_addr, &mut value, &cur_elem, &text);
+            }
+
+            Ok(XmlEvent::GeneralRef(ref e)) => {
+                apply_event_text(
+                    &mut control,
+                    &mut node_addr,
+                    &mut value,
+                    &cur_elem,
+                    &resolve_ref(e),
+                );
             }
             Ok(XmlEvent::Eof) => break,
             Err(_) => return None,
@@ -421,11 +447,87 @@ fn local_name_str(bytes: &[u8]) -> String {
 }
 
 /// Read the value of the named attribute from a start/empty element.
+/// Trim a node field once its element has closed.
+fn trim_node_field(node: &mut IsyNode, elem: &str) {
+    let field = match elem {
+        "address" => &mut node.address,
+        "name" => &mut node.name,
+        "type" => &mut node.node_type,
+        _ => return,
+    };
+    let trimmed = field.trim().to_string();
+    *field = trimmed;
+}
+
+/// Resolve one `&entity;` event to the text it stands for.
+///
+/// An unknown entity is kept in its source form rather than dropped: an ISY
+/// name containing something we do not recognise should look odd, not vanish.
+fn resolve_ref(e: &quick_xml::events::BytesRef<'_>) -> String {
+    let raw = e.decode().unwrap_or_default().into_owned();
+    quick_xml::escape::resolve_predefined_entity(&raw)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("&{raw};"))
+}
+
+/// Append a text fragment to whichever node field the current element names.
+///
+/// Appends, because a single element's content can arrive as several events
+/// once entity references are separate (see the GeneralRef arm above). Each
+/// `<node>` starts from `IsyNode::default()`, so the fields begin empty.
+fn apply_node_text(node: &mut IsyNode, elem: &str, text: &str) {
+    match elem {
+        "address" => node.address.push_str(text),
+        "name" => node.name.push_str(text),
+        "type" => node.node_type.push_str(text),
+        "enabled" => node.enabled = text != "false",
+        _ => {}
+    }
+}
+
+/// The same, for the WebSocket event parser's fields.
+fn apply_event_text(
+    control: &mut String,
+    node_addr: &mut String,
+    value: &mut i64,
+    elem: &str,
+    text: &str,
+) {
+    match elem {
+        "control" => control.push_str(text),
+        "node" => node_addr.push_str(text),
+        "action" => *value = text.parse().unwrap_or(*value),
+        _ => {}
+    }
+}
+
+/// Decode a text event and resolve its predefined entities.
+///
+/// One call in quick-xml 0.36 (`BytesText::unescape`), two in 0.41. An ISY
+/// names devices whatever the operator typed, so `&amp;` and `&lt;` do turn up
+/// in real payloads — dropping the unescape step would surface them raw.
+fn decode_and_unescape(e: &quick_xml::events::BytesText<'_>) -> String {
+    let decoded = match e.decode() {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    match quick_xml::escape::unescape(&decoded) {
+        Ok(u) => u.into_owned(),
+        // Malformed entity: keep the decoded text rather than dropping the
+        // whole node on the floor.
+        Err(_) => decoded.into_owned(),
+    }
+}
+
 fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
     e.attributes()
         .filter_map(|a| a.ok())
         .find(|a| a.key.as_ref() == name)
-        .and_then(|a| a.unescape_value().ok())
+        // `unescape_value` is deprecated in 0.41 in favour of the
+        // normalization-aware form. Explicit1_0 because an ISY sends
+        // `<?xml version="1.0"?>`; the difference from 1.1 is line-ending
+        // normalization, which attribute values here never carry anyway.
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Explicit1_0).ok())
         .map(|v| v.to_string())
 }
 
@@ -439,7 +541,10 @@ fn read_property_elem(e: &quick_xml::events::BytesStart<'_>) -> Option<(String, 
 
     for attr in e.attributes().filter_map(|a| a.ok()) {
         let key = local_name_str(attr.key.as_ref());
-        let val = attr.unescape_value().unwrap_or_default().to_string();
+        let val = attr
+            .normalized_value(quick_xml::XmlVersion::Explicit1_0)
+            .unwrap_or_default()
+            .to_string();
         match key.as_str() {
             "id" => id = val,
             "value" => value_str = val,
@@ -464,4 +569,98 @@ fn read_property_elem(e: &quick_xml::events::BytesStart<'_>) -> Option<(String, 
             prec,
         },
     ))
+}
+
+#[cfg(test)]
+mod xml_tests {
+    use super::*;
+
+    /// Device names come from whatever the operator typed into the ISY Admin
+    /// Console, so ampersands and angle brackets arrive XML-escaped. quick-xml
+    /// 0.36 resolved those in one call (`BytesText::unescape`); 0.41 split it
+    /// into decode-then-unescape, and doing only the first half would surface
+    /// `&amp;` to the user as literal text in a device name — visible, wrong,
+    /// and not something the compiler would have caught.
+    #[test]
+    fn escaped_entities_in_names_are_resolved() {
+        let xml = r#"
+        <nodes>
+          <node>
+            <address>13 A6 99 1</address>
+            <name>Kitchen &amp; Dining</name>
+            <type>1.32.65.0</type>
+            <enabled>true</enabled>
+          </node>
+          <node>
+            <address>13 A6 99 2</address>
+            <name>Hall &lt;main&gt;</name>
+            <type>1.32.65.0</type>
+            <enabled>true</enabled>
+          </node>
+        </nodes>"#;
+
+        let nodes = parse_nodes_xml(xml).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "Kitchen & Dining");
+        assert_eq!(nodes[1].name, "Hall <main>");
+    }
+
+    #[test]
+    fn a_plain_node_parses_with_its_address_and_type() {
+        let xml = r#"
+        <nodes>
+          <node>
+            <address>13 A6 99 1</address>
+            <name>Porch Light</name>
+            <type>1.32.65.0</type>
+            <enabled>true</enabled>
+          </node>
+        </nodes>"#;
+        let nodes = parse_nodes_xml(xml).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].address, "13 A6 99 1");
+        assert_eq!(nodes[0].name, "Porch Light");
+        assert_eq!(nodes[0].node_type, "1.32.65.0");
+        assert!(!nodes[0].is_group);
+    }
+
+    #[test]
+    fn a_group_is_marked_as_one() {
+        let xml = r#"
+        <nodes>
+          <group><address>12345</address><name>Evening</name></group>
+        </nodes>"#;
+        let nodes = parse_nodes_xml(xml).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].is_group);
+        assert_eq!(nodes[0].name, "Evening");
+    }
+
+    /// Attribute values take the other changed path — `unescape_value` is
+    /// deprecated in 0.41 in favour of `normalized_value`.
+    #[test]
+    fn escaped_entities_in_attributes_are_resolved() {
+        let xml = r#"
+        <nodes>
+          <node>
+            <address>13 A6 99 1</address>
+            <name>Lamp</name>
+            <enabled>true</enabled>
+            <property id="ST" value="255" formatted="On &amp; bright" uom="100"/>
+          </node>
+        </nodes>"#;
+        let nodes = parse_nodes_xml(xml).unwrap();
+        let st = nodes[0].properties.get("ST").expect("ST property");
+        assert_eq!(st.formatted, "On & bright");
+    }
+
+    #[test]
+    fn malformed_xml_is_an_error_not_a_panic() {
+        assert!(
+            parse_nodes_xml("<nodes><node><name>unclosed").is_err()
+                || parse_nodes_xml("<nodes><node><name>unclosed")
+                    .unwrap()
+                    .is_empty()
+        );
+    }
 }

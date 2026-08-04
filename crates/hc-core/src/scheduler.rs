@@ -416,26 +416,28 @@ fn in_catchup_window(trigger: NaiveTime, window_start: NaiveTime, now: NaiveTime
 /// Parses the expression, then asks the schedule for its next occurrence after
 /// one minute ago.  If that next occurrence falls within the current minute
 /// (same hour + minute) the rule fires.
+/// Did this expression fire in the last minute?
+///
+/// Delegates to [`cron_fired_in_window`] over `(now - 1min, now]`, which is
+/// what the tick interval means — and having one implementation is the point.
+///
+/// This used to compare `times_match(next.time(), current_time)`: the *time* of
+/// the next occurrence against the current time, with the date thrown away. For
+/// `0 0 8 * * Mon-Fri` evaluated on a Saturday at 08:00, the next occurrence is
+/// Monday 08:00, the hours and minutes match, and the rule fired — on a day it
+/// excludes. Every day-of-week and day-of-month restriction was silently
+/// inert: `Sat,Sun` fired daily, and `0 0 0 1 * *` fired every midnight rather
+/// than on the first. Only the time-of-day part of a Cron trigger worked.
+///
+/// The catch-up path never had the bug, because it compared datetimes. Two
+/// implementations of one question, and only one of them was right.
 fn cron_fires_now(
     expression: &str,
     now: &chrono::DateTime<chrono_tz::Tz>,
     rule_name: &str,
 ) -> bool {
-    match Schedule::from_str(expression) {
-        Ok(schedule) => {
-            let prev = *now - chrono::Duration::minutes(1);
-            let current_time = now.time().with_second(0).unwrap_or(now.time());
-            schedule
-                .after(&prev)
-                .next()
-                .map(|next| times_match(next.time(), current_time))
-                .unwrap_or(false)
-        }
-        Err(e) => {
-            warn!(rule_name, expression, error = %e, "Scheduler: invalid cron expression — rule will never fire");
-            false
-        }
-    }
+    let prev = *now - chrono::Duration::minutes(1);
+    cron_fired_in_window(expression, &prev, now, rule_name)
 }
 
 /// Returns `true` if the cron expression fired at least once in `(window_start, now]`.
@@ -553,4 +555,115 @@ fn periodic_to_secs(every_n: u32, unit: &PeriodicUnit) -> u64 {
 fn equation_of_time(day_of_year: f64) -> f64 {
     let b = 2.0 * std::f64::consts::PI * (day_of_year - 81.0) / 364.0;
     9.87 * (2.0 * b).sin() - 7.53 * b.cos() - 1.5 * b.sin()
+}
+
+#[cfg(test)]
+mod cron_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// Cron triggers decide when a user's automations run, and this crate had
+    /// no test for that at all. Every expression below is one the docs promise
+    /// works (`docs/devNotes.md`, "Expression quick reference"), so these are a
+    /// contract with the operator rather than a snapshot of a library.
+    ///
+    /// Note the six fields: `{sec} {min} {hour} {dom} {month} {dow}`. The
+    /// second is required — it is what distinguishes Cron from TimeOfDay — and
+    /// a five-field expression is rejected, which the last test pins.
+    fn at(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> chrono::DateTime<chrono_tz::Tz> {
+        chrono_tz::America::New_York
+            .with_ymd_and_hms(y, m, d, hh, mm, 0)
+            .unwrap()
+    }
+
+    fn fires(expr: &str, when: chrono::DateTime<chrono_tz::Tz>) -> bool {
+        cron_fires_now(expr, &when, "test-rule")
+    }
+
+    #[test]
+    fn daily_at_a_fixed_time() {
+        // 2026-08-04 is a Tuesday.
+        assert!(fires("0 30 9 * * *", at(2026, 8, 4, 9, 30)));
+        assert!(!fires("0 30 9 * * *", at(2026, 8, 4, 9, 31)));
+        assert!(!fires("0 30 9 * * *", at(2026, 8, 4, 10, 30)));
+    }
+
+    #[test]
+    fn step_values_fire_on_each_step() {
+        for minute in [0, 15, 30, 45] {
+            assert!(
+                fires("0 */15 * * * *", at(2026, 8, 4, 13, minute)),
+                "{minute}"
+            );
+        }
+        for minute in [1, 14, 16, 44] {
+            assert!(
+                !fires("0 */15 * * * *", at(2026, 8, 4, 13, minute)),
+                "{minute}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_day_ranges_respect_the_weekend() {
+        // Mon-Fri at 08:00 — Tuesday fires, Saturday does not.
+        assert!(fires("0 0 8 * * Mon-Fri", at(2026, 8, 4, 8, 0)));
+        assert!(!fires("0 0 8 * * Mon-Fri", at(2026, 8, 8, 8, 0)));
+    }
+
+    #[test]
+    fn day_lists_fire_only_on_listed_days() {
+        // Sat,Sun at 10:00 — Saturday the 8th fires, Tuesday the 4th does not.
+        assert!(fires("0 0 10 * * Sat,Sun", at(2026, 8, 8, 10, 0)));
+        assert!(!fires("0 0 10 * * Sat,Sun", at(2026, 8, 4, 10, 0)));
+    }
+
+    #[test]
+    fn hour_lists_fire_at_each_listed_hour() {
+        assert!(fires("0 0 8,20 * * *", at(2026, 8, 4, 8, 0)));
+        assert!(fires("0 0 8,20 * * *", at(2026, 8, 4, 20, 0)));
+        assert!(!fires("0 0 8,20 * * *", at(2026, 8, 4, 14, 0)));
+    }
+
+    #[test]
+    fn day_of_month_fires_only_on_that_day() {
+        assert!(fires("0 0 0 1 * *", at(2026, 9, 1, 0, 0)));
+        assert!(!fires("0 0 0 1 * *", at(2026, 9, 2, 0, 0)));
+    }
+
+    /// Catch-up after a restart: anything that should have fired inside the
+    /// window fires immediately. Getting this wrong either double-fires
+    /// automations or silently drops them across a restart.
+    #[test]
+    fn the_catch_up_window_sees_a_missed_firing() {
+        let now = at(2026, 8, 4, 9, 40);
+        let window_start = at(2026, 8, 4, 9, 25);
+        assert!(cron_fired_in_window(
+            "0 30 9 * * *",
+            &window_start,
+            &now,
+            "t"
+        ));
+
+        // Nothing due in this window.
+        let quiet_start = at(2026, 8, 4, 10, 5);
+        let quiet_now = at(2026, 8, 4, 10, 20);
+        assert!(!cron_fired_in_window(
+            "0 30 9 * * *",
+            &quiet_start,
+            &quiet_now,
+            "t"
+        ));
+    }
+
+    /// An unparseable expression must be inert, never a panic and never a
+    /// fire-every-tick — the rule is disabled and logged instead.
+    #[test]
+    fn a_broken_expression_never_fires() {
+        assert!(!fires("not a cron expression", at(2026, 8, 4, 9, 30)));
+        assert!(!fires("", at(2026, 8, 4, 9, 30)));
+        // Five fields: valid in crontab(5), rejected here. The docs say the
+        // second field is required, and this is what enforces it.
+        assert!(!fires("30 9 * * *", at(2026, 8, 4, 9, 30)));
+    }
 }

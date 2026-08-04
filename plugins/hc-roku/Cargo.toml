@@ -30,5 +30,5 @@ tracing-appender   = "0.2"
 flate2             = "1"
 chrono             = "0.4"
 reqwest            = { version = "0.13", default-features = false, features = ["rustls"] }
-roxmltree          = "0.18"
+roxmltree          = "0.21"
 futures-util       = "0.3"
