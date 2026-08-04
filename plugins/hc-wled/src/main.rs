@@ -381,7 +381,11 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // Two calls per device, now issued concurrently, at a 5s client
+                // timeout each — so ~5s wall-clock however many devices there
+                // are. 15s clears that and core's 5s default, which this used
+                // to exceed on a single unreachable WLED.
+                timeout_ms: Some(15_000),
             },
             Action {
                 id: "refresh_presets".into(),
@@ -402,7 +406,8 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                // One call per device, concurrent, 5s client timeout.
+                timeout_ms: Some(15_000),
             },
             Action {
                 id: "reboot".into(),
@@ -429,7 +434,9 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
-                timeout_ms: None,
+                // A rebooting WLED may not answer the request that told it to
+                // reboot; concurrent, but still bounded well past core's 5s.
+                timeout_ms: Some(15_000),
             },
         ],
     }
@@ -539,11 +546,20 @@ async fn run_action(
             }))
         }
         "refresh_effects_palettes" => {
-            let mut per_device = serde_json::Map::new();
-            for d in devices {
+            // Per device, concurrently. Serially this was two 5s calls each,
+            // so a single unreachable WLED already blew past core's 5s default
+            // response window and 504'd the whole action — the same failure
+            // `discover_devices` was fixed for, left in place here.
+            let results = futures_util::future::join_all(devices.iter().map(|d| async move {
                 let client = WledClient::new(&d.host);
-                let effects = client.get_effect_names().await.ok();
-                let palettes = client.get_palette_names().await.ok();
+                let (effects, palettes) =
+                    futures_util::join!(client.get_effect_names(), client.get_palette_names());
+                (d, effects.ok(), palettes.ok())
+            }))
+            .await;
+
+            let mut per_device = serde_json::Map::new();
+            for (d, effects, palettes) in results {
                 per_device.insert(
                     d.hc_id.clone(),
                     json!({
@@ -559,10 +575,14 @@ async fn run_action(
             }))
         }
         "refresh_presets" => {
-            let mut per_device = serde_json::Map::new();
-            for d in devices {
+            let results = futures_util::future::join_all(devices.iter().map(|d| async move {
                 let client = WledClient::new(&d.host);
-                let presets = client.get_presets().await.ok();
+                (d, client.get_presets().await.ok())
+            }))
+            .await;
+
+            let mut per_device = serde_json::Map::new();
+            for (d, presets) in results {
                 per_device.insert(
                     d.hc_id.clone(),
                     json!({
@@ -582,10 +602,15 @@ async fn run_action(
             // reboots all configured devices. The manifest's `host`
             // param is documented for future expansion when params
             // routing through custom_handler is wired in.
-            let mut rebooted = Vec::new();
-            for d in devices {
+            let outcomes = futures_util::future::join_all(devices.iter().map(|d| async move {
                 let client = WledClient::new(&d.host);
-                match client.reboot().await {
+                (d, client.reboot().await)
+            }))
+            .await;
+
+            let mut rebooted = Vec::new();
+            for (d, outcome) in outcomes {
+                match outcome {
                     Ok(()) => rebooted.push(d.host.clone()),
                     Err(e) => {
                         warn!(host = %d.host, error = %e, "reboot failed");
@@ -604,6 +629,35 @@ async fn run_action(
 #[cfg(test)]
 mod schema_tests {
     use super::*;
+
+    /// Every action here fans out over the configured devices, and core gives
+    /// an action that declares no `timeout_ms` five seconds. The WLED client
+    /// allows 5s per request, so one unreachable device is enough to spend the
+    /// entire window — and the caller sees a 504 rather than partial results.
+    ///
+    /// `discover_devices` was fixed for exactly this once already;
+    /// `refresh_effects_palettes`, `refresh_presets` and `reboot` were left
+    /// behind and each still ran its devices serially on top. This asserts the
+    /// next action added does not repeat it.
+    #[test]
+    fn every_action_declares_more_than_cores_default_window() {
+        const CORE_DEFAULT_MS: u64 = 5_000;
+        let manifest = capabilities_manifest();
+        let actions = &manifest.actions;
+
+        assert!(!actions.is_empty(), "manifest declares no actions");
+        for a in actions {
+            let ms = a.timeout_ms.unwrap_or(CORE_DEFAULT_MS);
+            assert!(
+                ms > CORE_DEFAULT_MS,
+                "action '{}' declares timeout_ms {:?}; it talks to every \
+                 configured device, so core's {}ms default will 504 it",
+                a.id,
+                a.timeout_ms,
+                CORE_DEFAULT_MS
+            );
+        }
+    }
 
     /// Every boolean names both of its states.
     ///
