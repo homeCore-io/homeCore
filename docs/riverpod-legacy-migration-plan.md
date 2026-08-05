@@ -1,5 +1,13 @@
 # Getting hc-web off Riverpod's legacy shim
 
+> **Status: complete.** All four phases landed 2026-08-04, `hc-web`
+> `ee8131c`..`41fdfd1`. The shim is gone from `lib/` and `test/`; the suite went
+> 871 → 922. Two things were found and fixed along the way that were not part of
+> the migration: the `landing_route` key had two spellings, and
+> `sceneActivatedTimesProvider` had never executed. Kept as a record of what the
+> work actually cost.
+
+
 Fourteen files still import `package:flutter_riverpod/legacy.dart`. Riverpod 3
 kept `StateProvider`, `StateNotifier` and `StateNotifierProvider` alive behind
 that import so the 2 → 3 upgrade could be a version bump; it was. This is the
@@ -259,7 +267,30 @@ Then the two public ones:
   the only override site of a legacy provider in the suite, and it is the only
   test file that has to change in this whole plan.
 
-### Phase 3 — remove the shim and prove it
+### Phase 3 — remove the shim and prove it — **DONE**
+
+`hc-web` `41fdfd1`. `grep -rn "flutter_riverpod/legacy" lib test` returns
+nothing, and no `StateNotifier`, `StateProvider`, `StateController` or
+`ChangeNotifierProvider` is referenced anywhere. (`app.dart`'s `_RouterNotifier`
+extends Flutter's own `ChangeNotifier`, which is unrelated to the shim.)
+
+Decision 1 was taken: `sceneActivatedTimesProvider` was **deleted**, not ported.
+Confirmed first that nothing in `lib/` renders per-scene recency by any route —
+the scenes page shows no "last activated", `SceneModel` has no timestamp field,
+and `HcSceneChip` has an `active` bool but nothing time-based. The two other
+readers of `scene_activated` (the events feed, the dashboard editor's trigger
+list) do not want per-scene times. If it is wanted later it belongs on
+`SceneModel` from the API, not in a client-side map rebuilt from a live socket
+that shows nothing on a fresh page load.
+
+`preferences_test.dart`'s header was updated — it described these as "the last
+`StateNotifier`s in the app and next to be ported", true when written and not
+now. The assertions themselves are still the originals.
+
+Suite 922 green, `flutter analyze` and `dart format` clean, CI green.
+
+The original brief, kept for reference:
+
 
 Delete every `import 'package:flutter_riverpod/legacy.dart';`. Grep must return
 zero. Then, and only then, `dart format`, `flutter analyze`, `flutter test`.
@@ -267,7 +298,29 @@ zero. Then, and only then, `dart format`, `flutter analyze`, `flutter test`.
 `dart format` is a release gate on this repo — analyze and test passing is not
 sufficient. Run all three before pushing.
 
-### Phase 4 — verify on the running system
+### Phase 4 — verify on the running system — **DONE**
+
+Verified against the sandbox (`:8080`, 188 devices) with a build of the migrated
+code, driven through `tool/shot.mjs` and a CDP probe.
+
+- **Collapsed rooms and the nav rail state both survive a hard reload.**
+  Collapsing Attic and expanding the rail wrote
+  `flutter.home_rooms_collapsed = ["attic"]` and
+  `flutter.nav_rail_expanded = true` — the exact keys and stored types
+  `preferences_test.dart` pins — and after `Page.reload({ignoreCache: true})`
+  the screenshot shows Attic still folded and the rail still labelled. That is
+  `roomCollapseProvider` and `navRailExpandedProvider` end to end.
+- **The skin choice survives too**, and re-skins the whole app including sheets
+  (see the separate skin work).
+
+One trap worth recording for the next person doing this: an earlier run
+appeared to show the skin *not* persisting. It was the harness — `shot.mjs`
+kills Chromium ~1.2s after its click, before localStorage flushes to disk.
+Reading `localStorage` inside a live session, and reloading within that session,
+is what settles it. The app was right and the screenshot was lying.
+
+The original brief, kept for reference:
+
 
 Unit tests cannot see a flash, a lost preference, or a nav rail that comes back
 in the wrong state. Deploy to the sandbox and check, by screenshot, on a
