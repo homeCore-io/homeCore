@@ -6474,6 +6474,26 @@ fn restore_toml_secrets(incoming: &str, current: &str) -> String {
 }
 
 /// Redact secret leaves anywhere in a parsed config tree.
+/// The `config` half of `GET /plugins/:id/config`: TOML text in, redacted JSON
+/// out, or the parse error as a string.
+///
+/// Split out so it can be tested without an `AppState`. It had no test, and the
+/// only signal that it was not producing anything was a client quietly
+/// behaving as though the plugin had no configuration at all.
+fn parse_config_json(content: &str) -> Result<Value, String> {
+    // `toml::from_str`, not `str::parse::<toml::Value>()`.
+    //
+    // Under toml 1.x `FromStr for Value` parses a single *value expression*,
+    // not a document, so it fails on the first table header of every real
+    // config file: "unexpected content, expected nothing" pointing just past
+    // `[homecore]`. It compiles, it is plausible, and it is wrong for every
+    // input this codebase gives it.
+    let parsed: toml::Value = toml::from_str(content).map_err(|e| e.to_string())?;
+    let mut cfg = serde_json::to_value(parsed).map_err(|e| e.to_string())?;
+    redact_json_secrets(&mut cfg);
+    Ok(cfg)
+}
+
 fn redact_json_secrets(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -6589,10 +6609,22 @@ pub async fn get_plugin_config(
                 "redacted":  true,
             });
             // Also include parsed JSON for clients that want structured access.
-            if let Ok(parsed) = content.parse::<toml::Value>() {
-                let mut cfg = serde_json::to_value(parsed).unwrap_or_default();
-                redact_json_secrets(&mut cfg);
-                resp["config"] = cfg;
+            //
+            // Say so when it is missing. A client cannot tell "this plugin has
+            // no settings" from "I could not parse them" by absence alone, and
+            // hc-web's config form could not either: it read `config ?? {}`,
+            // showed every field's default, and on save diffed against that
+            // empty map — so a save replaced the document with the form and
+            // dropped every key the form did not cover. That deleted
+            // `[homecore]` from a live plugin's config and left it exiting 1 on
+            // a 60-second loop. Absence needs a reason attached to it.
+            match parse_config_json(&content) {
+                Ok(cfg) => resp["config"] = cfg,
+                Err(e) => {
+                    tracing::warn!(plugin_id = %id, path = %path,
+                        error = %e, "Plugin config is not parseable as TOML");
+                    resp["config_error"] = json!(e);
+                }
             }
             return (StatusCode::OK, Json(resp)).into_response();
         }
@@ -6664,7 +6696,12 @@ pub async fn put_plugin_config(
         } else if let Some(config) = body.get("config") {
             let mut config = config.clone();
             if has_redaction(&config) {
-                if let Ok(parsed) = current.parse::<toml::Value>() {
+                // See parse_config_json: `str::parse::<toml::Value>()` is a
+                // value parser under toml 1.x and fails on every document. It
+                // failing here is worse than a missing field — the restore
+                // never runs, so the literal "__redacted__" is written over the
+                // real credential.
+                if let Ok(parsed) = toml::from_str::<toml::Value>(&current) {
                     let current_json = serde_json::to_value(parsed).unwrap_or_default();
                     restore_json_secrets(&mut config, &current_json);
                 }
@@ -8609,8 +8646,7 @@ pub async fn get_system_config(
         }
     };
 
-    let parsed: Value = raw
-        .parse::<toml::Value>()
+    let parsed: Value = toml::from_str::<toml::Value>(&raw)
         .ok()
         .and_then(|t| serde_json::to_value(t).ok())
         .unwrap_or(Value::Null);
@@ -8758,7 +8794,7 @@ pub async fn put_system_config(
     // happens at next core start; we only catch the shallow class of
     // errors here (typos, missing quotes) so the operator gets
     // immediate feedback without rejecting valid-but-unusual configs.
-    if let Err(e) = new_raw.parse::<toml::Value>() {
+    if let Err(e) = toml::from_str::<toml::Value>(&new_raw) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": format!("TOML parse error: {e}") })),
@@ -8873,6 +8909,103 @@ pub async fn system_restart(
 
 #[cfg(test)]
 mod tests {
+
+    // ── GET /plugins/:id/config → the `config` half ────────────────────────
+    //
+    // These had no coverage, and the absence of `config` in a response is
+    // indistinguishable from a plugin with no settings. hc-web read it as the
+    // latter: it showed every field's descriptor default, then diffed a save
+    // against an empty map, so `PUT /config` replaced the document with just
+    // the form. That deleted `[homecore]` from a live plugin's config file and
+    // left it exiting 1 on a 60-second restart loop for the better part of an
+    // hour, while the UI insisted the server URL "would not save".
+
+    #[test]
+    fn parses_a_plugin_config_into_json() {
+        // The Z-Wave file, as it should be.
+        let toml = concat!(
+            "[homecore]\n",
+            "broker_host = \"127.0.0.1\"\n",
+            "\n",
+            "[server]\n",
+            "url = \"ws://10.0.10.123:3000\"\n",
+        );
+        let cfg = super::parse_config_json(toml).expect("valid TOML must parse");
+        assert_eq!(cfg["server"]["url"], "ws://10.0.10.123:3000");
+        assert_eq!(cfg["homecore"]["broker_host"], "127.0.0.1");
+    }
+
+    #[test]
+    fn nests_dotted_sections_rather_than_flattening_them() {
+        // The plugin deserialises `[server] url` into a struct field. A flat
+        // "server.url" key would not reach it, and the descriptor addresses
+        // fields by that dotted path — so the two must not be confused.
+        let cfg = super::parse_config_json("[server]\nurl = \"ws://x:3000\"\n").unwrap();
+        assert!(cfg.get("server.url").is_none(), "flattened the section");
+        assert!(cfg["server"].is_object());
+    }
+
+    #[test]
+    fn redacts_secrets_but_keeps_the_shape() {
+        let cfg =
+            super::parse_config_json("[homecore]\npassword = \"hunter2\"\nbroker_port = 1883\n")
+                .unwrap();
+        assert_eq!(cfg["homecore"]["password"], super::REDACTED_SECRET);
+        // Redaction must not eat the rest of the table — the editor patches
+        // against this, so anything missing here is a key the next save drops.
+        assert_eq!(cfg["homecore"]["broker_port"], 1883);
+    }
+
+    #[test]
+    fn unparseable_toml_reports_why_instead_of_going_quiet() {
+        // The case that cost a diagnosis: absence with no reason attached.
+        let err = super::parse_config_json("[server\nurl = broken").unwrap_err();
+        assert!(!err.is_empty(), "a parse failure must carry its reason");
+    }
+
+    #[test]
+    fn a_document_parses_with_from_str_and_not_with_str_parse() {
+        // The regression itself, pinned. Under toml 1.x `FromStr for Value`
+        // parses a single value expression, so it rejects the first table
+        // header of every config file this server reads or writes. It compiles
+        // and it is plausible, which is why it survived the 0.8 -> 1.0 bump and
+        // took out four separate code paths in silence.
+        let doc = "[server]\nurl = \"ws://x:3000\"\n";
+        assert!(
+            doc.parse::<toml::Value>().is_err(),
+            "toml gained document parsing on FromStr — the workarounds can go"
+        );
+        assert!(toml::from_str::<toml::Value>(doc).is_ok());
+    }
+
+    #[test]
+    fn a_redacted_secret_is_restored_from_the_current_file() {
+        // The nastier half. On PUT, a config carrying "__redacted__" is
+        // supposed to have the real value put back from the file on disk. That
+        // restore is gated on parsing the current file, so when the parse
+        // failed the placeholder was written over the credential.
+        let current = "[homecore]\npassword = \"hunter2\"\n";
+        let parsed = toml::from_str::<toml::Value>(current).expect("document");
+        let current_json = serde_json::to_value(parsed).unwrap();
+
+        let mut incoming = serde_json::json!({
+            "homecore": { "password": super::REDACTED_SECRET }
+        });
+        super::restore_json_secrets(&mut incoming, &current_json);
+
+        assert_eq!(
+            incoming["homecore"]["password"], "hunter2",
+            "the placeholder was saved over the real credential"
+        );
+    }
+
+    #[test]
+    fn an_empty_config_is_still_an_object() {
+        // "No settings yet" and "could not read the settings" must not arrive
+        // at a client looking the same.
+        let cfg = super::parse_config_json("").unwrap();
+        assert!(cfg.is_object());
+    }
     use super::*;
 
     #[test]
