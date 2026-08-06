@@ -259,6 +259,18 @@ pub fn config_descriptor() -> serde_json::Value {
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RokuConfig {
+    /// Optional, like every field inside it.
+    ///
+    /// It was mandatory while every field it holds already had a default, so
+    /// the only thing a config could be missing was the section header — and
+    /// missing it was fatal: "missing field `homecore`", exit 1, before the
+    /// plugin could log or attempt anything.
+    ///
+    /// That took hc-zwave down on a real house for the better part of an hour
+    /// after an editor wrote a config containing only the fields its form
+    /// covered. A plugin with a working default for every value in a section
+    /// should not be one dropped section away from a restart loop.
+    #[serde(default)]
     pub homecore: HomecoreConfig,
     #[serde(default)]
     pub logging: plugin_sdk_rs::logging::LoggingConfig,
@@ -422,6 +434,30 @@ impl RokuConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// A config with no `[homecore]` section must still load.
+    ///
+    /// It used to be fatal — "missing field `homecore`", exit 1, before the
+    /// plugin could log or attempt anything — while every value in the section
+    /// already had a working default. hc-zwave spent the better part of an hour
+    /// in a 60-second restart loop over exactly this, after an editor wrote a
+    /// config containing only the fields its form covered.
+    #[test]
+    fn a_config_without_the_homecore_section_still_loads() {
+        let cfg: RokuConfig = toml::from_str("").expect("[homecore] must be optional");
+        assert_eq!(cfg.homecore.broker_host, "127.0.0.1");
+        assert_eq!(cfg.homecore.broker_port, 1883);
+        assert_eq!(cfg.homecore.plugin_id, "plugin.roku");
+    }
+
+    /// ...and an explicit section still wins, which is how this kind of fix
+    /// usually goes wrong.
+    #[test]
+    fn an_explicit_homecore_section_beats_the_defaults() {
+        let cfg: RokuConfig = toml::from_str("[homecore]\nbroker_host = \"10.0.0.5\"\n").unwrap();
+        assert_eq!(cfg.homecore.broker_host, "10.0.0.5");
+        assert_eq!(cfg.homecore.plugin_id, "plugin.roku");
+    }
     use super::*;
 
     /// The `[roku]` section is entirely optional — a config with nothing
