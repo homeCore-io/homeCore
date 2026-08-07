@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.28"
+  version: "0.1.29"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -6846,6 +6846,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DashboardWidgetPlacement"
+        derived_from:
+          $ref: "#/components/schemas/DashboardBreakpoint"
+          description: >
+            Which breakpoint this layout was computed from. Omitted when a
+            person arranged it, which is the case for every layout that predates
+            this field. Core stores it and never acts on it: it does not derive
+            layouts and has no opinion about which breakpoint is primary. An
+            editor that writes back only the breakpoint it read uses this to
+            tell which other layouts are its to recompute and which a person has
+            taken over.
 
     DashboardWidget:
       type: object
