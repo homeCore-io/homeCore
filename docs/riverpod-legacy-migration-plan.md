@@ -1,0 +1,367 @@
+# Getting hc-web off Riverpod's legacy shim
+
+> **Status: complete.** All four phases landed 2026-08-04, `hc-web`
+> `ee8131c`..`41fdfd1`. The shim is gone from `lib/` and `test/`; the suite went
+> 871 → 922. Two things were found and fixed along the way that were not part of
+> the migration: the `landing_route` key had two spellings, and
+> `sceneActivatedTimesProvider` had never executed. Kept as a record of what the
+> work actually cost.
+
+
+Fourteen files still import `package:flutter_riverpod/legacy.dart`. Riverpod 3
+kept `StateProvider`, `StateNotifier` and `StateNotifierProvider` alive behind
+that import so the 2 → 3 upgrade could be a version bump; it was. This is the
+other half, and it is not a version bump.
+
+## Why, and why the urgency is low
+
+Nothing is broken and nothing is warning. The shim carries no `@Deprecated`
+annotation in 3.4.2, so `flutter analyze` is green today and stays green — the
+CI gate will not tell us when this becomes a problem. The forcing function is
+Riverpod 4, whenever that lands, at which point the shim goes away and this
+becomes an emergency instead of a plan.
+
+So: schedule it, do it once, do it properly. The reason to do it *properly*
+rather than mechanically is that the eight preference providers all share an
+async-load pattern whose correctness has never been tested, and the port is
+the only moment when we will be looking straight at it.
+
+## What is actually there
+
+Two cohorts, and they are not the same job.
+
+### Cohort A — eight `StateNotifier` preference stores (the real work)
+
+Every one of these is the same shape: construct with a default, kick off an
+async `_load()` from `SharedPreferences`, assign `state` if still `mounted`,
+and write through on every mutation.
+
+| File | Provider(s) | State | Consumers outside its file |
+|---|---|---|---|
+| `core/providers/time_display_provider.dart` | `timeUtcProvider` | `bool` | 7 |
+| `core/providers/collapsed_groups_provider.dart` | `collapsedGroupsProvider` | `Set<String>` | 3 |
+| `core/providers/nav_prefs_provider.dart` | `navRailVisibleProvider`, `navRailExpandedProvider`, `landingRouteProvider` | `bool`, `bool`, `String` | 2, 1, 1 |
+| `core/providers/active_sort_provider.dart` | `activeSortProvider` | `bool` | 1 |
+| `core/providers/room_collapse_provider.dart` | `roomCollapseProvider` | `Set<String>` | 1 |
+| `core/providers/thermostat_prefs_provider.dart` | `thermostatLargeProvider` | `Set<String>` | 1 |
+| `core/providers/client_error_log_provider.dart` | `clientErrorLogProvider` | `List<ApiErrorEntry>` | 1 |
+| `core/providers/scenes_provider.dart` | `sceneActivatedTimesProvider` | `Map<String, DateTime>` | **0** |
+
+`clientErrorLogProvider` is the odd one out — in-memory only, no
+`SharedPreferences`, a 100-entry ring buffer. It is the easiest of the eight.
+
+### Cohort B — six bare `StateProvider`s of private UI state (mechanical)
+
+| File | Providers | Notes |
+|---|---|---|
+| `features/events/events_page.dart` | `_liveEventsProvider`, `_liveTypeFilterProvider`, `_historyLimitProvider`, `_historyTypeFilterProvider`, `_historyDeviceSearchProvider` | five, all file-private |
+| `features/automations/automation_list_page.dart` | `_filterProvider`, `_selectionProvider` | file-private |
+| `features/devices/device_list_page.dart` | `_queryProvider` | file-private |
+| `features/scenes/scenes_page.dart` | `_filterProvider` | file-private |
+| `shell/shell_scope.dart` | `skinOverrideProvider` | **public**, and overridden in a test |
+| `shell/wall_chrome.dart` | `kioskProvider` | public, one-way latch to `true` |
+
+There are 12 `ref.read(x.notifier).state = …` assignment sites across cohort B.
+`Notifier` has no public `state` setter from outside, so each becomes a named
+method on the notifier. That is the bulk of the diff and none of it is subtle —
+but it is also the part that makes the change readable, because
+`.notifier).state = next` says nothing about intent and `.clearFilters()` does.
+
+## Three things to decide before writing any code
+
+**1. `sceneActivatedTimesProvider` is dead.** Nothing watches it, which means
+its notifier is never constructed, which means its `ref.listen` on the event
+stream never runs. The "scene last activated at" data it exists to collect is
+not being collected. Do not port dead code — either delete it, or wire it up
+first and port it as a live feature. That is a product call, not a migration
+call.
+
+**2. `landing_route` has two readers and one of them hard-codes the key.**
+`nav_prefs_provider.dart` owns `_kLandingRouteKey = 'landing_route'`, but
+`app.dart:65` reads `prefs.getString('landing_route')` directly, as a string
+literal, inside the router's redirect. That is deliberate and arguably correct
+— the router can `await` and the provider cannot — but it means the key exists
+in two places. Export the constant and have `app.dart` use it, in the same
+commit, or this desyncs the first time someone renames it.
+
+**3. Whether to fix the async-load race or preserve it.** Every cohort-A
+provider yields its default for one or more frames and then swaps to the stored
+value. Visibly, that is the nav rail flashing expanded before collapsing, and
+Home sorting A–Z before re-sorting active-first. It has always done this. The
+port can preserve that behaviour exactly, or fix it by awaiting
+`SharedPreferences.getInstance()` once in `main()` and injecting it through an
+overridden provider — after which every `build()` is synchronous and correct
+with no flash.
+
+Fixing it is the better outcome and is genuinely small (Riverpod 3 caches
+nothing here; `SharedPreferences.getInstance()` is already a singleton after
+first call). But it changes startup ordering for the whole app and it is not
+the migration. **Recommendation: preserve behaviour in the migration, fix the
+flash in a separate follow-up commit**, so that if something regresses we know
+which of the two caused it.
+
+## Phases
+
+### Phase 0 — pin the behaviour that has no tests — **DONE**
+
+Landed as `hc-web` `ee8131c`, `test/core/providers/preferences_test.dart`,
+34 tests. Suite went 871 → 905, green; `flutter analyze` clean; `dart format`
+clean.
+
+Two notes on what was actually written:
+
+- **Mutation-checked, not just green.** Renaming `time_display_utc` fails 3
+  tests; changing its absent-key fallback from `false` to `true` fails 3. Both
+  were verified by actually making the change and running, then reverting.
+- **The two public cohort-B providers were left alone.** The plan called for
+  pinning `kioskProvider`'s latch and `skinOverrideProvider`'s default, but both
+  are one-line `StateProvider` initializers with no logic — a test would assert
+  the literal sitting two lines above it. `shell_test.dart` already exercises
+  `skinOverrideProvider` through an override, and Phase 2's conversion of both
+  is compiler-checked at every call site. Not worth a vacuous test.
+
+The original brief, kept for reference:
+
+
+None of the eight preference providers has a single test. `SharedPreferences`
+appears nowhere in `test/`. This is the phase that makes the rest safe, and it
+should land and be reviewed *before* any provider changes.
+
+Write `test/core/providers/preferences_test.dart` against the **current,
+unported** code, using `SharedPreferences.setMockInitialValues({})`. For each
+of the eight, assert:
+
+- the default when the key is absent (`activeSort` is `true`, `navRailExpanded`
+  is `false`, `landingRoute` is `'/'`, the three `Set` providers start empty)
+- the stored value wins once `_load()` completes
+- a mutation writes through — read `SharedPreferences` back and check the key
+  *and its exact stored type* (`getBool` / `getStringList` / `getString`)
+- the key strings themselves, spelled out as literals in the test, so a rename
+  during the port fails loudly instead of silently orphaning everyone's saved
+  preferences
+
+That last one matters more than it looks. These keys are live on John's
+browsers; changing one is indistinguishable from a factory reset of that
+preference, and nothing would report an error.
+
+Also pin `clientErrorLogProvider`'s 100-entry cap and its FIFO eviction, and
+`kioskProvider`'s latch.
+
+Green here, committed, before proceeding.
+
+### Phase 1 — cohort A, one provider per commit — **DONE except `scenes_provider.dart`**
+
+`hc-web` `61db72b`..`e3ea37a`, one commit per provider as planned. Suite 905
+green throughout, `flutter analyze` and `dart format` clean, CI green.
+
+The plan's prediction held: **the seven ports touched only
+`lib/core/providers/`** — seven files, no call-site changes anywhere. Method
+names and `ref.watch` / `ref.read(p.notifier)` shapes were preserved exactly,
+and `preferences_test.dart` was never edited.
+
+Three things worth recording:
+
+- **`ref.mounted` is longer than `mounted`**, which pushed one guard past 80
+  columns and made `dart format` split it into a body-less two-line `if`.
+  Braced instead (`abc79d4`). Trivial, but it is the only place the port
+  changed the shape of a line rather than a name.
+- **Decision 2 was taken and fixed** (`e3ea37a`): `kLandingRouteKey` is now
+  public and `app.dart` imports it instead of spelling `'landing_route'` a
+  second time. The router still reads `SharedPreferences` directly — that part
+  is correct, since it can `await` and the provider cannot.
+- **The pinning tests still bite after the port.** Re-ran the mutation check
+  against the ported `timeUtc`: changing `build()`'s return from `false` to
+  `true` fails the fallback test. The tests are not passing vacuously against
+  the new API.
+
+**Still open: `scenes_provider.dart`.** It is the one remaining cohort-A file
+and it holds `sceneActivatedTimesProvider`, which decision 1 identified as
+dead — nothing watches it, so its `ref.listen` never runs. Porting dead code
+and deleting a feature that was intended to exist are both wrong defaults, so
+it is left as-is pending that call. It is the only thing blocking Phase 3.
+
+The original brief, kept for reference:
+
+
+Convert `StateNotifier<T>` → `Notifier<T>`, `StateNotifierProvider<N, T>` →
+`NotifierProvider<N, T>`. The mapping:
+
+- constructor default → the return value of `build()`
+- constructor side effects → statements in `build()` before the return
+- `mounted` → `ref.mounted` (present in 3.4.2, same semantics)
+- `ref.listen(...)` in the constructor → `ref.listen(...)` in `build()`
+  (`scenes_provider.dart` only, and only if decision 1 says keep it)
+
+Both `NotifierProvider` and `StateNotifierProvider` default to
+`isAutoDispose = false` in 3.4.2, so provider lifetime does not change. That is
+worth stating because it is the one thing that would silently break the error
+log and the kiosk latch, and it does not.
+
+Order by blast radius, smallest first: `client_error_log` (no persistence),
+then `active_sort`, `thermostat_prefs`, `room_collapse`, `collapsed_groups`,
+`nav_prefs` (three notifiers in one file), and `time_display` last — it has
+seven consumers and touches every timestamp on screen.
+
+Public method names stay identical. `ref.watch(p)` and
+`ref.read(p.notifier).toggle()` are unchanged at every call site, so cohort A
+should produce **no diff outside `lib/core/providers/`**. If it does, something
+was misunderstood.
+
+Re-run Phase 0's tests unchanged after each commit. They were written against
+the old implementation and must pass against the new one without edits — that
+is the whole point of writing them first.
+
+### Phase 2 — cohort B — **DONE**
+
+`hc-web` `c790353`..`d633684`, six commits. Suite 905 green throughout,
+`flutter analyze` and `dart format` clean, CI green.
+
+Unlike Phase 1 this was not a rename: the 12 `.notifier).state = …` and
+`.notifier).update(…)` sites became named methods, and in four places that
+moved real logic off the call site and onto the notifier.
+
+- The events page's **200-entry cap** lived in the `ref.listen` callback that
+  pushed into the buffer. It is now `_LiveEvents.push()` — a property of the
+  buffer rather than of whoever feeds it — and the widget no longer knows the
+  number.
+- **Both type-filter chips** built their next `Set` by hand, identically, at two
+  call sites. One `_TypeFilter.toggle()` behind two providers, so live and
+  history still filter independently.
+- The device list's `initState` post-frame callback read `notifier.state`
+  **twice** to decide between scoping to a plugin and clearing a stale scope.
+  Now `_Query.scopeToPlugin()`.
+- The automations list had the same inline-`Set` duplication for its
+  trigger-category chip and its row-select callback.
+
+**The predicted test break happened, and only that one.**
+`skinOverrideProvider.overrideWith((ref) => HcSkin.controlRoom)` does not
+typecheck against `NotifierProvider`, whose `overrideWith` takes a notifier
+factory. The test now overrides `build()` in a `_FixedSkin` subclass, and that
+rewrite was mutation-checked: pointing its `build()` at `null` fails the test,
+so it still asserts what it used to.
+
+One judgement call worth flagging: `skinOverrideProvider` is only ever *read*
+in `lib/` — the sole writer is that test override — so a plain `Provider` would
+also have got it off the shim and left `shell_test.dart` untouched. It became a
+`NotifierProvider` with a `choose()` nobody calls yet, because narrowing it to
+a read-only injection point would quietly remove a capability the migration was
+not asked to remove.
+
+The original brief, kept for reference:
+
+
+`StateProvider<T>` → `NotifierProvider<X, T>` with a small named notifier and
+explicit mutators replacing the 12 `.state =` sites. File-private providers
+first (events, automations, devices, scenes pages) — those are contained and
+the compiler finds every site.
+
+Then the two public ones:
+
+- `kioskProvider` — one setter, `enterKiosk()`.
+- `skinOverrideProvider` — **this one breaks a test.**
+  `test/shell/shell_test.dart:114` does
+  `skinOverrideProvider.overrideWith((ref) => HcSkin.controlRoom)`.
+  `StateProvider.overrideWith` takes `(ref) => value`; `NotifierProvider`'s
+  takes `() => Notifier`. The test must change to
+  `overrideWith(() => SkinOverride(HcSkin.controlRoom))` or equivalent. It is
+  the only override site of a legacy provider in the suite, and it is the only
+  test file that has to change in this whole plan.
+
+### Phase 3 — remove the shim and prove it — **DONE**
+
+`hc-web` `41fdfd1`. `grep -rn "flutter_riverpod/legacy" lib test` returns
+nothing, and no `StateNotifier`, `StateProvider`, `StateController` or
+`ChangeNotifierProvider` is referenced anywhere. (`app.dart`'s `_RouterNotifier`
+extends Flutter's own `ChangeNotifier`, which is unrelated to the shim.)
+
+Decision 1 was taken: `sceneActivatedTimesProvider` was **deleted**, not ported.
+Confirmed first that nothing in `lib/` renders per-scene recency by any route —
+the scenes page shows no "last activated", `SceneModel` has no timestamp field,
+and `HcSceneChip` has an `active` bool but nothing time-based. The two other
+readers of `scene_activated` (the events feed, the dashboard editor's trigger
+list) do not want per-scene times. If it is wanted later it belongs on
+`SceneModel` from the API, not in a client-side map rebuilt from a live socket
+that shows nothing on a fresh page load.
+
+`preferences_test.dart`'s header was updated — it described these as "the last
+`StateNotifier`s in the app and next to be ported", true when written and not
+now. The assertions themselves are still the originals.
+
+Suite 922 green, `flutter analyze` and `dart format` clean, CI green.
+
+The original brief, kept for reference:
+
+
+Delete every `import 'package:flutter_riverpod/legacy.dart';`. Grep must return
+zero. Then, and only then, `dart format`, `flutter analyze`, `flutter test`.
+
+`dart format` is a release gate on this repo — analyze and test passing is not
+sufficient. Run all three before pushing.
+
+### Phase 4 — verify on the running system — **DONE**
+
+Verified against the sandbox (`:8080`, 188 devices) with a build of the migrated
+code, driven through `tool/shot.mjs` and a CDP probe.
+
+- **Collapsed rooms and the nav rail state both survive a hard reload.**
+  Collapsing Attic and expanding the rail wrote
+  `flutter.home_rooms_collapsed = ["attic"]` and
+  `flutter.nav_rail_expanded = true` — the exact keys and stored types
+  `preferences_test.dart` pins — and after `Page.reload({ignoreCache: true})`
+  the screenshot shows Attic still folded and the rail still labelled. That is
+  `roomCollapseProvider` and `navRailExpandedProvider` end to end.
+- **The skin choice survives too**, and re-skins the whole app including sheets
+  (see the separate skin work).
+
+One trap worth recording for the next person doing this: an earlier run
+appeared to show the skin *not* persisting. It was the harness — `shot.mjs`
+kills Chromium ~1.2s after its click, before localStorage flushes to disk.
+Reading `localStorage` inside a live session, and reloading within that session,
+is what settles it. The app was right and the screenshot was lying.
+
+The original brief, kept for reference:
+
+
+Unit tests cannot see a flash, a lost preference, or a nav rail that comes back
+in the wrong state. Deploy to the sandbox and check, by screenshot, on a
+profile that already has stored preferences:
+
+- collapsed rooms on Home are still collapsed after reload
+- the nav rail's visible/expanded state survives a reload
+- "Set as Home page" still lands there on a fresh load
+- the events page filters still filter, and the device list query still queries
+- 12/24-hour time is still whatever it was set to
+
+Restore the sandbox afterwards. Do not claim this is done from a green test
+run; the failure mode this plan is most exposed to — a preference key that
+quietly stopped matching what is on disk — is invisible to every test and
+obvious on the running page.
+
+## What could go wrong
+
+**A renamed or retyped preference key.** The worst outcome, because it presents
+as "my collapsed rooms reset" weeks later with no error anywhere. Phase 0's
+literal-key assertions are the defence, and they are the reason Phase 0 is not
+optional.
+
+**Startup ordering.** If someone folds the flash fix into Phase 1, a failure in
+Phase 4 has two candidate causes instead of one. Keep them apart.
+
+**`ref.listen` inside `build()`.** `build()` re-runs on dependency change,
+whereas the old constructor ran once. Only `scenes_provider.dart` is affected,
+and only if it survives decision 1 — but if it does, a duplicated listener is
+the failure mode to look for.
+
+## Not in scope
+
+- **`ref.persist()`**, Riverpod 3's built-in storage-backed provider support.
+  Seven of these eight providers hand-roll exactly what it does, so it is
+  tempting. It is also a second migration wearing the first one's clothes, with
+  its own storage-format questions. Note it, revisit after this lands.
+- **`riverpod_generator` / `@riverpod` codegen.** The repo has
+  `riverpod_generator` 2.6.4 in the pub cache but writes providers by hand
+  throughout. Not a decision this plan should make for the codebase.
+- **The 10 existing `AsyncNotifier`s** (auth, devices, automations, dashboards,
+  users, audit, plugins, system config, camera store). They are already on the
+  modern API and are the house style this migration is converging toward — the
+  target shape already exists in-tree to copy from.

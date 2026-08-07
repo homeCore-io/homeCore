@@ -159,6 +159,21 @@ pub fn config_descriptor() -> serde_json::Value {
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
+    /// Optional, like every field inside it.
+    ///
+    /// It used to be mandatory, and every field it holds already had a default,
+    /// so the only thing a config could be missing was the section header — and
+    /// missing it was fatal. `Config::load` returned "missing field `homecore`"
+    /// and main exited 1 before logging anything else.
+    ///
+    /// That happened on a real house: hc-web's config editor wrote a document
+    /// containing only the fields its form covered, `[homecore]` was not one of
+    /// them, and this plugin then failed to start every 60 seconds for the
+    /// better part of an hour. The editor bug is fixed and core no longer hands
+    /// out configs it could not parse, but a plugin should not be one dropped
+    /// section away from a restart loop when it has a working default for every
+    /// value in it.
+    #[serde(default)]
     pub homecore: HomecoreConfig,
     #[serde(default)]
     pub server: ServerConfig,
@@ -189,6 +204,17 @@ pub struct HomecoreConfig {
     pub plugin_id: String,
     #[serde(default)]
     pub password: String,
+}
+
+impl Default for HomecoreConfig {
+    fn default() -> Self {
+        Self {
+            broker_host: default_broker_host(),
+            broker_port: default_broker_port(),
+            plugin_id: default_plugin_id(),
+            password: String::new(),
+        }
+    }
 }
 
 fn default_broker_host() -> String {
@@ -234,6 +260,48 @@ fn default_schema_version() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    /// The config that took the plugin down, and must not any more.
+    ///
+    /// hc-web's editor wrote a document holding only the fields its form
+    /// covered. `[homecore]` was not among them, and this plugin then refused
+    /// to start — "missing field `homecore`", exit 1, every 60 seconds, for the
+    /// better part of an hour, against a zwave-js-server that was up the whole
+    /// time on the address the file already named.
+    #[test]
+    fn a_config_without_the_homecore_section_still_loads() {
+        let cfg: Config = toml::from_str("[server]\nurl = \"ws://10.0.10.123:3000\"\n")
+            .expect("a missing [homecore] must not be fatal");
+
+        // The setting the operator actually cared about.
+        assert_eq!(cfg.server.url, "ws://10.0.10.123:3000");
+        // And the section that was missing falls back to the same values it
+        // would have held had it been written out in full.
+        assert_eq!(cfg.homecore.broker_host, "127.0.0.1");
+        assert_eq!(cfg.homecore.broker_port, 1883);
+        assert_eq!(cfg.homecore.plugin_id, "plugin.zwave");
+        assert!(cfg.homecore.password.is_empty());
+    }
+
+    /// An explicit section still wins — the default must not shadow real
+    /// values, which is the way this kind of fix usually goes wrong.
+    #[test]
+    fn an_explicit_homecore_section_is_not_overridden_by_defaults() {
+        let cfg: Config =
+            toml::from_str("[homecore]\nbroker_host = \"10.0.0.5\"\nbroker_port = 8883\n").unwrap();
+        assert_eq!(cfg.homecore.broker_host, "10.0.0.5");
+        assert_eq!(cfg.homecore.broker_port, 8883);
+        // Untouched keys in a present section still default.
+        assert_eq!(cfg.homecore.plugin_id, "plugin.zwave");
+    }
+
+    /// A wholly empty file is a working plugin pointed at the defaults.
+    #[test]
+    fn an_empty_config_is_all_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.homecore.broker_host, "127.0.0.1");
+        assert_eq!(cfg.server.url, "ws://localhost:3000");
+    }
+
     use super::*;
 
     /// The descriptor is authoritative — the editor renders it instead of

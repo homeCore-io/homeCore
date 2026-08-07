@@ -200,6 +200,18 @@ pub fn config_descriptor() -> serde_json::Value {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
+    /// Optional, like every field inside it now is.
+    ///
+    /// It was mandatory, and its identity and broker fields had no defaults, so
+    /// a config missing the section — or merely missing `plugin_id` — killed
+    /// the plugin outright: "missing field", exit 1, before it could log or
+    /// attempt anything. That took hc-zwave down on a real house for the better
+    /// part of an hour after an editor wrote a config holding only the fields
+    /// its form covered.
+    ///
+    /// The defaults are the ones every other plugin already uses, and the ones
+    /// this plugin's own shipped config states.
+    #[serde(default)]
     pub homecore: HomecoreSection,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -210,8 +222,11 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HomecoreSection {
+    #[serde(default = "default_plugin_id")]
     pub plugin_id: String,
+    #[serde(default = "default_broker_host")]
     pub broker_host: String,
+    #[serde(default = "default_broker_port")]
     pub broker_port: u16,
     /// MQTT credential. Empty = anonymous (dev broker default).
     /// The broker uses `plugin_id` as the username; this is just the password.
@@ -219,6 +234,28 @@ pub struct HomecoreSection {
     pub password: String,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_secs: u64,
+}
+
+impl Default for HomecoreSection {
+    fn default() -> Self {
+        Self {
+            plugin_id: default_plugin_id(),
+            broker_host: default_broker_host(),
+            broker_port: default_broker_port(),
+            password: String::new(),
+            heartbeat_secs: default_heartbeat_secs(),
+        }
+    }
+}
+
+fn default_plugin_id() -> String {
+    "plugin.thermostat".into()
+}
+fn default_broker_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_broker_port() -> u16 {
+    1883
 }
 
 fn default_heartbeat_secs() -> u64 {
@@ -353,4 +390,33 @@ mod descriptor_tests {
             "config fields missing from the descriptor: {missing:?}"
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// A config with no `[homecore]` section must still load.
+    ///
+    /// It used to be fatal — "missing field `homecore`", exit 1, before the
+    /// plugin could log or attempt anything — while every value in the section
+    /// already had a working default. hc-zwave spent the better part of an hour
+    /// in a 60-second restart loop over exactly this, after an editor wrote a
+    /// config containing only the fields its form covered.
+    #[test]
+    fn a_config_without_the_homecore_section_still_loads() {
+        let cfg: Config = toml::from_str("").expect("[homecore] must be optional");
+        assert_eq!(cfg.homecore.broker_host, "127.0.0.1");
+        assert_eq!(cfg.homecore.broker_port, 1883);
+        assert_eq!(cfg.homecore.plugin_id, "plugin.thermostat");
+    }
+
+    /// ...and an explicit section still wins, which is how this kind of fix
+    /// usually goes wrong.
+    #[test]
+    fn an_explicit_homecore_section_beats_the_defaults() {
+        let cfg: Config = toml::from_str("[homecore]\nbroker_host = \"10.0.0.5\"\n").unwrap();
+        assert_eq!(cfg.homecore.broker_host, "10.0.0.5");
+        assert_eq!(cfg.homecore.plugin_id, "plugin.thermostat");
+    }
+    use super::*;
 }

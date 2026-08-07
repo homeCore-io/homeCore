@@ -13,6 +13,17 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    /// Deliberately **not** `#[serde(default)]`, unlike every shipped plugin.
+    ///
+    /// The others made this optional because a missing section killed them
+    /// outright while every value in it had a working default — hc-zwave spent
+    /// the better part of an hour in a restart loop over exactly that.
+    ///
+    /// A template is the one place that must not follow. `plugin_id` is the
+    /// single value whoever copies this has to set, and it has no defensible
+    /// default: guessing one lets a new plugin register under the wrong name
+    /// and publish onto another plugin's topics, which is far worse than
+    /// refusing to start. Loud and missing beats quiet and wrong for identity.
     pub homecore: HomeCoreSection,
     #[serde(default)]
     pub logging: LoggingSection,

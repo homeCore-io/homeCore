@@ -17,12 +17,50 @@
 use chrono::Utc;
 use hc_core::EventBus;
 use hc_types::event::Event;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{mpsc, watch, RwLock};
+
+/// How much of a dying plugin's output to keep for its obituary.
+const EXIT_CONTEXT_LINES: usize = 12;
+
+/// Drop ANSI colour from a captured line.
+///
+/// Plugins colour their output whether or not anyone is looking — piping the
+/// stream does not stop it — and these lines end up in a JSON log field and on
+/// a web page, where escape codes are noise at best and mojibake at worst. The
+/// echo to our own stdout keeps its colour; only the copy we store is cleaned.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC '[' … final byte in @-~. Anything else after ESC is a short
+        // escape whose next character is the whole of it.
+        if let Some('[') = chars.next() {
+            for f in chars.by_ref() {
+                if ('@'..='~').contains(&f) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Which of a child's two streams a reader task is draining.
+enum OutputStream {
+    Out(ChildStdout),
+    Err(ChildStderr),
+}
 use tracing::{error, info, warn};
 
 use hc_api::{PluginCommand, PluginCommandChannels, PluginRecord};
@@ -158,10 +196,26 @@ async fn supervise(
 
         let started_at = Instant::now();
 
+        // Piped, not inherited, so a plugin that dies before it can talk to us
+        // still gets to say why.
+        //
+        // A plugin's log lines normally reach core over MQTT, which is why they
+        // show up in Administration › Logs. That channel needs the broker
+        // address, which comes from the plugin's config — so the one class of
+        // failure it can never carry is a failure to read that config. Those
+        // lines went to core's own stdout via `inherit()`, which is to say into
+        // the container's console, reachable only by someone who already
+        // suspects the plugin and knows to run `docker logs`.
+        //
+        // hc-zwave spent the better part of an hour exiting 1 at uptime 0 on a
+        // 60-second loop. It was saying "Failed to load config" with the
+        // missing field and the path every single time. Core recorded
+        // `code Some(1)` and nothing else, and the operator was left staring at
+        // a plugin that was "offline" for no stated reason.
         let mut child = match Command::new(&binary)
             .arg(&config)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
@@ -180,6 +234,42 @@ async fn supervise(
                 continue;
             }
         };
+
+        // Drain both streams: echo to our own stdout so a terminal still shows
+        // plugin output as it always did, and keep the last few lines so the
+        // exit can be explained. Only the tail is kept — during a healthy run
+        // these same lines arrive over MQTT, and logging them here too would
+        // double every plugin's output in the stream.
+        let tail = Arc::new(std::sync::Mutex::new(VecDeque::<String>::new()));
+        for stream in [
+            child.stdout.take().map(OutputStream::Out),
+            child.stderr.take().map(OutputStream::Err),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tail = Arc::clone(&tail);
+            tokio::spawn(async move {
+                let mut lines = match stream {
+                    OutputStream::Out(o) => {
+                        BufReader::new(Box::pin(o) as Pin<Box<dyn AsyncRead + Send>>).lines()
+                    }
+                    OutputStream::Err(e) => {
+                        BufReader::new(Box::pin(e) as Pin<Box<dyn AsyncRead + Send>>).lines()
+                    }
+                };
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("{line}");
+                    let line = strip_ansi(&line);
+                    if let Ok(mut t) = tail.lock() {
+                        if t.len() == EXIT_CONTEXT_LINES {
+                            t.pop_front();
+                        }
+                        t.push_back(line);
+                    }
+                }
+            });
+        }
 
         // The plugin is now running.  PluginRegistered event (from MQTT
         // registration) will set status to "active" via the AppState background
@@ -201,7 +291,19 @@ async fn supervise(
                         info!(plugin_id = %entry.id, uptime_secs = uptime.as_secs(), "Plugin exited cleanly");
                     }
                     Ok(status) => {
-                        warn!(plugin_id = %entry.id, code = ?status.code(), uptime_secs = uptime.as_secs(), "Plugin exited with error");
+                        // The tail is the point: `code Some(1)` on its own has
+                        // never told anyone anything.
+                        let last = tail
+                            .lock()
+                            .map(|t| t.iter().cloned().collect::<Vec<_>>().join(" | "))
+                            .unwrap_or_default();
+                        warn!(
+                            plugin_id = %entry.id,
+                            code = ?status.code(),
+                            uptime_secs = uptime.as_secs(),
+                            output = %last,
+                            "Plugin exited with error"
+                        );
                     }
                     Err(e) => {
                         error!(plugin_id = %entry.id, error = %e, "wait() failed for plugin");
@@ -361,5 +463,51 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
         if shutdown_requested(shutdown) {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod output_capture_tests {
+    use super::*;
+
+    #[test]
+    fn strips_colour_from_a_captured_line() {
+        // A real hc-zwave line: tracing colours the level and the target even
+        // when its stdout is a pipe.
+        let raw = "\x1b[2m2026-08-06T21:21:12Z\x1b[0m \x1b[31mERROR\x1b[0m \
+                   \x1b[2mhc_zwave\x1b[0m: Failed to load config";
+        let clean = strip_ansi(raw);
+        assert!(clean.contains("ERROR"));
+        assert!(clean.contains("Failed to load config"));
+        assert!(
+            !clean.contains('\x1b'),
+            "escape codes reached the log field"
+        );
+    }
+
+    #[test]
+    fn plain_text_survives_untouched() {
+        let line = "missing field `homecore`";
+        assert_eq!(strip_ansi(line), line);
+    }
+
+    #[test]
+    fn the_tail_keeps_the_last_lines_not_the_first() {
+        // A plugin that fails on startup prints its reason last, right before
+        // it exits — so a buffer that filled up and stopped listening would
+        // keep the banner and throw away the diagnosis.
+        let mut tail: VecDeque<String> = VecDeque::new();
+        for i in 0..EXIT_CONTEXT_LINES + 5 {
+            if tail.len() == EXIT_CONTEXT_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(format!("line {i}"));
+        }
+        assert_eq!(tail.len(), EXIT_CONTEXT_LINES);
+        assert_eq!(
+            tail.back().map(String::as_str),
+            Some(format!("line {}", EXIT_CONTEXT_LINES + 4).as_str())
+        );
+        assert_eq!(tail.front().map(String::as_str), Some("line 5"));
     }
 }
