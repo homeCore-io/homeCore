@@ -10,10 +10,24 @@ repository  = "https://github.com/homeCore-io/hc-plugin-template"
 name = "hc-plugin-template"
 path = "src/main.rs"
 
+[features]
+default = ["schema"]
+# Derives the operator-config JSON Schema and publishes it on the capability
+# manifest, so the hc-web config editor renders a typed form instead of a raw
+# TOML textarea. Off = a leaner build with no schemars, and that textarea.
+schema = ["dep:schemars", "plugin-sdk-rs/schema"]
+
 [dependencies]
-# Pin the SDK by tag. It re-exports core's `hc-types`, which is the plugin
-# ABI, so an unpinned dep means your build changes when core does.
+# A path dependency, because this template lives inside the homeCore workspace
+# and builds against the SDK sitting next to it — no tag to pin, no version to
+# chase, and `cargo test` at the repo root covers this crate along with core.
+#
+# Lifting the template *out* of the workspace is the case that needs care: the
+# SDK re-exports core's `hc-types`, which is the plugin ABI, so an out-of-tree
+# plugin wants a pinned git dependency rather than an unpinned one that changes
+# under it whenever core does.
 plugin-sdk-rs      = { path = "../../sdk/rust" }
+schemars           = { version = "1", optional = true }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
