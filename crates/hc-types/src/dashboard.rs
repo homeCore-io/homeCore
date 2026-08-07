@@ -36,6 +36,22 @@ pub struct DashboardLayout {
     pub gap: f64,
     #[serde(default)]
     pub placements: Vec<DashboardWidgetPlacement>,
+
+    /// Which breakpoint this layout is computed from, or `None` when a person
+    /// arranged it.
+    ///
+    /// Core never acts on this — it does not derive layouts and has no opinion
+    /// about which breakpoint is primary. It stores it because a client cannot:
+    /// an editor that writes back only the breakpoint it read needs to know
+    /// which of the others are its to recompute and which a person has taken
+    /// over, and that answer has to survive a round trip.
+    ///
+    /// `Option` + `default` on purpose. Every dashboard already in redb
+    /// deserializes with `None`, which reads as *authored* — the interpretation
+    /// that makes an editor leave it alone. Erring the other way would let a
+    /// client repack layouts that predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<DashboardBreakpoint>,
 }
 
 /// A card.
