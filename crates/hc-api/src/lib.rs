@@ -50,6 +50,8 @@ pub mod plugin_install;
 pub mod rate_limit;
 pub mod registry;
 pub mod rule_file_store;
+pub mod skin_handlers;
+pub mod skin_store;
 pub mod streaming;
 pub mod ws;
 
@@ -65,6 +67,7 @@ pub use plugin_config_store::PluginConfigStore;
 pub use plugin_config_watcher::PluginConfigWatcher;
 pub use plugin_install::{InstallContext, InstalledPlugin};
 use rule_file_store::RuleFileStore;
+use skin_store::{SkinStore, SkinStoreData};
 
 /// Runtime command sent to a plugin supervisor task.
 #[derive(Debug)]
@@ -335,6 +338,11 @@ pub struct AppState {
     pub dashboards: Option<Arc<RwLock<DashboardStoreData>>>,
     /// Persistent store for dashboards (`data/dashboards.json`).
     pub dashboard_store: Option<Arc<DashboardStore>>,
+    /// User-defined skins. The built-in four are compiled into the client and
+    /// are not here — see `hc_types::skin`.
+    pub skins: Option<Arc<RwLock<SkinStoreData>>>,
+    /// Persistent store for skins (`data/skins.json`).
+    pub skin_store: Option<Arc<SkinStore>>,
     /// Live calendar store — loaded `.ics` files with expanded events.
     /// `None` when no calendar directory is configured.
     pub calendar: Option<CalendarHandle>,
@@ -784,6 +792,8 @@ impl AppState {
             group_store: None,
             dashboards: None,
             dashboard_store: None,
+            skins: None,
+            skin_store: None,
             calendar: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
@@ -923,6 +933,14 @@ impl AppState {
     pub fn with_dashboard_store(mut self, store: DashboardStore, data: DashboardStoreData) -> Self {
         self.dashboard_store = Some(Arc::new(store));
         self.dashboards = Some(Arc::new(RwLock::new(data)));
+        self
+    }
+
+    /// Attach the skin store. Absent, `/skins` answers 501 rather than
+    /// pretending an empty list is the house's answer.
+    pub fn with_skin_store(mut self, store: SkinStore, data: SkinStoreData) -> Self {
+        self.skin_store = Some(Arc::new(store));
+        self.skins = Some(Arc::new(RwLock::new(data)));
         self
     }
 
@@ -1178,6 +1196,16 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/dashboards/templates/{id}",
             post(handlers::create_dashboard_from_template),
+        )
+        .route(
+            "/skins",
+            get(skin_handlers::list_skins).post(skin_handlers::create_skin),
+        )
+        .route(
+            "/skins/{id}",
+            get(skin_handlers::get_skin)
+                .put(skin_handlers::update_skin)
+                .delete(skin_handlers::delete_skin),
         )
         .route("/dashboards/import", post(handlers::import_dashboard))
         .route("/dashboards/reload", post(handlers::reload_dashboards))
