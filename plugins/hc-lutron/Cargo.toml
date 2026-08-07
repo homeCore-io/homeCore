@@ -3,7 +3,7 @@ name        = "hc-lutron"
 version     = "0.1.14"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Lutron RadioRA2 plugin for homeCore"
+description = "Lutron RadioRA2 dimmers, switches and scenes, over telnet to the main repeater"
 repository  = "https://github.com/homeCore-io/hc-lutron"
 
 [[bin]]

@@ -3,7 +3,7 @@ name        = "hc-thermostat"
 version     = "0.1.13"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Virtual thermostat plugin for homeCore — aggregates temperature sensors, applies hysteresis + short-cycle protection, drives an actuator device on/off"
+description = "Software thermostats that read temperature sensors and drive a switch to a setpoint"
 repository  = "https://github.com/homeCore-io/hc-thermostat"
 
 [[bin]]

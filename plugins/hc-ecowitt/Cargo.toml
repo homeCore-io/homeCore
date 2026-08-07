@@ -3,7 +3,7 @@ name        = "hc-ecowitt"
 version     = "0.1.12"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Ecowitt weather station plugin for homeCore"
+description = "Ecowitt weather stations, with sensors discovered from the gateway's data stream"
 repository  = "https://github.com/homeCore-io/hc-ecowitt"
 
 [[bin]]

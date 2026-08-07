@@ -3,7 +3,7 @@ name        = "hc-sonos"
 version     = "0.1.11"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Sonos speaker plugin for homeCore"
+description = "Sonos speakers as media players, discovered over UPnP"
 repository  = "https://github.com/homeCore-io/hc-sonos"
 
 [[bin]]

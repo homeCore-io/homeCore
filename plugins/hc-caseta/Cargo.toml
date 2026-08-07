@@ -3,7 +3,7 @@ name        = "hc-caseta"
 version     = "0.1.11"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Lutron Caseta plugin for homeCore"
+description = "Lutron Caseta dimmers, switches and Pico remotes, via a Smart Bridge Pro over LIP"
 repository  = "https://github.com/homeCore-io/hc-caseta"
 
 [[bin]]

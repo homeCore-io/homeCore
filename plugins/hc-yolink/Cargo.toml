@@ -3,7 +3,7 @@ name        = "hc-yolink"
 version     = "0.1.12"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "YoLink/YoSmart sensor plugin for homeCore"
+description = "YoLink door, motion and temperature sensors, over the YoLink cloud MQTT service"
 repository  = "https://github.com/homeCore-io/hc-yolink"
 
 [[bin]]

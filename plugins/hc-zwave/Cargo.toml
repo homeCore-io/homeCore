@@ -3,7 +3,7 @@ name        = "hc-zwave"
 version     = "0.1.9"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Z-Wave JS plugin for homeCore"
+description = "Z-Wave locks, dimmers, switches and sensors, through a zwave-js server"
 repository  = "https://github.com/homeCore-io/hc-zwave"
 
 [[bin]]
