@@ -12,7 +12,9 @@
 //! every layout reads back authored, which looks exactly like the client
 //! failing to save.
 
-use hc_types::dashboard::{DashboardBreakpoint, DashboardLayout, DashboardWidgetPlacement};
+use hc_types::dashboard::{
+    DashboardBreakpoint, DashboardFlow, DashboardLayout, DashboardWidgetPlacement,
+};
 
 fn layout(derived_from: Option<DashboardBreakpoint>) -> DashboardLayout {
     DashboardLayout {
@@ -28,6 +30,7 @@ fn layout(derived_from: Option<DashboardBreakpoint>) -> DashboardLayout {
             h: 2,
         }],
         derived_from,
+        flow: DashboardFlow::default(),
     }
 }
 
@@ -74,4 +77,51 @@ fn an_authored_layout_does_not_write_the_key_at_all() {
         json.get("derived_from").is_none(),
         "expected the key to be omitted, got {json}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// flow
+// ---------------------------------------------------------------------------
+
+/// A gap is content, and the document has to be able to say so.
+///
+/// `hc_types` structs have no `deny_unknown_fields`, so a field core does not
+/// know about is dropped silently on the way through — which is how a client
+/// can send `flow: free`, get a 200, and find every gap closed on reload with
+/// nothing anywhere saying why. Same reasoning as `derived_from` above.
+#[test]
+fn flow_survives_a_round_trip() {
+    let mut l = layout(None);
+    l.flow = DashboardFlow::Free;
+    let json = serde_json::to_string(&l).unwrap();
+    let after: DashboardLayout = serde_json::from_str(&json).unwrap();
+    assert_eq!(after.flow, DashboardFlow::Free);
+}
+
+#[test]
+fn flow_is_snake_case_on_the_wire() {
+    let mut l = layout(None);
+    l.flow = DashboardFlow::Free;
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+    assert_eq!(json["flow"], "free");
+}
+
+/// Every dashboard already in redb predates this field.
+///
+/// Absence must read as `Packed`: a gap could not be expressed at all before
+/// `flow`, so that is not a guess about what those documents meant, it is the
+/// only thing they can have meant. Erring the other way would let a client stop
+/// packing a layout that was authored expecting it.
+#[test]
+fn a_layout_without_flow_is_packed() {
+    let json = r#"{
+        "breakpoint": "desktop",
+        "columns": 12,
+        "row_height": 120.0,
+        "gap": 12.0,
+        "placements": []
+    }"#;
+    let parsed: DashboardLayout = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.flow, DashboardFlow::Packed);
 }
