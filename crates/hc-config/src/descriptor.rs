@@ -59,6 +59,7 @@ pub fn system_config_descriptor() -> Value {
         .section(influx())
         .section(metrics())
         .section(registry())
+        .section(plugin_runtimes())
         .section(lifecycle())
         .section(logging())
         .section(logging_stderr())
@@ -446,6 +447,84 @@ fn registry() -> Section {
             Field::text("registry.public_key")
                 .label("Signing key")
                 .help("Base64 ed25519 public key the index is verified against."),
+        )
+}
+
+fn plugin_runtimes() -> Section {
+    Section::new("plugin_runtimes", "Plugin runtimes")
+        .help(
+            "Containers you run yourself that host plugins written in other \
+             languages. homeCore does not manage the container — only whether \
+             one is allowed to join.",
+        )
+        .field(
+            Field::toggle("plugin_runtimes.enabled")
+                .label("Allow plugin runtimes")
+                .default(true),
+        )
+        .field(
+            Field::enumeration("plugin_runtimes.mode")
+                .label("Enrollment")
+                .render("segmented")
+                .default("open")
+                .help(
+                    "Open: a runtime may ask to join and you approve it by matching \
+                     a code shown in its logs. Token: you issue a token first and \
+                     nothing is ever left pending.",
+                )
+                .option("open", "Open")
+                .option("token", "Token only")
+                .visible_when(Cond::truthy("plugin_runtimes.enabled")),
+        )
+        .field(
+            Field::toggle("plugin_runtimes.whitelist_only")
+                .label("Local network only")
+                .default(true)
+                .help("Only allow enrollment from the addresses in Security -> whitelist.")
+                .visible_when(Cond::truthy("plugin_runtimes.enabled")),
+        )
+        .field(
+            Field::duration("plugin_runtimes.pending_ttl_mins")
+                .label("Pending expires after")
+                .unit("mins")
+                .default(15)
+                .min(1)
+                .visible_when(Cond::all([
+                    Cond::truthy("plugin_runtimes.enabled"),
+                    Cond::eq("plugin_runtimes.mode", "open"),
+                ])),
+        )
+        .field(
+            Field::int("plugin_runtimes.max_pending")
+                .label("Max pending at once")
+                .default(5)
+                .min(1)
+                .help("Bounds how many requests can queue for your attention.")
+                .visible_when(Cond::all([
+                    Cond::truthy("plugin_runtimes.enabled"),
+                    Cond::eq("plugin_runtimes.mode", "open"),
+                ])),
+        )
+        .field(
+            Field::int("plugin_runtimes.max_denials")
+                .label("Denials before cooldown")
+                .default(3)
+                .min(1)
+                .visible_when(Cond::all([
+                    Cond::truthy("plugin_runtimes.enabled"),
+                    Cond::eq("plugin_runtimes.mode", "open"),
+                ])),
+        )
+        .field(
+            Field::duration("plugin_runtimes.denial_cooldown_mins")
+                .label("Cooldown")
+                .unit("mins")
+                .default(60)
+                .min(1)
+                .visible_when(Cond::all([
+                    Cond::truthy("plugin_runtimes.enabled"),
+                    Cond::eq("plugin_runtimes.mode", "open"),
+                ])),
         )
 }
 
