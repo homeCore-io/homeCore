@@ -702,3 +702,103 @@ Plugins run as a non-root user, and the host does not need to be root either.
   `docker pull` and a restart — which is the operator's job, and probably should
   stay that way. But core will know when a runtime is older than it expects, and
   should say so.
+
+---
+
+# Piece 5: The hc-web surface
+
+Almost all of this is already built, because a runtime *is* a plugin. The
+runtime gets `plugin_studio_page.dart` — header, notices band, config panes,
+actions — with no new page. What is genuinely new is the moment before it
+becomes a plugin, and the fact that some plugins now run somewhere.
+
+## New: pending runtimes
+
+The only surface that cannot reuse the plugin machinery, because at this point
+the runtime has no credentials and is not a plugin yet.
+
+**Where.** Settings, not Plugins. It is an admin decision about admitting a
+machine, not a plugin you manage — and putting an unauthenticated stranger's
+self-description on the Plugins page invites approving it as though it were
+already trusted. A pending record does need to *reach* the operator wherever
+they are, so it also raises a system notification, the way a plugin notice does.
+
+**What it must show.** The `code`, larger and in mono, is the point of the
+screen. Everything else — source IP, hostname, kind, runtime and SDK versions,
+advertised ABI and arch, time remaining before it expires — is supporting
+evidence for the same question.
+
+The copy has to state the check plainly, because the whole security of open mode
+is that the admin performs it:
+
+> Compare this code with the one in your container's logs. If they do not match,
+> deny — something else is asking to join.
+
+**Actions.** Approve and Deny, with Deny the low-friction one. Deny should not
+feel destructive; it is the safe answer to an unrecognised request, and the
+runtime can retry.
+
+## New: hosted plugins, on the runtime's page
+
+A pane in the runtime's existing studio page listing what it hosts: plugin id,
+version, running state, last restart. Rows link to that plugin's own page.
+
+Its own capability actions — `install_plugin`, `remove_plugin`,
+`restart_plugin` — already render as buttons via the action drawer, so the pane
+is a list plus links rather than a control surface.
+
+## New: attribution, on the hosted plugin's page
+
+One line in the header — "Running in pyhost-01", linking to the runtime. That
+is the whole feature. A hosted plugin is otherwise an ordinary plugin and should
+not look like a special case; the only thing an operator needs is to know where
+to go when it will not start.
+
+## Changed: the registry sheet
+
+`registry_sheet.dart` currently assumes every plugin installs here. With
+placement it has three cases:
+
+| situation | behaviour |
+|---|---|
+| one matching runtime | install normally; name the destination on the button or beneath it |
+| several matching | ask which, then install |
+| none enrolled | **do not hide the plugin** — show it with what it needs and a link to enroll a runtime |
+
+The last row is the important one. Hiding uninstallable plugins means nobody
+discovers that runtimes exist, and the catalog quietly looks smaller than it is.
+An explicit "needs a python runtime — none enrolled" is a feature announcement
+in the one place someone is already shopping for plugins.
+
+## Changed: token mode
+
+An admin issues a one-time enrollment token, shown once and copyable. `hc-web`
+has no existing show-once secret pattern to inherit — API keys are minted
+server-side and `users_page.dart` does not display one — so this is a small new
+component, and it belongs beside the pending list in Settings.
+
+## What must not regress
+
+- **Design tokens are ratcheted.** `test/design/token_ratchet_test.dart` fails
+  on literal `fontSize:` values and corner radii, because a literal does not
+  receive a skin's `scale`. New screens use the ramp.
+- **A skin must reach all of it.** Nothing here may pin its own colours; the
+  pending banner and the code block are as skinnable as everything else.
+- **Verify by screenshot.** The API payload is not the page — a pending runtime
+  that renders off-screen or a code that wraps is the failure this surface
+  cannot afford.
+
+## Open questions
+
+- **Does a runtime appear in the Plugins list at all?** It is one, so it will
+  unless filtered. Showing it is honest and gives the hosted-plugins pane a home;
+  it also means "Plugins" contains a thing that is not a device integration.
+  Leaning toward showing it with a distinct badge rather than a separate
+  section, and revisiting once there is more than one.
+- **Where do a hosted plugin's crash-loop signals converge?** The runtime raises
+  a notice, and the plugin itself goes offline for want of a heartbeat. Two true
+  signals about one fault. Probably the plugin's card should say why it is
+  offline by reading the runtime's notice, rather than both shouting.
+- **Does the pending list need a sound or push?** It expires in 15 minutes,
+  which is short if nobody is looking at the screen. `hc-notify` is already
+  wired for this kind of thing.
