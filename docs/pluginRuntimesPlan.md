@@ -1,4 +1,11 @@
-# Plugin Runtimes — Piece 1: Enrollment
+# Plugin Runtimes
+
+Container-based plugins, in pieces. Piece 1 is how a runtime joins homeCore;
+piece 2 is how a plugin gets into one.
+
+---
+
+# Piece 1: Enrollment
 
 ## What this is
 
@@ -11,9 +18,8 @@ container lifecycle. The operator runs the container in whatever runtime they
 like; homeCore manages what is *inside* it, over the plugin management protocol
 that already exists.
 
-This document covers enrollment only: discover → register → approve →
-credential exchange. What runs inside an approved runtime, and how plugins get
-installed into it, is piece 2.
+This piece covers enrollment only: discover → register → approve → credential
+exchange. What runs inside an approved runtime is piece 2, below.
 
 ## Why this piece exists at all
 
@@ -208,3 +214,201 @@ Two things piece 1 must carry forward so piece 2 is not blocked:
   source)? Convenient for fleets, weaker for homes. Probably not piece 1.
 - Where does the pending list live in hc-web — the Plugins page, or somewhere
   in Settings? It is an admin action, not a plugin.
+
+---
+
+# Piece 2: Placing a plugin in a runtime
+
+## Decisions taken
+
+- **Hermetic artifacts.** A plugin ships with every dependency it needs,
+  vendored and signed as one unit. Nothing is downloaded at provision time.
+- **Multi-arch from the start.** x86_64 and aarch64 both, rather than adding the
+  second one after the house moves to a Pi.
+- **Core verifies, the runtime executes.** Signature checking happens in exactly
+  one implementation.
+- **Install is placement.** `POST /plugins/install` stays the endpoint; core
+  decides where the plugin runs.
+
+## Organizing principle: core holds desired state
+
+Core records that `plugin.foo v0.2.1` is placed on `pyhost-01`. On connect a
+runtime reports what it actually has; core diffs and re-provisions the
+difference.
+
+This makes a lost container volume a non-event — the runtime re-enrolls, reports
+nothing installed, and core replays every placement. It is `reconcile_devices`
+one level up, and it means the runtime never has to be backed up.
+
+## Install is placement, not a new flow
+
+`POST /api/v1/plugins/install { id, version?, runtime_id? }` stays *the*
+endpoint. Core resolves the artifact from the registry; if its `runtime` is not
+`native`, core dispatches to a matching approved runtime instead of unpacking
+locally.
+
+- `runtime_id` given → place there, or fail if it cannot host the artifact.
+- omitted → auto-place when exactly one runtime matches; otherwise ask.
+- nothing matches → a specific error ("plugin.foo needs a python runtime; none
+  enrolled"), never a generic failure.
+
+The admin clicks Install and does not need to know where it runs.
+
+## Trust: core verifies, the runtime executes
+
+Core downloads the artifact and checks the index signature and the artifact
+sha256 exactly as it does for a binary plugin today. It then serves the
+**verified bytes** to the runtime over authenticated HTTP; the runtime pulls
+with its API key and confirms the sha256 core gave it.
+
+The alternative — each runtime fetching from the registry itself — means
+reimplementing ed25519 index verification in Python, JavaScript and .NET, by
+three different authors, in security-critical code that fails open when it is
+wrong. One implementation, in core, is the whole point.
+
+## The artifact
+
+```
+plugin.<id>-<version>-<runtime>-<abi>-<arch>.tar.zst
+├── plugin.toml       # id, name, version, runtime, abi, arch, entrypoint
+├── src/              # the plugin itself
+└── wheelhouse/       # every dependency as a wheel, including the SDK
+```
+
+Installing it is `pip install --no-index --find-links wheelhouse` — offline, by
+construction. If a wheel is missing the install fails at build time, not on the
+operator's machine.
+
+`plugin.toml` gains what a binary plugin does not need:
+
+```toml
+id         = "plugin.foo"
+name       = "Foo"
+version    = "0.2.1"
+runtime    = "python"
+abi        = "cp312-manylinux_2_28"
+arch       = "x86_64"
+entrypoint = "hc_foo.main:run"
+```
+
+### A venv per plugin
+
+Each plugin installs into its own virtualenv inside the runtime. Two plugins
+that want different `aiohttp` versions must not fight, and one plugin's upgrade
+must not break its neighbour. The cost is disk, which is the cheapest thing we
+have.
+
+## Multi-arch is cheap here, and that is worth knowing
+
+Rust cross-compilation needs toolchains or QEMU. Building a Python wheelhouse
+does not, because we are **downloading prebuilt wheels rather than compiling**:
+
+```sh
+pip download \
+  --platform manylinux_2_28_x86_64 \
+  --python-version 3.12 \
+  --only-binary=:all: \
+  -r requirements.txt -d wheelhouse/
+```
+
+Changing `--platform` to `manylinux_2_28_aarch64` produces the aarch64
+wheelhouse from the same x86_64 CI runner. No emulation, no second builder.
+
+`--only-binary=:all:` is load-bearing: it makes the build **fail** when a
+dependency has no wheel for the target, rather than silently falling back to a
+source build that would need a compiler on the operator's machine and would not
+be hermetic. A loud CI failure is the correct outcome — it means that plugin
+does not support that architecture yet, and we should know.
+
+Pure-Python dependencies produce `py3-none-any` wheels that work everywhere, so
+many plugins will have byte-identical wheelhouses across architectures. Not
+worth deduplicating; just build both.
+
+## Recommendation: glibc, not musl, for the Python base image
+
+Core ships on alpine because a static Rust binary makes musl free. Python is a
+different ecosystem: `manylinux` is the paved road and effectively every wheel
+publishes for it, while `musllinux` coverage is good for the popular packages
+and patchy in the long tail. On musl, the gaps turn into source builds, which
+`--only-binary=:all:` will correctly refuse.
+
+So the Python runtime base image should be debian-slim. It is a larger image in
+exchange for a much larger set of installable plugins, which is the trade this
+whole effort exists to make.
+
+This is a per-runtime decision, not a homeCore-wide one — a future Node or .NET
+runtime can choose differently.
+
+## Registry index changes
+
+Artifact entries today carry `{os, arch, url, sha256, size, key_id}`. Two
+additions:
+
+```json
+{ "runtime": "python", "abi": "cp312-manylinux_2_28", ... }
+```
+
+Both `#[serde(default)]`, with `runtime` defaulting to `"native"` — so every
+entry already in the index keeps working untouched, and a plugin published
+before this change is still a binary plugin.
+
+### Matching
+
+The runtime advertises its triple at enrollment (piece 1's `capabilities`):
+
+```json
+{ "runtime": "python", "abi": "cp312-manylinux_2_28", "arch": "x86_64" }
+```
+
+Core places an artifact whose triple matches an approved runtime.
+
+**v1 uses exact string equality on all three, and pins both sides.** Strictly,
+`manylinux_2_28` wheels run on any glibc ≥ 2.28, so the honest rule is a
+comparison rather than an equality — but we control the base image and the build
+pipeline, so pinning both sides is correct now and the comparison can arrive
+when a second ABI actually exists. Exact match fails loudly; a wrong comparison
+fails at import time inside the container.
+
+Pin one Python version per homeCore minor. That keeps the matrix at
+`arch × runtime`, and makes ABI upgrades a deliberate release note rather than a
+drift.
+
+## Lifecycle
+
+| step | mechanism |
+|---|---|
+| provision | core mints the per-plugin MQTT credential, seeds config, hands artifact + config to the runtime |
+| start, restart on crash | the runtime, mirroring `plugin_launcher`'s backoff |
+| health | the plugin's own heartbeat — core needs no new concept |
+| config edit | `set_config` reaches the plugin over MQTT as today; core asks the runtime to restart it |
+| upgrade | install a new version; runtime keeps `<id>/<version>/` like core does, so rollback works |
+| uninstall | core tells the runtime to remove, then clears devices, credentials and tombstone as today |
+
+Because a runtime *is* a plugin, all of this is capability actions on it:
+
+- `install_plugin` — streaming, with fetch / verify / unpack / start progress
+- `remove_plugin`, `restart_plugin`, `list_plugins`
+
+`hc-zwave`'s `inclusion.rs` is the worked example for the streaming shape, and
+hc-web renders these with no new UI.
+
+## Not in this piece
+
+- The Python host implementation itself.
+- The CI that *builds* these artifacts — that is piece 3, in hc-scripts.
+- Porting anything.
+
+## Open questions
+
+- **Artifact size.** Tens of MB per artifact × versions × arches, in GitHub
+  releases. Fine for storage; worth watching what it does to install time on a
+  slow connection, and whether the runtime should keep a local cache across
+  reinstalls.
+- **Who owns the venv when a plugin is removed** — delete it eagerly, or keep it
+  for a fast reinstall? Leaning eager, with the version directory as the
+  rollback mechanism.
+- **Does a runtime refuse an artifact it cannot verify**, or trust core
+  entirely? It checks the sha256 core supplies, which catches transport
+  corruption but not a compromised core. That seems the right boundary — if core
+  is compromised, the plugin credentials are already gone — but it should be a
+  stated boundary rather than an accident.
