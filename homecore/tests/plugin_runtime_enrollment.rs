@@ -170,7 +170,9 @@ async fn denial_counts_toward_a_cooldown() {
         max_denials: 1,
         ..Default::default()
     };
-    let h = Harness::start_with(&tmp, local_only(), policy).await.unwrap();
+    let h = Harness::start_with(&tmp, local_only(), policy)
+        .await
+        .unwrap();
     let base = h.tcp_base();
     let http = reqwest::Client::new();
 
@@ -188,7 +190,8 @@ async fn denial_counts_toward_a_cooldown() {
         .unwrap();
     assert_eq!(denied["status"].as_str(), Some("denied"));
     assert_eq!(
-        denied["code"], serde_json::Value::Null,
+        denied["code"],
+        serde_json::Value::Null,
         "a resolved record must stop advertising a code to compare"
     );
 
