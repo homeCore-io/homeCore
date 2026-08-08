@@ -59,6 +59,7 @@ pub struct StateStore {
     audit: Arc<AuditStore>,
     battery: Arc<BatteryStore>,
     plugin_state: Arc<PluginStateStore>,
+    plugin_runtimes: Arc<PluginRuntimeStore>,
 }
 
 impl StateStore {
@@ -95,6 +96,7 @@ impl StateStore {
             audit,
             battery,
             plugin_state,
+            plugin_runtimes,
         ) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
@@ -130,6 +132,7 @@ impl StateStore {
             let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
             let battery = BatteryStore::new(Arc::clone(&db))?;
             let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
+            let plugin_runtimes = PluginRuntimeStore::new(Arc::clone(&db))?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -141,6 +144,7 @@ impl StateStore {
                 audit,
                 battery,
                 plugin_state,
+                plugin_runtimes,
             ))
         })
         .await??;
@@ -156,12 +160,22 @@ impl StateStore {
             audit: Arc::new(audit),
             battery: Arc::new(battery),
             plugin_state: Arc::new(plugin_state),
+            plugin_runtimes: Arc::new(plugin_runtimes),
         })
     }
 
     // --- Plugin-learned state (D8 split, leg 2) ---
 
     /// Full learned-state document a plugin has persisted, or `None`.
+    /// Enrollment records for container-hosted plugin runtimes.
+    ///
+    /// Handed out rather than wrapped in async helpers like the device store,
+    /// because every caller is an HTTP handler that already has an executor and
+    /// the operations are single small reads.
+    pub fn plugin_runtimes(&self) -> Arc<PluginRuntimeStore> {
+        Arc::clone(&self.plugin_runtimes)
+    }
+
     pub async fn plugin_state_get(&self, plugin_id: &str) -> Result<Option<serde_json::Value>> {
         let store = Arc::clone(&self.plugin_state);
         let id = plugin_id.to_string();
