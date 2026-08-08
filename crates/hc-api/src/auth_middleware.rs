@@ -469,6 +469,7 @@ mod tests {
         let jwt = std::sync::Arc::new(jwt);
         Router::new()
             .route("/guarded", get(guarded_handler))
+            .route("/guarded-write", get(guarded_write_handler))
             .route_layer(axum::middleware::from_fn_with_state(
                 jwt.clone(),
                 |axum::extract::State(j): axum::extract::State<std::sync::Arc<JwtService>>,
@@ -505,6 +506,10 @@ mod tests {
     }
 
     async fn guarded_handler(_: DevicesRead) -> impl IntoResponse {
+        StatusCode::OK
+    }
+
+    async fn guarded_write_handler(_: DevicesWrite) -> impl IntoResponse {
         StatusCode::OK
     }
 
@@ -612,7 +617,7 @@ mod tests {
     /// role that lacks `devices:read`.  We build a Claims struct manually via
     /// `jsonwebtoken` since `JwtService::issue` always uses a known Role.
     #[tokio::test]
-    async fn token_missing_scope_returns_403() {
+    async fn a_stale_scope_list_is_overruled_by_the_role() {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
         let secret = b"scope-test-secret-32-bytes-minimum";
@@ -622,13 +627,16 @@ mod tests {
             .as_secs()
             + 3600;
 
-        // Claims with an empty scopes vec.
+        // A session minted before a scope existed looks exactly like this: the
+        // role is right and the frozen list is short. It used to be refused,
+        // which is what stranded every logged-in browser when 0.1.30 added
+        // `skins:write` — a 403 is not a 401, so nothing refreshed it.
         let claims = Claims {
             sub: "dave".into(),
             uid: "uid-dave".into(),
             exp,
             role: hc_auth::user::Role::ReadOnly,
-            scopes: vec![], // no scopes
+            scopes: vec![],
             actor: None,
             tv: 0,
         };
@@ -639,9 +647,7 @@ mod tests {
         )
         .unwrap();
 
-        let svc = JwtService::new_hs256(secret, 24);
-        let app = make_router(svc);
-
+        let app = make_router(JwtService::new_hs256(secret, 24));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -652,7 +658,109 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "read_only grants devices:read, so the role should allow it \
+             however old the token is"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_that_lacks_the_scope_is_still_refused() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let secret = b"scope-test-secret-32-bytes-minimum";
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+
+        // Deriving from the role must not mean granting everything: read_only
+        // has no devices:write, and a generously-stuffed scope list must not
+        // buy one either.
+        let claims = Claims {
+            sub: "dave".into(),
+            uid: "uid-dave".into(),
+            exp,
+            role: hc_auth::user::Role::ReadOnly,
+            scopes: vec!["devices:write".into()],
+            actor: None,
+            tv: 0,
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let app = make_router(JwtService::new_hs256(secret, 24));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/guarded-write")
+                    .header("Authorization", bearer(&token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_judged_on_its_own_scopes_not_its_role() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let secret = b"scope-test-secret-32-bytes-minimum";
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+
+        // API-key claims carry `role: Admin` as a placeholder because the role
+        // is unused for keys. If scope checks derived from it, every key in the
+        // house would become an administrator — so this is the guard on the
+        // change above, at the layer that actually refuses requests.
+        let claims = Claims {
+            sub: "api_key:dashboard".into(),
+            uid: uuid::Uuid::nil().to_string(),
+            exp,
+            role: hc_auth::user::Role::Admin,
+            scopes: vec![],
+            actor: Some(hc_auth::actor::Actor::ApiKey {
+                id: uuid::Uuid::nil(),
+                owner_uid: uuid::Uuid::nil(),
+                label: "dashboard".into(),
+            }),
+            tv: 0,
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let app = make_router(JwtService::new_hs256(secret, 24));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/guarded")
+                    .header("Authorization", bearer(&token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a key granted nothing may do nothing, whatever its role says"
+        );
     }
 
     #[tokio::test]
