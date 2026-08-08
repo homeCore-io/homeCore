@@ -1,4 +1,4 @@
-//! Per-IP rate limiting for the login endpoint.
+//! Per-IP rate limiting for unauthenticated endpoints.
 //!
 //! Sliding window over the last `WINDOW`. If the same source IP submits more
 //! than `MAX_ATTEMPTS` requests in that window, further requests get 429 with
@@ -28,15 +28,27 @@ use std::time::{Duration, Instant};
 const MAX_ATTEMPTS: usize = 5;
 const WINDOW: Duration = Duration::from_secs(60);
 
-fn buckets() -> &'static Mutex<HashMap<IpAddr, Vec<Instant>>> {
-    static B: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
+type Buckets = Mutex<HashMap<IpAddr, Vec<Instant>>>;
+
+fn login_buckets() -> &'static Buckets {
+    static B: OnceLock<Buckets> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Separate budget from login, deliberately.
+///
+/// A shared map would let a container retrying its enrollment lock the operator
+/// out of the login form from the same address — and the reverse. Two
+/// unauthenticated endpoints, two budgets.
+fn enroll_buckets() -> &'static Buckets {
+    static B: OnceLock<Buckets> = OnceLock::new();
     B.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Record an attempt from `ip`. Returns `Ok(())` if accepted, or
 /// `Err(retry_after_seconds)` if the IP has hit the limit.
-fn record(ip: IpAddr, now: Instant) -> Result<(), u64> {
-    let mut state = buckets().lock().expect("rate limiter mutex poisoned");
+fn record_in(buckets: &'static Buckets, ip: IpAddr, now: Instant) -> Result<(), u64> {
+    let mut state = buckets.lock().expect("rate limiter mutex poisoned");
 
     // GC empty / fully-aged-out entries opportunistically. Cheap because the
     // map only ever holds IPs that recently touched the login endpoint.
@@ -56,6 +68,10 @@ fn record(ip: IpAddr, now: Instant) -> Result<(), u64> {
     }
     entry.push(now);
     Ok(())
+}
+
+fn record(ip: IpAddr, now: Instant) -> Result<(), u64> {
+    record_in(login_buckets(), ip, now)
 }
 
 pub async fn login_rate_limit(
@@ -84,6 +100,39 @@ pub async fn login_rate_limit(
     }
 }
 
+/// Rate limit for `POST /plugin-runtimes/enroll`.
+///
+/// Applied to enrollment but **not** to the status poll: a runtime polls that
+/// endpoint every couple of seconds for up to the pending TTL, and the poll is
+/// already gated by a full-strength single-use secret, so limiting it would
+/// break the legitimate case to defend against a brute force that is not
+/// feasible anyway.
+pub async fn enroll_rate_limit(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match record_in(enroll_buckets(), addr.ip(), Instant::now()) {
+        Ok(()) => next.run(request).await,
+        Err(retry_after) => {
+            tracing::warn!(
+                ip = %addr.ip(),
+                retry_after_seconds = retry_after,
+                "plugin-runtime enrollment rate limit exceeded"
+            );
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", retry_after.to_string())],
+                Json(json!({
+                    "error": "too many enrollment attempts",
+                    "retry_after_seconds": retry_after,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,7 +143,8 @@ mod tests {
     }
 
     fn reset() {
-        buckets().lock().unwrap().clear();
+        login_buckets().lock().unwrap().clear();
+        enroll_buckets().lock().unwrap().clear();
     }
 
     #[test]
@@ -138,5 +188,27 @@ mod tests {
         }
         // After the window, the bucket should be empty again.
         assert!(record(ip(5), Instant::now()).is_ok());
+    }
+
+    /// The reason the buckets were split. Exhausting one endpoint's budget must
+    /// not lock the same address out of the other — a container retrying its
+    /// enrollment should never cost the operator their login.
+    #[test]
+    fn login_and_enroll_budgets_are_independent() {
+        reset();
+        let now = Instant::now();
+        let addr = ip(9);
+
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(record_in(login_buckets(), addr, now).is_ok());
+        }
+        assert!(
+            record_in(login_buckets(), addr, now).is_err(),
+            "login budget should now be spent"
+        );
+        assert!(
+            record_in(enroll_buckets(), addr, now).is_ok(),
+            "enrollment must be unaffected by login attempts from the same IP"
+        );
     }
 }

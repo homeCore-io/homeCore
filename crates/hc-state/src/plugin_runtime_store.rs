@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const RUNTIMES: TableDefinition<&str, &str> = TableDefinition::new("plugin_runtimes");
+/// Enrollment tokens, keyed by lookup prefix. Same table file as the runtimes
+/// themselves: both answer "who may join", and splitting them would mean two
+/// stores that always change together.
+const ENROLL_TOKENS: TableDefinition<&str, &str> = TableDefinition::new("plugin_runtime_tokens");
 
 /// Where an enrollment stands. Mirrors `hc_api_types::plugin_runtimes::RuntimeStatus`;
 /// duplicated rather than shared so the storage layer does not depend on the wire crate.
@@ -90,6 +94,34 @@ impl RuntimeRecord {
     }
 }
 
+/// An admin-issued, single-use enrollment token.
+///
+/// Token mode's whole point is that the operator expresses intent *before* a
+/// container asks, so nothing is ever left pending. The token is that intent,
+/// and it is spent the moment it works.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollTokenRecord {
+    /// Indexed lookup prefix of the token body.
+    pub prefix: String,
+    /// argon2id hash of the full token. The token itself is never stored.
+    pub hash: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// Set when redeemed. Present means spent — a second use is not an error to
+    /// be lenient about, it means the token leaked or is being replayed.
+    #[serde(default)]
+    pub used_at: Option<DateTime<Utc>>,
+    /// Which runtime redeemed it, for the audit trail.
+    #[serde(default)]
+    pub used_by: Option<String>,
+}
+
+impl EnrollTokenRecord {
+    pub fn is_usable(&self, now: DateTime<Utc>) -> bool {
+        self.used_at.is_none() && self.expires_at > now
+    }
+}
+
 pub struct PluginRuntimeStore {
     db: Arc<Database>,
 }
@@ -99,6 +131,7 @@ impl PluginRuntimeStore {
         let write_txn = db.begin_write()?;
         {
             write_txn.open_table(RUNTIMES)?;
+            write_txn.open_table(ENROLL_TOKENS)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -179,6 +212,61 @@ impl PluginRuntimeStore {
             self.delete(id)?;
         }
         Ok(stale.len())
+    }
+}
+
+// ── Enrollment tokens ────────────────────────────────────────────────────────
+
+impl PluginRuntimeStore {
+    pub fn create_token(&self, record: &EnrollTokenRecord) -> Result<()> {
+        let json = serde_json::to_string(record)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut t = write_txn.open_table(ENROLL_TOKENS)?;
+            t.insert(record.prefix.as_str(), json.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_token(&self, prefix: &str) -> Result<Option<EnrollTokenRecord>> {
+        let read_txn = self.db.begin_read()?;
+        let t = read_txn.open_table(ENROLL_TOKENS)?;
+        match t.get(prefix)? {
+            Some(v) => Ok(Some(
+                serde_json::from_str(v.value()).context("EnrollTokenRecord deserialize")?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Mark a token spent. Returns false when it was already used or expired, so
+    /// the caller cannot accidentally honour a replay by ignoring the result.
+    pub fn redeem_token(&self, prefix: &str, runtime_id: &str, now: DateTime<Utc>) -> Result<bool> {
+        let Some(mut rec) = self.get_token(prefix)? else {
+            return Ok(false);
+        };
+        if !rec.is_usable(now) {
+            return Ok(false);
+        }
+        rec.used_at = Some(now);
+        rec.used_by = Some(runtime_id.to_string());
+        self.create_token(&rec)?;
+        Ok(true)
+    }
+
+    pub fn list_tokens(&self) -> Result<Vec<EnrollTokenRecord>> {
+        let read_txn = self.db.begin_read()?;
+        let t = read_txn.open_table(ENROLL_TOKENS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_, v) = row?;
+            if let Ok(rec) = serde_json::from_str::<EnrollTokenRecord>(v.value()) {
+                out.push(rec);
+            }
+        }
+        out.sort_by_key(|r| r.created_at);
+        Ok(out)
     }
 }
 
@@ -308,5 +396,51 @@ mod tests {
 
         r.cooldown_until = Some(now - Duration::minutes(1));
         assert!(r.may_retry(now), "cooldown elapsed");
+    }
+
+    fn token(prefix: &str, expires_in: Duration) -> EnrollTokenRecord {
+        EnrollTokenRecord {
+            prefix: prefix.into(),
+            hash: "HASH".into(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + expires_in,
+            used_at: None,
+            used_by: None,
+        }
+    }
+
+    #[test]
+    fn a_token_redeems_once() {
+        let (s, _d) = store();
+        let now = Utc::now();
+        s.create_token(&token("abc", Duration::hours(1))).unwrap();
+
+        assert!(s.redeem_token("abc", "rt-a", now).unwrap(), "first use");
+        assert!(
+            !s.redeem_token("abc", "rt-b", now).unwrap(),
+            "a spent token must not work again — a second use means it leaked"
+        );
+
+        let rec = s.get_token("abc").unwrap().unwrap();
+        assert_eq!(
+            rec.used_by.as_deref(),
+            Some("rt-a"),
+            "first redeemer recorded"
+        );
+    }
+
+    #[test]
+    fn an_expired_token_cannot_be_redeemed() {
+        let (s, _d) = store();
+        let now = Utc::now();
+        s.create_token(&token("old", Duration::minutes(-1)))
+            .unwrap();
+        assert!(!s.redeem_token("old", "rt-a", now).unwrap());
+    }
+
+    #[test]
+    fn redeeming_an_unknown_token_is_false_not_an_error() {
+        let (s, _d) = store();
+        assert!(!s.redeem_token("nope", "rt-a", Utc::now()).unwrap());
     }
 }
