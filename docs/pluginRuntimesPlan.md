@@ -802,3 +802,94 @@ component, and it belongs beside the pending list in Settings.
 - **Does the pending list need a sound or push?** It expires in 15 minutes,
   which is short if nobody is looking at the screen. `hc-notify` is already
   wired for this kind of thing.
+
+---
+
+# Order of work
+
+The five pieces describe a finished system. This is the sequence that gets
+there, arranged so each phase is shippable on its own and the unknowns come
+first.
+
+## What never changes
+
+Existing binary plugins are untouched at every phase. `PluginEntry` gains a
+variant rather than a replacement, the registry gains defaulted fields, and a
+plugin published before any of this is still a binary plugin installed exactly
+as before. There is no migration, and no phase requires one.
+
+## Phase A — the walking skeleton
+
+Enrollment plus the host, proving the loop end to end with everything else
+stubbed.
+
+- piece 1's four endpoints and the runtime store, **token mode only** — it skips
+  pending records, codes and rate limits, which is most of the security surface
+  and none of the plumbing
+- piece 4's host: identity, enroll, connect, register as a plugin, supervise one
+  process
+- placement by API call, artifact from a **local path** — no registry
+- no UI; `curl` and the plugin's own page
+
+Done when a hand-built Python plugin is running under a host and visible in
+homeCore as an ordinary plugin, with its devices in the device list.
+
+This is where the remaining risk lives. The artifact chain is already validated
+by hand (see piece 3); what is unproven is enrollment, credential delivery, and
+whether supervision-from-inside behaves like supervision-from-core.
+
+## Phase B — open enrollment
+
+The rest of piece 1: pending records, codes, rate limits, whitelist gating,
+retry counters and cooldowns, approve and deny.
+
+Deliberately after phase A, because it is the part with a threat model and it
+deserves to be built against a loop that already works rather than at the same
+time as one.
+
+## Phase C — the registry path
+
+Pieces 2 and 3 together, since neither is useful alone.
+
+- `runtime` and `abi` on artifacts; matching at placement
+- core fetches, verifies, and serves verified bytes to the runtime
+- the hc-scripts workflow, the lock, the wheelhouse, multi-arch
+- install-and-run in CI, which is where the two traps in piece 3 get caught
+  permanently
+
+Done when `POST /plugins/install` places a registry plugin on a runtime with no
+local paths anywhere.
+
+## Phase D — the UI
+
+Piece 5. Pending list, hosted-plugins pane, attribution, registry-sheet
+placement, token issuance.
+
+Last because every phase before it is usable over the API, and because the
+screens are easier to design once the states they display actually exist.
+
+## Phase E — the first port
+
+One real integration, chosen for a clean library and API-key auth rather than
+OAuth. Ported by hand, without a generator, keeping notes on what was mechanical
+— those notes are the specification for any tooling that follows.
+
+This is also the honest test of the whole effort: if porting is not markedly
+cheaper than writing a Rust plugin, the answer is to stop here and treat
+runtimes as an interop path rather than a porting strategy.
+
+## What can run in parallel
+
+The host (phase A) and core's endpoints are independent once the enrollment
+request and response shapes are fixed. Fixing those two payloads first is worth
+doing deliberately, because it is the seam that lets the work split.
+
+## Revisit points
+
+Each phase is expected to change what follows. In particular:
+
+- phase A will have opinions about whether the host should be Rust, once
+  somebody has written the supervision loop
+- phase C will discover whether one lock really covers both architectures
+- phase E is allowed to invalidate phase C's assumptions about how much a port
+  reuses, since it is the first time anyone finds out
