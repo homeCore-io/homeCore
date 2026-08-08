@@ -561,3 +561,123 @@ interpreter version by accident.
   pinning allows staged rollout of an SDK change; central pinning keeps the
   fleet consistent. The Rust side is central by construction now, which argues
   for central here too.
+
+---
+
+# Piece 4: The runtime host
+
+Pieces 1–3 define what a runtime does from homeCore's side. This piece is the
+thing inside the container that does it.
+
+## One host, written once, for every language
+
+The host is a **static Rust binary**, shared across runtime kinds. What varies
+per language is described as data, not code.
+
+The reasoning is the same one that put signature verification in core rather
+than in every runtime: enrollment, credential storage, artifact handling,
+supervision and the MQTT management surface are correctness- and
+security-sensitive, and three implementations of them — Python, Node, .NET —
+means three sets of bugs, written by whoever was porting a plugin that week.
+Writing it once also means a fix reaches every runtime kind at once.
+
+The image is then `base image + host binary + adapter`, and adding a language is
+a new base image and a new adapter rather than a new program.
+
+## The adapter is data
+
+`/etc/hc-runtime/adapter.toml`, baked into the image:
+
+```toml
+kind = "python"
+abi  = "cp312-manylinux_2_28"
+
+create_env = ["python3", "-m", "venv", "{env}"]
+install    = ["{env}/bin/pip", "install", "--no-index",
+              "--find-links", "{wheelhouse}", "{plugin_wheel}"]
+launch     = ["{env}/bin/python", "-m", "{entrypoint}", "{config}"]
+```
+
+A Node runtime differs only in these four lines — `npm ci --offline`, `node
+dist/index.js {config}`. The host substitutes paths and runs them; it knows
+nothing about Python.
+
+## A process per plugin
+
+Each hosted plugin runs as its own process, in its own environment. That falls
+out of piece 2's venv-per-plugin decision — two plugins wanting different
+`aiohttp` versions cannot share an interpreter — but it is also what makes a
+crashing plugin a contained event rather than an outage for everything in the
+container.
+
+Which makes the host, precisely, a `plugin_launcher` written for a different
+substrate: spawn, hand the config path as `argv[1]`, restart with exponential
+backoff, and report. The semantics should match core's, because an operator
+should not have to learn two supervision behaviours.
+
+A plugin that crash-loops past its backoff cap becomes a **notice on the
+runtime**, so `plugin.foo is crash-looping in pyhost-01` reaches the operator's
+screen instead of only the container logs.
+
+## Lifecycle
+
+**Start.** Read `HOMECORE_URL` and the data directory from the environment.
+Load the ed25519 identity, or generate and persist one. If credentials exist,
+connect; if not, enroll and print the code prominently, then poll.
+
+**Connected.** Register as `plugin.<kind>-<short-id>` through the Rust SDK, and
+report the installed set so core can diff it against the placements it holds and
+re-provision the difference.
+
+**Placement.** Fetch the artifact from core over authenticated HTTP, verify the
+sha256 core supplied, unpack to `<data>/plugins/<id>/<version>/`, run the
+adapter's `create_env` and `install`, write the config core sent, launch.
+
+**Config change.** Core owns the config file, exactly as it does for binary
+plugins — it lives at `config/plugins/<id>.toml` on core's side, the operator
+edits it in the UI, and core pushes it to the host, which writes it and restarts
+that one plugin. No new ownership model.
+
+**Removal.** Stop, delete the version directory and its environment, report.
+
+## What the host keeps, and what it does not
+
+| in the volume | why |
+|---|---|
+| ed25519 identity | the only thing core cannot regenerate |
+| credentials | re-obtainable by re-enrolling, cached to avoid it |
+| installed plugins, envs, configs | reconstructible from core's placements |
+
+Only the identity is genuinely stateful, and losing it costs one re-approval.
+Everything else is a cache of what core already knows, which is what makes the
+"core holds desired state" principle from piece 2 worth having.
+
+## The isolation boundary, stated plainly
+
+Plugins in the same runtime are **not isolated from each other**. They share a
+container, a filesystem and a user; separate virtualenvs prevent dependency
+conflicts, not interference. What the boundary buys is isolation from the host
+system, from core, and from plugins in *other* runtimes.
+
+So the rule is: **isolation is per runtime, not per plugin.** Anything that
+needs to be contained gets its own runtime, which is cheap precisely because the
+operator runs them and homeCore does not care how many there are. That is the
+flexibility this whole design is for, and it should be documented rather than
+discovered.
+
+Plugins run as a non-root user, and the host does not need to be root either.
+
+## Open questions
+
+- **Does the host stream a hosted plugin's stdout/stderr to core?** The plugin
+  forwards its own tracing over MQTT through the SDK, so the host only sees what
+  a crash prints. Capturing the last N lines of a crashed plugin and attaching
+  them to the crash-loop notice would turn "it keeps restarting" into something
+  diagnosable without shelling into the container.
+- **Concurrency limits.** Nothing stops an operator placing forty plugins on a
+  Raspberry Pi. A declared maximum, advertised at enrollment and enforced at
+  placement, is cheap; deciding the number is not.
+- **Does the host self-update?** It ships in the image, so updating it is
+  `docker pull` and a restart — which is the operator's job, and probably should
+  stay that way. But core will know when a runtime is older than it expects, and
+  should say so.
