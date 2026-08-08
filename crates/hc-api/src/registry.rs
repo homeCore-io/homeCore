@@ -13,11 +13,26 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// One downloadable build of a plugin version, for a specific OS/arch.
+/// One downloadable build of a plugin version.
+///
+/// Native artifacts are a static binary core unpacks and runs itself. Runtime
+/// artifacts are hermetic bundles that only make sense inside a matching plugin
+/// runtime — see `docs/pluginRuntimesPlan.md`, piece 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub os: String,
     pub arch: String,
+    /// `native` (the default, and what every entry published before runtimes
+    /// existed means) or a runtime kind such as `python`.
+    ///
+    /// Defaulted rather than required so an index written by an older publisher
+    /// keeps working untouched: absent means native, which is what it was.
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
+    /// ABI the artifact was built against, e.g. `cp312-manylinux_2_28`. Empty
+    /// for native artifacts, where os/arch already say everything.
+    #[serde(default)]
+    pub abi: String,
     /// Absolute URL of the `.tar.zst` artifact.
     pub url: String,
     /// Hex sha256 of the artifact bytes.
@@ -27,6 +42,11 @@ pub struct ArtifactRef {
     /// Signing key id — single project key for now; enables per-publisher later.
     #[serde(default)]
     pub key_id: String,
+}
+
+/// What `runtime` means when an index entry does not say.
+pub fn default_runtime() -> String {
+    "native".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,8 +174,52 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 impl PluginVersion {
     /// The artifact matching this host's os/arch, if any.
+    /// The native artifact for this host, if any.
+    ///
+    /// Runtime artifacts are excluded deliberately: they are not runnable by
+    /// core, and matching one here would hand the supervisor a wheelhouse to
+    /// exec.
     pub fn artifact_for(&self, os: &str, arch: &str) -> Option<&ArtifactRef> {
-        self.artifacts.iter().find(|a| a.os == os && a.arch == arch)
+        self.artifacts
+            .iter()
+            .find(|a| a.is_native() && a.os == os && a.arch == arch)
+    }
+
+    /// The artifact matching a runtime's advertised triple.
+    ///
+    /// Exact equality on all three, and both sides are pinned — the base image
+    /// fixes the ABI and the build pipeline stamps it. A comparison (`this
+    /// manylinux_2_28 wheel runs on any glibc >= 2.28`) is the honest rule and
+    /// arrives when a second ABI actually exists; until then an exact match
+    /// fails loudly, where a wrong comparison would fail at import time inside
+    /// the container.
+    pub fn artifact_for_runtime(&self, kind: &str, abi: &str, arch: &str) -> Option<&ArtifactRef> {
+        self.artifacts
+            .iter()
+            .find(|a| a.runtime == kind && a.abi == abi && a.arch == arch)
+    }
+
+    /// Runtime kinds this version publishes for, native excluded.
+    ///
+    /// Used to explain a failed placement: "needs a python runtime" is worth
+    /// more to an operator than "no artifact matched".
+    pub fn runtime_kinds(&self) -> Vec<&str> {
+        let mut kinds: Vec<&str> = self
+            .artifacts
+            .iter()
+            .filter(|a| !a.is_native())
+            .map(|a| a.runtime.as_str())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds
+    }
+}
+
+impl ArtifactRef {
+    /// Whether core can run this itself.
+    pub fn is_native(&self) -> bool {
+        self.runtime.is_empty() || self.runtime == "native"
     }
 }
 

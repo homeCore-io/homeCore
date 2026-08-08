@@ -44,6 +44,7 @@ pub mod managed_plugins;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod placement;
 pub mod plugin_config_store;
 pub mod plugin_config_watcher;
 pub mod plugin_install;
