@@ -45,8 +45,28 @@ impl Claims {
         self.role == Role::Admin
     }
 
+    /// Whether this caller may do `scope`.
+    ///
+    /// **A user's scopes are derived from their role here, not read from the
+    /// token.** `issue` writes `role.scopes()` into the token, so the two agree
+    /// the moment a token is minted — and disagree from the moment a release
+    /// adds a scope. A session issued before `skins:write` existed carried a
+    /// list without it and got a 403 from a role that plainly grants it, with
+    /// no way out but re-logging in: a 403 is not a 401, so it never reached
+    /// the client's silent refresh. Deriving here means a new scope takes
+    /// effect on deploy, for everyone, without a forced sign-out — which
+    /// matters most for the wall panels nobody is standing in front of.
+    ///
+    /// **An API key is the exception, and it is the whole reason this is a
+    /// match rather than one line.** A key carries a deliberately *narrowed*
+    /// set, and its `role` is a decorative `Admin` placeholder (see
+    /// `auth_middleware`); deriving from that would hand every key full admin.
+    /// Keys keep being judged on exactly what they were granted.
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|s| s == scope)
+        match self.actor {
+            Some(Actor::ApiKey { .. }) => self.scopes.iter().any(|s| s == scope),
+            _ => self.role.scopes().iter().any(|s| s == scope),
+        }
     }
 
     /// Return the Actor for this token, synthesising a `User` from `uid`/`sub`
@@ -172,6 +192,74 @@ mod tests {
         assert_eq!(claims.role, Role::Admin);
         assert_eq!(claims.tv, 7);
         assert!(claims.scopes.iter().any(|s| s == "devices:write"));
+    }
+
+    /// The bug this file's `has_scope` was changed for.
+    #[test]
+    fn a_user_token_minted_before_a_scope_existed_still_gets_it() {
+        // Exactly the shape of a session issued by an older build: the role is
+        // right, the frozen list is missing something the role now grants.
+        let claims = Claims {
+            sub: "admin".into(),
+            uid: Uuid::nil().to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes: vec!["devices:read".into()],
+            actor: Some(Actor::User {
+                uid: Uuid::nil(),
+                username: "admin".into(),
+            }),
+            tv: 0,
+        };
+        assert!(
+            claims.has_scope("skins:write"),
+            "a scope added by a later release must not need a re-login"
+        );
+    }
+
+    /// The reason `has_scope` branches instead of always deriving.
+    #[test]
+    fn an_api_key_is_never_widened_to_its_decorative_role() {
+        // Middleware builds API-key claims with `role: Role::Admin` because the
+        // role is unused for keys. Deriving from it would turn every key into a
+        // full administrator.
+        let claims = Claims {
+            sub: "api_key:readonly dashboard".into(),
+            uid: Uuid::nil().to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes: vec!["devices:read".into()],
+            actor: Some(Actor::ApiKey {
+                id: Uuid::nil(),
+                owner_uid: Uuid::nil(),
+                label: "readonly dashboard".into(),
+            }),
+            tv: 0,
+        };
+        assert!(claims.has_scope("devices:read"), "its own scope");
+        assert!(!claims.has_scope("devices:write"), "NOT its role's scopes");
+        assert!(!claims.has_scope("users:write"), "NOT its role's scopes");
+    }
+
+    /// A token from before the Actor field existed reads as a user, and a user
+    /// is judged on their role — which is the safe direction only because the
+    /// role travels inside the signed token.
+    #[test]
+    fn a_legacy_token_without_an_actor_is_treated_as_a_user() {
+        let claims = Claims {
+            sub: "someone".into(),
+            uid: Uuid::nil().to_string(),
+            exp: u64::MAX,
+            role: Role::ReadOnly,
+            scopes: vec![],
+            actor: None,
+            tv: 0,
+        };
+        assert!(claims.has_scope("devices:read"));
+        assert!(
+            !claims.has_scope("devices:write"),
+            "read_only stays read only"
+        );
     }
 
     #[test]
