@@ -1,0 +1,28 @@
+[package]
+name        = "hc-runtime-host"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Hosts homeCore plugins written in languages other than Rust"
+
+[[bin]]
+name = "hc-runtime-host"
+path = "src/main.rs"
+
+[dependencies]
+# The enrollment wire types, shared with core so the two cannot drift.
+hc-api-types = { path = "../crates/hc-api-types" }
+tokio        = { workspace = true }
+reqwest      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono       = { workspace = true }
+ed25519-dalek = "2"
+base64       = "0.23"
+getrandom    = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
