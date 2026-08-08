@@ -151,11 +151,22 @@ impl Skin {
             if key.trim().is_empty() {
                 return Err("override key cannot be empty".into());
             }
-            // Overrides are token paths, and every overridable token is a
-            // colour today. A number would need a different representation and
-            // is worth rejecting until it exists rather than storing something
-            // no client can read.
-            parse_hex(value).map_err(|e| format!("override '{key}': {e}"))?;
+            // A colour or a number — the two forms a client can read. It was
+            // colours only until the editor's advanced panel started offering
+            // radii, spacing, densities and durations, and a core that refused
+            // those turned a working editor field into a 400 at save time.
+            //
+            // Not checked *per path*: which token is a colour and which is a
+            // number is the client's catalogue, and a core that policed it
+            // would have to be redeployed to add a row. What core owes is that
+            // the value is readable at all, so a typo like "reddish" or "12px"
+            // is still caught here rather than silently ignored on the client.
+            if parse_hex(value).is_err() && value.parse::<f64>().is_err() {
+                return Err(format!(
+                    "override '{key}': '{value}' is neither a colour \
+                     (#RRGGBB or #AARRGGBB) nor a number"
+                ));
+            }
         }
         Ok(())
     }

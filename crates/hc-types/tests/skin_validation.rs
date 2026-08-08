@@ -134,12 +134,44 @@ fn no_bloom_and_no_radius_is_control_rooms_shape_and_is_fine() {
 }
 
 #[test]
-fn an_override_that_is_not_a_colour_is_rejected_with_its_key() {
+fn an_override_that_is_neither_a_colour_nor_a_number_is_rejected_with_its_key() {
+    for bad in ["burnt sienna", "12px", "#GG0000", ""] {
+        let mut s = skin();
+        s.overrides.insert("accent.warn".into(), bad.into());
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("accent.warn"), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn a_numeric_override_is_stored() {
+    // The editor's advanced panel offers radii, spacing, densities and
+    // durations alongside colours. Core validated every override as a colour
+    // until it did, which turned a working field into a 400 at save time —
+    // found by saving a skin, not by a test, because both sides were
+    // internally consistent.
+    for (key, value) in [
+        ("space.unit", "10"),
+        ("radius.md", "18"),
+        ("motion.baseMs", "260"),
+        ("text.scale", "1.15"),
+        ("glow.strength", "0.5"),
+    ] {
+        let mut s = skin();
+        s.overrides.insert(key.into(), value.into());
+        assert_eq!(s.validate(), Ok(()), "{key} = {value}");
+    }
+}
+
+#[test]
+fn core_does_not_police_which_path_takes_which_kind() {
+    // Which token is a colour and which is a number is the client's
+    // catalogue. A core that knew would have to be redeployed to add a row,
+    // and the client already ignores a value of the wrong kind.
     let mut s = skin();
-    s.overrides
-        .insert("accent.warn".into(), "burnt sienna".into());
-    let err = s.validate().unwrap_err();
-    assert!(err.contains("accent.warn"), "{err}");
+    s.overrides.insert("accent.warn".into(), "12".into());
+    s.overrides.insert("space.unit".into(), "#FF00FF".into());
+    assert_eq!(s.validate(), Ok(()));
 }
 
 #[test]
