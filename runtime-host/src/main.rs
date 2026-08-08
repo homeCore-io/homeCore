@@ -11,9 +11,12 @@
 //!
 //! Phase A covers enrollment. Placement and supervision follow.
 
+mod adapter;
 mod enroll;
 mod identity;
+mod placement;
 mod plugin;
+mod supervisor;
 
 use anyhow::{Context, Result};
 use hc_api_types::plugin_runtimes::RuntimeCapabilities;
@@ -25,6 +28,27 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// A plugin that keeps dying reaches the operator's screen, not just the
+/// container logs.
+///
+/// Keyed per plugin so two flapping plugins do not overwrite each other's
+/// notice, and cleared on recovery because a notice is state.
+fn report_crash_loop(notices: &plugin_sdk_rs::PluginNotices, plugin_id: &str, looping: bool) {
+    use plugin_sdk_rs::types::PluginNotice;
+    let code = format!("crash_loop.{plugin_id}");
+    if looping {
+        notices.raise(
+            PluginNotice::error(
+                code,
+                format!("{plugin_id} keeps exiting and is being restarted."),
+            )
+            .with_remedy("Check this plugin's logs and its configuration."),
+        );
+    } else {
+        notices.clear(&code);
+    }
 }
 
 /// Best-effort hostname, for the operator's benefit at approval time.
@@ -104,18 +128,47 @@ async fn main() -> Result<()> {
 
     let caps = capabilities();
     let notices = plugin::connect_and_register(&creds, &caps, env!("CARGO_PKG_VERSION")).await?;
+    tracing::info!(plugin_id = %creds.plugin_id, "registered with homeCore");
 
-    // Nothing is hosted yet, and an empty runtime is indistinguishable from a
-    // broken one in the plugin list unless it says so.
-    plugin::announce_empty(&notices, &caps.kind);
+    // What this runtime should be running. Core will hold this list and the
+    // runtime will reconcile against it; for now it is local.
+    let placements = placement::load(&data_dir)?;
 
-    tracing::info!(
-        plugin_id = %creds.plugin_id,
-        "registered with homeCore; ready to host plugins"
-    );
+    if placements.is_empty() {
+        // An empty runtime and a broken one are indistinguishable in the plugin
+        // list unless one of them says so.
+        plugin::announce_empty(&notices, &caps.kind);
+        tracing::info!("no plugins placed on this runtime yet");
+    } else {
+        plugin::clear_empty(&notices);
+        let adapter_path =
+            PathBuf::from(env_or("HC_RUNTIME_ADAPTER", "/etc/hc-runtime/adapter.toml"));
+        let adapter = adapter::Adapter::load(&adapter_path)?;
 
-    // Supervision of placements lands next; until then the SDK event loop owns
-    // the process.
+        // Held for the lifetime of the process: dropping the sender would tell
+        // every supervisor to shut down immediately.
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        for p in placements {
+            let argv = adapter::render(&adapter.launch, &p.vars())
+                .with_context(|| format!("rendering the launch command for {}", p.id))?;
+            tracing::info!(plugin_id = %p.id, "hosting");
+
+            let notices = notices.clone();
+            let rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                supervisor::supervise(
+                    supervisor::Supervised {
+                        plugin_id: p.id.clone(),
+                        argv,
+                    },
+                    rx,
+                    move |id, looping| report_crash_loop(&notices, id, looping),
+                )
+                .await;
+            });
+        }
+    }
+
     std::future::pending::<()>().await;
     Ok(())
 }
