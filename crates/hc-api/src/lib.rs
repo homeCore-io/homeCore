@@ -47,6 +47,7 @@ pub mod mode_definition_store;
 pub mod plugin_config_store;
 pub mod plugin_config_watcher;
 pub mod plugin_install;
+pub mod plugin_runtimes;
 pub mod rate_limit;
 pub mod registry;
 pub mod rule_file_store;

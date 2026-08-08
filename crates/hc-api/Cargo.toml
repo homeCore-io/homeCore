@@ -46,6 +46,10 @@ tempfile     = "3"
 # together when jsonwebtoken does. Same reasoning as crossterm/ratatui.
 ed25519-dalek = "2"
 base64       = "0.23"
+# Same primitive hc-auth uses, and for the same reason: every use is "give me N
+# bytes from the OS". Here it is the runtime enrollment code — not a credential,
+# but no reason for it to be guessable either.
+getrandom    = "0.4"
 # 0.10 to match what jsonwebtoken's ed25519-dalek 2 already pulls in; 0.11
 # would add a second digest stack for one SHA-256 helper. Moves with the above.
 sha2         = "0.10"
