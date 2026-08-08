@@ -412,3 +412,152 @@ hc-web renders these with no new UI.
   corruption but not a compromised core. That seems the right boundary — if core
   is compromised, the plugin credentials are already gone — but it should be a
   stated boundary rather than an accident.
+
+---
+
+# Piece 3: Building the artifacts
+
+Piece 2 defines what a runtime plugin artifact *is*. This piece is the pipeline
+that produces one, and it lands in `hc-scripts` as a reusable workflow beside
+`rust-release.yml`.
+
+## Where Python plugins live
+
+**One repository holding all of them**, mirroring what core does for Rust
+plugins: a directory per plugin, one CI, one release workflow, and tags shaped
+`hc-<name>-v<version>`.
+
+The monorepo migration happened because thirteen near-identical per-plugin
+repos each carried a copy of the same workflow and drifted. Standing up a fresh
+repo per Python plugin would repeat that, one language later. `workspace.toml`
+already has a `plugin` role for repos that are not Rust — `hc-matter` uses it —
+so this is one more entry, not a new concept.
+
+## Manifest source
+
+`pyproject.toml`, which the plugin needs anyway:
+
+```toml
+[project]
+name        = "hc-foo"
+version     = "0.2.1"
+description = "Foo lights, over the Foo cloud API"   # → the registry card
+
+[tool.homecore]
+id         = "plugin.foo"
+runtime    = "python"
+entrypoint = "hc_foo.main:run"
+```
+
+`[project]` carries what `[package]` carries in a Cargo.toml, and
+`[tool.homecore]` is the equivalent of a `[package.metadata.homecore]` table.
+Description forwarding to the registry comes free — same mechanism the Rust
+pipeline uses, different parser.
+
+## The SDK is not on an index
+
+`homecore-plugin-sdk` is a proper PEP 517 package, but it is published nowhere,
+so `pip download` cannot fetch it into a wheelhouse. The build must obtain it
+from source: check out `hc-plugin-sdk-py` at a pinned tag and `pip wheel` it
+into the wheelhouse alongside everything else.
+
+That keeps the "nothing is published to a package registry" stance intact and
+bakes an explicit SDK version into each artifact, which is what hermetic means.
+If third-party plugin authors ever appear, publishing the SDK to PyPI becomes
+worth revisiting — they need it to develop against regardless, and today that
+means `pip install git+…`.
+
+## Steps
+
+1. Check out the plugin repo, and `hc-plugin-sdk-py` at its pinned tag.
+2. `setup-python` at the pinned ABI version.
+3. Build the SDK wheel and the plugin's own wheel.
+4. **Lock once**, architecture-independently, to exact versions with hashes
+   (`uv pip compile` or `pip-compile`). This file is committed.
+
+5. **Download per architecture against the lock**, never resolving again:
+
+   ```sh
+   pip download --only-binary=:all: --implementation cp --require-hashes \
+     --python-version "$PY_VERSION" \
+     --platform "manylinux_2_28_${ARCH}" \
+     --platform "manylinux_2_17_${ARCH}" \
+     --platform "manylinux2014_${ARCH}" \
+     -r requirements.lock -d "wheelhouse-${ARCH}/"
+   ```
+
+6. Generate `plugin.toml` from `pyproject.toml`.
+7. `tar --zstd`, sha256, size.
+8. Attach to the GitHub Release.
+9. Dispatch to the registry with `runtime`, `abi`, `arch` and `description`.
+10. Poll the *served* index until the entry appears, as `rust-release.yml`
+   already does.
+
+Even a trivial plugin exercises the platform matrix: the SDK depends on
+`jsonschema`, which pulls `rpds-py`, which is a compiled extension. There is no
+"pure Python so it does not matter" case to fall back on.
+
+### Why the lock, and why three platform tags
+
+`--platform` matches wheel tags **exactly** — it does not treat a
+`manylinux_2_17` wheel as satisfying a `manylinux_2_28` request. Measured on
+2026-08-08, resolving the SDK's own dependencies with a single
+`--platform manylinux_2_28_aarch64` did not fail; pip quietly **backtracked** to
+`jsonschema 4.17.3` from 2022, because that release's dependency tree happened
+to have wheels carrying that exact tag. Passing the compatible range instead
+resolved `jsonschema 4.26.0` with a real `rpds-py` aarch64 wheel.
+
+So `--only-binary=:all:` alone does *not* guarantee a loud failure. It
+guarantees no source builds, which is a different promise — pip will happily
+find some older version that fits rather than tell you the newest one does not.
+Shipping silently ancient dependencies is worse than a red build.
+
+Pinning the versions first is what makes the failure loud: with
+`--require-hashes` against a committed lock there is nothing to backtrack to, so
+an architecture that lacks a wheel for a locked version fails the build and says
+which package. The lock also guarantees both architectures ship the same
+versions, which resolving per-architecture does not.
+
+## What CI must prove
+
+A green build is not a shipped plugin — the same rule the Rust pipeline learned
+the hard way, and it is stricter here because "it compiled" no longer exists as
+a signal.
+
+**x86_64 — prove it runs.** Create a fresh venv, install with
+`--no-index --find-links wheelhouse`, start a scratch MQTT broker in the job,
+run the plugin against it, and assert it connects and registers a device. That
+turns a green release into evidence the artifact is actually runnable, rather
+than evidence the tarball was well-formed.
+
+**aarch64 — prove it resolves, and say so.** The wheelhouse is complete by
+construction, because `--only-binary=:all:` fails the build when any dependency
+lacks a wheel for the target. Running it needs an arm64 runner or emulation.
+Use an arm64 runner for the same install-and-register smoke test where one is
+available; where it is not, the artifact ships **built and resolved but not
+executed**, and the release notes should say that rather than implying parity.
+
+## Registry dispatch
+
+`update-index.py` gains `runtime` and `abi` on the artifact entry, beside the
+existing `os`, `arch`, `url`, `sha256`, `size` and `key_id`. `publish.yml`
+passes them through. Both default, so entries already in the index keep working
+and a plugin published before this change is still a binary plugin.
+
+## Pinning the ABI centrally
+
+`python_version` and the manylinux tag are inputs to the reusable workflow with
+defaults set **in hc-scripts**, not per plugin. Bumping the Python version is
+then one edit that moves every plugin together, matching the "one ABI per
+homeCore minor" rule from piece 2. A plugin cannot drift onto its own
+interpreter version by accident.
+
+## Open questions
+
+- **Artifact size in Releases.** A wheelhouse with compiled deps runs to tens of
+  MB, times two architectures, times every version retained. Worth a retention
+  policy before it becomes one.
+- **Does the plugin repo pin the SDK tag, or does hc-scripts?** Per-plugin
+  pinning allows staged rollout of an SDK change; central pinning keeps the
+  fleet consistent. The Rust side is central by construction now, which argues
+  for central here too.
