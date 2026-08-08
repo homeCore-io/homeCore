@@ -1828,6 +1828,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.2",
  "hc-api-types",
+ "plugin-sdk-rs",
  "reqwest",
  "serde",
  "serde_json",

@@ -13,6 +13,7 @@
 
 mod enroll;
 mod identity;
+mod plugin;
 
 use anyhow::{Context, Result};
 use hc_api_types::plugin_runtimes::RuntimeCapabilities;
@@ -98,10 +99,23 @@ async fn main() -> Result<()> {
     tracing::info!(
         plugin_id = %creds.plugin_id,
         broker = %format!("{}:{}", creds.broker_host, creds.broker_port),
-        "credentials received; ready to host plugins"
+        "credentials received"
     );
 
-    // Phase A ends here. Next: connect to the broker as `creds.plugin_id`,
-    // register through the SDK, and supervise placements.
+    let caps = capabilities();
+    let notices = plugin::connect_and_register(&creds, &caps, env!("CARGO_PKG_VERSION")).await?;
+
+    // Nothing is hosted yet, and an empty runtime is indistinguishable from a
+    // broken one in the plugin list unless it says so.
+    plugin::announce_empty(&notices, &caps.kind);
+
+    tracing::info!(
+        plugin_id = %creds.plugin_id,
+        "registered with homeCore; ready to host plugins"
+    );
+
+    // Supervision of placements lands next; until then the SDK event loop owns
+    // the process.
+    std::future::pending::<()>().await;
     Ok(())
 }

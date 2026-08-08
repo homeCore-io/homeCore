@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 # The enrollment wire types, shared with core so the two cannot drift.
 hc-api-types = { path = "../crates/hc-api-types" }
+# The runtime registers as an ordinary plugin once approved, so it uses the same
+# SDK every Rust plugin does rather than a private protocol.
+plugin-sdk-rs = { path = "../sdk/rust" }
 tokio        = { workspace = true }
 reqwest      = { workspace = true }
 serde        = { workspace = true }
