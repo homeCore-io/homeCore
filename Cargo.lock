@@ -1494,6 +1494,7 @@ dependencies = [
  "chrono",
  "hc-auth",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
