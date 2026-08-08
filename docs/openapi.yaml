@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.29"
+  version: "0.1.30"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1162,6 +1162,113 @@ paths:
   # ---------------------------------------------------------------------------
   # Dashboards
   # ---------------------------------------------------------------------------
+  /skins:
+    get:
+      operationId: listSkins
+      summary: List user-defined skins
+      description: >
+        The built-in skins are compiled into the client and are not returned
+        here — a house that has never defined one gets an empty array, which is
+        the correct answer rather than an error.
+      tags: [skins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of skins, by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Skin"
+        "501":
+          description: Skin storage is not configured
+    post:
+      operationId: createSkin
+      summary: Define a skin
+      tags: [skins]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Skin"
+      responses:
+        "201":
+          description: The stored skin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skin"
+        "400":
+          description: Structurally invalid — unparseable colour, out-of-range number
+        "409":
+          description: A skin with that id already exists
+  /skins/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getSkin
+      summary: One skin
+      tags: [skins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The skin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skin"
+        "404":
+          description: No such skin
+    put:
+      operationId: updateSkin
+      summary: Replace a skin
+      description: >
+        The path id wins over any id in the body, so a PUT to one skin cannot
+        rewrite another.
+      tags: [skins]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Skin"
+      responses:
+        "200":
+          description: The stored skin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skin"
+        "400":
+          description: Structurally invalid
+        "404":
+          description: No such skin
+    delete:
+      operationId: deleteSkin
+      summary: Remove a skin
+      description: >
+        Allowed even if a panel is currently showing it: the client falls back
+        to the built-in the skin was based on.
+      tags: [skins]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Removed
+        "404":
+          description: No such skin
   /dashboards:
     get:
       operationId: listDashboards
@@ -6829,6 +6936,89 @@ components:
         section_id:
           type: string
           nullable: true
+
+    Skin:
+      type: object
+      required: [id, name, base, seeds]
+      description: >
+        A user-defined skin, stored as the decisions it was made from rather
+        than the ~74 tokens they resolve to. Storing the output would freeze
+        every skin at the moment it was written; storing the input means a
+        later improvement to a derivation rule reaches skins already saved.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        base:
+          type: string
+          description: >
+            Which built-in this was forked from. Also the fallback if the skin
+            fails to load.
+        seeds:
+          $ref: "#/components/schemas/SkinSeeds"
+        overrides:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            Individual token overrides keyed by token path, e.g.
+            `accent.warn`. Free-form on purpose, so a client that learns a new
+            overridable token is not silently truncated by an older core.
+
+    SkinSeeds:
+      type: object
+      required:
+        [brightness, ground, raised, sunken, overlay, ink, ink_muted, accent,
+         on_accent, active, inactive, success, warn, danger, offline, hairline,
+         corners, space_unit, type_scale, glow_strength, glow_radius, density,
+         motion]
+      properties:
+        brightness:
+          type: string
+          enum: [dark, light]
+        ground: { type: string }
+        raised: { type: string }
+        sunken: { type: string }
+        overlay: { type: string }
+        ink: { type: string }
+        ink_muted: { type: string }
+        accent: { type: string }
+        on_accent: { type: string }
+        active: { type: string }
+        inactive: { type: string }
+        success: { type: string }
+        warn: { type: string }
+        danger: { type: string }
+        offline: { type: string }
+        hairline: { type: string }
+        focus:
+          type: string
+          description: The focus ring. Absent takes `accent`.
+        corners:
+          type: array
+          items: { type: number }
+          minItems: 4
+          maxItems: 4
+          description: xs, sm, md, lg — ascending.
+        space_unit: { type: number }
+        type_scale: { type: number }
+        glow_strength:
+          type: number
+          description: 0 is no bloom at all, and then `glow_radius` must be 0 too.
+        glow_radius: { type: number }
+        density:
+          type: string
+          enum: [compact, comfortable, wall]
+        motion:
+          type: string
+          enum: [crisp, standard, calm]
+        glass:
+          type: string
+          enum: [none, tinted, frosted]
+          description: >
+            Two decisions, not one — a tint without a blur is what a light skin
+            wants.
 
     DashboardLayout:
       type: object

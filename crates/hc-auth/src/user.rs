@@ -87,12 +87,19 @@ impl Role {
             "dashboards:read",
             "scenes:read",
             "areas:read",
+            // A skin is house-wide appearance. Anyone who can see the house can
+            // see what it looks like — including read-only roles, or the wall
+            // panel would fall back to a built-in for want of a permission.
+            "skins:read",
         ];
         let write_authoring: &[&str] = &[
             "automations:write",
             "dashboards:write",
             "scenes:write",
             "areas:write",
+            // Authoring a skin sits with authoring a dashboard: it is a change
+            // to how the house presents itself, not to what it does.
+            "skins:write",
         ];
         let to_strings = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 

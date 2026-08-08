@@ -7,6 +7,7 @@ use hc_api::{
     group_store::{groups_path, GroupStore},
     logs::LogStreamState,
     rule_file_store::RuleFileStore,
+    skin_store::SkinStore,
     AppState,
 };
 use hc_auth::{hash_password, JwtService, Role, User};
@@ -1028,6 +1029,14 @@ async fn main() -> Result<()> {
         Vec::new()
     });
     let dashboard_store = DashboardStore::new(base_dir.join("data").join("dashboards.json"));
+    let skin_store = SkinStore::new(base_dir.join("data").join("skins.json"));
+    // A malformed skins file must not stop the house booting: the built-in four
+    // are compiled into the client, so the worst case is the appearance someone
+    // had before they wrote it.
+    let skin_data = skin_store.load().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not read skins; starting with none");
+        Default::default()
+    });
     let dashboard_data = dashboard_store.load().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "Failed to load dashboards — starting with empty dashboard list");
         Default::default()
@@ -1092,6 +1101,7 @@ async fn main() -> Result<()> {
     .with_fire_history(fire_history)
     .with_group_store(group_store, groups)
     .with_dashboard_store(dashboard_store, dashboard_data)
+    .with_skin_store(skin_store, skin_data)
     .with_battery_config(battery_tx)
     .with_homecore_config_path(config_path.clone())
     // Inject the binary crate's CARGO_PKG_VERSION so /health,

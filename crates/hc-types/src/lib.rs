@@ -27,6 +27,7 @@ pub mod plugin_capabilities;
 pub mod plugin_notice;
 pub mod rule;
 pub mod schema;
+pub mod skin;
 
 /// The rule vocabulary, derived from the rule types rather than written down.
 /// See [`vocabulary`] for why that distinction is the whole point.

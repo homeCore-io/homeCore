@@ -67,13 +67,89 @@ impl RegistryIndex {
 }
 
 impl RegistryPlugin {
-    /// Latest version (last in the list; the registry publishes in order).
+    /// The newest version listed, **by comparison rather than by position**.
+    ///
+    /// This used to be `versions.last()`, on the theory that the registry
+    /// publishes in order. It does not: `update-index.py` re-sorts the list on
+    /// every write, and it sorted version *strings* — so `0.1.14` landed before
+    /// `0.1.4` and the last entry was whatever happened to sort highest as
+    /// text. Every plugin that reached `0.1.10` therefore installed a version
+    /// several releases old, and `POST /plugins/install` with no `version` is
+    /// exactly the fresh-install path the web UI uses.
+    ///
+    /// The index sort is fixed too, but position stays untrustworthy on
+    /// purpose: an index is a remote document, and one written by an older
+    /// script is still the one core has to read correctly.
     pub fn latest(&self) -> Option<&PluginVersion> {
-        self.versions.last()
+        self.versions.iter().reduce(
+            |best, pv| match compare_versions(&pv.version, &best.version) {
+                std::cmp::Ordering::Greater => pv,
+                _ => best,
+            },
+        )
     }
     pub fn version(&self, v: &str) -> Option<&PluginVersion> {
         self.versions.iter().find(|pv| pv.version == v)
     }
+}
+
+/// Compare two version strings by numeric segment, so `0.1.10` is newer than
+/// `0.1.9`.
+///
+/// Deliberately the same rules as hc-web's `RegistryPlugin.compareVersions`,
+/// because the two answer halves of one question: core decides what an
+/// unversioned install resolves to, and hc-web decides whether to offer the
+/// update. If they disagree, the UI offers an update that installs something
+/// else. Not a full semver implementation, and does not pretend to be:
+///
+/// - segments split on `.`, `+` and `-`; numeric pairs compare numerically and
+///   anything else compares as text, so a suffix is ordered rather than fatal,
+/// - a *numeric* extra segment means more version (`0.2` < `0.2.1`), while a
+///   non-numeric one is a pre-release and sorts before its release
+///   (`0.2.0-rc1` < `0.2.0`).
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let split = |s: &str| -> Vec<String> {
+        s.split(['.', '+', '-'])
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (x, y) = (split(a), split(b));
+
+    for i in 0..x.len().max(y.len()) {
+        let (l, r) = (x.get(i), y.get(i));
+        let ln = l.and_then(|s| s.parse::<u64>().ok());
+        let rn = r.and_then(|s| s.parse::<u64>().ok());
+
+        let ord = match (l, r) {
+            // One side ran out of segments: a numeric extra is more version,
+            // a non-numeric extra is a pre-release of what the other side is.
+            (None, _) => {
+                if rn.is_some() {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (_, None) => {
+                if ln.is_some() {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (Some(l), Some(r)) => match (ln, rn) {
+                (Some(ln), Some(rn)) => ln.cmp(&rn),
+                _ => l.cmp(r),
+            },
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 impl PluginVersion {
@@ -253,6 +329,79 @@ mod tests {
         assert_eq!(v.version, "1.2.0");
         assert!(v.artifact_for("linux", "x86_64").is_some());
         assert!(v.artifact_for("linux", "aarch64").is_none());
+    }
+
+    fn plugin_with(versions: &[&str]) -> RegistryPlugin {
+        RegistryPlugin {
+            id: "plugin.demo".into(),
+            name: String::new(),
+            description: String::new(),
+            category: String::new(),
+            versions: versions
+                .iter()
+                .map(|v| PluginVersion {
+                    version: (*v).into(),
+                    min_core: String::new(),
+                    artifacts: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    /// The bug this guards, in the exact shape the live index had it: the
+    /// publisher sorts versions as strings, so "0.1.14" comes before "0.1.4"
+    /// and the last entry is not the newest. `latest()` used to take the last
+    /// entry, so a fresh install of hc-lutron resolved 0.1.7 while 0.1.14 was
+    /// published — and it did that for nine of the eleven plugins.
+    #[test]
+    fn latest_is_newest_not_last_in_a_string_sorted_index() {
+        let p = plugin_with(&[
+            "0.1.10", "0.1.11", "0.1.12", "0.1.13", "0.1.14", "0.1.4", "0.1.5", "0.1.6", "0.1.7",
+        ]);
+        assert_eq!(p.latest().unwrap().version, "0.1.14");
+    }
+
+    #[test]
+    fn latest_handles_the_ordinary_cases() {
+        assert!(plugin_with(&[]).latest().is_none());
+        assert_eq!(plugin_with(&["0.1.0"]).latest().unwrap().version, "0.1.0");
+        // Already in order — the common case must not regress.
+        assert_eq!(
+            plugin_with(&["0.1.0", "0.2.0", "1.0.0"])
+                .latest()
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+    }
+
+    /// Same rules as hc-web's `RegistryPlugin.compareVersions`. The two decide
+    /// halves of one question — what an unversioned install resolves to, and
+    /// whether to offer the update — so they have to agree.
+    #[test]
+    fn compare_versions_matches_the_web_clients_rules() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("0.1.10", "0.1.9"), Ordering::Greater);
+        assert_eq!(compare_versions("0.1.9", "0.1.10"), Ordering::Less);
+        assert_eq!(compare_versions("1.2.3", "1.2.3"), Ordering::Equal);
+        // A numeric extra segment is more version.
+        assert_eq!(compare_versions("0.2.1", "0.2"), Ordering::Greater);
+        // A non-numeric extra segment is a pre-release of the release it leads to.
+        assert_eq!(compare_versions("0.2.0-rc1", "0.2.0"), Ordering::Less);
+        assert_eq!(compare_versions("0.2.0", "0.2.0-rc1"), Ordering::Greater);
+        // Suffixes are ordered rather than fatal.
+        assert_eq!(
+            compare_versions("0.2.0-rc2", "0.2.0-rc1"),
+            Ordering::Greater
+        );
+    }
+
+    /// A pre-release must not out-rank the release, or `latest()` would hand a
+    /// release candidate to every fresh install.
+    #[test]
+    fn latest_prefers_a_release_over_its_pre_release() {
+        let p = plugin_with(&["0.2.0-rc1", "0.2.0", "0.2.0-rc2"]);
+        assert_eq!(p.latest().unwrap().version, "0.2.0");
     }
 
     #[test]

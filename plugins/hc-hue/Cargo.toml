@@ -3,7 +3,7 @@ name        = "hc-hue"
 version     = "0.1.10"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Philips Hue plugin for homeCore"
+description = "Philips Hue lights, groups and scenes, via the Hue bridge"
 repository  = "https://github.com/homeCore-io/hc-hue"
 
 [[bin]]

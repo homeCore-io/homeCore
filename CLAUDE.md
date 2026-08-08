@@ -36,7 +36,7 @@ MQTT broker  (embedded rumqttd — core layer)
   └── TLS, retained messages, QoS 0/1/2
   └── ⚠ Embedded rumqttd enforces CONNECT authn only — NOT topic ACLs.
       For per-plugin topic isolation, deploy with an external Mosquitto
-      broker (see mqttAuthzPlan.md + docker/docker-compose.external-broker.yml)
+      broker (see `claude-notes/plans/originals/mqttAuthzPlan.md` + core/docker/docker-compose.external-broker.yml)
 
 Rust core kernel
   ├── MQTT client (rumqttc) — bridges broker → internal event bus
@@ -105,7 +105,7 @@ permissions declared per client** in `[[broker.clients]]`:
 
 Generate the Mosquitto deployment from your config with
 `hc-cli broker generate-mosquitto-config`. Full plan lives in
-`mqttAuthzPlan.md` at the repo root.
+`claude-notes/plans/originals/mqttAuthzPlan.md` in the workspace root.
 
 ```toml
 # homecore.toml — broker ACL section
@@ -292,64 +292,89 @@ Event types: `device_state_changed`, `device_availability_changed`, `rule_fired`
 
 ## Repository layout
 
-The workspace root (`/home/john/RustroverProjects/homeCore/`) is **not** a git repo.
+The workspace root (`/home/john/Github/homeCore/`) is **not** a git repo.
 Each sub-directory is its own independent git repository. `workspace.toml` at the root is
-the authoritative repo list (used by `scripts/workspace-clone.sh`).
+the authoritative repo list (used by `hc-scripts/workspace-clone.sh`).
+
+**`core/` is a monorepo.** It holds the server, its 17 crates, the Rust plugin
+SDK (`sdk/rust`, crate `plugin-sdk-rs`) and all thirteen Rust plugins
+(`plugins/hc-*`) as members of one cargo workspace with one `Cargo.lock`. The
+per-plugin repos and `hc-plugin-sdk-rs` are archived read-only; the meta-layout
+workspaces (`plugins/Cargo.toml` and friends) that used to stitch them together
+are gone. Only non-Rust components stay separate repos: `plugins/hc-matter`
+(TypeScript), `clients/hc-web` (Flutter), `clients/hc-mcp` (Python), and the
+Python/Node.js/.NET SDKs in `sdks/`.
 
 ```
 homeCore/                          # container dir (no git)
-├── workspace.toml                 # authoritative repo list
-├── scripts/
-│   ├── run-dev.sh                 # build all + start server (debug)
+├── workspace.toml                 # authoritative repo list (-> hc-scripts/)
+├── hc-scripts/                    # workspace tooling + reusable GitHub Actions
+│   ├── run-dev.sh                 # build all + start server (debug) — NOT sandboxed
 │   ├── deploy.sh                  # build + install to /var/tmp/homeCore
 │   └── workspace-clone.sh
 │
-├── core/                          # main HomeCore server (git repo: homeCore-io/homeCore)
-│   ├── Cargo.toml / Cargo.lock    # workspace with all crates
+├── core/                          # THE monorepo (git repo: homeCore-io/homeCore)
+│   ├── Cargo.toml / Cargo.lock    # virtual workspace: server + crates + SDK + plugins
 │   ├── build.sh                   # local build helper
 │   ├── config/
 │   │   ├── homecore.toml          # prod config
-│   │   ├── homecore.dev.toml      # dev config (plugin paths: ../plugins/hc-*/target/debug/*)
+│   │   ├── homecore.dev.toml      # dev config (plugin paths: target/debug/hc-*)
 │   │   ├── modes.toml             # solar + named boolean mode definitions
 │   │   └── profiles/              # ecosystem profiles (shelly-gen2, tasmota, zigbee2mqtt…)
 │   │       └── examples/          # reference profiles (not auto-loaded)
-│   ├── crates/
+│   ├── crates/                    # 17 internal crates
 │   │   ├── hc-types/              # shared types: Event, DeviceState, Rule, MqttMsg
+│   │   │                          #   ALSO the plugin ABI — see below
 │   │   ├── hc-broker/             # rumqttd embedded broker + TLS config
 │   │   ├── hc-mqtt-client/        # rumqttc async client → internal event bus
 │   │   ├── hc-topic-map/          # pattern-based topic translation, Rhai transforms
 │   │   ├── hc-core/               # rule engine, scheduler, mode/timer/switch managers
 │   │   ├── hc-state/              # device registry (redb), history (SQLite), schemas
 │   │   ├── hc-api/                # axum HTTP + WebSocket server, all REST handlers
+│   │   ├── hc-api-types/          # request/response types shared with Rust clients
 │   │   ├── hc-auth/               # JWT HS256, Argon2id passwords, MQTT bcrypt creds
 │   │   ├── hc-scripting/          # Rhai sandboxed runtime (conditions + action scripts)
 │   │   ├── hc-logging/            # tracing setup, rolling files, log stream ring buffer
-│   │   └── hc-notify/             # notification delivery (Pushover, email)
+│   │   ├── hc-notify/             # notification delivery (Pushover, email, Telegram)
+│   │   ├── hc-config/             # config model + the descriptor the UI's forms read
+│   │   ├── hc-influx/             # optional InfluxDB v2 export of device state
+│   │   ├── hc-time/               # configured-timezone helpers (never chrono::Local)
+│   │   ├── hc-web-admin/          # optional static-file mount for a pre-built UI
+│   │   └── hc-cli/                # admin CLI (issuance, broker config gen, …)
 │   ├── homecore/                  # the server binary — a workspace member like
 │   │   ├── src/                   #   any other; the root is a pure [workspace]
-│   │   │   └── main.rs
+│   │   │   ├── main.rs
+│   │   │   └── plugin_launcher.rs # plugin supervision + restart backoff
 │   │   └── tests/
 │   │       └── integration_test.rs  # end-to-end: virtual device → rule → command
+│   ├── sdk/rust/                  # the Rust plugin SDK — crate `plugin-sdk-rs`
+│   ├── plugins/                   # every Rust plugin, as workspace members
+│   │   ├── hc-yolink/             # YoLink cloud MQTT bridge
+│   │   ├── hc-lutron/             # Lutron RadioRA2 telnet bridge
+│   │   ├── hc-caseta/             # Lutron Caseta
+│   │   ├── hc-sonos/              # Sonos UPnP bridge
+│   │   ├── hc-hue/                # Philips Hue bridge
+│   │   ├── hc-wled/               # WLED LED controller — smallest complete plugin
+│   │   ├── hc-isy/                # ISY/IoX controller bridge (Insteon, Z-Wave)
+│   │   ├── hc-zwave/              # Z-Wave JS WebSocket bridge
+│   │   ├── hc-thermostat/         # virtual thermostat (cross-device consumer)
+│   │   ├── hc-ecowitt/            # Ecowitt weather stations
+│   │   ├── hc-roku/               # Roku TVs and players (ECP)
+│   │   ├── hc-captest/            # capability-spec conformance test plugin
+│   │   └── hc-plugin-template/    # starter template — read this first
 │   ├── rules/                     # live automation rules (RON, hot-reloaded)
 │   │   └── examples/              # documented rule patterns (OR/AND, multi-trigger…)
 │   └── docs/
-│       └── devNotes.md            # developer reference (API, rule patterns, device types)
+│       ├── devNotes.md            # developer reference (API, rule patterns, device types)
+│       └── monorepo-plan.md       # why the SDK and plugins live here now
 │
-├── sdks/                          # plugin SDKs (each is its own git repo)
-│   ├── hc-plugin-sdk-rs/          # Rust plugin SDK (primary)
+├── sdks/                          # the NON-Rust plugin SDKs (each its own git repo)
 │   ├── hc-plugin-sdk-py/          # Python plugin SDK
 │   ├── hc-plugin-sdk-js/          # Node.js plugin SDK
 │   └── hc-plugin-sdk-dotnet/      # .NET Core plugin SDK
 │
-├── plugins/                       # device adapter plugins (each is its own git repo)
-│   ├── hc-yolink/                 # YoLink cloud MQTT bridge
-│   ├── hc-lutron/                 # Lutron RadioRA2 telnet bridge
-│   ├── hc-sonos/                  # Sonos UPnP bridge
-│   ├── hc-hue/                    # Philips Hue bridge
-│   ├── hc-wled/                   # WLED LED controller
-│   ├── hc-isy/                    # ISY/IoX controller bridge (Insteon, Z-Wave)
-│   ├── hc-zwave/                  # Z-Wave JS WebSocket bridge
-│   └── hc-plugin-template/        # starter template for new plugins
+├── plugins/                       # plugins that are NOT Rust (each its own git repo)
+│   └── hc-matter/                 # Matter bridge (TypeScript, matter.js)
 │
 └── clients/                       # UI and API consumers (each is its own git repo)
     ├── hc-web/                    # Flutter web dashboard (all phases complete)
@@ -455,7 +480,7 @@ homeCore/                          # container dir (no git)
 1. **MQTT is the device communication fabric** — never route device state through REST-only paths; MQTT is always the source of truth for device state.
 2. **Core is side-effect free in conditions** — rule conditions must only read state, never call external services. This makes them safe to evaluate speculatively and test with dry-run.
 3. **Rules are data, not code** — stored as RON files, created/modified via API. No recompile to add automations.
-4. **Plugin isolation at the MQTT layer** — each plugin has its own credentials and declared ACL patterns. Enforcement depends on broker: the embedded rumqttd only enforces CONNECT authn (convention + network boundary provides the rest); deploying against external Mosquitto enforces per-topic ACLs as described in `mqttAuthzPlan.md`. Choose the deployment that matches your trust model.
+4. **Plugin isolation at the MQTT layer** — each plugin has its own credentials and declared ACL patterns. Enforcement depends on broker: the embedded rumqttd only enforces CONNECT authn (convention + network boundary provides the rest); deploying against external Mosquitto enforces per-topic ACLs as described in `claude-notes/plans/originals/mqttAuthzPlan.md`. Choose the deployment that matches your trust model.
 5. **API-first** — every operation the system can perform is available via REST or WebSocket. The future web UI is just another API consumer.
 6. **No cloud dependency** — solar events computed locally from lat/lon config. All automation logic runs offline.
 

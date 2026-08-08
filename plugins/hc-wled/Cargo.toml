@@ -3,7 +3,7 @@ name        = "hc-wled"
 version     = "0.1.11"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "WLED LED controller plugin for homeCore"
+description = "WLED LED controllers, discovered on the network over mDNS"
 repository  = "https://github.com/homeCore-io/hc-wled"
 
 [[bin]]

@@ -3,7 +3,7 @@ name        = "hc-isy"
 version     = "0.1.10"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "ISY/IoX (Insteon + Z-Wave) plugin for homeCore"
+description = "Insteon, Z-Wave and Zigbee devices behind a Universal Devices ISY/IoX hub"
 repository  = "https://github.com/homeCore-io/hc-isy"
 
 [[bin]]

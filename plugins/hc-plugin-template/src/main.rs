@@ -4,7 +4,7 @@
 //! `on` and `brightness` commands, and echoes the result back as state. Replace
 //! the device talking with your own protocol and the shape stays the same.
 //!
-//! What is here because every plugin needs it:
+//! What is here because every plugin needs it, in the order it has to happen:
 //!
 //!   1. Read the config path from `argv[1]` — core hands it to you.
 //!   2. Connect to the broker with the credentials in `[homecore]`.
@@ -12,12 +12,18 @@
 //!      in this process's stderr.
 //!   4. `enable_management`, so core can heartbeat, restart, and reconfigure
 //!      you, and so the UI can render your actions as buttons.
-//!   5. Remember which devices you registered, so a device that disappears
+//!   5. Publish a config schema and descriptor, so an operator configures you
+//!      through a form rather than a TOML textarea.
+//!   6. Remember which devices you registered, so a device that disappears
 //!      while the plugin is down can still be retired.
-//!   6. Register devices, then publish their state retained.
-//!   7. Raise notices for conditions an operator can act on, and CLEAR them
+//!   7. Spawn `run_managed` — BEFORE registering anything. It drives the MQTT
+//!      connection, and publishes only queue (64 of them) until it runs. See
+//!      the comment at that call: this ordering is why a plugin that works
+//!      with three devices can hang at startup with seventeen.
+//!   8. Register devices, subscribe to their commands, publish state retained.
+//!   9. Raise notices for conditions an operator can act on, and CLEAR them
 //!      when they stop being true.
-//!   8. `run_managed`, which owns the process from then on.
+//!  10. Consume commands, applying each and publishing what actually happened.
 //!
 //! Read <https://github.com/homeCore-io/hc-wled> next — it is the smallest
 //! complete plugin — then <https://github.com/homeCore-io/hc-roku> for
@@ -125,6 +131,65 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
             _ => None,
         });
 
+    // Describe this plugin's configuration, so the operator gets a real form
+    // instead of a TOML textarea. Both ride on the capability manifest above.
+    //
+    // The schema says what exists (derived from the structs, so it cannot
+    // drift); the descriptor says how to present it. See config.rs — including
+    // the coverage test that stops a new setting from becoming uneditable.
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
+    // Commands arrive on the SDK's callback, which is synchronous. Hand them to
+    // this channel so slow device I/O never stalls the MQTT event loop.
+    let (tx, mut rx) = mpsc::channel::<(String, Value)>(64);
+
+    // ── Start the event loop BEFORE registering anything ──────────────────
+    //
+    // This ordering is load-bearing, and it is the opposite of what reads
+    // naturally. `run_managed` is what *drives* the MQTT connection: until it
+    // is polling, nothing you publish actually leaves the process, it only
+    // queues. The queue holds 64 messages.
+    //
+    // Registering a device costs four of those (register, subscribe, state,
+    // availability), so a plugin that registers its devices first and calls
+    // `run_managed` afterwards works fine with three devices and hangs at
+    // startup with seventeen — never reaching the line that would have drained
+    // the queue. Every shipped plugin spawns the loop first for this reason.
+    //
+    // Nothing is lost by starting early: commands for devices you have not
+    // registered yet cannot arrive, because the subscription that would carry
+    // them does not exist until you make it.
+    tokio::spawn(async move {
+        if let Err(e) = client
+            .run_managed(
+                move |device_id, payload| {
+                    // try_send, not send: dropping a command under load beats
+                    // blocking the MQTT event loop behind it.
+                    if tx.try_send((device_id.clone(), payload)).is_err() {
+                        warn!(device_id = %device_id, "command queue full, dropped");
+                    }
+                },
+                mgmt,
+            )
+            .await
+        {
+            error!(error = %e, "SDK event loop exited");
+        }
+        // Returning drops `tx`. The command loop at the bottom of this function
+        // then sees the channel close and returns, so the process exits and
+        // core restarts it — rather than sitting there healthy-looking with no
+        // connection behind it.
+    });
+
+    // Let the connection establish before publishing. Not required for
+    // correctness — the queue covers a slower CONNACK — but it keeps the first
+    // registrations off the retry path.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     // An empty device list is what a fresh install looks like, and without a
     // notice it is indistinguishable from a healthy plugin: active, zero
     // devices, no explanation.
@@ -192,34 +257,14 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
         Err(e) => warn!(error = %e, "reconcile failed; stale devices may linger"),
     }
 
-    // Commands arrive on the SDK's callback, which is synchronous. Hand them
-    // to a task over a channel so slow device I/O never stalls the event loop.
-    let (tx, mut rx) = mpsc::channel::<(String, Value)>(64);
-
-    let state_for_task = Arc::clone(&state);
-    let publisher_for_task = publisher.clone();
-    tokio::spawn(async move {
-        while let Some((device_id, payload)) = rx.recv().await {
-            if let Err(e) = apply(&publisher_for_task, &state_for_task, &device_id, &payload).await
-            {
-                warn!(device_id = %device_id, error = %e, "command failed");
-            }
+    // Owns the process from here: apply commands as they arrive, one at a time.
+    // Returns only when the event loop above has stopped and closed the channel.
+    while let Some((device_id, payload)) = rx.recv().await {
+        if let Err(e) = apply(&publisher, &state, &device_id, &payload).await {
+            warn!(device_id = %device_id, error = %e, "command failed");
         }
-    });
-
-    // Owns the process from here. Returns only if the loop fails.
-    client
-        .run_managed(
-            move |device_id, payload| {
-                // try_send, not send: dropping a command under load beats
-                // blocking the MQTT event loop behind it.
-                if tx.try_send((device_id.clone(), payload)).is_err() {
-                    warn!(device_id = %device_id, "command queue full, dropped");
-                }
-            },
-            mgmt,
-        )
-        .await
+    }
+    Ok(())
 }
 
 /// Apply a command and publish the result.

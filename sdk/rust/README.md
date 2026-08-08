@@ -1,4 +1,4 @@
-# hc-plugin-sdk-rs
+# plugin-sdk-rs — the Rust plugin SDK
 
 The Rust plugin SDK for [homeCore](https://github.com/homeCore-io/homeCore).
 Async MQTT client, device registration, state publishing, the management
@@ -8,40 +8,41 @@ The crate is named **`plugin-sdk-rs`**.
 
 ## Installing
 
-Declare the git dependency, pinned to a tag. **The crate is not on crates.io**,
-by design — plugins pin the SDK by tag and adopt updates on their own cadence.
+This SDK lives at `sdk/rust` in the homeCore repository, and every Rust plugin
+lives at `plugins/<name>` in that same repository. They are workspace members
+together, so a plugin depends on the SDK by path:
 
 ```toml
 [dependencies]
-plugin-sdk-rs = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.3.10" }
+plugin-sdk-rs = { path = "../../sdk/rust" }
 tokio         = { version = "1", features = ["full"] }
 anyhow        = "1"
 serde_json    = "1"
 ```
 
-### Working inside the homeCore workspace
+That is the whole story for a plugin in this repo: no tag to pin, no version to
+chase, and an SDK edit is live in every plugin on the next `cargo build`. The
+repo-root `cargo fmt` / `clippy` / `test` already cover the SDK, core and all
+the plugins together, so a change here that breaks a plugin fails immediately
+rather than at that plugin's next release.
 
-Leave that dependency exactly as it is. The meta-workspace at `plugins/Cargo.toml`
-redirects it to the checkout:
+This used to work very differently — plugins were separate repositories pinning
+a git tag, redirected to a local checkout by a `[patch]` table in a
+`plugins/Cargo.toml` meta-workspace. All of that is gone. If you find
+instructions mentioning `hc-plugin-sdk-rs`, a tag pin, or that patch table, they
+predate the monorepo.
+
+**The crate is not on crates.io.** For a plugin *outside* this repository, depend
+on it by git tag, so core's `hc-types` — the plugin ABI it re-exports — cannot
+change under you:
 
 ```toml
-[patch."https://github.com/homeCore-io/hc-plugin-sdk-rs"]
-plugin-sdk-rs = { path = "../sdks/hc-plugin-sdk-rs" }
+plugin-sdk-rs = { git = "https://github.com/homeCore-io/homeCore", tag = "v0.1.29" }
 ```
 
-So a plugin built from inside `plugins/` compiles against `sdks/hc-plugin-sdk-rs`
-on disk, while its committed `Cargo.toml` still says the tag — which is what CI
-clones and builds standalone. Confirm which one you are getting with:
-
-```sh
-cargo tree -p hc-yourplugin -i plugin-sdk-rs
-# plugin-sdk-rs v0.3.10 (/…/sdks/hc-plugin-sdk-rs)   ← local
-# plugin-sdk-rs v0.3.10 (https://github.com/…)        ← the tag
-```
-
-Do **not** change the dependency to a `path` in a plugin's own `Cargo.toml`:
-standalone CI has no workspace to patch it, and the build breaks there while
-working fine on your machine.
+No `path` key: cargo finds `plugin-sdk-rs` by package name among the repo's
+workspace members. The tag is a **core** release tag (`v0.1.29`), because the
+SDK ships with core now rather than on its own tags.
 
 ## Quick start
 
@@ -58,30 +59,67 @@ async fn main() -> anyhow::Result<()> {
     })
     .await?;
 
+    // Take every handle you need BEFORE starting the loop — `run` and
+    // `run_managed` consume the client.
     let publisher = client.device_publisher();
+
+    // Start the event loop first. See "Start the event loop before you
+    // register" below — this ordering is not stylistic.
+    let event_loop = tokio::spawn(async move {
+        client
+            .run(|device_id, payload| {
+                println!("Command for {device_id}: {payload}");
+            })
+            .await
+    });
+
     publisher
         .register_device_full("example_sensor", "Example Sensor", Some("sensor"), None, None)
         .await?;
+    publisher.subscribe_commands("example_sensor").await?;
     publisher
         .publish_state("example_sensor", &serde_json::json!({ "temperature": 21.5 }))
         .await?;
 
-    // `run` consumes the client and does not return unless the loop fails.
-    client
-        .run(|device_id, payload| {
-            println!("Command for {device_id}: {payload}");
-        })
-        .await
+    // Returns only when the loop stops.
+    event_loop.await?
 }
 ```
 
-Real plugins call `run_managed` instead, so homeCore can supervise them —
-see below. Start from
-[hc-plugin-template](https://github.com/homeCore-io/hc-plugin-template), which
-is a working plugin rather than a skeleton, then read
-[hc-wled](https://github.com/homeCore-io/hc-wled) for the smallest real one and
-[hc-roku](https://github.com/homeCore-io/hc-roku) for discovery, notices, and
-capability actions together.
+Real plugins call `run_managed` instead, so homeCore can supervise them — see
+below. Start from `plugins/hc-plugin-template` in this repository, which is a
+working plugin rather than a skeleton, then read `plugins/hc-wled` for the
+smallest real one and `plugins/hc-roku` for discovery, notices, and capability
+actions together.
+
+## Start the event loop before you register
+
+`run` / `run_managed` is what *drives* the MQTT connection. Until one of them is
+polling, nothing you publish leaves the process — it queues, and the queue holds
+64 messages.
+
+Registering one device costs four of them (register, subscribe, state,
+availability). So a plugin that registers its devices and *then* calls
+`run_managed` works fine with three devices and **hangs at startup with
+seventeen**, never reaching the line that would have drained the queue. There is
+no error and no log line; it simply stops.
+
+Measured against a real broker, a plugin registering 40 devices gets through 12
+of them in the register-first order and all 40 in this one:
+
+```rust
+let publisher = client.device_publisher();
+let notices   = client.notices();
+let mgmt      = client.enable_management(60, version, config_path, None).await?;
+
+tokio::spawn(async move { client.run_managed(on_command, mgmt).await });
+
+// ...now register, subscribe, and publish.
+```
+
+Nothing is lost by starting early: a command for a device you have not
+registered cannot arrive, because the subscription that would carry it does not
+exist until you make it.
 
 ## What it gives you
 
@@ -161,4 +199,9 @@ tracing::info!("Connecting with key {}", config.api_key);
 
 The SDK re-exports types from core's `hc-types`, which is the plugin ABI: a
 required new field there breaks every plugin's build, so additions are
-`#[serde(default)]`. Pin the SDK by tag, as in the Quick start above.
+`#[serde(default)]`.
+
+Inside this repository that is enforced for you — the SDK, `hc-types` and every
+plugin build and test together at the repo root, so an ABI break is a red CI run
+rather than a plugin that fails to compile weeks later. Outside it, pin the core
+tag as shown under [Installing](#installing).
