@@ -472,8 +472,10 @@ means `pip install git+…`.
 1. Check out the plugin repo, and `hc-plugin-sdk-py` at its pinned tag.
 2. `setup-python` at the pinned ABI version.
 3. Build the SDK wheel and the plugin's own wheel.
-4. **Lock once**, architecture-independently, to exact versions with hashes
-   (`uv pip compile` or `pip-compile`). This file is committed.
+4. **Lock once, for the target interpreter**, to exact versions with hashes
+   (`uv pip compile --python-version "$PY_VERSION"`). The lock is committed and
+   is architecture-independent, but it is **not** Python-version-independent —
+   see below.
 
 5. **Download per architecture against the lock**, never resolving again:
 
@@ -517,6 +519,25 @@ Pinning the versions first is what makes the failure loud: with
 an architecture that lacks a wheel for a locked version fails the build and says
 which package. The lock also guarantees both architectures ship the same
 versions, which resolving per-architecture does not.
+
+### The lock must be resolved for the target Python, not the builder's
+
+Environment markers make a lock valid only for the environment that produced it.
+Measured on 2026-08-08 while building this by hand: `referencing` requires
+`typing-extensions` only when `python_full_version < '3.13'`. Compiling the lock
+on the builder's Python 3.14 evaluated that marker as false, so
+`typing-extensions` never entered the lock, the wheelhouse shipped without it,
+and the artifact failed to install on its cp312 target with an unsatisfiable
+resolution.
+
+That failure surfaces at install time on the *operator's* machine, which is the
+worst place to find it — the build is green, the artifact is signed, and the
+plugin simply will not start. Passing `--python-version` to the lock step fixes
+it, and the install-and-run check below is what catches it if anyone forgets.
+
+Markers can also be platform-conditional (`sys_platform`, `platform_machine`).
+In practice a single lock covers both Linux architectures, but the rule to
+remember is that a lock describes an environment, not a package set.
 
 ## What CI must prove
 
