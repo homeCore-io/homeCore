@@ -7,8 +7,8 @@ structural question is still open.**
 |---|---|
 | device metadata — `manufacturer`, `model`, `sw_version` | **accepted**, built — see `deviceHardwareRollout.md` |
 | `entity_category` → `AttributeSchema.category` | **accepted**, built |
-| `via_device` | still open, its own design |
-| collapse entities into attributes, or expand into devices | **still open** — the recommendation below stands, unchosen |
+| `via_device` | proposed as `parent_device_id` — see `deviceRelationships.md` |
+| collapse entities into attributes, or expand into devices | **collapse**, with child devices as the escape hatch — see `deviceRelationships.md` |
 | config stays hand-editable TOML | **confirmed**, we do not follow HA |
 | state stays on MQTT | **confirmed**, we do not follow HA |
 
