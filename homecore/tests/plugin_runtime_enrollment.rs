@@ -197,3 +197,75 @@ async fn denial_counts_toward_a_cooldown() {
 
     h.stop().await;
 }
+
+/// A runtime's key identifies exactly one runtime.
+///
+/// This is the property the placements endpoint leans on: it is what makes
+/// "serve this runtime's placements" impossible to get wrong later, rather than
+/// something every future handler has to remember to check.
+///
+/// One enrollment.
+#[tokio::test]
+async fn a_runtimes_key_cannot_read_another_runtimes_placements() {
+    let tmp = TempDir::new().unwrap();
+    let h = Harness::start_with(&tmp, local_only(), Default::default())
+        .await
+        .unwrap();
+    let base = h.tcp_base();
+    let http = reqwest::Client::new();
+
+    // Enrol and approve one runtime, collecting its key.
+    let req = signed(51, "rt-alpha");
+    let (status, body) = post_enroll(&base, &req).await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{body}");
+    let secret = serde_json::from_str::<EnrollResponse>(&body)
+        .unwrap()
+        .enrollment_secret
+        .expect("poll secret");
+
+    http.post(format!("{base}/api/v1/plugin-runtimes/rt-alpha/approve"))
+        .send()
+        .await
+        .unwrap();
+
+    let creds = http
+        .get(format!("{base}/api/v1/plugin-runtimes/rt-alpha"))
+        .bearer_auth(&secret)
+        .send()
+        .await
+        .unwrap()
+        .json::<EnrollResponse>()
+        .await
+        .unwrap()
+        .credentials
+        .expect("credentials");
+    assert!(
+        !creds.api_key.is_empty(),
+        "an approved runtime must be issued a key it can pull placements with"
+    );
+
+    // Its own placements: fine, and empty.
+    let mine = http
+        .get(format!("{base}/api/v1/plugin-runtimes/rt-alpha/placements"))
+        .bearer_auth(&creds.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mine.status(), reqwest::StatusCode::OK);
+
+    // The same key against another id: refused, and refused the same way an
+    // unknown id is, so it cannot be used to find out who else exists.
+    let theirs = http
+        .get(format!("{base}/api/v1/plugin-runtimes/rt-beta/placements"))
+        .bearer_auth(&creds.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        theirs.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a runtime key must not reach another runtime's placements"
+    );
+
+    h.stop().await;
+}

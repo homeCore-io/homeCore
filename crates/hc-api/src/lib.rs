@@ -1066,6 +1066,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugin-runtimes/{id}",
             get(plugin_runtime_handlers::get_status),
         )
+        // Desired state, authenticated by the runtime's own key rather than a
+        // JWT, so it cannot sit behind the Bearer middleware either.
+        .route(
+            "/plugin-runtimes/{id}/placements",
+            get(plugin_runtime_handlers::list_placements),
+        )
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/{path}", post(handlers::receive_webhook));

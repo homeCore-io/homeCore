@@ -221,6 +221,7 @@ mod tests {
             status: RuntimeStatus::Pending,
             code: None,
             secret_hash: None,
+            api_key_hash: None,
             source_ip: None,
             plugin_id: None,
             denial_count: 0,

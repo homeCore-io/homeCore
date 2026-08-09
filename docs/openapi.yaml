@@ -4518,6 +4518,55 @@ paths:
         "410":
           description: The enrollment expired; enroll again
 
+  /plugin-runtimes/{id}/placements:
+    get:
+      operationId: listPluginRuntimePlacements
+      summary: What this runtime should be running
+      description: |
+        The desired state, in core's words. The runtime diffs it against what it
+        actually has and re-provisions the difference — which is why losing a
+        runtime's volume costs nothing but a re-enrollment.
+
+        Authenticated by the runtime's **own API key**, issued when it was
+        approved and rotated every time credentials are handed out. The key
+        identifies exactly one runtime, so this cannot return another's
+        placements. Unknown, unapproved and wrong-key all answer `404` alike.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Everything placed on this runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        plugin_id: { type: string }
+                        version: { type: string }
+                        sha256:
+                          type: string
+                          description: Checked against the bytes core serves.
+                        config:
+                          type: string
+                          description: |
+                            The operator config, including the minted MQTT
+                            credential. Core owns it, exactly as for a binary
+                            plugin.
+                        placed_at: { type: string, format: date-time }
+        "404":
+          description: Unknown runtime, not approved, or the key does not match
+
   /plugin-runtimes:
     get:
       operationId: listPluginRuntimes

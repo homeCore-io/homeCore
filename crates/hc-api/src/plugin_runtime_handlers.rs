@@ -23,7 +23,7 @@ use hc_api_types::plugin_runtimes::{
 use hc_state::plugin_runtime_store::{
     EnrollTokenRecord, RuntimeRecord, RuntimeStatus as StoreStatus,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 
 use crate::auth_middleware::PluginsWrite;
@@ -80,12 +80,18 @@ fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
     }
 }
 
-/// Everything an approved runtime needs to join the broker.
+/// Everything an approved runtime needs, plus the hash the caller must persist.
 ///
-/// The MQTT password is minted fresh on every approval rather than stored: the
-/// broker holds the credential, this store holds the fact of approval, and a
-/// value nobody can read back cannot leak from here.
-fn credentials_for(state: &AppState, rec: &RuntimeRecord) -> anyhow::Result<RuntimeCredentials> {
+/// Both secrets are minted fresh every time credentials are handed out rather
+/// than stored: the broker holds the MQTT credential, this store holds only the
+/// fact of approval and a hash, and a value nobody can read back cannot leak
+/// from here. Handing them out again is what makes a restarted container work
+/// without re-approval, and rotating on each hand-out means a leaked key stops
+/// working the next time the container comes up.
+fn credentials_for(
+    state: &AppState,
+    rec: &RuntimeRecord,
+) -> anyhow::Result<(RuntimeCredentials, String)> {
     let plugin_id = match &rec.plugin_id {
         Some(id) => id.clone(),
         None => svc::plugin_id_for(
@@ -104,13 +110,41 @@ fn credentials_for(state: &AppState, rec: &RuntimeRecord) -> anyhow::Result<Runt
         .plugin_install
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("plugin install is not configured on this server"))?;
-    Ok(RuntimeCredentials {
-        broker_host: install.broker_host.clone(),
-        broker_port: install.broker_port,
-        plugin_id,
-        mqtt_password: svc::mint_mqtt_password(),
-        api_key: String::new(), // issued with placement — piece 2, not phase A
-    })
+    let key = hc_auth::api_key::generate()?;
+    Ok((
+        RuntimeCredentials {
+            broker_host: install.broker_host.clone(),
+            broker_port: install.broker_port,
+            plugin_id,
+            mqtt_password: svc::mint_mqtt_password(),
+            api_key: key.full_token,
+        },
+        key.hash,
+    ))
+}
+
+/// Authenticate a runtime by its own API key.
+///
+/// Returns the record only when the key belongs to *that* runtime, so an
+/// endpoint written with this cannot serve one runtime's placements to another
+/// however carelessly it is written afterwards.
+pub fn authenticate_runtime(
+    state: &AppState,
+    runtime_id: &str,
+    headers: &axum::http::HeaderMap,
+) -> Option<RuntimeRecord> {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))?
+        .trim();
+
+    let rec = store(state).get(runtime_id).ok().flatten()?;
+    if rec.status != StoreStatus::Approved {
+        return None;
+    }
+    let hash = rec.api_key_hash.as_deref()?;
+    hc_auth::api_key::verify_token(presented, hash).then_some(rec)
 }
 
 // ── POST /plugin-runtimes/enroll ─────────────────────────────────────────────
@@ -199,11 +233,12 @@ pub async fn enroll(
             rec.code = None;
             rec.expires_at = None;
             rec.last_seen_at = Some(now);
-            let creds = match credentials_for(&state, &rec) {
+            let (creds, api_key_hash) = match credentials_for(&state, &rec) {
                 Ok(c) => c,
                 Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             };
             rec.plugin_id = Some(creds.plugin_id.clone());
+            rec.api_key_hash = Some(api_key_hash);
             if let Err(e) = store.upsert(&rec) {
                 return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
             }
@@ -277,6 +312,7 @@ fn new_record(req: &EnrollRequest, source_ip: String, now: chrono::DateTime<Utc>
         status: StoreStatus::Pending,
         code: None,
         secret_hash: None,
+        api_key_hash: None,
         source_ip: Some(source_ip),
         plugin_id: None,
         denial_count: 0,
@@ -349,10 +385,20 @@ pub async fn get_status(
     let now = Utc::now();
     match rec.status {
         StoreStatus::Approved => {
-            let creds = match credentials_for(&state, &rec) {
+            let (creds, api_key_hash) = match credentials_for(&state, &rec) {
                 Ok(c) => c,
                 Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             };
+            // The poll is where an approved-by-admin runtime first receives its
+            // key, so the hash has to be recorded here too, not only on the
+            // enroll path.
+            let mut updated = rec.clone();
+            updated.api_key_hash = Some(api_key_hash);
+            updated.last_seen_at = Some(now);
+            if let Err(e) = store.upsert(&updated) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+            }
+            let rec = updated;
             (
                 StatusCode::OK,
                 Json(EnrollResponse {
@@ -514,4 +560,57 @@ pub async fn issue_token(State(state): State<AppState>, _: PluginsWrite) -> impl
         })),
     )
         .into_response()
+}
+
+// ── GET /plugin-runtimes/{id}/placements ─────────────────────────────────────
+
+/// What this runtime should be running.
+///
+/// The desired state, in core's words. The runtime diffs it against what it
+/// actually has and re-provisions the difference, which is why a lost container
+/// volume costs nothing but a re-enrollment.
+///
+/// Authenticated by the runtime's own key, which identifies exactly one runtime
+/// — so this cannot serve another's placements even by mistake.
+pub async fn list_placements(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let Some(rec) = authenticate_runtime(&state, &id, &headers) else {
+        // Same answer for "no such runtime", "not approved" and "wrong key":
+        // this endpoint must not become a way to discover which runtimes exist
+        // or which of them are live.
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+
+    let store = store(&state);
+    let placements = match store.placements_for(&rec.runtime_id) {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
+    };
+
+    // Seeing its own placements is the runtime saying hello, so it counts as
+    // being seen — the alternative is a healthy runtime looking stale on the
+    // admin screen between heartbeats.
+    let mut touched = rec;
+    touched.last_seen_at = Some(Utc::now());
+    let _ = store.upsert(&touched);
+
+    let body: Vec<Value> = placements
+        .iter()
+        .map(|p| {
+            json!({
+                "plugin_id": p.plugin_id,
+                "version": p.version,
+                "sha256": p.sha256,
+                "config": p.config,
+                "placed_at": p.placed_at,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({ "placements": body }))).into_response()
 }

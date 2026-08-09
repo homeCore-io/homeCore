@@ -67,6 +67,15 @@ pub struct RuntimeRecord {
     /// argon2id hash of the enrollment secret. The secret itself is never stored.
     #[serde(default)]
     pub secret_hash: Option<String>,
+    /// argon2id hash of the runtime's API key — the credential it uses to pull
+    /// its placements and artifacts back from core.
+    ///
+    /// Deliberately not an entry in the general API-key store: a runtime is not
+    /// a user, and a key that identifies exactly one runtime cannot be used to
+    /// read another's placements however the endpoint is written. Re-minted
+    /// whenever credentials are handed out, so a restart rotates it.
+    #[serde(default)]
+    pub api_key_hash: Option<String>,
     /// Address the enrollment arrived from, for the admin's judgement at approval.
     #[serde(default)]
     pub source_ip: Option<String>,
@@ -396,6 +405,7 @@ mod tests {
             status,
             code: None,
             secret_hash: None,
+            api_key_hash: None,
             source_ip: None,
             plugin_id: None,
             denial_count: 0,
