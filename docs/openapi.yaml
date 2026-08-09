@@ -1807,7 +1807,27 @@ paths:
                 version:
                   type: string
                   description: Defaults to the newest version in the registry.
+                runtime_id:
+                  type: string
+                  description: |
+                    Place the plugin on a specific plugin runtime. Only needed
+                    when more than one could host it — a single match is chosen
+                    automatically, and a plugin with a native artifact always
+                    runs in core.
       responses:
+        "409":
+          description: |
+            More than one runtime can host this plugin. The body lists them;
+            repeat the request with `runtime_id`.
+        "422":
+          description: |
+            Nowhere to run it — no artifact for this machine, or the plugin needs
+            a runtime kind that is not enrolled. The message names the next
+            action.
+        "501":
+          description: |
+            The plugin belongs on a runtime, and delivery to runtimes is not
+            wired up yet. The body reports which runtime it would have used.
         "200":
           description: Plugin installed and starting
           content:

@@ -5666,6 +5666,74 @@ pub async fn install_plugin(
                 .into_response();
         };
         let version = body.get("version").and_then(Value::as_str);
+
+        // Where does this run? A plugin whose artifact targets a runtime is
+        // dispatched there rather than unpacked here, and the admin who clicked
+        // Install does not need to know which case they hit.
+        let pv = match reg.version_of(id, version).await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("registry resolve failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let runtime_records = s.store.plugin_runtimes().list().unwrap_or_default();
+        let candidates = crate::placement::candidates(&runtime_records);
+        let runtime_artifacts: Vec<(&str, &str, &str)> = pv
+            .artifacts
+            .iter()
+            .filter(|a| !a.is_native())
+            .map(|a| (a.runtime.as_str(), a.abi.as_str(), a.arch.as_str()))
+            .collect();
+        let offered = crate::placement::Offered {
+            native_for_this_host: pv
+                .artifact_for(std::env::consts::OS, std::env::consts::ARCH)
+                .is_some(),
+            runtime_artifacts,
+            kinds: pv.runtime_kinds(),
+        };
+        let requested = body.get("runtime_id").and_then(Value::as_str);
+
+        match crate::placement::decide(&offered, &candidates, requested) {
+            crate::placement::Placement::Core => {}
+            crate::placement::Placement::Runtime(runtime_id) => {
+                // Delivery to the runtime is the next slice. Refusing now is
+                // honest; installing it into core would put a wheelhouse where a
+                // binary belongs and fail at spawn.
+                return (
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(json!({
+                        "error": "placing a plugin on a runtime is not wired up yet",
+                        "would_place_on": runtime_id,
+                        "plugin_id": id,
+                        "version": pv.version,
+                    })),
+                )
+                    .into_response();
+            }
+            crate::placement::Placement::Ambiguous(ids) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "more than one runtime can host this plugin — choose one",
+                        "runtimes": ids,
+                        "hint": "repeat the request with runtime_id set",
+                    })),
+                )
+                    .into_response();
+            }
+            crate::placement::Placement::Impossible(why) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": why })),
+                )
+                    .into_response();
+            }
+        }
+
         let (art, _ver) = match reg.resolve(id, version).await {
             Ok(x) => x,
             Err(e) => {

@@ -311,6 +311,28 @@ impl RegistryClient {
         verify_and_parse(&bytes, &sig, &self.public_key)
     }
 
+    /// The whole version entry for `id`, so a caller can see every artifact
+    /// rather than only the one that matches this host.
+    ///
+    /// Placement needs this: deciding a plugin belongs on a python runtime means
+    /// looking at artifacts core itself cannot run, which `resolve` deliberately
+    /// hides.
+    pub async fn version_of(&self, id: &str, version: Option<&str>) -> Result<PluginVersion> {
+        let idx = self.index().await?;
+        let plugin = idx
+            .plugin(id)
+            .ok_or_else(|| anyhow!("plugin `{id}` is not in the registry"))?;
+        let pv = match version {
+            Some(v) => plugin
+                .version(v)
+                .ok_or_else(|| anyhow!("version `{v}` of `{id}` not found"))?,
+            None => plugin
+                .latest()
+                .ok_or_else(|| anyhow!("`{id}` has no published versions"))?,
+        };
+        Ok(pv.clone())
+    }
+
     /// Resolve `(artifact, resolved_version)` for `id` (latest, or a specific
     /// version) matching this host's os/arch.
     pub async fn resolve(&self, id: &str, version: Option<&str>) -> Result<(ArtifactRef, String)> {
