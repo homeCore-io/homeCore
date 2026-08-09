@@ -574,6 +574,14 @@ impl StateBridge {
                 }
             }
         }
+        // Hardware identity, when the upstream system knows it. Absent leaves
+        // whatever is already stored alone: a plugin that has not been taught
+        // to report these yet must not blank out what an earlier version, or
+        // another code path, already learned.
+        let manufacturer = hardware_field(&json, "manufacturer");
+        let model = hardware_field(&json, "model");
+        let sw_version = hardware_field(&json, "sw_version");
+
         let raw_device_type = json["device_type"].as_str().map(str::to_string);
         let device_type = raw_device_type.as_deref().map(canonical_device_type_name);
 
@@ -599,6 +607,17 @@ impl StateBridge {
                 }
                 if let Some(dt) = device_type.as_ref() {
                     existing.device_type = Some(dt.clone());
+                }
+                if manufacturer.is_some() {
+                    existing.manufacturer = manufacturer.clone();
+                }
+                if model.is_some() {
+                    existing.model = model.clone();
+                }
+                // Firmware changes under a device that is otherwise the same
+                // one, so this is the field most worth keeping current.
+                if sw_version.is_some() {
+                    existing.sw_version = sw_version.clone();
                 }
                 existing.name = new_name.to_string();
                 if existing.canonical_name.is_none() {
@@ -632,6 +651,9 @@ impl StateBridge {
                 let mut device = DeviceState::new(device_id, new_name, plugin_id);
                 device.area = area;
                 device.device_type = device_type.clone();
+                device.manufacturer = manufacturer.clone();
+                device.model = model.clone();
+                device.sw_version = sw_version.clone();
                 let devices = self.store.list_devices().await?;
                 device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
                 self.store.upsert_device(&device).await?;
@@ -917,6 +939,20 @@ fn apply_partial_merge_patch(
     }
 }
 
+/// One hardware-identity field from a registration payload.
+///
+/// Absent, null, empty and whitespace all mean *the plugin did not say*, and
+/// the caller leaves whatever core already stored alone. A plugin that learns
+/// its firmware only after the first poll re-registers with it later; treating
+/// "" as an answer would blank the field it is about to fill.
+fn hardware_field(json: &serde_json::Value, key: &str) -> Option<String> {
+    json[key]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1068,5 +1104,47 @@ mod tests {
             ..DeviceChange::unknown()
         };
         assert!(!is_generic_plugin_external_change(&change));
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::hardware_field;
+    use serde_json::json;
+
+    /// Absent must not read as "clear it". A plugin learns manufacturer at
+    /// discovery and firmware only after the first poll, so most registrations
+    /// carry some fields and not others — and the missing ones are silence, not
+    /// an instruction.
+    #[test]
+    fn absent_null_and_blank_are_all_silence() {
+        let payload = json!({
+            "manufacturer": "Acme",
+            "model": null,
+            "sw_version": "   ",
+        });
+        assert_eq!(
+            hardware_field(&payload, "manufacturer").as_deref(),
+            Some("Acme")
+        );
+        assert!(hardware_field(&payload, "model").is_none());
+        assert!(hardware_field(&payload, "sw_version").is_none());
+        assert!(hardware_field(&payload, "missing").is_none());
+    }
+
+    /// Trimmed, because these are labels an operator reads beside each other
+    /// and a stray space makes two identical models look like two models.
+    #[test]
+    fn values_are_trimmed() {
+        let payload = json!({ "model": "  A1  " });
+        assert_eq!(hardware_field(&payload, "model").as_deref(), Some("A1"));
+    }
+
+    /// A number is not a version string. Anything non-string is silence rather
+    /// than a stringified surprise.
+    #[test]
+    fn a_non_string_is_silence() {
+        let payload = json!({ "sw_version": 2 });
+        assert!(hardware_field(&payload, "sw_version").is_none());
     }
 }
