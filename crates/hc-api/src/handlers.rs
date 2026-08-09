@@ -3163,6 +3163,7 @@ fn default_dashboard_layout(
         row_height,
         gap,
         derived_from: None,
+        flow: Default::default(),
         placements: placements
             .iter()
             .enumerate()
@@ -3251,6 +3252,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     derived_from: None,
+                    flow: Default::default(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3295,6 +3297,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     derived_from: None,
+                    flow: Default::default(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3339,6 +3342,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 100.0,
                     gap: 12.0,
                     derived_from: None,
+                    flow: Default::default(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3383,6 +3387,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     row_height: 120.0,
                     gap: 16.0,
                     derived_from: None,
+                    flow: Default::default(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -9528,6 +9533,7 @@ token = "TOKEN-TWO"
                 row_height: 160.0,
                 gap: 12.0,
                 derived_from: None,
+                flow: Default::default(),
                 placements: vec![DashboardWidgetPlacement {
                     widget_id: "summary".to_string(),
                     x: 0,
