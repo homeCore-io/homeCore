@@ -24,6 +24,16 @@ const RUNTIMES: TableDefinition<&str, &str> = TableDefinition::new("plugin_runti
 /// themselves: both answer "who may join", and splitting them would mean two
 /// stores that always change together.
 const ENROLL_TOKENS: TableDefinition<&str, &str> = TableDefinition::new("plugin_runtime_tokens");
+/// Placements, keyed `<runtime_id>\u{1f}<plugin_id>`. Core is the authority on
+/// what should be running where; a runtime reports what it actually has and core
+/// replays the difference, so this table is the desired state rather than a
+/// record of what happened.
+const PLACEMENTS: TableDefinition<&str, &str> = TableDefinition::new("plugin_runtime_placements");
+
+/// Separator for the composite key. A unit separator cannot appear in a plugin
+/// id (they are dotted identifiers) or a runtime id (`rt-` plus hex), so no pair
+/// can collide with another by concatenation.
+const KEY_SEP: char = '\u{1f}';
 
 /// Where an enrollment stands. Mirrors `hc_api_types::plugin_runtimes::RuntimeStatus`;
 /// duplicated rather than shared so the storage layer does not depend on the wire crate.
@@ -122,6 +132,29 @@ impl EnrollTokenRecord {
     }
 }
 
+/// One plugin, placed on one runtime.
+///
+/// Carries everything needed to re-provision it from nothing, because that is
+/// the point: a runtime that loses its volume re-enrolls, reports an empty set,
+/// and gets all of this replayed at it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacementRecord {
+    pub runtime_id: String,
+    pub plugin_id: String,
+    pub version: String,
+    /// Where core fetched the artifact from, kept for diagnosis rather than for
+    /// the runtime — the runtime pulls verified bytes from core, never from the
+    /// registry.
+    pub artifact_url: String,
+    /// Hex sha256 of the artifact. The runtime checks the bytes it receives
+    /// against this, which catches transport corruption.
+    pub sha256: String,
+    /// The plugin's operator config, which core owns exactly as it does for a
+    /// binary plugin. Includes the minted MQTT credential.
+    pub config: String,
+    pub placed_at: DateTime<Utc>,
+}
+
 pub struct PluginRuntimeStore {
     db: Arc<Database>,
 }
@@ -132,6 +165,7 @@ impl PluginRuntimeStore {
         {
             write_txn.open_table(RUNTIMES)?;
             write_txn.open_table(ENROLL_TOKENS)?;
+            write_txn.open_table(PLACEMENTS)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -212,6 +246,73 @@ impl PluginRuntimeStore {
             self.delete(id)?;
         }
         Ok(stale.len())
+    }
+}
+
+// ── Placements ───────────────────────────────────────────────────────────────
+
+fn placement_key(runtime_id: &str, plugin_id: &str) -> String {
+    format!("{runtime_id}{KEY_SEP}{plugin_id}")
+}
+
+impl PluginRuntimeStore {
+    pub fn place(&self, record: &PlacementRecord) -> Result<()> {
+        let json = serde_json::to_string(record)?;
+        let key = placement_key(&record.runtime_id, &record.plugin_id);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut t = write_txn.open_table(PLACEMENTS)?;
+            t.insert(key.as_str(), json.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Everything placed on one runtime — the desired state it reconciles to.
+    pub fn placements_for(&self, runtime_id: &str) -> Result<Vec<PlacementRecord>> {
+        let read_txn = self.db.begin_read()?;
+        let t = read_txn.open_table(PLACEMENTS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_, v) = row?;
+            if let Ok(rec) = serde_json::from_str::<PlacementRecord>(v.value()) {
+                if rec.runtime_id == runtime_id {
+                    out.push(rec);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        Ok(out)
+    }
+
+    /// Which runtime hosts this plugin, if any.
+    ///
+    /// A plugin lives in one place at a time, so this also answers "is it
+    /// already placed" before a second install tries to put it somewhere else.
+    pub fn placement_of(&self, plugin_id: &str) -> Result<Option<PlacementRecord>> {
+        let read_txn = self.db.begin_read()?;
+        let t = read_txn.open_table(PLACEMENTS)?;
+        for row in t.iter()? {
+            let (_, v) = row?;
+            if let Ok(rec) = serde_json::from_str::<PlacementRecord>(v.value()) {
+                if rec.plugin_id == plugin_id {
+                    return Ok(Some(rec));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn unplace(&self, runtime_id: &str, plugin_id: &str) -> Result<bool> {
+        let key = placement_key(runtime_id, plugin_id);
+        let write_txn = self.db.begin_write()?;
+        let existed;
+        {
+            let mut t = write_txn.open_table(PLACEMENTS)?;
+            existed = t.remove(key.as_str())?.is_some();
+        }
+        write_txn.commit()?;
+        Ok(existed)
     }
 }
 
@@ -442,5 +543,95 @@ mod tests {
     fn redeeming_an_unknown_token_is_false_not_an_error() {
         let (s, _d) = store();
         assert!(!s.redeem_token("nope", "rt-a", Utc::now()).unwrap());
+    }
+
+    fn placement(rt: &str, plugin: &str, version: &str) -> PlacementRecord {
+        PlacementRecord {
+            runtime_id: rt.into(),
+            plugin_id: plugin.into(),
+            version: version.into(),
+            artifact_url: "https://example/a.tar.zst".into(),
+            sha256: "abc".into(),
+            config: "[homecore]\n".into(),
+            placed_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn placements_are_scoped_to_their_runtime() {
+        let (s, _d) = store();
+        s.place(&placement("rt-a", "plugin.one", "1.0.0")).unwrap();
+        s.place(&placement("rt-a", "plugin.two", "1.0.0")).unwrap();
+        s.place(&placement("rt-b", "plugin.three", "1.0.0"))
+            .unwrap();
+
+        let ids: Vec<String> = s
+            .placements_for("rt-a")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.plugin_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["plugin.one", "plugin.two"],
+            "sorted, and rt-b excluded"
+        );
+        assert_eq!(s.placements_for("rt-none").unwrap().len(), 0);
+    }
+
+    /// Re-placing is an upgrade, not a duplicate. Core holds desired state, so
+    /// the same plugin on the same runtime is one row whatever version it is on.
+    #[test]
+    fn re_placing_replaces_rather_than_duplicating() {
+        let (s, _d) = store();
+        s.place(&placement("rt-a", "plugin.one", "1.0.0")).unwrap();
+        s.place(&placement("rt-a", "plugin.one", "1.1.0")).unwrap();
+
+        let all = s.placements_for("rt-a").unwrap();
+        assert_eq!(all.len(), 1, "one row per (runtime, plugin)");
+        assert_eq!(all[0].version, "1.1.0");
+    }
+
+    /// A plugin lives in one place. Asking where it is must not depend on
+    /// knowing the runtime already — that is the question being asked.
+    #[test]
+    fn a_plugin_can_be_found_without_knowing_its_runtime() {
+        let (s, _d) = store();
+        s.place(&placement("rt-b", "plugin.somewhere", "2.0.0"))
+            .unwrap();
+
+        let found = s.placement_of("plugin.somewhere").unwrap().unwrap();
+        assert_eq!(found.runtime_id, "rt-b");
+        assert!(s.placement_of("plugin.elsewhere").unwrap().is_none());
+    }
+
+    /// The composite key must not let one pair collide with another by
+    /// concatenation — `rt-a` + `x.y` and `rt-a\u{1f}x` + `y` would be the same
+    /// string under a naive join.
+    #[test]
+    fn keys_cannot_collide_by_concatenation() {
+        let (s, _d) = store();
+        s.place(&placement("rt-a", "plugin.one", "1.0.0")).unwrap();
+        s.place(&placement("rt-aplugin", "one", "1.0.0")).unwrap();
+
+        assert_eq!(s.placements_for("rt-a").unwrap().len(), 1);
+        assert_eq!(s.placements_for("rt-aplugin").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unplacing_removes_only_that_pair() {
+        let (s, _d) = store();
+        s.place(&placement("rt-a", "plugin.one", "1.0.0")).unwrap();
+        s.place(&placement("rt-a", "plugin.two", "1.0.0")).unwrap();
+
+        assert!(s.unplace("rt-a", "plugin.one").unwrap());
+        assert!(!s.unplace("rt-a", "plugin.one").unwrap(), "idempotent");
+        let left: Vec<String> = s
+            .placements_for("rt-a")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.plugin_id)
+            .collect();
+        assert_eq!(left, vec!["plugin.two"]);
     }
 }

@@ -42,7 +42,7 @@ pub use api_key_store::ApiKeyRecord;
 pub use audit_store::{AuditActorType, AuditEntry, AuditQuery, AuditResult};
 pub use battery_store::{BatteryEdge, BatteryRecord};
 pub use plugin_runtime_store::{
-    EnrollTokenRecord, PluginRuntimeStore, RuntimeRecord, RuntimeStatus,
+    EnrollTokenRecord, PlacementRecord, PluginRuntimeStore, RuntimeRecord, RuntimeStatus,
 };
 pub use refresh_token_store::RefreshTokenRecord;
 
