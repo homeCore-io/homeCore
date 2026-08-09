@@ -4567,6 +4567,61 @@ paths:
         "404":
           description: Unknown runtime, not approved, or the key does not match
 
+  /plugin-runtimes/{id}/artifacts/{plugin_id}:
+    get:
+      operationId: getPluginRuntimeArtifact
+      summary: Fetch the verified artifact for one placement
+      description: |
+        **Core verifies, the runtime executes.** The index signature and the
+        artifact sha256 are checked here, in one implementation, rather than in
+        every runtime — Python, Node and .NET each reimplementing ed25519
+        verification is how one ends up skipping it.
+
+        The runtime re-checks only the `x-hc-sha256` it is handed, which catches
+        transport corruption. A compromised core is already past the point where
+        a plugin's credentials matter, so that is the stated boundary rather than
+        an oversight.
+
+        Core re-resolves through the registry rather than trusting the URL stored
+        at placement time, so a stored row cannot become a way to fetch something
+        the registry no longer vouches for.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: plugin_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The verified `.tar.zst`
+          headers:
+            x-hc-sha256:
+              schema: { type: string }
+              description: Hex sha256 the runtime should check the body against.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: |
+            Unknown runtime, wrong key, or no such placement on this runtime —
+            all answered alike.
+        "409":
+          description: |
+            The registry no longer publishes an artifact matching this runtime's
+            kind, ABI and architecture.
+        "502":
+          description: Registry unreachable, or the artifact failed verification
+        "503":
+          description: No plugin registry is configured
+
   /plugin-runtimes:
     get:
       operationId: listPluginRuntimes

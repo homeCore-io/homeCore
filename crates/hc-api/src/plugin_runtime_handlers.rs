@@ -614,3 +614,111 @@ pub async fn list_placements(
         .collect();
     (StatusCode::OK, Json(json!({ "placements": body }))).into_response()
 }
+
+// ── GET /plugin-runtimes/{id}/artifacts/{plugin_id} ──────────────────────────
+
+/// Serve the artifact bytes for one placement.
+///
+/// **Core verifies; the runtime executes.** The signature over the index and the
+/// sha256 of the bytes are checked here, in one implementation, rather than in
+/// every runtime — Python, Node and .NET reimplementing ed25519 verification is
+/// how you end up with one that skips it. The runtime re-checks only the sha256
+/// core hands it, which catches transport corruption and nothing else. That is
+/// the boundary: a compromised core is already past the point where a plugin's
+/// credentials matter.
+///
+/// Fetched on demand rather than cached. A placement is installed once and the
+/// artifact is tens of megabytes, so a cache would mostly be disk spent on
+/// something read a single time.
+pub async fn get_placement_artifact(
+    State(state): State<AppState>,
+    Path((id, plugin_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let Some(rec) = authenticate_runtime(&state, &id, &headers) else {
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+    let Some(reg) = state.registry.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin registry is configured",
+        );
+    };
+
+    // Only what this runtime was actually given. Asking for someone else's
+    // plugin is the same 404 as asking for one that does not exist.
+    let placement = match store(&state).placements_for(&rec.runtime_id) {
+        Ok(list) => list.into_iter().find(|p| p.plugin_id == plugin_id),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
+    };
+    let Some(placement) = placement else {
+        return err(StatusCode::NOT_FOUND, "no such placement on this runtime");
+    };
+
+    // Re-resolve rather than trusting the URL recorded at placement time: this
+    // re-runs signature verification over the index, so a stored row can never
+    // become a way to fetch something the registry no longer vouches for.
+    let pv = match reg.version_of(&plugin_id, Some(&placement.version)).await {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("registry lookup failed: {e:#}"),
+            )
+        }
+    };
+    let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, &rec.arch) else {
+        return err(
+            StatusCode::CONFLICT,
+            format!(
+                "{plugin_id} {} no longer publishes a {} {} artifact for {}",
+                placement.version, rec.kind, rec.abi, rec.arch
+            ),
+        );
+    };
+
+    let file = match reg.download_artifact(art).await {
+        Ok(f) => f,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("artifact download failed: {e:#}"),
+            )
+        }
+    };
+    let bytes = match std::fs::read(file.path()) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading verified artifact: {e}"),
+            )
+        }
+    };
+
+    tracing::info!(
+        runtime_id = %rec.runtime_id, %plugin_id, version = %placement.version,
+        bytes = bytes.len(), "served a verified artifact to a runtime"
+    );
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_string(),
+            ),
+            // The runtime checks this against what it received. Repeated here
+            // rather than only in the placement list so a client that fetches
+            // directly still has it.
+            (
+                axum::http::HeaderName::from_static("x-hc-sha256"),
+                art.sha256.clone(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
