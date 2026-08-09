@@ -4642,6 +4642,41 @@ paths:
                     items:
                       $ref: "#/components/schemas/RuntimeSummary"
 
+  /plugin-runtimes/placements:
+    get:
+      operationId: listAllPluginPlacements
+      summary: Every plugin placed on a runtime
+      description: |
+        The admin view. Distinct from `/plugin-runtimes/{id}/placements`, which
+        a runtime calls with its own key to learn what it should be running;
+        this one answers both halves of the operator's question — what a
+        runtime hosts, and where a plugin runs — from one read.
+
+        Carries no config: that holds a minted broker credential, and the
+        operator already edits the same file through the plugin config surface.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All placements, ordered by runtime then plugin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        runtime_id: { type: string }
+                        plugin_id: { type: string }
+                        version: { type: string }
+                        placed_at: { type: string, format: date-time }
+        "404":
+          description: Plugin runtimes are disabled
+
   /plugin-runtimes/tokens:
     post:
       operationId: issuePluginRuntimeToken
