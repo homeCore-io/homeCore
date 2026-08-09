@@ -613,6 +613,44 @@ pub fn place_on_runtime(
     Ok(())
 }
 
+// ── GET /plugin-runtimes/placements (admin) ──────────────────────────────────
+
+/// Every placement, for the admin UI.
+///
+/// Distinct from the per-runtime endpoint below, which a *runtime* calls with
+/// its own key to learn what it should be running. This one answers the two
+/// questions an operator asks — what does this runtime host, and where does
+/// this plugin run — from a single read, so a page showing both does not make
+/// a request per runtime and another per plugin.
+///
+/// Carries no config: that is the runtime's business and it holds a minted
+/// broker credential. The admin already edits the same file through the plugin
+/// config surface.
+pub async fn list_all_placements(
+    State(state): State<AppState>,
+    _: crate::auth_middleware::PluginsRead,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
+    }
+    let placements = match store(&state).all_placements() {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
+    };
+    let body: Vec<Value> = placements
+        .iter()
+        .map(|p| {
+            json!({
+                "runtime_id": p.runtime_id,
+                "plugin_id": p.plugin_id,
+                "version": p.version,
+                "placed_at": p.placed_at,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({ "placements": body }))).into_response()
+}
+
 // ── GET /plugin-runtimes/{id}/placements ─────────────────────────────────────
 
 /// What this runtime should be running.

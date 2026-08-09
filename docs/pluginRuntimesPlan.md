@@ -417,6 +417,20 @@ hc-web renders these with no new UI.
 
 # Piece 3: Building the artifacts
 
+> **Built 2026-08-09**, in `hc-scripts`: `build-python-artifact.sh`,
+> `smoke-python-artifact.sh` and `python-release.yml`, plus `runtime`/`abi` in
+> the registry's `update-index.py` and `publish.yml`. Both traps below are now
+> asserted rather than remembered, and both scripts run on a laptop — which is
+> how the traps were found in the first place. Verified before commit: x86_64
+> and aarch64 built from one x86_64 machine with no emulation, identical locked
+> versions, arch-correct compiled wheels, and the x86_64 artifact installed
+> offline into a clean venv and registered a device with a real core.
+>
+> Still missing: **a repository for Python plugins to live in**. The pipeline
+> takes a plugin directory and has only ever been run against a scratch
+> fixture. That repo is phase E's first act.
+
+
 Piece 2 defines what a runtime plugin artifact *is*. This piece is the pipeline
 that produces one, and it lands in `hc-scripts` as a reusable workflow beside
 `rust-release.yml`.

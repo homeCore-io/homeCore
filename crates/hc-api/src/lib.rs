@@ -1295,6 +1295,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugin-runtimes/tokens",
             post(plugin_runtime_handlers::issue_token),
         )
+        // Before `/plugin-runtimes/{id}/...`: axum matches literals ahead of
+        // captures, but keeping them adjacent makes the pair obvious to read.
+        .route(
+            "/plugin-runtimes/placements",
+            get(plugin_runtime_handlers::list_all_placements),
+        )
         .route(
             "/plugin-runtimes/{id}/approve",
             post(plugin_runtime_handlers::approve_runtime),

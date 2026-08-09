@@ -278,6 +278,29 @@ impl PluginRuntimeStore {
     }
 
     /// Everything placed on one runtime — the desired state it reconciles to.
+    /// Every placement, whichever runtime it belongs to.
+    ///
+    /// For the admin surface, which asks both halves of the question at once:
+    /// what does this runtime host, and where does this plugin run. One read
+    /// answers both, rather than a request per runtime and another per plugin.
+    pub fn all_placements(&self) -> Result<Vec<PlacementRecord>> {
+        let read_txn = self.db.begin_read()?;
+        let t = read_txn.open_table(PLACEMENTS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_, v) = row?;
+            if let Ok(rec) = serde_json::from_str::<PlacementRecord>(v.value()) {
+                out.push(rec);
+            }
+        }
+        out.sort_by(|a, b| {
+            a.runtime_id
+                .cmp(&b.runtime_id)
+                .then_with(|| a.plugin_id.cmp(&b.plugin_id))
+        });
+        Ok(out)
+    }
+
     pub fn placements_for(&self, runtime_id: &str) -> Result<Vec<PlacementRecord>> {
         let read_txn = self.db.begin_read()?;
         let t = read_txn.open_table(PLACEMENTS)?;
@@ -643,5 +666,34 @@ mod tests {
             .map(|p| p.plugin_id)
             .collect();
         assert_eq!(left, vec!["plugin.two"]);
+    }
+
+    /// The admin view reads every placement at once. Sorted by runtime then
+    /// plugin, so a page rendering "what does this host" does not have to sort
+    /// per section and two runs never disagree about the order.
+    #[test]
+    fn all_placements_spans_runtimes_and_is_ordered() {
+        let (store, _dir) = store();
+        store
+            .place(&placement("rt-b", "plugin.two", "1.0.0"))
+            .unwrap();
+        store
+            .place(&placement("rt-a", "plugin.two", "1.0.0"))
+            .unwrap();
+        store
+            .place(&placement("rt-a", "plugin.one", "1.0.0"))
+            .unwrap();
+
+        let all = store.all_placements().unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|p| (p.runtime_id.as_str(), p.plugin_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("rt-a", "plugin.one"),
+                ("rt-a", "plugin.two"),
+                ("rt-b", "plugin.two"),
+            ]
+        );
     }
 }
