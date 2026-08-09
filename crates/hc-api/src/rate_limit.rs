@@ -142,14 +142,15 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, n))
     }
 
-    fn reset() {
-        login_buckets().lock().unwrap().clear();
-        enroll_buckets().lock().unwrap().clear();
-    }
+    // No shared `reset()`. These buckets are process-global statics and the
+    // test harness runs tests in parallel, so clearing them clobbered whichever
+    // test happened to be mid-run: `cargo test -p hc-api --lib rate_limit`
+    // failed every time while the whole-suite run passed, because a different
+    // interleaving hid it. Each test owns its own address instead, which is
+    // isolation by construction rather than by timing.
 
     #[test]
     fn allows_up_to_max_attempts() {
-        reset();
         let now = Instant::now();
         for i in 0..MAX_ATTEMPTS {
             assert!(record(ip(1), now).is_ok(), "attempt {i} should pass");
@@ -158,7 +159,6 @@ mod tests {
 
     #[test]
     fn rejects_after_max_attempts() {
-        reset();
         let now = Instant::now();
         for _ in 0..MAX_ATTEMPTS {
             record(ip(2), now).unwrap();
@@ -169,7 +169,6 @@ mod tests {
 
     #[test]
     fn separate_ips_have_separate_buckets() {
-        reset();
         let now = Instant::now();
         for _ in 0..MAX_ATTEMPTS {
             record(ip(3), now).unwrap();
@@ -181,7 +180,6 @@ mod tests {
 
     #[test]
     fn old_attempts_age_out() {
-        reset();
         let past = Instant::now() - WINDOW - Duration::from_secs(1);
         for _ in 0..MAX_ATTEMPTS {
             record(ip(5), past).unwrap();
@@ -195,7 +193,6 @@ mod tests {
     /// enrollment should never cost the operator their login.
     #[test]
     fn login_and_enroll_budgets_are_independent() {
-        reset();
         let now = Instant::now();
         let addr = ip(9);
 
