@@ -1,6 +1,16 @@
 # Mapping Home Assistant integrations onto homeCore
 
-**Status: for review. Nothing here is decided.**
+**Status: reviewed. Two of the three gaps are accepted and built; the
+structural question is still open.**
+
+| question | decision |
+|---|---|
+| device metadata — `manufacturer`, `model`, `sw_version` | **accepted**, built — see `deviceHardwareRollout.md` |
+| `entity_category` → `AttributeSchema.category` | **accepted**, built |
+| `via_device` | still open, its own design |
+| collapse entities into attributes, or expand into devices | **still open** — the recommendation below stands, unchosen |
+| config stays hand-editable TOML | **confirmed**, we do not follow HA |
+| state stays on MQTT | **confirmed**, we do not follow HA |
 
 Written against the HA developer docs (entity base properties, device registry)
 on 2026-08-09, and against `hc-types`' `DeviceRegistration`, `DeviceSchema`,
@@ -83,17 +93,17 @@ suffix with the entity's own name.
 These are places where an HA integration has information in hand and homeCore
 has nowhere to put it. Each one is a thing the porter must currently throw away.
 
-1. **Device metadata — `manufacturer`, `model`, `sw_version`.** Every HA
-   integration supplies it, we drop it, and it is exactly what an operator
-   wants when a device misbehaves. `DeviceRegistration` has no field.
-   Cheap to add, useful immediately to plugins that are already ours.
+1. ~~**Device metadata — `manufacturer`, `model`, `sw_version`.**~~
+   **Accepted and built.** On `DeviceState` and `DeviceRegistration`, optional
+   and defaulted so no plugin build broke, with `DeviceHardware` in the Rust
+   SDK and keyword arguments in the Python one. Filling them in across the
+   fleet is `deviceHardwareRollout.md`.
 
-2. **`entity_category: diagnostic | config`.** HA uses it to keep RSSI, battery
-   and firmware out of the main controls. Without an equivalent, a faithful
-   port dumps six diagnostic readings beside the light switch, and the porter's
-   only options are to lose the distinction or drop the data. An
-   `AttributeSchema.category` would be a small addition with an obvious UI use
-   beyond porting.
+2. ~~**`entity_category: diagnostic | config`.**~~ **Accepted and built** as
+   `AttributeSchema.category`. Absent means primary, so every attribute
+   declared before it keeps its meaning. Nothing renders it yet — that is a
+   separate hc-web change, and until it lands the distinction is recorded but
+   not shown.
 
 3. **`via_device`.** A bridge and the bulbs behind it is a relationship we
    currently flatten. Not blocking, and arguably a separate design.
