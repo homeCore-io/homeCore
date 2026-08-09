@@ -52,6 +52,38 @@ pub struct DashboardLayout {
     /// client repack layouts that predate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<DashboardBreakpoint>,
+
+    /// Whether cards float up to close gaps, or stay where they were put.
+    ///
+    /// Core never acts on this either — it does not lay anything out. It stores
+    /// it because the answer is a property of the *document*, not of whichever
+    /// client is drawing it, and two clients that disagreed about whether a gap
+    /// is content would render the same page differently.
+    ///
+    /// The default is `Packed`, which is what every dashboard already in redb
+    /// was authored under: cards float up until they collide. A gap could not
+    /// be expressed at all before this field, so reading absence as `Packed` is
+    /// not a guess, it is the only thing those documents can have meant.
+    #[serde(default)]
+    pub flow: DashboardFlow,
+}
+
+/// What empty space in a layout means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardFlow {
+    /// Gaps close. A card floats up until something stops it. The behaviour
+    /// every layout had before `flow` existed, and the right one for a layout
+    /// computed from another — deriving *is* repacking.
+    #[default]
+    Packed,
+
+    /// Gaps are content. Cards sit where they were put.
+    ///
+    /// What a person means when they leave room between two things on a page
+    /// they are designing. Only ever set by a client that has an authoring
+    /// surface; a derived layout is always `Packed`.
+    Free,
 }
 
 /// A card.

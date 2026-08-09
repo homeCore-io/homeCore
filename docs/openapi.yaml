@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.31"
+  version: "0.1.33"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1807,7 +1807,27 @@ paths:
                 version:
                   type: string
                   description: Defaults to the newest version in the registry.
+                runtime_id:
+                  type: string
+                  description: |
+                    Place the plugin on a specific plugin runtime. Only needed
+                    when more than one could host it — a single match is chosen
+                    automatically, and a plugin with a native artifact always
+                    runs in core.
       responses:
+        "409":
+          description: |
+            More than one runtime can host this plugin. The body lists them;
+            repeat the request with `runtime_id`.
+        "422":
+          description: |
+            Nowhere to run it — no artifact for this machine, or the plugin needs
+            a runtime kind that is not enrolled. The message names the next
+            action.
+        "501":
+          description: |
+            The plugin belongs on a runtime, and delivery to runtimes is not
+            wired up yet. The body reports which runtime it would have used.
         "200":
           description: Plugin installed and starting
           content:
@@ -4381,6 +4401,322 @@ paths:
                   deleted_so_far:
                     type: integer
 
+  /plugin-runtimes/enroll:
+    post:
+      operationId: enrollPluginRuntime
+      summary: Ask to join as a plugin runtime
+      description: |
+        A **plugin runtime** is a container the operator runs themselves, hosting
+        plugins written in something other than Rust. homeCore never manages the
+        container; this is how one is admitted.
+
+        The only unauthenticated endpoint in the plugin story, because a runtime
+        holds no credential until it has been through here. It is gated three
+        ways: the `[plugin_runtimes]` feature switch, the `[auth].whitelist`
+        (when `whitelist_only`), and a rate budget separate from login's.
+
+        The request is signed with the runtime's ed25519 key. In open mode the
+        response is `202` with a short `code` that the container also prints to
+        its logs — an administrator approves by confirming the two match. In
+        token mode a valid `token` is approved immediately and nothing is left
+        pending.
+      tags: [plugins]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [runtime_id, public_key, signature, capabilities]
+              properties:
+                runtime_id:
+                  type: string
+                  description: Stable identity, persisted to the container's volume.
+                public_key:
+                  type: string
+                  description: base64 ed25519 public key.
+                signature:
+                  type: string
+                  description: |
+                    base64 ed25519 signature over the canonical payload
+                    `hc-runtime-enroll:v1\n<runtime_id>\n<public_key>\n<kind>\n<abi>\n<arch>`.
+                capabilities:
+                  type: object
+                  required: [kind, abi, arch]
+                  properties:
+                    kind:
+                      type: string
+                      example: python
+                    abi:
+                      type: string
+                      example: cp312-manylinux_2_28
+                    arch:
+                      type: string
+                      example: x86_64
+                host_version: { type: string }
+                sdk_version: { type: string }
+                hostname: { type: string }
+                network_mode:
+                  type: string
+                  description: host | bridge | macvlan
+                token:
+                  type: string
+                  description: One-time enrollment token, when in token mode.
+      responses:
+        "200":
+          description: Approved — credentials returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollResponse"
+        "202":
+          description: Pending — an administrator must approve the code
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollResponse"
+        "401":
+          description: Signature does not verify
+        "403":
+          description: Source not whitelisted, denied too often, or too many pending
+        "404":
+          description: Plugin runtimes are disabled on this server
+        "409":
+          description: runtime_id is already registered to a different key
+        "429":
+          description: Too many enrollment attempts from this address
+
+  /plugin-runtimes/{id}:
+    get:
+      operationId: getPluginRuntimeStatus
+      summary: Poll an enrollment
+      description: |
+        Authenticated by the single-use enrollment secret as a bearer token, not
+        by a JWT. Deliberately not rate-limited: a runtime polls this every few
+        seconds while it waits.
+
+        Returns `410` once a pending enrollment has expired, so a waiting
+        container stops rather than spinning until it is restarted.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current status, with credentials once approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollResponse"
+        "404":
+          description: Unknown runtime, or the secret does not match
+        "410":
+          description: The enrollment expired; enroll again
+
+  /plugin-runtimes/{id}/placements:
+    get:
+      operationId: listPluginRuntimePlacements
+      summary: What this runtime should be running
+      description: |
+        The desired state, in core's words. The runtime diffs it against what it
+        actually has and re-provisions the difference — which is why losing a
+        runtime's volume costs nothing but a re-enrollment.
+
+        Authenticated by the runtime's **own API key**, issued when it was
+        approved and rotated every time credentials are handed out. The key
+        identifies exactly one runtime, so this cannot return another's
+        placements. Unknown, unapproved and wrong-key all answer `404` alike.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Everything placed on this runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        plugin_id: { type: string }
+                        version: { type: string }
+                        sha256:
+                          type: string
+                          description: Checked against the bytes core serves.
+                        config:
+                          type: string
+                          description: |
+                            The operator config, including the minted MQTT
+                            credential. Core owns it, exactly as for a binary
+                            plugin.
+                        placed_at: { type: string, format: date-time }
+        "404":
+          description: Unknown runtime, not approved, or the key does not match
+
+  /plugin-runtimes/{id}/artifacts/{plugin_id}:
+    get:
+      operationId: getPluginRuntimeArtifact
+      summary: Fetch the verified artifact for one placement
+      description: |
+        **Core verifies, the runtime executes.** The index signature and the
+        artifact sha256 are checked here, in one implementation, rather than in
+        every runtime — Python, Node and .NET each reimplementing ed25519
+        verification is how one ends up skipping it.
+
+        The runtime re-checks only the `x-hc-sha256` it is handed, which catches
+        transport corruption. A compromised core is already past the point where
+        a plugin's credentials matter, so that is the stated boundary rather than
+        an oversight.
+
+        Core re-resolves through the registry rather than trusting the URL stored
+        at placement time, so a stored row cannot become a way to fetch something
+        the registry no longer vouches for.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: plugin_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The verified `.tar.zst`
+          headers:
+            x-hc-sha256:
+              schema: { type: string }
+              description: Hex sha256 the runtime should check the body against.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: |
+            Unknown runtime, wrong key, or no such placement on this runtime —
+            all answered alike.
+        "409":
+          description: |
+            The registry no longer publishes an artifact matching this runtime's
+            kind, ABI and architecture.
+        "502":
+          description: Registry unreachable, or the artifact failed verification
+        "503":
+          description: No plugin registry is configured
+
+  /plugin-runtimes:
+    get:
+      operationId: listPluginRuntimes
+      summary: List plugin runtimes, including those awaiting approval
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All known runtimes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtimes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RuntimeSummary"
+
+  /plugin-runtimes/tokens:
+    post:
+      operationId: issuePluginRuntimeToken
+      summary: Issue a one-time enrollment token
+      description: |
+        For token mode, or to admit a runtime without waiting for a code. The
+        plaintext is returned once and only its hash is stored.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Token issued — shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time }
+                  note: { type: string }
+
+  /plugin-runtimes/{id}/approve:
+    post:
+      operationId: approvePluginRuntime
+      summary: Approve a waiting runtime
+      description: |
+        Confirm the `code` shown here against the one in the container's logs
+        before approving. That comparison is what distinguishes this container
+        from whichever one happened to ask.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSummary"
+        "404":
+          description: Unknown runtime
+        "410":
+          description: The enrollment expired; ask it to retry
+
+  /plugin-runtimes/{id}/deny:
+    post:
+      operationId: denyPluginRuntime
+      summary: Deny a runtime
+      description: |
+        The safe answer to a request you do not recognise. The runtime may retry;
+        repeated denials put its identity into a cooldown.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Denied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSummary"
+        "404":
+          description: Unknown runtime
+
   /plugins/{id}/restart:
     post:
       operationId: restartPlugin
@@ -6786,6 +7122,86 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    RuntimeCapabilities:
+      type: object
+      description: |
+        What a runtime can host. The triple is the whole matching key used when
+        placing a plugin artifact.
+      properties:
+        kind: { type: string, example: python }
+        abi: { type: string, example: cp312-manylinux_2_28 }
+        arch: { type: string, example: x86_64 }
+
+    RuntimeCredentials:
+      type: object
+      description: |
+        Returned once, on approval. This is the runtime's own credential and
+        covers its management channel only — plugins it hosts get their own,
+        minted at placement time.
+      properties:
+        broker_host: { type: string }
+        broker_port: { type: integer }
+        plugin_id:
+          type: string
+          description: The id the runtime registers under, e.g. plugin.python-a1b2c3d4.
+        mqtt_password: { type: string }
+        api_key: { type: string }
+
+    EnrollResponse:
+      type: object
+      properties:
+        runtime_id: { type: string }
+        status:
+          type: string
+          enum: [pending, approved, denied]
+        enrollment_secret:
+          type: string
+          description: |
+            Bearer for the status poll. Returned once, at enrollment. Absent from
+            every later response.
+        code:
+          type: string
+          description: |
+            Short, human-comparable, and **not** a credential. It exists so an
+            administrator can confirm this container against the code in its
+            logs.
+          example: "482-193"
+        credentials:
+          $ref: "#/components/schemas/RuntimeCredentials"
+        reason:
+          type: string
+          description: Why a denial or refusal happened, when there is something useful to say.
+        expires_at:
+          type: string
+          format: date-time
+          description: When a pending record stops being answerable.
+
+    RuntimeSummary:
+      type: object
+      description: Admin-facing view. Never carries the secret or the credentials.
+      properties:
+        runtime_id: { type: string }
+        status:
+          type: string
+          enum: [pending, approved, denied]
+        capabilities:
+          $ref: "#/components/schemas/RuntimeCapabilities"
+        host_version: { type: string }
+        sdk_version: { type: string }
+        hostname: { type: string }
+        network_mode: { type: string }
+        code:
+          type: string
+          description: Present only while pending.
+        source_ip:
+          type: string
+          description: Where the enrollment came from — part of the same judgement as the code.
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        plugin_id:
+          type: string
+          description: Set once approved.
+
 
     # ---- Auth ----
 

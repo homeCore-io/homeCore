@@ -37,6 +37,19 @@ pub struct Harness {
 
 impl Harness {
     pub async fn start(tmp: &TempDir) -> Result<Self> {
+        Self::start_with(tmp, Vec::new(), Default::default()).await
+    }
+
+    /// Start with an auth whitelist and a plugin-runtime policy.
+    ///
+    /// Enrollment is whitelist-gated by default, so a test that does not set one
+    /// gets 403 from every enroll — which is correct behaviour and a confusing
+    /// way to discover it.
+    pub async fn start_with(
+        tmp: &TempDir,
+        whitelist: Vec<ipnet::IpNet>,
+        runtimes: hc_config::PluginRuntimesSection,
+    ) -> Result<Self> {
         let state_db_path = tmp.path().join("state.redb");
         let history_db_path = tmp.path().join("history.db");
         let jwt_secret_path = jwt_secret::default_secret_path(&state_db_path);
@@ -52,7 +65,16 @@ impl Harness {
         .await?;
 
         let bus = EventBus::new(256);
-        let state = AppState::new(AppStateParams::new(store, bus, jwt))
+        let mut params = AppStateParams::new(store, bus, jwt);
+        params.whitelist = whitelist;
+        let state = AppState::new(params)
+            .with_plugin_runtimes(runtimes)
+            .with_plugin_install(std::sync::Arc::new(hc_api::InstallContext {
+                plugins_dir: tmp.path().join("plugins"),
+                config_plugins_dir: tmp.path().join("config").join("plugins"),
+                broker_host: "127.0.0.1".into(),
+                broker_port: 1883,
+            }))
             .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(&[]));
 
         let tcp_port = free_port();

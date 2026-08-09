@@ -1,6 +1,6 @@
 [package]
 name        = "homecore"
-version     = "0.1.31"
+version     = "0.1.33"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Home automation platform — MQTT-native, API-first, fully local"
@@ -54,3 +54,7 @@ plugin-sdk-rs = { path = "../sdk/rust" }
 # assertions that hc-cli's bail-on-non-2xx wrapper would swallow.
 reqwest       = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tokio-stream  = "0.1"
+# Plugin-runtime enrollment tests sign requests the way a real runtime host
+# does, so the signature check is exercised rather than stubbed.
+ed25519-dalek = "2"
+base64        = "0.23"

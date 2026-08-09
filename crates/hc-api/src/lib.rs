@@ -44,9 +44,12 @@ pub mod managed_plugins;
 pub mod management_rpc;
 pub mod metrics;
 pub mod mode_definition_store;
+pub mod placement;
 pub mod plugin_config_store;
 pub mod plugin_config_watcher;
 pub mod plugin_install;
+pub mod plugin_runtime_handlers;
+pub mod plugin_runtimes;
 pub mod rate_limit;
 pub mod registry;
 pub mod rule_file_store;
@@ -364,6 +367,10 @@ pub struct AppState {
     /// Client for the remote signed plugin registry. `None` when `[registry]`
     /// isn't configured (browse/registry-install then return 503).
     pub registry: Option<Arc<registry::RegistryClient>>,
+    /// Policy for who may enroll as a plugin runtime. Carried on state rather
+    /// than read per-request so the gate cannot drift from what the
+    /// Configuration screen shows. The records themselves live in `store`.
+    pub plugin_runtimes_config: hc_config::PluginRuntimesSection,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -800,6 +807,7 @@ impl AppState {
             plugin_commands: Arc::new(RwLock::new(HashMap::new())),
             managed_plugins: None,
             plugin_install: None,
+            plugin_runtimes_config: hc_config::PluginRuntimesSection::default(),
             plugin_spawn: None,
             registry: None,
             management_rpc: None,
@@ -967,6 +975,13 @@ impl AppState {
         self
     }
 
+    /// Policy for plugin-runtime enrollment. The records live in the state
+    /// store, so only the policy needs threading here.
+    pub fn with_plugin_runtimes(mut self, config: hc_config::PluginRuntimesSection) -> Self {
+        self.plugin_runtimes_config = config;
+        self
+    }
+
     pub fn with_plugin_install(mut self, ctx: Arc<InstallContext>) -> Self {
         self.plugin_install = Some(ctx);
         self
@@ -1035,6 +1050,31 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/plugins/{id}/command/{request_id}/stream",
             get(handlers::get_plugin_stream_sse),
+        )
+        // Plugin-runtime enrollment is the one unauthenticated endpoint in the
+        // plugin story: a container has no credential until it has been through
+        // here. Gated by the feature switch, the whitelist and its own rate
+        // budget — see plugin_runtime_handlers.
+        .route(
+            "/plugin-runtimes/enroll",
+            post(plugin_runtime_handlers::enroll)
+                .layer(middleware::from_fn(rate_limit::enroll_rate_limit)),
+        )
+        // Status poll, authenticated by the single-use enrollment secret rather
+        // than a JWT, so it cannot live behind the Bearer middleware.
+        .route(
+            "/plugin-runtimes/{id}",
+            get(plugin_runtime_handlers::get_status),
+        )
+        // Desired state, authenticated by the runtime's own key rather than a
+        // JWT, so it cannot sit behind the Bearer middleware either.
+        .route(
+            "/plugin-runtimes/{id}/placements",
+            get(plugin_runtime_handlers::list_placements),
+        )
+        .route(
+            "/plugin-runtimes/{id}/artifacts/{plugin_id}",
+            get(plugin_runtime_handlers::get_placement_artifact),
         )
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
@@ -1247,6 +1287,22 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // "status" would be unreachable here, but ids are `plugin.*`.
         .route("/plugins/status", get(handlers::list_plugin_status))
         .route("/plugins/install", post(handlers::install_plugin))
+        .route(
+            "/plugin-runtimes",
+            get(plugin_runtime_handlers::list_runtimes),
+        )
+        .route(
+            "/plugin-runtimes/tokens",
+            post(plugin_runtime_handlers::issue_token),
+        )
+        .route(
+            "/plugin-runtimes/{id}/approve",
+            post(plugin_runtime_handlers::approve_runtime),
+        )
+        .route(
+            "/plugin-runtimes/{id}/deny",
+            post(plugin_runtime_handlers::deny_runtime),
+        )
         .route("/registry/plugins", get(handlers::browse_registry))
         .route("/registry/plugins/{id}", get(handlers::get_registry_plugin))
         .route(
