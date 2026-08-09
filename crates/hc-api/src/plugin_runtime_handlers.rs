@@ -562,6 +562,57 @@ pub async fn issue_token(State(state): State<AppState>, _: PluginsWrite) -> impl
         .into_response()
 }
 
+// ── Placing a plugin on a runtime ────────────────────────────────────────────
+
+/// Record that a plugin belongs on a runtime, and seed its config.
+///
+/// The artifact is deliberately **not** downloaded here. Placement is a
+/// statement of intent that the runtime converges on; fetching tens of megabytes
+/// inside the request that made it would only mean the admin waits for a
+/// download that has to happen again on the runtime anyway.
+///
+/// Config is seeded exactly as a binary install seeds it — same store, same
+/// `[homecore]` bootstrap, same minted password — so an operator editing a
+/// hosted plugin's config is editing the same file in the same place, and only
+/// existing configs are preserved on a re-place.
+pub fn place_on_runtime(
+    state: &AppState,
+    runtime_id: &str,
+    plugin_id: &str,
+    version: &str,
+    artifact_url: &str,
+    sha256: &str,
+) -> anyhow::Result<()> {
+    let ctx = state
+        .plugin_install
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("plugin install is not configured on this server"))?;
+
+    let config_store =
+        crate::plugin_config_store::PluginConfigStore::new(ctx.config_plugins_dir.clone());
+    if !config_store.exists(plugin_id) {
+        let bootstrap = format!(
+            "[homecore]\nbroker_host = \"{}\"\nbroker_port = {}\nplugin_id = \"{}\"\npassword = \"{}\"\n\n",
+            ctx.broker_host,
+            ctx.broker_port,
+            plugin_id,
+            svc::mint_mqtt_password(),
+        );
+        config_store.write(plugin_id, &bootstrap)?;
+    }
+
+    store(state).place(&hc_state::plugin_runtime_store::PlacementRecord {
+        runtime_id: runtime_id.to_string(),
+        plugin_id: plugin_id.to_string(),
+        version: version.to_string(),
+        artifact_url: artifact_url.to_string(),
+        sha256: sha256.to_string(),
+        config: config_store.read(plugin_id)?,
+        placed_at: Utc::now(),
+    })?;
+    Ok(())
+}
+
 // ── GET /plugin-runtimes/{id}/placements ─────────────────────────────────────
 
 /// What this runtime should be running.
@@ -600,14 +651,27 @@ pub async fn list_placements(
     touched.last_seen_at = Some(Utc::now());
     let _ = store.upsert(&touched);
 
+    // The config served is the one on disk now, not the copy taken when the
+    // plugin was placed. Core owns that file and the operator edits it in the
+    // UI exactly as they do a binary plugin's; serving it here is what carries
+    // the edit to the runtime, which restarts the plugin because the text
+    // changed. No second mechanism, and nothing to keep in sync.
+    let config_store = state.plugin_install.as_ref().map(|ctx| {
+        crate::plugin_config_store::PluginConfigStore::new(ctx.config_plugins_dir.clone())
+    });
+
     let body: Vec<Value> = placements
         .iter()
         .map(|p| {
+            let config = config_store
+                .as_ref()
+                .and_then(|s| s.read(&p.plugin_id).ok())
+                .unwrap_or_else(|| p.config.clone());
             json!({
                 "plugin_id": p.plugin_id,
                 "version": p.version,
                 "sha256": p.sha256,
-                "config": p.config,
+                "config": config,
                 "placed_at": p.placed_at,
             })
         })
