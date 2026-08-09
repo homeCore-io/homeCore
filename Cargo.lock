@@ -1446,6 +1446,7 @@ dependencies = [
  "base64 0.23.0",
  "chrono",
  "ed25519-dalek",
+ "getrandom 0.4.2",
  "hc-api-types",
  "hc-auth",
  "hc-config",
@@ -1494,6 +1495,7 @@ dependencies = [
  "chrono",
  "hc-auth",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -1817,6 +1819,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-runtime-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.0",
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "hc-api-types",
+ "hex",
+ "plugin-sdk-rs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
 name = "hc-scripting"
 version = "0.1.4"
 dependencies = [
@@ -2044,7 +2071,9 @@ name = "homecore"
 version = "0.1.31"
 dependencies = [
  "anyhow",
+ "base64 0.23.0",
  "chrono",
+ "ed25519-dalek",
  "getrandom 0.4.2",
  "hc-api",
  "hc-api-types",

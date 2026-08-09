@@ -5513,7 +5513,32 @@ pub async fn deregister_plugin(
         }
     }
 
-    if !removed && !stopped && devices_removed == 0 {
+    // 3b. If it lives on a runtime, withdrawing the placement *is* the uninstall
+    //     instruction: the runtime stops it and deletes its environment on the
+    //     next reconcile. Nothing below this applies to it — core has no child to
+    //     stop and no binary to delete — so it also has to count as having found
+    //     something, or a hosted plugin that registered no devices would 404.
+    let unplaced = match s.store.plugin_runtimes().placement_of(&id) {
+        Ok(Some(p)) => match s.store.plugin_runtimes().unplace(&p.runtime_id, &id) {
+            Ok(gone) => {
+                if gone {
+                    tracing::info!(plugin_id = %id, runtime_id = %p.runtime_id, "withdrew a placement");
+                }
+                gone
+            }
+            Err(e) => {
+                tracing::warn!(plugin_id = %id, error = %e, "failed to withdraw the placement");
+                false
+            }
+        },
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(plugin_id = %id, error = %e, "failed to look up the placement");
+            false
+        }
+    };
+
+    if !removed && !stopped && !unplaced && devices_removed == 0 {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "plugin not found" })),
@@ -5578,6 +5603,7 @@ pub async fn deregister_plugin(
             "affected_rules": affected_rules,
             "config_removed": config_removed,
             "binaries_removed": binaries_removed,
+            "unplaced": unplaced,
         })),
     )
         .into_response()
@@ -5666,6 +5692,111 @@ pub async fn install_plugin(
                 .into_response();
         };
         let version = body.get("version").and_then(Value::as_str);
+
+        // Where does this run? A plugin whose artifact targets a runtime is
+        // dispatched there rather than unpacked here, and the admin who clicked
+        // Install does not need to know which case they hit.
+        let pv = match reg.version_of(id, version).await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("registry resolve failed: {e:#}") })),
+                )
+                    .into_response();
+            }
+        };
+        let runtime_records = s.store.plugin_runtimes().list().unwrap_or_default();
+        let candidates = crate::placement::candidates(&runtime_records);
+        let runtime_artifacts: Vec<(&str, &str, &str)> = pv
+            .artifacts
+            .iter()
+            .filter(|a| !a.is_native())
+            .map(|a| (a.runtime.as_str(), a.abi.as_str(), a.arch.as_str()))
+            .collect();
+        let offered = crate::placement::Offered {
+            native_for_this_host: pv
+                .artifact_for(std::env::consts::OS, std::env::consts::ARCH)
+                .is_some(),
+            runtime_artifacts,
+            kinds: pv.runtime_kinds(),
+        };
+        let requested = body.get("runtime_id").and_then(Value::as_str);
+
+        match crate::placement::decide(&offered, &candidates, requested) {
+            crate::placement::Placement::Core => {}
+            crate::placement::Placement::Runtime(runtime_id) => {
+                // Placement is a statement of intent the runtime converges on.
+                // The admin does not wait for a download here: it has to happen
+                // on the runtime regardless, and it is the runtime that reports
+                // how it went.
+                let Some(rec) = runtime_records.iter().find(|r| r.runtime_id == runtime_id) else {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "error": format!("runtime {runtime_id} disappeared mid-request") })),
+                    )
+                        .into_response();
+                };
+                let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, &rec.arch) else {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": format!(
+                                "{id} {} publishes nothing for {} {} on {}",
+                                pv.version, rec.kind, rec.abi, rec.arch
+                            )
+                        })),
+                    )
+                        .into_response();
+                };
+
+                if let Err(e) = crate::plugin_runtime_handlers::place_on_runtime(
+                    &s,
+                    &runtime_id,
+                    id,
+                    &pv.version,
+                    &art.url,
+                    &art.sha256,
+                ) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("recording the placement failed: {e:#}") })),
+                    )
+                        .into_response();
+                }
+
+                tracing::info!(plugin_id = %id, version = %pv.version, %runtime_id, "placed a plugin on a runtime");
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "placed_on": runtime_id,
+                        "plugin_id": id,
+                        "version": pv.version,
+                        "note": "The runtime installs and starts it on its next reconcile.",
+                    })),
+                )
+                    .into_response();
+            }
+            crate::placement::Placement::Ambiguous(ids) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "more than one runtime can host this plugin — choose one",
+                        "runtimes": ids,
+                        "hint": "repeat the request with runtime_id set",
+                    })),
+                )
+                    .into_response();
+            }
+            crate::placement::Placement::Impossible(why) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": why })),
+                )
+                    .into_response();
+            }
+        }
+
         let (art, _ver) = match reg.resolve(id, version).await {
             Ok(x) => x,
             Err(e) => {

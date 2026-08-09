@@ -16,8 +16,13 @@ name: CI
 on:
   push:
     branches: [main, develop]
+  # These filter the branch a PR is *merging into*, not the one it comes from —
+  # so this covers every PR from every branch, including ones that do not exist
+  # yet. `develop` was missing, which meant work merged there was only checked
+  # by the push run afterwards: red develop, found after the fact, on a branch
+  # that had already been deleted.
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 # The default workflow token is read-only, and a called workflow can never hold
 # more than its caller. rust-ci.yml opens/closes a tracking issue when develop

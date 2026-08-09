@@ -1126,6 +1126,7 @@ async fn main() -> Result<()> {
         broker_host: config.broker.host.clone(),
         broker_port: config.broker.port,
     }))
+    .with_plugin_runtimes(config.plugin_runtimes.clone())
     .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
         publish_handle_rpc,
