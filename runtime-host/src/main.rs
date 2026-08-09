@@ -9,13 +9,16 @@
 //! `adapter.toml`, baked into the image, so a Node or .NET runtime is a new base
 //! image rather than a new program. See `docs/pluginRuntimesPlan.md`, piece 4.
 //!
-//! Phase A covers enrollment. Placement and supervision follow.
+//! Once approved it converges: core holds the list of what belongs here, the
+//! host pulls it, provisions what is missing and supervises the result.
 
 mod adapter;
+mod core_client;
 mod enroll;
 mod identity;
-mod placement;
+mod install;
 mod plugin;
+mod reconcile;
 mod supervisor;
 
 use anyhow::{Context, Result};
@@ -130,45 +133,112 @@ async fn main() -> Result<()> {
     let notices = plugin::connect_and_register(&creds, &caps, env!("CARGO_PKG_VERSION")).await?;
     tracing::info!(plugin_id = %creds.plugin_id, "registered with homeCore");
 
-    // What this runtime should be running. Core will hold this list and the
-    // runtime will reconcile against it; for now it is local.
-    let placements = placement::load(&data_dir)?;
-
-    if placements.is_empty() {
-        // An empty runtime and a broken one are indistinguishable in the plugin
-        // list unless one of them says so.
-        plugin::announce_empty(&notices, &caps.kind);
-        tracing::info!("no plugins placed on this runtime yet");
-    } else {
-        plugin::clear_empty(&notices);
-        let adapter_path =
-            PathBuf::from(env_or("HC_RUNTIME_ADAPTER", "/etc/hc-runtime/adapter.toml"));
-        let adapter = adapter::Adapter::load(&adapter_path)?;
-
-        // Held for the lifetime of the process: dropping the sender would tell
-        // every supervisor to shut down immediately.
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        for p in placements {
-            let argv = adapter::render(&adapter.launch, &p.vars())
-                .with_context(|| format!("rendering the launch command for {}", p.id))?;
-            tracing::info!(plugin_id = %p.id, "hosting");
-
-            let notices = notices.clone();
-            let rx = shutdown_rx.clone();
-            tokio::spawn(async move {
-                supervisor::supervise(
-                    supervisor::Supervised {
-                        plugin_id: p.id.clone(),
-                        argv,
-                    },
-                    rx,
-                    move |id, looping| report_crash_loop(&notices, id, looping),
-                )
-                .await;
-            });
-        }
+    // Everything language-specific, and the only reason this binary can host
+    // Python without knowing anything about it. Loaded before the first pass
+    // rather than on demand: an image shipped without an adapter cannot host
+    // anything, and finding that out at startup beats finding out the first
+    // time something is placed here.
+    let adapter_path = PathBuf::from(env_or("HC_RUNTIME_ADAPTER", "/etc/hc-runtime/adapter.toml"));
+    let adapter = adapter::Adapter::load(&adapter_path)?;
+    if adapter.kind != caps.kind || adapter.abi != caps.abi {
+        anyhow::bail!(
+            "this host enrolled as {} {} but its adapter is {} {} — artifacts are matched \
+             against what was advertised at enrollment, so they would arrive unusable",
+            caps.kind,
+            caps.abi,
+            adapter.kind,
+            adapter.abi
+        );
     }
 
-    std::future::pending::<()>().await;
-    Ok(())
+    let client =
+        core_client::CoreClient::new(http.clone(), &cfg.base_url, &id.runtime_id, &creds.api_key);
+    let crash_notices = notices.clone();
+    let mut reconciler = reconcile::Reconciler::new(
+        data_dir.clone(),
+        adapter,
+        client,
+        move |plugin_id, looping| report_crash_loop(&crash_notices, plugin_id, looping),
+    );
+
+    let interval = std::time::Duration::from_secs(
+        env_or("HC_RUNTIME_POLL_SECS", "30")
+            .parse()
+            .unwrap_or(30)
+            .max(5),
+    );
+
+    // Converge, forever. Core holds the desired state and this is the loop that
+    // catches up with it — including everything that happened while the
+    // container was down, which is the same case as everything else.
+    let mut announced_empty = false;
+    loop {
+        match reconciler.pass().await {
+            Ok(pass) => {
+                if pass.changed_anything() {
+                    tracing::info!(
+                        started = ?pass.started, restarted = ?pass.restarted,
+                        stopped = ?pass.stopped, "reconciled"
+                    );
+                }
+                for (plugin_id, error) in &pass.failed {
+                    tracing::warn!(%plugin_id, %error, "still not provisioned");
+                }
+
+                // An empty runtime and a broken one look identical in the plugin
+                // list unless one of them says which it is.
+                let empty = reconciler.hosted() == 0;
+                if empty && !announced_empty {
+                    plugin::announce_empty(&notices, &caps.kind);
+                } else if !empty && announced_empty {
+                    plugin::clear_empty(&notices);
+                }
+                announced_empty = empty;
+            }
+            // Everything keeps running. Stopping plugins because the list could
+            // not be fetched would turn a core restart into an outage in every
+            // runtime at once.
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "could not reach homeCore for the desired state — keeping what is running"
+            ),
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            // A container stop is a SIGTERM, and the hosted plugins are this
+            // process's children. Left to the container runtime they are killed
+            // a moment later, mid-publish, with core still holding whatever
+            // they last said.
+            _ = terminate() => {
+                tracing::info!("shutting down — stopping hosted plugins");
+                reconciler.stop_all().await;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Resolve when the operator, or the container runtime, asks this to stop.
+async fn terminate() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            // Nothing to do about it, and it must not take the host down.
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for SIGTERM");
+                return std::future::pending().await;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

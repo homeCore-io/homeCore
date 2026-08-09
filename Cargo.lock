@@ -1828,15 +1828,19 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.2",
  "hc-api-types",
+ "hex",
  "plugin-sdk-rs",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
