@@ -212,6 +212,23 @@ pub enum OptionSource {
     Scenes,
 }
 
+/// Why an attribute exists, borrowed from Home Assistant's `entity_category`
+/// because a porter arrives with it already decided.
+///
+/// This is a *presentation* distinction, not a permission one: a diagnostic
+/// attribute is as readable as any other, it simply is not what the device is
+/// for. Clients are expected to group or fold these rather than hide them —
+/// battery level matters exactly when it is low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributeCategory {
+    /// Health and connectivity: battery, RSSI, firmware version, uptime.
+    Diagnostic,
+    /// Settings that shape how the device behaves rather than reporting what
+    /// it is doing — a sensitivity threshold, a reporting interval.
+    Config,
+}
+
 /// Describes a single attribute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchema {
@@ -238,6 +255,20 @@ pub struct AttributeSchema {
     /// Fixed option list for `Enum` kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
+    /// What kind of thing this reading is *for*, when it is not the point of
+    /// the device.
+    ///
+    /// A door lock reports whether it is locked; it also reports battery,
+    /// signal strength and firmware. Rendering all four the same way buries
+    /// the one an operator came for. Home Assistant solved this with
+    /// `entity_category`, and a faithful port of any integration arrives with
+    /// the distinction already made — without somewhere to put it, the porter
+    /// either loses it or drops the data.
+    ///
+    /// Absent means primary: the ordinary case stays untouched, and every
+    /// attribute declared before this existed keeps its meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<AttributeCategory>,
     /// What this attribute's two states are *called*, for `Bool` kind.
     ///
     /// Absent on every attribute that predates this field, and meaningless on
@@ -348,6 +379,7 @@ impl Default for AttributeSchema {
             max: None,
             step: None,
             options: None,
+            category: None,
             states: None,
         }
     }
