@@ -7521,8 +7521,12 @@ components:
 
             Initial server-enforced shapes:
             - `device_grid`, `device_list`, `device_tile`, `media_player`:
-              `selection_mode` (`manual|area|query`), optional `device_ids`, `area_name`,
-              `query`, `limit`, `show_offline`
+              `selection_mode` (`manual|area|query|facet`), required `area_name` when
+              the mode is `area` and `facet` when it is `facet`, optional `device_ids`,
+              `query`, `limit`, `show_offline`. The `facet` value is validated as a
+              non-empty string only: facets are inferred by the client from a device's
+              override, canonical type and reported attributes, so the server has no
+              vocabulary to check it against.
             - `stat_summary`: `metrics` string array
             - `event_feed`: optional `limit`, `types`, `device_ids`, `area_name`,
               `group_by` (`none|type|device|area`)

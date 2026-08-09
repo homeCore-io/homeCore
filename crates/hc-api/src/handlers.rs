@@ -3736,9 +3736,28 @@ fn validate_selection_widget_config(
                 }
             }
         }
+        // "every light in the house", as a kind rather than as a search.
+        //
+        // The mode exists because a substring query is the wrong tool for it
+        // and quietly so: the house's own "Lights 22" count is facet-derived,
+        // while `query: "light"` matches on the NAME and found 17 of those 22.
+        // A card that is confidently short by five is worse than no card.
+        //
+        // Core validates the shape and not the vocabulary, exactly as it does
+        // for `area_name`, and for the same reason: **it does not compute
+        // facets.** A facet is inferred from the user's override, then the
+        // canonical device type, then the attributes a device actually reports
+        // — three sources core does not assemble. Policing a list it cannot
+        // evaluate would only mean a client that learns a new facet cannot save
+        // until core is released too, which is the trap `type` was made a plain
+        // string to avoid.
+        "facet" => {
+            require_string(map, "facet", &widget.id)?;
+        }
         _ => {
             return Err(format!(
-                "widget '{}' has unsupported selection_mode '{}'",
+                "widget '{}' has unsupported selection_mode '{}' \
+                 (expected manual, area, query or facet)",
                 widget.id, selection_mode
             ));
         }
@@ -10598,5 +10617,102 @@ token = "TOKEN-TWO"
         let imported: DashboardResponse = parse_json(resp).await;
         assert_ne!(imported.dashboard.id, created.dashboard.id);
         assert_eq!(imported.dashboard.owner_user_id, "owner");
+    }
+
+    // ── selection_mode: facet ──────────────────────────────────────────────
+    //
+    // Phase 10 of hc-web's designer plan, and one of only two core changes in
+    // the whole programme. "Every light in the house" as a KIND, rather than as
+    // a search for the word.
+    //
+    // The mode is here because the search was quietly wrong: the house's own
+    // "Lights 22" figure is facet-derived, while `query: "light"` matches on the
+    // name and found 17 of them. A card confidently short by five is worse than
+    // no card, which is why the client refused to offer the filter at all until
+    // core could express it.
+
+    fn selection_widget(config: serde_json::Value) -> hc_types::dashboard::DashboardWidget {
+        hc_types::dashboard::DashboardWidget {
+            id: "grid".to_string(),
+            r#type: "device_grid".to_string(),
+            title: "Lights".to_string(),
+            subtitle: None,
+            config,
+        }
+    }
+
+    #[test]
+    fn accepts_a_facet_selection() {
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "facet",
+            "facet": "light",
+            "limit": 12,
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
+    }
+
+    #[test]
+    fn a_facet_selection_needs_a_facet() {
+        // The same shape as `area`: the mode names a field, and the field has
+        // to be there. A card whose facet is missing would select the whole
+        // house rather than nothing, which is the failure that is hard to see.
+        for config in [
+            serde_json::json!({"selection_mode": "facet"}),
+            serde_json::json!({"selection_mode": "facet", "facet": ""}),
+            serde_json::json!({"selection_mode": "facet", "facet": "   "}),
+            serde_json::json!({"selection_mode": "facet", "facet": 7}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_err(),
+                "accepted {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_does_not_police_the_facet_vocabulary() {
+        // Deliberate, and the same rule `area_name` follows. Core does not
+        // compute facets — they are inferred from a user override, then the
+        // canonical device type, then the attributes a device reports, and core
+        // assembles none of that. A list here would only mean a client that
+        // learns a new facet cannot save until core is released too.
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "facet",
+            "facet": "something_a_newer_client_knows_about",
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
+    }
+
+    #[test]
+    fn still_rejects_a_mode_it_has_never_heard_of() {
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "vibes",
+            "facet": "light",
+        }));
+        let error = super::validate_widget_config(&widget).expect_err("must reject");
+        assert!(error.contains("vibes"), "{error}");
+        // The message names the modes that would have worked. A typo is the
+        // likeliest way to get here.
+        assert!(error.contains("facet"), "{error}");
+    }
+
+    #[test]
+    fn the_other_modes_are_untouched() {
+        for config in [
+            serde_json::json!({"selection_mode": "manual", "device_ids": ["a"]}),
+            serde_json::json!({"selection_mode": "area", "area_name": "Kitchen"}),
+            serde_json::json!({"selection_mode": "query", "query": "lamp"}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_ok(),
+                "rejected {config}"
+            );
+        }
+        // And `area` still requires its own field, so the new arm did not
+        // loosen the neighbouring one.
+        let widget = selection_widget(serde_json::json!({"selection_mode": "area"}));
+        assert!(super::validate_widget_config(&widget).is_err());
     }
 }
