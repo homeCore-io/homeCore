@@ -2,7 +2,7 @@
 //!
 //! Core holds the desired state; the runtime pulls it. Pull rather than push
 //! because the container is the side that may vanish and come back on a
-//! different address — a runtime that lost its volume re-enrols and asks again,
+//! different address — a runtime that lost its volume re-enrolls and asks again,
 //! and core does not need to have noticed anything.
 //!
 //! Both calls authenticate with the runtime's own API key, which identifies
@@ -73,7 +73,7 @@ impl CoreClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             bail!(
                 "homeCore does not recognise this runtime — it may have been removed. \
-                 Delete the identity file and restart to enrol again."
+                 Delete the identity file and restart to enroll again."
             );
         }
         let status = resp.status();

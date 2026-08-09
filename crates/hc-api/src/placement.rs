@@ -117,7 +117,7 @@ fn matches(offered: &Offered, c: &Candidate) -> bool {
 /// Say what is missing in terms of the next action, not in terms of matching.
 ///
 /// "No artifact matched" tells an operator nothing they can act on. Whether they
-/// need to enrol a runtime at all, or already have one of the right kind that is
+/// need to enroll a runtime at all, or already have one of the right kind that is
 /// simply the wrong ABI or architecture, are different problems with different
 /// fixes.
 fn explain_no_fit(offered: &Offered, runtimes: &[Candidate]) -> String {
