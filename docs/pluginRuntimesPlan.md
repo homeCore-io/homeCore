@@ -860,6 +860,31 @@ Pieces 2 and 3 together, since neither is useful alone.
 Done when `POST /plugins/install` places a registry plugin on a runtime with no
 local paths anywhere.
 
+### What the delivery loop was proven to do
+
+Run end to end against an isolated core on 18080/18883, with a `file://`
+registry whose index was signed by hand, and a deliberately trivial artifact —
+the point was the delivery path, not the plugin:
+
+| step | result |
+|---|---|
+| `POST /plugins/install` | `202`, `placed_on` the runtime |
+| the runtime's next pass | fetched, sha256 verified, unpacked, `create_env`, `install`, launched |
+| edit core's `config/plugins/<id>.toml` | next pass restarted that plugin with the new text |
+| restart the host | re-adopted the plugin, no re-download |
+| `SIGTERM` the host | stopped the plugin first, no orphan |
+| `DELETE /plugins/<id>` | placement withdrawn, plugin stopped, directory removed |
+
+What that does **not** cover, and phase E will: a real hermetic wheelhouse
+installed by real `pip`, and a plugin that registers devices. Phase A already
+proved that half separately — a hermetic Python plugin registering and answering
+a `PATCH` — but the two halves have not yet been run as one.
+
+One operational note found by running it: a plugin orphaned by `SIGKILL`ing the
+host keeps running and will be *duplicated* by the next host that starts. In a
+container that cannot happen — killing PID 1 takes the namespace with it — but
+it can bite in development, and it is why the `SIGTERM` path exists.
+
 ## Phase D — the UI
 
 Piece 5. Pending list, hosted-plugins pane, attribution, registry-sheet
