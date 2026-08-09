@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.33"
+  version: "0.1.34"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -4642,6 +4642,41 @@ paths:
                     items:
                       $ref: "#/components/schemas/RuntimeSummary"
 
+  /plugin-runtimes/placements:
+    get:
+      operationId: listAllPluginPlacements
+      summary: Every plugin placed on a runtime
+      description: |
+        The admin view. Distinct from `/plugin-runtimes/{id}/placements`, which
+        a runtime calls with its own key to learn what it should be running;
+        this one answers both halves of the operator's question — what a
+        runtime hosts, and where a plugin runs — from one read.
+
+        Carries no config: that holds a minted broker credential, and the
+        operator already edits the same file through the plugin config surface.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All placements, ordered by runtime then plugin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        runtime_id: { type: string }
+                        plugin_id: { type: string }
+                        version: { type: string }
+                        placed_at: { type: string, format: date-time }
+        "404":
+          description: Plugin runtimes are disabled
+
   /plugin-runtimes/tokens:
     post:
       operationId: issuePluginRuntimeToken
@@ -7486,8 +7521,12 @@ components:
 
             Initial server-enforced shapes:
             - `device_grid`, `device_list`, `device_tile`, `media_player`:
-              `selection_mode` (`manual|area|query`), optional `device_ids`, `area_name`,
-              `query`, `limit`, `show_offline`
+              `selection_mode` (`manual|area|query|facet`), required `area_name` when
+              the mode is `area` and `facet` when it is `facet`, optional `device_ids`,
+              `query`, `limit`, `show_offline`. The `facet` value is validated as a
+              non-empty string only: facets are inferred by the client from a device's
+              override, canonical type and reported attributes, so the server has no
+              vocabulary to check it against.
             - `stat_summary`: `metrics` string array
             - `event_feed`: optional `limit`, `types`, `device_ids`, `area_name`,
               `group_by` (`none|type|device|area`)

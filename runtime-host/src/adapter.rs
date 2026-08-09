@@ -1,6 +1,6 @@
 //! What differs per language, expressed as data.
 //!
-//! The host knows how to enrol, register, supervise and report. It knows nothing
+//! The host knows how to enroll, register, supervise and report. It knows nothing
 //! about Python. Everything language-specific is four command templates baked
 //! into the image as `adapter.toml`, so a Node or .NET runtime is a new base
 //! image rather than a new program:

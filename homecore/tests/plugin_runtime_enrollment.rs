@@ -214,7 +214,7 @@ async fn a_runtimes_key_cannot_read_another_runtimes_placements() {
     let base = h.tcp_base();
     let http = reqwest::Client::new();
 
-    // Enrol and approve one runtime, collecting its key.
+    // Enroll and approve one runtime, collecting its key.
     let req = signed(51, "rt-alpha");
     let (status, body) = post_enroll(&base, &req).await;
     assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{body}");

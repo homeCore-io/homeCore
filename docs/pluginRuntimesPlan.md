@@ -3,6 +3,32 @@
 Container-based plugins, in pieces. Piece 1 is how a runtime joins homeCore;
 piece 2 is how a plugin gets into one.
 
+## Why this exists
+
+"Any language, over MQTT" was always a design goal, and it has always been
+technically true — a plugin in any language can speak the topics today. What
+never existed was a way to *get started*: a plugin needs a config file with
+broker credentials, and the only way to get one was to be a binary core
+unpacked. Everything here closes that gap.
+
+Two things follow, and they are the point rather than a side effect:
+
+1. **Someone who knows Python and does not want to learn Rust can write a
+   plugin.** They are the constrained party, not us. Whether we could have
+   written the same plugin faster in Rust is not a measure of anything.
+
+2. **Porting an existing Home Assistant integration should be as easy as we
+   can make it.** That is where the integrations already are — years of them,
+   written by people who know the device and its API. A homeCore plugin and an
+   HA integration are both "Python that talks to a device", and every place we
+   can accept their shape instead of insisting on ours is a translation step a
+   contributor does not have to perform.
+
+The second one is a standing constraint on design decisions, not a phase. When
+a choice is open — how config is expressed, how devices are declared, how
+discovery reports — the tie-breaker is whichever is closer to what someone
+bringing an integration across already has in their hands.
+
 ---
 
 # Piece 1: Enrollment
@@ -416,6 +442,20 @@ hc-web renders these with no new UI.
 ---
 
 # Piece 3: Building the artifacts
+
+> **Built 2026-08-09**, in `hc-scripts`: `build-python-artifact.sh`,
+> `smoke-python-artifact.sh` and `python-release.yml`, plus `runtime`/`abi` in
+> the registry's `update-index.py` and `publish.yml`. Both traps below are now
+> asserted rather than remembered, and both scripts run on a laptop — which is
+> how the traps were found in the first place. Verified before commit: x86_64
+> and aarch64 built from one x86_64 machine with no emulation, identical locked
+> versions, arch-correct compiled wheels, and the x86_64 artifact installed
+> offline into a clean venv and registered a device with a real core.
+>
+> Still missing: **a repository for Python plugins to live in**. The pipeline
+> takes a plugin directory and has only ever been run against a scratch
+> fixture. That repo is phase E's first act.
+
 
 Piece 2 defines what a runtime plugin artifact *is*. This piece is the pipeline
 that produces one, and it lands in `hc-scripts` as a reusable workflow beside
@@ -899,9 +939,47 @@ One real integration, chosen for a clean library and API-key auth rather than
 OAuth. Ported by hand, without a generator, keeping notes on what was mechanical
 — those notes are the specification for any tooling that follows.
 
-This is also the honest test of the whole effort: if porting is not markedly
-cheaper than writing a Rust plugin, the answer is to stop here and treat
-runtimes as an interop path rather than a porting strategy.
+### What success is, and what it is not
+
+An earlier draft of this plan said the test was whether porting is "markedly
+cheaper than writing a Rust plugin", and that if it is not, the answer is to
+stop. That is the wrong measure, and it was ours to get wrong: it prices the
+work in *our* hours.
+
+**The point is that someone who knows Python and does not want to learn Rust
+can write a plugin at all.** Whether that is cheaper than a Rust plugin *for
+us* does not enter into it — we are not the constrained party. A contributor
+who would have written nothing, and now ships a working integration, is the
+whole return, and it does not become smaller because we could have written it
+faster in Rust.
+
+So the honest test is accessibility, and it is answerable:
+
+- Can someone write a plugin knowing Python and **no Rust at all** — not for
+  the plugin, not for the build, not to read an error?
+- Is every step they need documented in one place, in their ecosystem's terms
+  (`pyproject.toml`, a venv, `pytest`), rather than as homeCore trivia?
+- When it breaks, does the failure name the thing they can fix?
+
+### The bar the port has to clear: porting from Home Assistant
+
+Most of what a contributor will want to bring across already exists as a Home
+Assistant integration. So the measure is not "a Python plugin can be written",
+it is **how little has to change for an integration to come across**:
+
+- the **device library** is usually the substance of an integration, and it is
+  ordinary Python that should carry over untouched
+- what changes is the shell around it — config, discovery, entity definitions,
+  state updates — and every one of those we can meet in a shape close to
+  theirs is a step someone does not have to translate
+- so the notes from this first port are not just "what was mechanical", they
+  are **what was mechanical and what was gratuitously different**. The second
+  list is the backlog: anything on it that we could have accepted in their
+  shape and did not is a cost we imposed for no reason.
+
+A generator or a compatibility shim may follow. This port is what tells us
+which parts are worth automating, and the answer is not knowable in advance —
+which is why it is a port and not a design exercise.
 
 ## What can run in parallel
 
