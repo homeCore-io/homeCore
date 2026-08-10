@@ -28,6 +28,7 @@ use tracing::{info, warn};
 
 pub mod admin_uds;
 pub mod api_key_handlers;
+pub mod asset_handlers;
 pub mod audit;
 pub mod audit_handlers;
 pub mod auth_handlers;
@@ -1076,6 +1077,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugin-runtimes/{id}/artifacts/{plugin_id}",
             get(plugin_runtime_handlers::get_placement_artifact),
         )
+        // Assets are read without a token, because a browser sends no
+        // Authorization header on an <img>, a CSS background or a font — the
+        // reason album art works on :8080 and 401s at :3001. The id is a
+        // content hash the caller cannot choose or guess, and that is what
+        // stands in for the token. Writes and the listing stay protected.
+        .route("/assets/{id}", get(asset_handlers::get_asset))
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/{path}", post(handlers::receive_webhook));
@@ -1246,6 +1253,26 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(skin_handlers::get_skin)
                 .put(skin_handlers::update_skin)
                 .delete(skin_handlers::delete_skin),
+        )
+        // Assets — the writes and the listing. The read is public; see
+        // `asset_handlers` for why, and note that the listing is the one call
+        // that would turn an unguessable id into a guessable one.
+        .route(
+            "/assets",
+            get(asset_handlers::list_assets)
+                .post(asset_handlers::upload_asset)
+                // Axum's default body cap is 2MB, so an upload route has to say
+                // its own. The slack is for headers; the handler enforces the
+                // real limit and answers 413 rather than letting the layer cut
+                // the connection.
+                .layer(DefaultBodyLimit::max(
+                    asset_handlers::MAX_ASSET_BYTES + 4096,
+                )),
+        )
+        .route("/assets/{id}", delete(asset_handlers::delete_asset))
+        .route(
+            "/assets/group/{group}",
+            delete(asset_handlers::delete_asset_group),
         )
         .route("/dashboards/import", post(handlers::import_dashboard))
         .route("/dashboards/reload", post(handlers::reload_dashboards))

@@ -3220,6 +3220,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             description: Some("Your home at a glance.".to_string()),
             owner_user_id: owner_user_id.to_string(),
             access: Vec::new(),
+            background: None,
             tags: vec!["starter".into(), "home".into(), "overview".into()],
             // Not "home": that renders the same house glyph as the Home nav
             // item. "rocket" reads as onboarding and stays distinct.
@@ -3434,6 +3435,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             description: Some("Entry points, alerts, and camera placeholders.".to_string()),
             owner_user_id: owner_user_id.to_string(),
             access: Vec::new(),
+            background: None,
             tags: vec!["security".into()],
             icon: "shield".into(),
             created_at: now,
@@ -3481,6 +3483,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
             description: Some("A room-focused dashboard with devices and media.".to_string()),
             owner_user_id: owner_user_id.to_string(),
             access: Vec::new(),
+            background: None,
             tags: vec!["room".into(), "living_room".into()],
             icon: "chair".into(),
             created_at: now,
@@ -3556,6 +3559,22 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
     }
     if dashboard.layouts.is_empty() {
         return Err("dashboard must define at least one layout".into());
+    }
+    if let Some(background) = &dashboard.background {
+        // Ranges, not existence. Core never fetches the image — it is a URL the
+        // browser resolves, and a background that 404s is a page with no
+        // picture on it, not a dashboard that must refuse to save.
+        if let Some(image) = &background.image {
+            if image.trim().is_empty() {
+                return Err("dashboard background image cannot be empty".into());
+            }
+        }
+        if !(0.0..=40.0).contains(&background.blur) {
+            return Err("dashboard background blur must be between 0 and 40".into());
+        }
+        if !(0.0..=1.0).contains(&background.dim) {
+            return Err("dashboard background dim must be between 0 and 1".into());
+        }
     }
 
     let mut widget_ids = HashSet::new();
@@ -3762,6 +3781,22 @@ fn validate_selection_widget_config(
             ));
         }
     }
+    // Exceptions to the rule, whatever the rule was.
+    //
+    // A selection used to be a rule and nothing else, which made it opaque: a
+    // room card meant "whatever is in the living room now" and there was no way
+    // to say "the living room EXCEPT the TV". These two lists are that "except"
+    // — and the "and also", for a device the rule does not reach.
+    //
+    // They apply to every mode including `manual`, where the rule is already a
+    // list: `device_ids` stays the rule, so an older client keeps rendering the
+    // same card, and `add`/`remove` are additional rather than a replacement.
+    // Same shape as `device_ids`, same validation, and core stays out of
+    // deciding whether a device id exists — the client resolves membership and
+    // a stale id is a device that was deleted, not a malformed dashboard.
+    optional_string_list(map, "add", &widget.id)?;
+    optional_string_list(map, "remove", &widget.id)?;
+
     optional_i64_min(map, "limit", 1, &widget.id)?;
     if require_limit && !map.contains_key("limit") {
         return Err(format!(
@@ -9542,6 +9577,7 @@ token = "TOKEN-TWO"
             description: Some("Test dashboard".to_string()),
             owner_user_id: owner_user_id.to_string(),
             access: Vec::new(),
+            background: None,
             tags: vec!["home".to_string()],
             icon: "dashboard".to_string(),
             created_at: Utc::now(),
@@ -10695,6 +10731,134 @@ token = "TOKEN-TWO"
         // The message names the modes that would have worked. A typo is the
         // likeliest way to get here.
         assert!(error.contains("facet"), "{error}");
+    }
+
+    fn dashboard_with_background(
+        background: Option<hc_types::dashboard::DashboardBackground>,
+    ) -> DashboardDefinition {
+        DashboardDefinition {
+            id: "d".into(),
+            name: "D".into(),
+            description: None,
+            owner_user_id: "u".into(),
+            tags: vec![],
+            icon: "grid".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            layouts: vec![hc_types::dashboard::DashboardLayout {
+                breakpoint: hc_types::dashboard::DashboardBreakpoint::Desktop,
+                columns: 12,
+                row_height: 100.0,
+                gap: 12.0,
+                placements: vec![],
+                derived_from: None,
+                flow: Default::default(),
+            }],
+            widgets: vec![],
+            access: Vec::new(),
+            background,
+        }
+    }
+
+    #[test]
+    fn a_page_may_have_a_background() {
+        use hc_types::dashboard::DashboardBackground;
+        let ok = dashboard_with_background(Some(DashboardBackground {
+            image: Some("http://10.0.10.150:8080/wall.jpg".into()),
+            blur: 12.0,
+            dim: 0.4,
+        }));
+        assert!(super::validate_dashboard(&ok).is_ok());
+        // And no background at all is the state every existing dashboard is in.
+        assert!(super::validate_dashboard(&dashboard_with_background(None)).is_ok());
+    }
+
+    #[test]
+    fn a_background_out_of_range_is_refused() {
+        use hc_types::dashboard::DashboardBackground;
+        for background in [
+            DashboardBackground {
+                image: None,
+                blur: 400.0,
+                dim: 0.0,
+            },
+            DashboardBackground {
+                image: None,
+                blur: -1.0,
+                dim: 0.0,
+            },
+            DashboardBackground {
+                image: None,
+                blur: 0.0,
+                dim: 2.0,
+            },
+            DashboardBackground {
+                image: Some("  ".into()),
+                blur: 0.0,
+                dim: 0.0,
+            },
+        ] {
+            assert!(
+                super::validate_dashboard(&dashboard_with_background(Some(background.clone())))
+                    .is_err(),
+                "accepted {background:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_never_fetches_the_background_image() {
+        // Ranges, not existence. A URL that 404s is a page with no picture on
+        // it, not a dashboard that must refuse to save — and core resolving a
+        // URL on a client's behalf is a request-forgery surface it does not
+        // need.
+        use hc_types::dashboard::DashboardBackground;
+        let odd = dashboard_with_background(Some(DashboardBackground {
+            image: Some("file:///etc/passwd".into()),
+            blur: 0.0,
+            dim: 0.0,
+        }));
+        assert!(super::validate_dashboard(&odd).is_ok());
+    }
+
+    #[test]
+    fn a_selection_may_carry_exceptions() {
+        // "The living room except the TV", and "…and also the hall lamp".
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "area",
+            "area_name": "living_room",
+            "remove": ["tv_1"],
+            "add": ["hall_lamp"],
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
+    }
+
+    #[test]
+    fn exceptions_must_be_lists_of_strings() {
+        for config in [
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "remove": "tv_1"}),
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "add": [7]}),
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "add": {}}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_err(),
+                "accepted {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_does_not_check_that_the_ids_exist() {
+        // Deliberate. Membership is resolved by the client against the live
+        // device map; an id that no longer resolves is a device someone
+        // deleted, which must not make the whole dashboard unsaveable.
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "area",
+            "area_name": "living_room",
+            "remove": ["a_device_that_was_deleted_last_year"],
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
     }
 
     #[test]
