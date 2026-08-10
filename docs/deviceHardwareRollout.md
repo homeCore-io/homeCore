@@ -64,6 +64,27 @@ These are the honest test of whether the fields are the right ones. If a wave-1
 plugin has a fact that does not fit `manufacturer`/`model`/`sw_version`, that is
 worth knowing **before** the other nine are edited.
 
+### What wave 1 actually found (2026-08-10)
+
+The fields are right. The estimate was not: **"one line each" holds only for
+`hc-zwave`.** In the other three the fact is one layer away from the
+registration call, and that is the real cost of this rollout.
+
+| plugin | where the fact is | what it needs |
+|---|---|---|
+| `hc-zwave` | `NodeState`, straight from zwave-js after the interview | **done** — three fields on the struct, one call swapped |
+| `hc-wled` | fetched later by `/json/info`, and currently written into *attributes* (`brand`, `product`, `firmware`) | re-register once info lands, and drop the three attributes that were standing in for this |
+| `hc-roku` | `RokuEntry` carries `serial` only; model and software version are in a device-info fetch the entry does not keep | thread two fields through the entry |
+| `hc-ecowitt` | `DeviceUpdate` carries none; the gateway's `/get_device_info` has them | carry them on the update, or register the gateway informed |
+
+`hc-wled` is the interesting one: it already had this data and had nowhere to
+put it, so it put it in attributes. That is the shape of the gap being closed —
+three readings that look like device state and are not.
+
+The registration contract makes all three safe to do incrementally: absent
+means "not said", so a plugin can register bare at discovery and again once it
+knows, without a special path for either.
+
 ### Wave 2 — the upstream API has it, the plugin does not parse it yet
 
 `hc-hue` (10 calls — bridge exposes `manufacturername`, `modelid`,

@@ -522,6 +522,21 @@ impl DevicePublisher {
         area: Option<&str>,
         capabilities: Option<Value>,
     ) -> Result<()> {
+        self.register_device_detailed(device_id, name, device_type, area, capabilities, None)
+            .await
+    }
+
+    /// Register a device, including what the hardware actually is and what it
+    /// sits behind. See [`PluginClient::register_device_detailed`].
+    pub async fn register_device_detailed(
+        &self,
+        device_id: &str,
+        name: &str,
+        device_type: Option<&str>,
+        area: Option<&str>,
+        capabilities: Option<Value>,
+        hardware: Option<&DeviceHardware>,
+    ) -> Result<()> {
         let topic = format!("homecore/plugins/{}/register", self.plugin_id);
         let mut payload = serde_json::json!({
             "device_id": device_id,
@@ -536,6 +551,18 @@ impl DevicePublisher {
         }
         if let Some(c) = capabilities {
             payload["capabilities"] = c;
+        }
+        if let Some(hw) = hardware {
+            for (key, value) in [
+                ("manufacturer", &hw.manufacturer),
+                ("model", &hw.model),
+                ("sw_version", &hw.sw_version),
+                ("parent_device_id", &hw.parent_device_id),
+            ] {
+                if let Some(v) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    payload[key] = Value::String(v.to_string());
+                }
+            }
         }
         self.client
             .publish(
@@ -839,6 +866,9 @@ pub struct DeviceHardware {
     pub model: Option<String>,
     /// Firmware, as the device reports it — not any homeCore version.
     pub sw_version: Option<String>,
+    /// The device this one sits behind — a bulb's bridge, a node's
+    /// controller, an outlet's strip. Advisory; nothing routes through it.
+    pub parent_device_id: Option<String>,
 }
 
 impl DeviceHardware {
@@ -855,6 +885,12 @@ impl DeviceHardware {
     }
     pub fn sw_version(mut self, v: impl Into<String>) -> Self {
         self.sw_version = Some(v.into());
+        self
+    }
+    /// Say what this device sits behind. The id must be one this plugin also
+    /// registers — a bridge, a controller, a strip.
+    pub fn behind(mut self, device_id: impl Into<String>) -> Self {
+        self.parent_device_id = Some(device_id.into());
         self
     }
 }
@@ -1233,6 +1269,7 @@ impl PluginClient {
                 ("manufacturer", &hw.manufacturer),
                 ("model", &hw.model),
                 ("sw_version", &hw.sw_version),
+                ("parent_device_id", &hw.parent_device_id),
             ] {
                 if let Some(v) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     payload[key] = serde_json::Value::String(v.to_string());
