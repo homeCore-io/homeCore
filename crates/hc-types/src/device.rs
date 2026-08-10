@@ -309,6 +309,24 @@ pub struct DeviceState {
     /// `"window"`, `"garage"`, or `"gate"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_hint: Option<String>,
+    /// What the thing actually is, as its own system reports it.
+    ///
+    /// Nothing in homeCore reads these — they exist for the operator staring
+    /// at a device that has stopped working and needing to know which one it
+    /// is, which firmware it is on, and whether the other three like it are
+    /// the same model. Every Home Assistant integration supplies them because
+    /// the device registry asks for them; ours dropped them on the floor.
+    ///
+    /// All optional and all defaulted: `hc-types` is a plugin ABI, and a
+    /// required field here would fail every plugin's build at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Firmware version, as the device reports it. Not homeCore's version of
+    /// anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sw_version: Option<String>,
     /// Whether the device is currently reachable.
     pub available: bool,
     /// All reported attributes and their current values.
@@ -338,6 +356,9 @@ impl DeviceState {
             area_override: None,
             device_type: None,
             ui_hint: None,
+            manufacturer: None,
+            model: None,
+            sw_version: None,
             available: false,
             attributes: HashMap::new(),
             last_seen: Utc::now(),
@@ -367,6 +388,14 @@ pub struct DeviceRegistration {
     pub area: Option<String>,
     /// JSON Schema object describing the device's capabilities.
     pub capabilities: serde_json::Value,
+    /// Hardware identity, if the plugin's upstream system knows it. See
+    /// [`DeviceState::manufacturer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sw_version: Option<String>,
 }
 
 /// A logical grouping of devices (room, zone, floor, etc.).

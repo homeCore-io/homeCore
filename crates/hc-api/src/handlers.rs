@@ -3762,6 +3762,22 @@ fn validate_selection_widget_config(
             ));
         }
     }
+    // Exceptions to the rule, whatever the rule was.
+    //
+    // A selection used to be a rule and nothing else, which made it opaque: a
+    // room card meant "whatever is in the living room now" and there was no way
+    // to say "the living room EXCEPT the TV". These two lists are that "except"
+    // — and the "and also", for a device the rule does not reach.
+    //
+    // They apply to every mode including `manual`, where the rule is already a
+    // list: `device_ids` stays the rule, so an older client keeps rendering the
+    // same card, and `add`/`remove` are additional rather than a replacement.
+    // Same shape as `device_ids`, same validation, and core stays out of
+    // deciding whether a device id exists — the client resolves membership and
+    // a stale id is a device that was deleted, not a malformed dashboard.
+    optional_string_list(map, "add", &widget.id)?;
+    optional_string_list(map, "remove", &widget.id)?;
+
     optional_i64_min(map, "limit", 1, &widget.id)?;
     if require_limit && !map.contains_key("limit") {
         return Err(format!(
@@ -10695,6 +10711,46 @@ token = "TOKEN-TWO"
         // The message names the modes that would have worked. A typo is the
         // likeliest way to get here.
         assert!(error.contains("facet"), "{error}");
+    }
+
+    #[test]
+    fn a_selection_may_carry_exceptions() {
+        // "The living room except the TV", and "…and also the hall lamp".
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "area",
+            "area_name": "living_room",
+            "remove": ["tv_1"],
+            "add": ["hall_lamp"],
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
+    }
+
+    #[test]
+    fn exceptions_must_be_lists_of_strings() {
+        for config in [
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "remove": "tv_1"}),
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "add": [7]}),
+            serde_json::json!({"selection_mode": "area", "area_name": "x", "add": {}}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_err(),
+                "accepted {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_does_not_check_that_the_ids_exist() {
+        // Deliberate. Membership is resolved by the client against the live
+        // device map; an id that no longer resolves is a device someone
+        // deleted, which must not make the whole dashboard unsaveable.
+        let widget = selection_widget(serde_json::json!({
+            "selection_mode": "area",
+            "area_name": "living_room",
+            "remove": ["a_device_that_was_deleted_last_year"],
+        }));
+        assert!(super::validate_widget_config(&widget).is_ok());
     }
 
     #[test]

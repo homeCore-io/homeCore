@@ -824,6 +824,41 @@ impl ManagementHandle {
 }
 
 /// Connection configuration for a plugin.
+/// What a device *is*, as its own system reports it.
+///
+/// Every field optional, because a plugin usually learns them at different
+/// times — a bridge names the manufacturer at discovery and the firmware only
+/// after the first poll. Absent leaves whatever core already knows alone.
+///
+/// Nothing in homeCore branches on these. They exist so an operator staring at
+/// a device that stopped working can tell which one it is, what it is running,
+/// and whether the other three like it are the same model.
+#[derive(Debug, Clone, Default)]
+pub struct DeviceHardware {
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    /// Firmware, as the device reports it — not any homeCore version.
+    pub sw_version: Option<String>,
+}
+
+impl DeviceHardware {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn manufacturer(mut self, v: impl Into<String>) -> Self {
+        self.manufacturer = Some(v.into());
+        self
+    }
+    pub fn model(mut self, v: impl Into<String>) -> Self {
+        self.model = Some(v.into());
+        self
+    }
+    pub fn sw_version(mut self, v: impl Into<String>) -> Self {
+        self.sw_version = Some(v.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PluginConfig {
     pub broker_host: String,
@@ -1150,6 +1185,34 @@ impl PluginClient {
         area: Option<&str>,
         capabilities: Option<Value>,
     ) -> Result<()> {
+        self.register_device_detailed(device_id, name, device_type, area, capabilities, None)
+            .await
+    }
+
+    /// Register a device, including what the hardware actually is.
+    ///
+    /// The same as [`Self::register_device_full`] plus [`DeviceHardware`] —
+    /// manufacturer, model and firmware, as the upstream system reports them.
+    /// homeCore acts on none of it; it is there for the operator looking at a
+    /// device that has stopped working and needing to know which one it is and
+    /// what it is running.
+    ///
+    /// A separate method rather than three more arguments, because
+    /// `register_device_full` is called by every plugin in the fleet and a
+    /// changed signature is a fleet-wide edit for the plugins that have
+    /// nothing to add.
+    ///
+    /// Absent fields leave whatever core already stored alone, so reporting
+    /// firmware only after the first poll — the common case — is fine.
+    pub async fn register_device_detailed(
+        &self,
+        device_id: &str,
+        name: &str,
+        device_type: Option<&str>,
+        area: Option<&str>,
+        capabilities: Option<Value>,
+        hardware: Option<&DeviceHardware>,
+    ) -> Result<()> {
         let topic = format!("homecore/plugins/{}/register", self.config.plugin_id);
         let mut payload = serde_json::json!({
             "device_id":   device_id,
@@ -1164,6 +1227,17 @@ impl PluginClient {
         }
         if let Some(c) = capabilities {
             payload["capabilities"] = c;
+        }
+        if let Some(hw) = hardware {
+            for (key, value) in [
+                ("manufacturer", &hw.manufacturer),
+                ("model", &hw.model),
+                ("sw_version", &hw.sw_version),
+            ] {
+                if let Some(v) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    payload[key] = serde_json::Value::String(v.to_string());
+                }
+            }
         }
         self.client
             .publish(

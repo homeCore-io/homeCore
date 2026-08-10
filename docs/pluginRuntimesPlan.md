@@ -29,6 +29,10 @@ a choice is open — how config is expressed, how devices are declared, how
 discovery reports — the tie-breaker is whichever is closer to what someone
 bringing an integration across already has in their hands.
 
+`haMapping.md` surveys which of those choices are actually open, field by
+field, and names two we should deliberately *not* move: config stays a TOML
+file an operator can edit, and state stays on MQTT.
+
 ---
 
 # Piece 1: Enrollment
