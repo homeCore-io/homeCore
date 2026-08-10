@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
