@@ -7471,6 +7471,30 @@ components:
             Two decisions, not one — a tint without a blur is what a light skin
             wants.
 
+    DashboardBackground:
+      type: object
+      description: >
+        What the page sits on. A property of the dashboard rather than of one
+        layout — the phone and the wall show the same house behind the same
+        cards. `blur` and `dim` are what make an image survivable behind live
+        content: an unblurred photograph destroys the legibility of everything
+        on top of it. The server stores the URL and never fetches it, so a
+        broken address is a page with no picture, not a dashboard that refuses
+        to save.
+      properties:
+        image:
+          type: string
+          description: A URL the browser can reach.
+        blur:
+          type: number
+          minimum: 0
+          maximum: 40
+        dim:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Darkens the image so text on top keeps its contrast.
+
     DashboardLayout:
       type: object
       required: [breakpoint, columns, row_height, gap, placements]
@@ -7575,6 +7599,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DashboardLayout"
+        background:
+          $ref: "#/components/schemas/DashboardBackground"
         widgets:
           type: array
           items:

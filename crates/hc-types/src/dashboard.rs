@@ -140,6 +140,38 @@ pub struct DashboardDefinition {
     /// loads (`serde(default)`).
     #[serde(default)]
     pub access: Vec<DashboardGrant>,
+    /// What the page sits on.
+    ///
+    /// A property of the dashboard rather than of one layout, because a
+    /// background is not an arrangement — the phone and the wall show the same
+    /// house behind the same cards.
+    ///
+    /// `Option` with `skip_serializing_if`, so every dashboard saved before
+    /// this existed serialises byte-identically and nothing has to be
+    /// migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<DashboardBackground>,
+}
+
+/// An image behind the whole page, and what makes it survivable behind live
+/// content.
+///
+/// Blur and dim are not decoration. An unblurred photograph destroys the
+/// legibility of everything on top of it, so a background that offers an image
+/// without them offers a page you cannot read.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DashboardBackground {
+    /// A URL the browser can reach. Core stores it and never fetches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    /// 0–40. Frosts the image, not the cards.
+    #[serde(default)]
+    pub blur: f64,
+
+    /// 0–1. Darkens the image so text on top keeps its contrast.
+    #[serde(default)]
+    pub dim: f64,
 }
 
 /// One person's access to a dashboard they do not own.
