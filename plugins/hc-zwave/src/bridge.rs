@@ -103,8 +103,31 @@ async fn publish_node(
     // `node.set_location` to zwave-js, then triggers a rescan that lands
     // here.
     let area = node.location.as_deref().filter(|s| !s.is_empty());
+
+    // What the node actually is, once zwave-js has interviewed it. Absent
+    // before then, and absent means "not said" rather than "unknown" — core
+    // keeps whatever an earlier registration established, so the bare
+    // registration of a freshly-included node is not a step backwards.
+    let mut hardware = plugin_sdk_rs::DeviceHardware::new();
+    if let Some(v) = node.manufacturer.as_deref().filter(|s| !s.is_empty()) {
+        hardware = hardware.manufacturer(v);
+    }
+    if let Some(v) = node.label.as_deref().filter(|s| !s.is_empty()) {
+        hardware = hardware.model(v);
+    }
+    if let Some(v) = node.firmware_version.as_deref().filter(|s| !s.is_empty()) {
+        hardware = hardware.sw_version(v);
+    }
+
     publisher
-        .register_device_full(&device_id, &display_name, Some("zwave"), area, None)
+        .register_device_detailed(
+            &device_id,
+            &display_name,
+            Some("zwave"),
+            area,
+            None,
+            Some(&hardware),
+        )
         .await?;
 
     // Diagnostic: log all CC 98 (Door Lock) value IDs so we can see exactly what the

@@ -327,6 +327,21 @@ pub struct DeviceState {
     /// anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sw_version: Option<String>,
+    /// The device this one sits behind, when its plugin knows.
+    ///
+    /// A Hue bulb's bridge, a Z-Wave node's controller, one outlet of a strip.
+    /// **Advisory: nothing routes through it.** Core does not mark children
+    /// unavailable when a parent goes down — that is a UI affordance and a
+    /// diagnosis aid, and making it load-bearing has failure modes of its own.
+    ///
+    /// It exists so twenty bulbs going unavailable at once can be shown as one
+    /// bridge being unreachable rather than twenty independent failures, and so
+    /// a four-outlet strip's outlets can be separate devices without scattering.
+    ///
+    /// Named for a dependency rather than a route — Home Assistant's
+    /// `via_device` describes how you reach a thing; this says what it needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_device_id: Option<String>,
     /// Whether the device is currently reachable.
     pub available: bool,
     /// All reported attributes and their current values.
@@ -359,6 +374,7 @@ impl DeviceState {
             manufacturer: None,
             model: None,
             sw_version: None,
+            parent_device_id: None,
             available: false,
             attributes: HashMap::new(),
             last_seen: Utc::now(),
@@ -396,6 +412,9 @@ pub struct DeviceRegistration {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sw_version: Option<String>,
+    /// What this device sits behind. See [`DeviceState::parent_device_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_device_id: Option<String>,
 }
 
 /// A logical grouping of devices (room, zone, floor, etc.).
