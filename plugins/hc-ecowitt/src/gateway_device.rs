@@ -115,6 +115,10 @@ pub async fn refresh(
     // Build the attributes map. Order is fixed so the device page
     // renders predictably across refreshes.
     let mut attrs: Map<String, Value> = Map::new();
+    // Filled from /get_version below, then sent with the registration rather
+    // than only as attributes — a model and a firmware are what the thing is,
+    // not something it is currently doing.
+    let mut hardware = plugin_sdk_rs::DeviceHardware::new();
     attrs.insert("ip".into(), json!(ip));
     attrs.insert("mac".into(), json!(mac));
     if let Some(v) = device_info.get("date").and_then(Value::as_str) {
@@ -132,17 +136,42 @@ pub async fn refresh(
     }
 
     // /get_version: model + firmware, plus an "update available" flag.
+    //
+    // This is where the gateway's identity lives — **not** /get_device_info,
+    // which despite the name returns timezone, RF and upgrade settings and no
+    // model at all. Verified against a GW1100B on 2026-08-10:
+    //
+    //     /get_version     {"version":"Version: GW1100B_V2.4.5","platform":"ecowitt",…}
+    //     /get_device_info {"sensorType":"1","tz_name":"America/New_York",…}
+    //
+    // `derive_gateway_name` reads `model` from /get_device_info and therefore
+    // never finds one; the gateway is always named "Ecowitt Gateway".
     let version_url = format!("http://{ip}/get_version");
     if let Ok(v) = http_get_json(&version_url).await {
         if let Some(s) = v.get("version").and_then(Value::as_str) {
-            attrs.insert("firmware".into(), json!(s.replace("Version: ", "")));
-            // "GW1100B_V2.4.5" → model = "GW1100B"
-            if let Some((model, _)) = s.replace("Version: ", "").split_once('_') {
-                attrs.insert("model".into(), json!(model));
+            let full = s.replace("Version: ", "");
+            // "GW1100B_V2.4.5" is model and firmware in one string. The
+            // attribute used to carry the whole thing under the name
+            // `firmware`, which made every gateway's firmware look unique to
+            // its model.
+            match full.split_once('_') {
+                Some((model, firmware)) => {
+                    attrs.insert("model".into(), json!(model));
+                    attrs.insert("firmware".into(), json!(firmware));
+                    hardware = hardware.model(model).sw_version(firmware);
+                }
+                None => {
+                    attrs.insert("firmware".into(), json!(full.clone()));
+                    hardware = hardware.sw_version(full);
+                }
             }
         }
         if let Some(s) = v.get("platform").and_then(Value::as_str) {
             attrs.insert("platform".into(), json!(s));
+            // "ecowitt" — the vendor, in the vendor's own lowercase.
+            if !s.trim().is_empty() {
+                hardware = hardware.manufacturer("Ecowitt");
+            }
         }
         if let Some(s) = v.get("newVersion").and_then(Value::as_str) {
             attrs.insert("update_available".into(), json!(s == "1"));
@@ -197,6 +226,24 @@ pub async fn refresh(
                 attrs.insert(format!("customserver.{k}"), val.clone());
             }
         }
+    }
+
+    // Re-register with what /get_version said the gateway is. The first
+    // registration above happens before that fetch, so this is the earliest
+    // the model exists; absent fields leave what core holds alone, which makes
+    // repeating it every cycle idempotent rather than chatty.
+    if let Err(e) = publisher
+        .register_device_detailed(
+            &hc_id,
+            &derive_gateway_name(&device_info),
+            Some("gateway"),
+            None,
+            None,
+            Some(&hardware),
+        )
+        .await
+    {
+        debug!(hc_id = %hc_id, error = %e, "gateway identity re-register failed");
     }
 
     publisher

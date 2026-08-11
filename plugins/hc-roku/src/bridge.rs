@@ -672,7 +672,7 @@ impl Bridge {
         let doc = state::to_json(&snap);
         let playback = state::playback_state(&snap).to_string();
 
-        let should_publish = {
+        let (should_publish, identity, device_name) = {
             let mut devs = self.devices.write().await;
             let d = devs.get_mut(hc_id)?;
             d.online = true;
@@ -684,12 +684,45 @@ impl Bridge {
             if d.serial.is_none() {
                 d.serial = info.serial().map(str::to_string);
             }
+            // What the box is, from the same `device-info` the snapshot came
+            // from. Registration happens at discovery, before anything has
+            // been asked, so this is the first moment the model exists — and
+            // re-registering with it is idempotent, since absent means "not
+            // said" and core keeps what it has.
+            let identity = {
+                let field = |k: &str| info.get(k).map(str::trim).filter(|s| !s.is_empty());
+                let mut hw = plugin_sdk_rs::DeviceHardware::new().manufacturer("Roku");
+                if let Some(v) = field("model-name") {
+                    hw = hw.model(v);
+                }
+                if let Some(v) = field("software-version") {
+                    hw = hw.sw_version(v);
+                }
+                hw
+            };
             let changed = d.last_published.as_ref() != Some(&doc);
             if changed {
                 d.last_published = Some(doc.clone());
             }
-            changed
+            (changed, identity, d.name.clone())
         };
+
+        // Idempotent: absent fields leave what core stored alone, and the
+        // fields only change when the box is updated.
+        if let Err(e) = self
+            .publisher
+            .register_device_detailed(
+                hc_id,
+                &device_name,
+                Some("media_player"),
+                None,
+                None,
+                Some(&identity),
+            )
+            .await
+        {
+            debug!(hc_id, error = %e, "identity re-register failed");
+        }
 
         // A command always republishes, even when the resulting state is
         // byte-identical: the caller needs the acknowledgement, and a

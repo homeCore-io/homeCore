@@ -73,9 +73,36 @@ registration call, and that is the real cost of this rollout.
 | plugin | where the fact is | what it needs |
 |---|---|---|
 | `hc-zwave` | `NodeState`, straight from zwave-js after the interview | **done** — three fields on the struct, one call swapped |
-| `hc-wled` | fetched later by `/json/info`, and currently written into *attributes* (`brand`, `product`, `firmware`) | re-register once info lands, and drop the three attributes that were standing in for this |
-| `hc-roku` | `RokuEntry` carries `serial` only; model and software version are in a device-info fetch the entry does not keep | thread two fields through the entry |
-| `hc-ecowitt` | `DeviceUpdate` carries none; the gateway's `/get_device_info` has them | carry them on the update, or register the gateway informed |
+| `hc-wled` | fetched later by `/json/info`, and was written into *attributes* (`brand`, `product`, `firmware`) | **done** — re-registers once info lands; `brand` and `product` are no longer attributes |
+| `hc-roku` | `RokuEntry` carries `serial` only; model and software version arrive with each `device-info` poll | **done** — re-registers from the poll it already makes |
+| `hc-ecowitt` | the gateway's identity is in `/get_version`, **not** `/get_device_info` | **done** — see below |
+
+### What the gateway taught us, by being asked
+
+`/get_device_info` was assumed to carry the model. It does not. Probed against
+a live GW1100B on 2026-08-10:
+
+```
+/get_version      {"version":"Version: GW1100B_V2.4.5","platform":"ecowitt",…}
+/get_device_info  {"sensorType":"1","tz_name":"America/New_York","dst_stat":"1",…}
+```
+
+Three things follow:
+
+1. The identity comes from `/get_version`. `hc-ecowitt` now reads it there.
+2. **`derive_gateway_name` reads `model` from `/get_device_info` and therefore
+   never finds one** — every gateway is called "Ecowitt Gateway". Not fixed
+   here; it is a naming change an operator would see, and it deserves its own
+   change.
+3. The `firmware` attribute carried `GW1100B_V2.4.5` — model and firmware in
+   one string, which made every gateway's firmware look unique to its model.
+   Now split: `model` = `GW1100B`, `firmware` = `V2.4.5`.
+
+**And the gateway device does not exist on the live house at all.** `host` is
+unset in the live config, and the fallback is discovery, which does not work
+from a container (see the Ecowitt notes on bridge networking). So none of this
+path has been running there. Setting `host = "10.0.10.21"` is what turns it on
+— a config change, not a code one.
 
 `hc-wled` is the interesting one: it already had this data and had nowhere to
 put it, so it put it in attributes. That is the shape of the gap being closed —
