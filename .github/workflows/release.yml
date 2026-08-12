@@ -9,15 +9,23 @@ name: Release
 #   v0.1.20              the server        -> tar.gz + sha256 + ghcr.io image
 #   hc-yolink-v0.1.11    a plugin          -> tar.gz + sha256 + tar.zst + registry
 #
-# Pushing to develop builds the server and publishes a :dev image, exactly as
-# before; no Release is created and no plugin is built.
-#
 # Releasing a plugin is now: bump its Cargo.toml on develop, merge to main, push
 # one tag. No SDK tag first, no thirteen-manifest update, no cross-repo ordering.
 
+# A `:dev` image is built **when someone asks for one**, not on every push.
+#
+# John, 2026-08-12: *"dev should not be building images on every push."* An
+# image per commit is a container build and two registry pushes for work usually
+# superseded ten minutes later — and enough pushes in an afternoon hits GHCR's
+# secondary rate limit, which fails a run for reasons unrelated to the code in
+# it. hc-web dropped the same trigger the same day.
+#
+# `develop` still gets CI on every push; that is the check that matters and it
+# lives in ci.yml. What is gone is only the image. Run this workflow by hand —
+# Actions tab, or `gh workflow run release.yml --ref develop` — when a `:dev`
+# image is actually wanted; `docker/compose-dev.yml` pins that tag.
 on:
   push:
-    branches: [develop]
     tags:
       - 'v*'
       - 'hc-*-v*'
