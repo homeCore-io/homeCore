@@ -3164,6 +3164,7 @@ fn default_dashboard_layout(
         gap,
         derived_from: None,
         flow: Default::default(),
+        frame: None,
         placements: placements
             .iter()
             .enumerate()
@@ -3186,6 +3187,7 @@ fn default_dashboard_layout(
                         *w
                     },
                     h: *h,
+                    rect: None,
                 },
             )
             .collect(),
@@ -3254,6 +3256,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     gap: 12.0,
                     derived_from: None,
                     flow: Default::default(),
+                    frame: None,
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3261,6 +3264,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 0,
                             w: 1,
                             h: 2,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3268,6 +3272,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 1,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3275,6 +3280,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 1,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3282,6 +3288,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 8,
                             w: 1,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3289,6 +3296,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 11,
                             w: 1,
                             h: 2,
+                            rect: None,
                         },
                     ],
                 },
@@ -3299,6 +3307,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     gap: 12.0,
                     derived_from: None,
                     flow: Default::default(),
+                    frame: None,
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3306,6 +3315,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 0,
                             w: 12,
                             h: 2,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3313,6 +3323,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 5,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3320,6 +3331,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 7,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3327,6 +3339,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 8,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3334,6 +3347,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 4,
                             h: 2,
+                            rect: None,
                         },
                     ],
                 },
@@ -3344,6 +3358,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     gap: 12.0,
                     derived_from: None,
                     flow: Default::default(),
+                    frame: None,
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3351,6 +3366,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 0,
                             w: 12,
                             h: 2,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3358,6 +3374,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 4,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3365,6 +3382,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 8,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3372,6 +3390,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 8,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3379,6 +3398,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 4,
                             h: 2,
+                            rect: None,
                         },
                     ],
                 },
@@ -3389,6 +3409,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     gap: 16.0,
                     derived_from: None,
                     flow: Default::default(),
+                    frame: None,
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3396,6 +3417,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 0,
                             w: 12,
                             h: 2,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3403,6 +3425,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 4,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3410,6 +3433,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 2,
                             w: 8,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3417,6 +3441,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 8,
                             h: 3,
+                            rect: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3424,6 +3449,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             y: 5,
                             w: 4,
                             h: 2,
+                            rect: None,
                         },
                     ],
                 },
@@ -3615,6 +3641,16 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                 layout.breakpoint
             ));
         }
+        // A frame with no size is not a canvas, and every rectangle on it would
+        // divide by zero on the way to the screen.
+        if let Some(frame) = &layout.frame {
+            if frame.width <= 0.0 || frame.height <= 0.0 {
+                return Err(format!(
+                    "layout {:?} frame must have width and height > 0",
+                    layout.breakpoint
+                ));
+            }
+        }
         let mut layout_widget_ids = HashSet::new();
         for placement in &layout.placements {
             if !widget_id_set.contains(placement.widget_id.as_str()) {
@@ -3646,6 +3682,31 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     "layout {:?} placement '{}' exceeds column count {}",
                     layout.breakpoint, placement.widget_id, layout.columns
                 ));
+            }
+            // The composed rectangle, when there is one. Only its size: a card
+            // may sit at a negative x or run off the right-hand edge, because
+            // bleeding something past the edge of a page is a thing people do
+            // on purpose and the document format has no business forbidding it.
+            if let Some(rect) = &placement.rect {
+                // Finiteness first, and separately: NaN compares false against
+                // everything, so `w <= 0.0` would wave it through and the card
+                // would land nowhere on every client that drew it.
+                if !rect.x.is_finite()
+                    || !rect.y.is_finite()
+                    || !rect.w.is_finite()
+                    || !rect.h.is_finite()
+                {
+                    return Err(format!(
+                        "layout {:?} placement '{}' rect must be finite",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
+                if rect.w <= 0.0 || rect.h <= 0.0 {
+                    return Err(format!(
+                        "layout {:?} placement '{}' rect must have w/h > 0",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
             }
         }
     }
@@ -9589,12 +9650,14 @@ token = "TOKEN-TWO"
                 gap: 12.0,
                 derived_from: None,
                 flow: Default::default(),
+                frame: None,
                 placements: vec![DashboardWidgetPlacement {
                     widget_id: "summary".to_string(),
                     x: 0,
                     y: 0,
                     w: 12,
                     h: 1,
+                    rect: None,
                 }],
             }],
             widgets: vec![DashboardWidget {
@@ -10753,6 +10816,7 @@ token = "TOKEN-TWO"
                 placements: vec![],
                 derived_from: None,
                 flow: Default::default(),
+                frame: None,
             }],
             widgets: vec![],
             access: Vec::new(),

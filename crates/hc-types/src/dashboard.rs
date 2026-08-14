@@ -26,6 +26,71 @@ pub struct DashboardWidgetPlacement {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+
+    /// Where the card really sits, when the layout has a frame.
+    ///
+    /// The cells above are then a *snapped approximation* of this, kept
+    /// deliberately: they are what core validates, what a client that predates
+    /// frames draws, and what the whole document falls back to if the frame is
+    /// ever removed. A composed page therefore still opens, still legally, in
+    /// software that has never heard of composition — approximately right
+    /// rather than broken, which is the only version of this change that is
+    /// safe to ship to documents already in redb.
+    ///
+    /// Core does not lay anything out and does not act on this. It validates
+    /// that the rectangle has a positive size and stores it, for the same
+    /// reason it stores `flow`: where a person put something is a property of
+    /// the document, and two clients that disagreed about it would draw the
+    /// same page differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<DashboardRect>,
+}
+
+/// A rectangle in frame units — see [`DashboardFrame`].
+///
+/// Not clamped to the frame. Bleeding a photograph off the edge of a page is a
+/// thing people do on purpose, and a document format that forbids it decides a
+/// design question it has no business deciding.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DashboardRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// The canvas a layout is composed on.
+///
+/// Absent means the layout is a grid of cells and nothing else — every
+/// dashboard authored before this. Present, the cells become a snapping aid
+/// and the placement rectangles become the truth.
+///
+/// The units are the frame's own: a desktop frame is 1600 wide because that is
+/// the width the layout is drawn at, and a card 420 wide occupies 420 of those.
+/// What they are worth in real pixels depends on the viewport, which is exactly
+/// what makes a composition scale instead of reflow.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DashboardFrame {
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub fit: DashboardFrameFit,
+}
+
+/// What the frame's height promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardFrameFit {
+    /// The height is a starting point. Width sets the scale and the page grows
+    /// downward past the frame if there is more on it — how every dashboard has
+    /// behaved until now, which is why it is the default.
+    #[default]
+    Scroll,
+
+    /// The whole frame is shown at once, scaled to whatever it is being drawn
+    /// in, and nothing scrolls. What a wall display is: a fixed rectangle
+    /// somebody composed, seen from across the room.
+    Fixed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +131,15 @@ pub struct DashboardLayout {
     /// not a guess, it is the only thing those documents can have meant.
     #[serde(default)]
     pub flow: DashboardFlow,
+
+    /// The canvas this layout is composed on, or `None` for a plain grid.
+    ///
+    /// Per layout rather than per dashboard, because the answer differs by
+    /// device and that is what a breakpoint is for: a wall is a fixed frame
+    /// somebody composed, a phone is a column that scrolls. One frame for the
+    /// whole document would force the same answer on both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<DashboardFrame>,
 }
 
 /// What empty space in a layout means.
