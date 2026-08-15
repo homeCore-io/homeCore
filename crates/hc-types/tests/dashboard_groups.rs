@@ -102,7 +102,10 @@ fn an_unstyled_group_box_stays_a_path_and_nothing_else() {
     // cannot hide a card that was visible a moment ago. Any other default would
     // change what an existing group looks like the moment somebody names it.
     let plain = box_for("Wall");
-    assert!(plain.rect.is_none(), "a group with no rect fits its members");
+    assert!(
+        plain.rect.is_none(),
+        "a group with no rect fits its members"
+    );
     assert_eq!(plain.padding, 0.0);
     assert!(plain.radius.is_none(), "radius is the skin's until asked");
     assert!(!plain.clip, "clipping must be asked for, never inherited");
