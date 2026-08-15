@@ -7789,6 +7789,64 @@ components:
             Per layout rather than per dashboard, because the answer differs by
             device: a wall is a fixed frame somebody composed, a phone is a
             column that scrolls.
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardGroupBox"
+          description: >
+            Groups that have been given a body. Empty, and omitted, on every
+            layout whose groups are just named selections — which is all of them
+            before this field. Membership is not here: a group is a path in each
+            widget's own config, so this list styles groups rather than defining
+            them.
+
+    DashboardGroupBox:
+      type: object
+      required: [path]
+      description: >
+        A group's body — where its box sits and what it looks like. Groups are
+        paths written into each widget's own config (`Wall/Lights`); the path is
+        the identity, which is what makes nesting free and an orphaned group
+        impossible. This adds only what a path cannot say. A group with no entry
+        here is what every group was before: a named selection, drawn as
+        nothing. An entry whose path no longer matches any widget is inert, not
+        invalid — rejecting it would make deleting the last card in a group fail
+        to save. Core never reads these; it validates their shape and stores
+        them.
+      properties:
+        path:
+          type: string
+          description: The group's path, as written in its members' config.
+        rect:
+          $ref: "#/components/schemas/DashboardRect"
+          description: >
+            The box, in the frame's units. Omitted means fit the members — the
+            bounding box of whatever is currently in the group, recomputed as
+            things move, so a group nobody resized stays correct when a member
+            does.
+        padding:
+          type: number
+          default: 0
+          description: >
+            Space between the box's edge and its members' bounding box. Ignored
+            when `rect` is set, where the box is stated outright.
+        radius:
+          type: number
+          description: >
+            Corner radius in frame units. Omitted leaves it to the client's
+            skin, which is the right answer for a group nobody has styled.
+        clip:
+          type: boolean
+          default: false
+          description: >
+            Whether members are clipped to the box. Off by default and
+            deliberately so: turning a group into a container must not hide a
+            card that was visible a moment ago.
+        background:
+          $ref: "#/components/schemas/DashboardBackground"
+          description: >
+            What the group sits on — the same shape the page's background has,
+            so a group is a small page rather than a new kind of thing.
 
     DashboardWidget:
       type: object

@@ -3165,6 +3165,7 @@ fn default_dashboard_layout(
         derived_from: None,
         flow: Default::default(),
         frame: None,
+        groups: Vec::new(),
         placements: placements
             .iter()
             .enumerate()
@@ -3257,6 +3258,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     derived_from: None,
                     flow: Default::default(),
                     frame: None,
+                    groups: Vec::new(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3308,6 +3310,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     derived_from: None,
                     flow: Default::default(),
                     frame: None,
+                    groups: Vec::new(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3359,6 +3362,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     derived_from: None,
                     flow: Default::default(),
                     frame: None,
+                    groups: Vec::new(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3410,6 +3414,7 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                     derived_from: None,
                     flow: Default::default(),
                     frame: None,
+                    groups: Vec::new(),
                     placements: vec![
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "hero".into(),
@@ -3705,6 +3710,60 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     return Err(format!(
                         "layout {:?} placement '{}' rect must have w/h > 0",
                         layout.breakpoint, placement.widget_id
+                    ));
+                }
+            }
+        }
+        // Group boxes. Note what is NOT checked: that the path matches any
+        // widget. Membership lives in the widgets' config and a group is
+        // whoever currently claims the path, so a box whose group has been
+        // emptied is inert, not invalid — and rejecting it would make deleting
+        // the last card in a group fail to save.
+        let mut group_paths = HashSet::new();
+        for group in &layout.groups {
+            if group.path.trim().is_empty() {
+                return Err(format!(
+                    "layout {:?} has a group box with an empty path",
+                    layout.breakpoint
+                ));
+            }
+            if !group_paths.insert(group.path.as_str()) {
+                return Err(format!(
+                    "layout {:?} has duplicate group box for '{}'",
+                    layout.breakpoint, group.path
+                ));
+            }
+            if !group.padding.is_finite() || group.padding < 0.0 {
+                return Err(format!(
+                    "layout {:?} group '{}' padding must be finite and >= 0",
+                    layout.breakpoint, group.path
+                ));
+            }
+            if let Some(radius) = group.radius {
+                if !radius.is_finite() || radius < 0.0 {
+                    return Err(format!(
+                        "layout {:?} group '{}' radius must be finite and >= 0",
+                        layout.breakpoint, group.path
+                    ));
+                }
+            }
+            // Same rule the placement rectangles get, and for the same reason:
+            // finiteness separately, because NaN passes every comparison.
+            if let Some(rect) = &group.rect {
+                if !rect.x.is_finite()
+                    || !rect.y.is_finite()
+                    || !rect.w.is_finite()
+                    || !rect.h.is_finite()
+                {
+                    return Err(format!(
+                        "layout {:?} group '{}' rect must be finite",
+                        layout.breakpoint, group.path
+                    ));
+                }
+                if rect.w <= 0.0 || rect.h <= 0.0 {
+                    return Err(format!(
+                        "layout {:?} group '{}' rect must have w/h > 0",
+                        layout.breakpoint, group.path
                     ));
                 }
             }
@@ -9651,6 +9710,7 @@ token = "TOKEN-TWO"
                 derived_from: None,
                 flow: Default::default(),
                 frame: None,
+                groups: Vec::new(),
                 placements: vec![DashboardWidgetPlacement {
                     widget_id: "summary".to_string(),
                     x: 0,
@@ -10817,6 +10877,7 @@ token = "TOKEN-TWO"
                 derived_from: None,
                 flow: Default::default(),
                 frame: None,
+                groups: Vec::new(),
             }],
             widgets: vec![],
             access: Vec::new(),
@@ -10883,6 +10944,109 @@ token = "TOKEN-TWO"
             dim: 0.0,
         }));
         assert!(super::validate_dashboard(&odd).is_ok());
+    }
+
+    fn dashboard_with_groups(
+        groups: Vec<hc_types::dashboard::DashboardGroupBox>,
+    ) -> DashboardDefinition {
+        let mut dashboard = dashboard_with_background(None);
+        dashboard.layouts[0].groups = groups;
+        dashboard
+    }
+
+    fn group_box(path: &str) -> hc_types::dashboard::DashboardGroupBox {
+        hc_types::dashboard::DashboardGroupBox {
+            path: path.into(),
+            rect: None,
+            padding: 0.0,
+            radius: None,
+            clip: false,
+            background: None,
+        }
+    }
+
+    #[test]
+    fn a_group_box_may_name_a_group_nothing_is_in() {
+        // Deliberately legal. Membership lives in the widgets' config, so core
+        // cannot tell an emptied group from a mistyped one — and refusing the
+        // first would make deleting the last card in a group fail to save,
+        // which is a data-loss bug dressed as validation.
+        assert!(
+            super::validate_dashboard(&dashboard_with_groups(vec![group_box("Nobody/Here")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_group_box_needs_a_path_and_only_one_of_them() {
+        let blank = super::validate_dashboard(&dashboard_with_groups(vec![group_box("   ")]))
+            .expect_err("a group box with no path names nothing");
+        assert!(blank.contains("empty path"), "{blank}");
+
+        let twice = super::validate_dashboard(&dashboard_with_groups(vec![
+            group_box("Wall"),
+            group_box("Wall"),
+        ]))
+        .expect_err("two boxes for one group have no defined winner");
+        assert!(twice.contains("duplicate group box"), "{twice}");
+    }
+
+    #[test]
+    fn a_group_rect_is_checked_for_finiteness_separately_from_size() {
+        // The NaN trap the placement rectangles already guard against: NaN
+        // compares false against every bound, so a `w <= 0.0` test alone waves
+        // it through and the group lands nowhere on every client that draws it.
+        let mut nan = group_box("Wall");
+        nan.rect = Some(hc_types::dashboard::DashboardRect {
+            x: 0.0,
+            y: 0.0,
+            w: f64::NAN,
+            h: 10.0,
+        });
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![nan]))
+            .expect_err("NaN is not a width");
+        assert!(error.contains("must be finite"), "{error}");
+
+        let mut flat = group_box("Wall");
+        flat.rect = Some(hc_types::dashboard::DashboardRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 10.0,
+        });
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![flat]))
+            .expect_err("a group with no width is not a box");
+        assert!(error.contains("w/h > 0"), "{error}");
+    }
+
+    #[test]
+    fn a_group_box_may_sit_anywhere_the_page_does() {
+        // Negative positions are legal for the same reason they are legal for a
+        // card: bleeding a group past the edge of a page is something people do
+        // on purpose, and the document format has no business forbidding it.
+        let mut bleeding = group_box("Wall");
+        bleeding.rect = Some(hc_types::dashboard::DashboardRect {
+            x: -40.0,
+            y: -20.0,
+            w: 400.0,
+            h: 200.0,
+        });
+        assert!(super::validate_dashboard(&dashboard_with_groups(vec![bleeding])).is_ok());
+    }
+
+    #[test]
+    fn a_group_box_rejects_negative_padding_and_radius() {
+        let mut padded = group_box("Wall");
+        padded.padding = -1.0;
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![padded]))
+            .expect_err("negative padding is a group smaller than its members");
+        assert!(error.contains("padding"), "{error}");
+
+        let mut round = group_box("Wall");
+        round.radius = Some(-4.0);
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![round]))
+            .expect_err("a negative radius has no rendering");
+        assert!(error.contains("radius"), "{error}");
     }
 
     #[test]

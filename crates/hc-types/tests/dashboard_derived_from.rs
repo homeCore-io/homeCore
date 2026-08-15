@@ -33,6 +33,7 @@ fn layout(derived_from: Option<DashboardBreakpoint>) -> DashboardLayout {
         derived_from,
         flow: DashboardFlow::default(),
         frame: None,
+        groups: Vec::new(),
     }
 }
 
