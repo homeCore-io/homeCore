@@ -7551,6 +7551,58 @@ components:
         section_id:
           type: string
           nullable: true
+        rect:
+          $ref: "#/components/schemas/DashboardRect"
+          description: >
+            Where the card really sits, when the layout has a frame. The cells
+            above are then a snapped approximation of it, kept deliberately:
+            they are what core validates, what a client that predates frames
+            draws, and what the document falls back to if the frame is removed.
+            Omitted on every layout nobody has composed. Core does not lay
+            anything out and does not act on this; it validates that the
+            rectangle is finite with a positive size, and stores it.
+
+    DashboardRect:
+      type: object
+      required: [x, y, w, h]
+      description: >
+        A rectangle in the units of the layout's frame. Not clamped to that
+        frame: bleeding a photograph past the edge of a page is something people
+        do on purpose.
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        w:
+          type: number
+        h:
+          type: number
+
+    DashboardFrame:
+      type: object
+      required: [width, height]
+      description: >
+        The canvas a layout is composed on. Absent means the layout is a grid of
+        cells and nothing else, which is every dashboard authored before this.
+        Present, the cells become a snapping aid and the placement rectangles
+        become the truth. The units are the frame's own — a desktop frame is
+        1600 wide because that is the width the layout is drawn at.
+      properties:
+        width:
+          type: number
+        height:
+          type: number
+        fit:
+          type: string
+          enum: [scroll, fixed]
+          default: scroll
+          description: >
+            What the height promises. `scroll` — the default, and how every
+            dashboard has behaved until now — treats it as a starting point:
+            width sets the scale and the page grows downward past the frame.
+            `fixed` shows the whole frame at once, scaled to whatever it is
+            drawn in, and nothing scrolls. A wall display is `fixed`.
 
     Asset:
       type: object
@@ -7719,6 +7771,24 @@ components:
             editor that writes back only the breakpoint it read uses this to
             tell which other layouts are its to recompute and which a person has
             taken over.
+        flow:
+          type: string
+          enum: [packed, free]
+          default: packed
+          description: >
+            Whether empty space is content. `packed` — the default, and what
+            every dashboard authored before this field was — floats cards up
+            until they collide. `free` leaves them where they were put. Core
+            stores it and never acts on it: the answer is a property of the
+            document, not of whichever client is drawing it, and two clients
+            that disagreed would render the same page differently.
+        frame:
+          $ref: "#/components/schemas/DashboardFrame"
+          description: >
+            The canvas this layout is composed on, or omitted for a plain grid.
+            Per layout rather than per dashboard, because the answer differs by
+            device: a wall is a fixed frame somebody composed, a phone is a
+            column that scrolls.
 
     DashboardWidget:
       type: object
