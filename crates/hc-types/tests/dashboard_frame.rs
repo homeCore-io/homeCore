@@ -39,6 +39,7 @@ fn layout(frame: Option<DashboardFrame>, rect: Option<DashboardRect>) -> Dashboa
         derived_from: None,
         flow: DashboardFlow::Free,
         frame,
+        groups: Vec::new(),
     }
 }
 

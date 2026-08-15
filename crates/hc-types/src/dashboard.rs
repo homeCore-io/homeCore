@@ -140,6 +140,62 @@ pub struct DashboardLayout {
     /// whole document would force the same answer on both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<DashboardFrame>,
+
+    /// Groups that have been given a body, keyed by their path.
+    ///
+    /// Membership is NOT here and never will be: a group is a path in each
+    /// widget's own config (`Wall/Lights`), the path *is* the identity, and
+    /// that is what makes nesting free and an orphaned group impossible. This
+    /// records only what a path cannot say — where the box is and what it looks
+    /// like — for the groups somebody has bothered to style.
+    ///
+    /// A group with no entry here is exactly what every group was before:
+    /// a named selection, drawn as nothing. So absence is not missing data, and
+    /// an entry whose path no longer matches any widget is inert rather than
+    /// broken. Core does not lay out, so it never reads these; it stores them
+    /// because they are properties of the document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<DashboardGroupBox>,
+}
+
+/// A group's body: where it sits, and what it looks like.
+///
+/// Per layout, like the placements it sits behind — a group is a box on a
+/// *page*, and the page differs by breakpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardGroupBox {
+    /// The group's path, as written in its members' config: `Wall/Lights`.
+    pub path: String,
+
+    /// The box, in the frame's units. `None` means "fit the members" — the
+    /// bounding box of whatever is currently in the group, recomputed as things
+    /// move. That is the useful default: a group you have not resized should
+    /// not need saved geometry to stay correct when a member moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<DashboardRect>,
+
+    /// Space between the box's edge and its members' bounding box. Ignored when
+    /// `rect` is set, where the box is stated outright.
+    #[serde(default)]
+    pub padding: f64,
+
+    /// Corner radius, in frame units. `None` leaves it to the client's skin,
+    /// which is the right answer for a group nobody has styled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+
+    /// Whether members are clipped to the box.
+    ///
+    /// Off by default, and deliberately so: turning a group into a container
+    /// must not be able to hide a card that was visible a moment ago. Clipping
+    /// is a thing you ask for.
+    #[serde(default)]
+    pub clip: bool,
+
+    /// What the group sits on — the same shape the page's background has, so a
+    /// group is a small page rather than a new kind of thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<DashboardBackground>,
 }
 
 /// What empty space in a layout means.
