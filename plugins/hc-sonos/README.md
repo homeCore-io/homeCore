@@ -51,6 +51,52 @@ For compatibility, the plugin also still publishes legacy Sonos-oriented fields:
 - `group_coordinator`
 - `group_members`
 
+## Known: radio streams publish no track, and report paused
+
+*Observed on the live house 2026-08-10 — Rock Nation Radio playing on Office-1,
+nothing on the dashboard. Not fixed; written down so the next person does not
+have to re-derive it.*
+
+What core held for the speaker while it was audibly playing:
+
+```
+state:            paused
+media_title:      absent      media_artist: absent      media_image_url: absent
+duration_secs:    0           position_secs: 0          ← present
+last_seen:        fresh, plugin active, initial poll succeeded
+```
+
+Position and duration arriving while everything else is missing is the tell:
+the poll ran, and the track metadata came back empty.
+
+**Why.** Track info is read from exactly one place — `GetPositionInfo` →
+`TrackMetaData` (`speaker.rs`, `poll_track_details`) — and GENA events read the
+matching `CurrentTrackMetaData` (`events.rs`). For a radio stream Sonos leaves
+that field empty or `NOT_IMPLEMENTED` and puts the information elsewhere:
+
+| What you want | Where Sonos puts it for a stream | Do we read it? |
+|---|---|---|
+| The station | `CurrentURIMetaData`, via `GetMediaInfo` | **no** — `GetMediaInfo` is never called |
+| The live "Artist – Track" | `r:streamContent` inside the DIDL | **no** — the parser reads `dc:title` only |
+| `dc:title` | often the stream URL itself | yes, which is the problem |
+
+That last row is visible in the house right now: the Bathroom speaker's
+`media_title` is literally `hls.m3u8?rj-ttl=5&rj-…`. hc-web already carries a
+`cleanTitle` sanitiser for exactly this, so the gap is long-standing rather
+than new — the workaround was written before the cause was found.
+
+`state: paused` is the same story one level up: `is_playing()` (from `sonor`)
+maps a transport state that a stream reports differently.
+
+**The fix, when it is picked up.** Read `GetMediaInfo` → `CurrentURIMetaData`
+for the station name and art, and `r:streamContent` for the live track, falling
+back to `GetPositionInfo` for queued music. Both the initial poll and the GENA
+handler need it, since they parse the same DIDL two different ways today.
+
+Worth doing with a real stream in front of you: the failure is entirely in what
+the speaker chooses to populate, so it cannot be reproduced from a queued
+track.
+
 ## Sonos-specific enrichments
 
 Additional Sonos UI data is published under `sonos`:

@@ -581,6 +581,9 @@ impl StateBridge {
         let manufacturer = hardware_field(&json, "manufacturer");
         let model = hardware_field(&json, "model");
         let sw_version = hardware_field(&json, "sw_version");
+        // A device cannot sit behind itself. A plugin that says so has a bug,
+        // and storing it would make anything walking parents loop forever.
+        let parent_device_id = hardware_field(&json, "parent_device_id").filter(|p| p != device_id);
 
         let raw_device_type = json["device_type"].as_str().map(str::to_string);
         let device_type = raw_device_type.as_deref().map(canonical_device_type_name);
@@ -619,6 +622,9 @@ impl StateBridge {
                 if sw_version.is_some() {
                     existing.sw_version = sw_version.clone();
                 }
+                if parent_device_id.is_some() {
+                    existing.parent_device_id = parent_device_id.clone();
+                }
                 existing.name = new_name.to_string();
                 if existing.canonical_name.is_none() {
                     let devices = self.store.list_devices().await?;
@@ -654,6 +660,7 @@ impl StateBridge {
                 device.manufacturer = manufacturer.clone();
                 device.model = model.clone();
                 device.sw_version = sw_version.clone();
+                device.parent_device_id = parent_device_id.clone();
                 let devices = self.store.list_devices().await?;
                 device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
                 self.store.upsert_device(&device).await?;
@@ -1138,6 +1145,23 @@ mod hardware_tests {
     fn values_are_trimmed() {
         let payload = json!({ "model": "  A1  " });
         assert_eq!(hardware_field(&payload, "model").as_deref(), Some("A1"));
+    }
+
+    /// A device cannot sit behind itself, and storing it would make anything
+    /// walking parents loop forever. The guard lives at the parse, so no
+    /// consumer has to remember it.
+    #[test]
+    fn a_device_cannot_be_its_own_parent() {
+        let payload = json!({ "parent_device_id": "dev1" });
+        let parsed = hardware_field(&payload, "parent_device_id").filter(|p| p != "dev1");
+        assert!(parsed.is_none());
+        let other = json!({ "parent_device_id": "bridge1" });
+        assert_eq!(
+            hardware_field(&other, "parent_device_id")
+                .filter(|p| p != "dev1")
+                .as_deref(),
+            Some("bridge1")
+        );
     }
 
     /// A number is not a version string. Anything non-string is silence rather

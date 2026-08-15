@@ -122,6 +122,19 @@ pub struct NodeState {
     /// the raw JSON and treat any non-false/non-null value as FLiRS.
     #[serde(rename = "isFrequentListening", default)]
     pub is_frequent_listening: Option<Value>,
+    /// What the node is, as zwave-js reports it after the interview.
+    ///
+    /// Absent on a freshly-included node and present once it has been
+    /// interviewed, which is exactly the case homeCore's registration handles:
+    /// a missing field leaves what core already stored alone, so registering
+    /// twice — once bare, once informed — fills these in without a special path.
+    #[serde(default)]
+    pub manufacturer: Option<String>,
+    /// zwave-js calls the model `label`.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(rename = "firmwareVersion", default)]
+    pub firmware_version: Option<String>,
     /// Values may be absent on freshly-included nodes or those still interviewing.
     #[serde(default)]
     pub values: Vec<NodeValue>,

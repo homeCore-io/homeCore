@@ -45,7 +45,26 @@ pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::
             loop {
                 interval.tick().await;
                 match build_attrs(&http, &base).await {
-                    Ok(attrs) => {
+                    Ok((attrs, hardware)) => {
+                        // Re-register with what the controller says it is.
+                        // Startup registration happens from config alone,
+                        // before anything has been asked — this is the first
+                        // moment the identity exists. Absent fields leave what
+                        // core holds alone, so doing it on every refresh is
+                        // idempotent rather than chatty.
+                        if let Err(e) = pub_for_task
+                            .register_device_detailed(
+                                &dev.hc_id,
+                                &dev.name,
+                                None,
+                                None,
+                                None,
+                                Some(&hardware),
+                            )
+                            .await
+                        {
+                            debug!(hc_id = %dev.hc_id, error = %e, "identity re-register failed");
+                        }
                         if let Err(e) = pub_for_task
                             .publish_state_partial(&dev.hc_id, &Value::Object(attrs))
                             .await
@@ -64,26 +83,56 @@ pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::
     }
 }
 
+/// What the controller *is*, from the same `/json/info` the attributes come
+/// from.
+///
+/// Separate from [`build_attrs`] because it goes somewhere else: registration
+/// rather than state. WLED reports `brand` and `product` on every controller
+/// and `ver` once it is running, so this is usually complete on the first poll
+/// — and where it is not, absent means "not said" and core keeps what it has.
+fn identity(info: &Value) -> plugin_sdk_rs::DeviceHardware {
+    let field = |key: &str| {
+        info.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let mut hw = plugin_sdk_rs::DeviceHardware::new();
+    if let Some(v) = field("brand") {
+        hw = hw.manufacturer(v);
+    }
+    if let Some(v) = field("product") {
+        hw = hw.model(v);
+    }
+    if let Some(v) = field("ver") {
+        hw = hw.sw_version(v);
+    }
+    hw
+}
+
 /// Pull `/json/info`, `/json/nodes`, and `/json/presets` and roll the
 /// useful fields into a flat attributes map. Anything missing or
 /// malformed is silently skipped — a partial picture is still useful.
-async fn build_attrs(http: &Client, base: &str) -> Result<Map<String, Value>> {
+async fn build_attrs(
+    http: &Client,
+    base: &str,
+) -> Result<(Map<String, Value>, plugin_sdk_rs::DeviceHardware)> {
     // /json/info is the heavy hitter; everything else is supplemental.
     // If it fails we bail — a device that can't answer /json/info
     // isn't going to give us anything useful anyway.
     let info = fetch_json(http, base, "/json/info").await?;
+    let hardware = identity(&info);
     let mut attrs: Map<String, Value> = Map::new();
 
-    // Top-level identity / firmware
-    if let Some(s) = info.get("ver").and_then(Value::as_str) {
-        attrs.insert("firmware".into(), json!(s));
-    }
-    if let Some(s) = info.get("product").and_then(Value::as_str) {
-        attrs.insert("product".into(), json!(s));
-    }
-    if let Some(s) = info.get("brand").and_then(Value::as_str) {
-        attrs.insert("brand".into(), json!(s));
-    }
+    // `brand`, `product` and `ver` used to be published here as attributes,
+    // which is where they went when a device's identity had nowhere else to
+    // go. They are not readings — they do not change while you watch, and a
+    // dashboard listing them beside brightness is listing three facts about
+    // the hardware among the things it is doing. They now ride the
+    // registration as manufacturer / model / sw_version; see `identity()`.
+    //
+    // `arch` stays an attribute: it is the ESP variant, which is closer to a
+    // diagnostic than to a model name.
     if let Some(s) = info.get("arch").and_then(Value::as_str) {
         attrs.insert("arch".into(), json!(s));
     }
@@ -163,7 +212,7 @@ async fn build_attrs(http: &Client, base: &str) -> Result<Map<String, Value>> {
         }
     }
 
-    Ok(attrs)
+    Ok((attrs, hardware))
 }
 
 async fn fetch_json(http: &Client, base: &str, path: &str) -> Result<Value> {
