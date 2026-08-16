@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "hc-roku"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "hc-wled"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "hc-zwave"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "chrono",
