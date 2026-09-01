@@ -3642,6 +3642,48 @@ That's it — config, executor, and rule engine need no changes.
 
 ---
 
+## Dashboard layout semantics
+
+Core stores `flow`, `frame`, `groups` and `rect` and never acts on them — it is
+a document store, not a layout engine. The semantics used to live only in
+hc-web's `lib/core/dashboard/grid_engine.dart`, so any other client had to
+reimplement packing and gravity and hope it agreed.
+
+Three artifacts now describe it, in increasing order of authority:
+
+| | |
+|---|---|
+| `docs/dashboard-layout.md` | the rules in prose |
+| `hc_types::dashboard_layout` | the reference implementation |
+| `docs/dashboard-layout-fixtures.json` | 15 cases every client must reproduce |
+
+```
+UPDATE_LAYOUT_FIXTURES=1 cargo test -p hc-types   # regenerate after a change
+```
+
+Why it is pinned this hard: `normalize` runs before every save, and core rejects
+the *entire* dashboard on the first bad placement. A client that normalises
+differently does not draw a page differently — it loses the user's edit.
+
+The short version:
+
+- **Overlap rule.** Two elements compete only when neither is floating, neither
+  is composed (`rect` set), they share a `section_id`, and their rectangles
+  intersect. Overlapping is not competing: a floating element over a card is a
+  design, not a conflict.
+- **`normalize`.** Clamp into the grid → sort by `(y, x)` → push each element
+  down until it competes with nothing → settle. Idempotent.
+- **`flow`.** The only thing that differs is the last step: `packed` pulls cards
+  up into gaps, `free` leaves them. Overlaps are resolved under both — a gap
+  being content does not make an overlap acceptable.
+- **Known asymmetry.** A composed element under `packed` is pulled to `y = 0`,
+  because gravity skips only floating elements while the overlap rule already
+  exempts composed ones. Reproduced deliberately and pinned by a fixture; see
+  `docs/dashboard-layout.md` before changing it.
+
+Editor interactions (`move`, `resize`, drop placement, marquee) are explicitly
+*not* specified: how a card follows a cursor is a client's business.
+
 ## Client vocabularies (`GET /automations/vocabulary`, `GET /dashboards/vocabulary`)
 
 Two endpoints that describe *the software*, not the house. Both exist for the

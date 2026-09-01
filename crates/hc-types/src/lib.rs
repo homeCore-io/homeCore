@@ -25,6 +25,11 @@ pub mod dashboard;
 /// [`dashboard_vocabulary`] for why this one is declared where the rule
 /// vocabulary is reflected.
 pub mod dashboard_vocabulary;
+
+/// What a stored layout MEANS — the reference implementation of packing,
+/// gravity and the overlap rule, so a client does not have to reimplement
+/// hc-web's grid engine from scratch and hope it agrees.
+pub mod dashboard_layout;
 pub mod device;
 pub mod event;
 pub mod log_line;
