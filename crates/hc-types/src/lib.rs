@@ -19,6 +19,12 @@ pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "descriptor")]
 pub mod config_descriptor;
 pub mod dashboard;
+
+/// What core will accept in a widget config — the table `hc-api` validates
+/// against, served so a client can stop mirroring it. See
+/// [`dashboard_vocabulary`] for why this one is declared where the rule
+/// vocabulary is reflected.
+pub mod dashboard_vocabulary;
 pub mod device;
 pub mod event;
 pub mod log_line;

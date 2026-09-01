@@ -3782,20 +3782,6 @@ fn config_object(
         .ok_or_else(|| format!("widget '{}' config must be an object", widget.id))
 }
 
-fn require_string(
-    map: &serde_json::Map<String, Value>,
-    key: &str,
-    widget_id: &str,
-) -> Result<String, String> {
-    match map.get(key).and_then(Value::as_str) {
-        Some(value) if !value.trim().is_empty() => Ok(value.to_string()),
-        _ => Err(format!(
-            "widget '{}' requires non-empty string '{}'",
-            widget_id, key
-        )),
-    }
-}
-
 fn optional_string_list(
     map: &serde_json::Map<String, Value>,
     key: &str,
@@ -3854,77 +3840,91 @@ fn optional_i64_min(
     Ok(())
 }
 
-fn validate_selection_widget_config(
-    widget: &hc_types::dashboard::DashboardWidget,
-    require_limit: bool,
+/// Validates one config field against its spec.
+///
+/// The spec comes from `hc_types::dashboard_vocabulary`, which is the same
+/// table served at `GET /dashboards/vocabulary`. That is the point: a client
+/// reading the vocabulary is reading the rules this function enforces, not a
+/// description of them that somebody kept up to date by hand.
+fn validate_spec_field(
+    map: &serde_json::Map<String, Value>,
+    field: &hc_types::dashboard_vocabulary::WidgetField,
+    widget_id: &str,
 ) -> Result<(), String> {
-    let map = config_object(widget)?;
-    let selection_mode = require_string(map, "selection_mode", &widget.id)?;
-    match selection_mode.as_str() {
-        "manual" => optional_string_list(map, "device_ids", &widget.id)?,
-        "area" => {
-            require_string(map, "area_name", &widget.id)?;
+    let present = map.get(&field.name);
+
+    // Absent. Fine unless the spec says otherwise; the messages are the ones
+    // this function has always produced, because a client may be matching on
+    // them and a refactor is no reason to change what a user reads.
+    let Some(value) = present else {
+        if !field.required {
+            return Ok(());
         }
-        "query" => {
-            if let Some(value) = map.get("query") {
-                if value.as_str().is_none() {
-                    return Err(format!(
-                        "widget '{}' field 'query' must be a string",
-                        widget.id
-                    ));
-                }
+        return Err(match field.r#type.as_str() {
+            "array" => format!(
+                "widget '{widget_id}' requires string array '{}'",
+                field.name
+            ),
+            "integer" => format!(
+                "widget '{widget_id}' requires integer field '{}'",
+                field.name
+            ),
+            _ if field.allow_empty => {
+                format!(
+                    "widget '{widget_id}' requires string field '{}'",
+                    field.name
+                )
+            }
+            _ => format!(
+                "widget '{widget_id}' requires non-empty string '{}'",
+                field.name
+            ),
+        });
+    };
+
+    match field.r#type.as_str() {
+        "string" => {
+            let Some(text) = value.as_str() else {
+                return Err(format!(
+                    "widget '{widget_id}' field '{}' must be a string",
+                    field.name
+                ));
+            };
+            if field.required && !field.allow_empty && text.trim().is_empty() {
+                return Err(format!(
+                    "widget '{widget_id}' requires non-empty string '{}'",
+                    field.name
+                ));
+            }
+            if !field.one_of.is_empty() && !field.one_of.iter().any(|v| v == text) {
+                // Names the offending value AND the ones that would have
+                // worked: arriving here is nearly always a typo.
+                return Err(format!(
+                    "widget '{widget_id}' field '{}' has unsupported value '{text}' (expected {})",
+                    field.name,
+                    field.one_of.join(", ")
+                ));
             }
         }
-        // "every light in the house", as a kind rather than as a search.
-        //
-        // The mode exists because a substring query is the wrong tool for it
-        // and quietly so: the house's own "Lights 22" count is facet-derived,
-        // while `query: "light"` matches on the NAME and found 17 of those 22.
-        // A card that is confidently short by five is worse than no card.
-        //
-        // Core validates the shape and not the vocabulary, exactly as it does
-        // for `area_name`, and for the same reason: **it does not compute
-        // facets.** A facet is inferred from the user's override, then the
-        // canonical device type, then the attributes a device actually reports
-        // — three sources core does not assemble. Policing a list it cannot
-        // evaluate would only mean a client that learns a new facet cannot save
-        // until core is released too, which is the trap `type` was made a plain
-        // string to avoid.
-        "facet" => {
-            require_string(map, "facet", &widget.id)?;
+        "array" => {
+            optional_string_list(map, &field.name, widget_id)?;
+            // A required array must also be non-empty. `metrics` is the only
+            // one, and the distinction is real: a stat card with no metrics is
+            // a blank box, where an event feed with no `types` filter is every
+            // event, which is a perfectly good card.
+            if field.required && value.as_array().is_some_and(|items| items.is_empty()) {
+                return Err(format!(
+                    "widget '{widget_id}' requires string array '{}'",
+                    field.name
+                ));
+            }
         }
-        _ => {
-            return Err(format!(
-                "widget '{}' has unsupported selection_mode '{}' \
-                 (expected manual, area, query or facet)",
-                widget.id, selection_mode
-            ));
-        }
+        "integer" => optional_i64_min(map, &field.name, field.min.unwrap_or(i64::MIN), widget_id)?,
+        "boolean" => optional_bool(map, &field.name, widget_id)?,
+        // `object` and `any` are unconstrained by design — see the module doc on
+        // why core does not police a shape it does not render.
+        _ => {}
     }
-    // Exceptions to the rule, whatever the rule was.
-    //
-    // A selection used to be a rule and nothing else, which made it opaque: a
-    // room card meant "whatever is in the living room now" and there was no way
-    // to say "the living room EXCEPT the TV". These two lists are that "except"
-    // — and the "and also", for a device the rule does not reach.
-    //
-    // They apply to every mode including `manual`, where the rule is already a
-    // list: `device_ids` stays the rule, so an older client keeps rendering the
-    // same card, and `add`/`remove` are additional rather than a replacement.
-    // Same shape as `device_ids`, same validation, and core stays out of
-    // deciding whether a device id exists — the client resolves membership and
-    // a stale id is a device that was deleted, not a malformed dashboard.
-    optional_string_list(map, "add", &widget.id)?;
-    optional_string_list(map, "remove", &widget.id)?;
-
-    optional_i64_min(map, "limit", 1, &widget.id)?;
-    if require_limit && !map.contains_key("limit") {
-        return Err(format!(
-            "widget '{}' requires integer field 'limit'",
-            widget.id
-        ));
-    }
-    optional_bool(map, "show_offline", &widget.id)?;
     Ok(())
 }
 
@@ -3933,160 +3933,66 @@ fn validate_selection_widget_config(
 /// An UNKNOWN type is accepted, not rejected. That is the point of `type` being
 /// a string: the client's registry decides what can be drawn, and core stays out
 /// of the business of knowing which cards exist. Rejecting unknown types is what
-/// forced every new card — including plugin cards — through a core release.
+/// forced every new card — including plugin cards — through a core release, and
+/// it is what let core and the Dart client drift until `house_status_hero` —
+/// shipped on core's OWN default dashboard — was a type the client had never
+/// heard of.
+///
+/// The rules themselves are not written here any more. They live in
+/// `hc_types::dashboard_vocabulary::catalogue`, which this function *executes*
+/// and `GET /dashboards/vocabulary` *serves*. One table, two readers: a field
+/// enforced here is described there by construction, which is the property a
+/// hand-written mirror can never have.
 fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Result<(), String> {
-    match widget.r#type.as_str() {
-        "device_grid" | "device_list" | "device_tile" | "media_player" => {
-            validate_selection_widget_config(widget, false)
+    let Some(spec) = hc_types::dashboard_vocabulary::widget(&widget.r#type) else {
+        return Ok(());
+    };
+
+    if !spec.config_required {
+        // `house_status_hero`: drawn client-side from the live device map, so a
+        // null config means "all six systems" rather than a malformed card.
+        if !widget.config.is_object() && !widget.config.is_null() {
+            return Err(format!("widget '{}' config must be an object", widget.id));
         }
-        "stat_summary" => {
-            let map = config_object(widget)?;
-            let metrics = map
-                .get("metrics")
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("widget '{}' requires string array 'metrics'", widget.id))?;
-            if metrics.is_empty() || metrics.iter().any(|item| item.as_str().is_none()) {
-                return Err(format!(
-                    "widget '{}' requires string array 'metrics'",
-                    widget.id
-                ));
-            }
-            Ok(())
-        }
-        "event_feed" => {
-            let map = config_object(widget)?;
-            optional_i64_min(map, "limit", 1, &widget.id)?;
-            optional_string_list(map, "types", &widget.id)?;
-            optional_string_list(map, "device_ids", &widget.id)?;
-            if let Some(value) = map.get("area_name") {
-                if value.as_str().is_none() {
-                    return Err(format!(
-                        "widget '{}' field 'area_name' must be a string",
-                        widget.id
-                    ));
-                }
-            }
-            if let Some(value) = map.get("group_by") {
-                let Some(group_by) = value.as_str() else {
-                    return Err(format!(
-                        "widget '{}' field 'group_by' must be a string",
-                        widget.id
-                    ));
-                };
-                match group_by {
-                    "none" | "type" | "device" | "area" => {}
-                    _ => {
-                        return Err(format!(
-                            "widget '{}' field 'group_by' is unsupported",
-                            widget.id
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        }
-        "camera_video" => {
-            let map = config_object(widget)?;
-            let source_type = require_string(map, "source_type", &widget.id)?;
-            match source_type.as_str() {
-                "image_refresh" | "mjpeg" | "hls" | "webrtc" => {}
-                _ => {
-                    return Err(format!(
-                        "widget '{}' field 'source_type' is unsupported",
-                        widget.id
-                    ));
-                }
-            }
-            require_string(map, "url", &widget.id)?;
-            optional_i64_min(map, "refresh_secs", 1, &widget.id)?;
-            Ok(())
-        }
-        "web_embed" => {
-            let map = config_object(widget)?;
-            require_string(map, "url", &widget.id)?;
-            if let Some(value) = map.get("sandbox_profile") {
-                let Some(profile) = value.as_str() else {
-                    return Err(format!(
-                        "widget '{}' field 'sandbox_profile' must be a string",
-                        widget.id
-                    ));
-                };
-                match profile {
-                    "readonly_embed" | "trusted_internal" | "strict_isolated" => {}
-                    _ => {
-                        return Err(format!(
-                            "widget '{}' field 'sandbox_profile' is unsupported",
-                            widget.id
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        }
-        "markdown" => {
-            let map = config_object(widget)?;
-            if let Some(value) = map.get("markdown") {
-                if value.as_str().is_none() {
-                    return Err(format!(
-                        "widget '{}' field 'markdown' must be a string",
-                        widget.id
-                    ));
-                }
-            } else {
-                return Err(format!(
-                    "widget '{}' requires string field 'markdown'",
-                    widget.id
-                ));
-            }
-            Ok(())
-        }
-        "history_chart" => {
-            let map = config_object(widget)?;
-            require_string(map, "device_id", &widget.id)?;
-            require_string(map, "attribute", &widget.id)?;
-            optional_i64_min(map, "limit", 1, &widget.id)?;
-            optional_i64_min(map, "timeframe_hours", 1, &widget.id)?;
-            Ok(())
-        }
-        "dashboard_link" => {
-            let map = config_object(widget)?;
-            optional_string_list(map, "dashboard_ids", &widget.id)?;
-            Ok(())
-        }
-        "mode_chips" | "scene_row" => {
-            let _ = config_object(widget)?;
-            Ok(())
-        }
-        // Hero is rendered client-side from the live device map. Config is
-        // optional (defaults to all 6 systems); accept any object shape and
-        // let the renderer ignore unknown fields.
-        "house_status_hero" => {
-            if !widget.config.is_object() && !widget.config.is_null() {
-                return Err(format!("widget '{}' config must be an object", widget.id));
-            }
-            Ok(())
-        }
-        // A plugin-contributed card. Core validates only the two keys that
-        // identify it and treats the rest as opaque — it has no business knowing
-        // what a given plugin's card needs, and guessing would make every new
-        // card a core release.
-        "plugin_widget" => {
-            let map = config_object(widget)?;
-            require_string(map, "plugin_id", &widget.id)?;
-            require_string(map, "widget_id", &widget.id)?;
-            Ok(())
-        }
-        // An unknown card is NOT an error.
-        //
-        // This is the whole reason `type` stopped being an enum. Core has no
-        // business knowing which cards exist — it stores the type verbatim and
-        // the client's registry decides what can be drawn. Rejecting here would
-        // put every new card, including every plugin card, behind a core
-        // release, and it is what let core and the Dart client drift until
-        // `house_status_hero` — shipped on core's OWN default dashboard — was a
-        // type the client had never heard of.
-        _ => Ok(()),
+        return Ok(());
     }
+
+    let map = config_object(widget)?;
+
+    for field in &spec.fields {
+        // A conditional field applies only when its switch holds the stated
+        // value — `area_name` is required for a room card and meaningless for a
+        // manual one, and demanding it unconditionally would refuse to save a
+        // perfectly good card.
+        //
+        // The switch itself (`selection_mode`) is validated before anything that
+        // depends on it, because the catalogue lists it first. An unknown mode
+        // therefore fails on its own `one_of` rather than silently disabling
+        // every field that hangs off it.
+        if let Some(cond) = &field.when {
+            let actual = map.get(&cond.field).and_then(Value::as_str);
+            if actual != Some(cond.equals.as_str()) {
+                continue;
+            }
+        }
+        validate_spec_field(map, field, &widget.id)?;
+    }
+
+    Ok(())
+}
+
+/// What core will accept in a widget config, so a client can stop guessing.
+///
+/// The dashboard counterpart to `get_rule_vocabulary`, and it exists for the
+/// same reason. Every client that edits dashboards has carried a hand-written
+/// mirror of `validate_widget_config` — hc-web's still says so in a comment —
+/// and a hand-written mirror of a validator always cracks. This serves the
+/// table the validator actually executes.
+///
+/// Read access only, and no house data in it: this is a description of the
+/// software, not of anybody's home.
+pub async fn get_dashboard_vocabulary(_: State<AppState>, _: DashboardsRead) -> impl IntoResponse {
+    Json(hc_types::dashboard_vocabulary::DashboardVocabulary::derive())
 }
 
 pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) -> impl IntoResponse {
@@ -10394,6 +10300,38 @@ token = "TOKEN-TWO"
             response.status(),
             StatusCode::NOT_FOUND,
             "/automations/vocabulary is not routed at all"
+        );
+    }
+    /// The same trap, one route over — and worse here.
+    ///
+    /// `/automations/{id}` takes a Uuid, so a swallowed "vocabulary" at least
+    /// fails loudly on the parse. `/dashboards/{id}` takes a plain String, so
+    /// "vocabulary" is a perfectly good id: registered after the wildcard, this
+    /// endpoint would answer 404 "dashboard not found" forever, and every test
+    /// that calls the handler directly would still pass.
+    #[tokio::test]
+    async fn the_dashboard_vocabulary_route_is_not_shadowed_by_the_id_route() {
+        use tower::ServiceExt;
+
+        let state = mk_state().await;
+        let app = crate::router(state, None);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/dashboards/vocabulary")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Unauthenticated, so 200 or 401 — either proves the literal matched.
+        // A 404 would mean `{id}` swallowed it and looked for a dashboard.
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/dashboards/vocabulary was swallowed by /dashboards/{{id}}"
         );
     }
 

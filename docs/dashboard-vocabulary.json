@@ -1,0 +1,519 @@
+{
+  "widgets": [
+    {
+      "type": "camera_video",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "source_type",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "image_refresh",
+            "mjpeg",
+            "hls",
+            "webrtc"
+          ]
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "refresh_secs",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        }
+      ]
+    },
+    {
+      "type": "dashboard_link",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "dashboard_ids",
+          "type": "array",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "device_grid",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "manual",
+            "area",
+            "query",
+            "facet"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false,
+          "when": {
+            "field": "selection_mode",
+            "equals": "manual"
+          }
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "area"
+          }
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "query"
+          }
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "facet"
+          }
+        },
+        {
+          "name": "add",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "remove",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "show_offline",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "device_list",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "manual",
+            "area",
+            "query",
+            "facet"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false,
+          "when": {
+            "field": "selection_mode",
+            "equals": "manual"
+          }
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "area"
+          }
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "query"
+          }
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "facet"
+          }
+        },
+        {
+          "name": "add",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "remove",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "show_offline",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "device_tile",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "manual",
+            "area",
+            "query",
+            "facet"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false,
+          "when": {
+            "field": "selection_mode",
+            "equals": "manual"
+          }
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "area"
+          }
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "query"
+          }
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "facet"
+          }
+        },
+        {
+          "name": "add",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "remove",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "show_offline",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "event_feed",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "types",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "group_by",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "one_of": [
+            "none",
+            "type",
+            "device",
+            "area"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "history_chart",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "timeframe_hours",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        }
+      ]
+    },
+    {
+      "type": "house_status_hero",
+      "config_required": false,
+      "extra_fields": true,
+      "fields": []
+    },
+    {
+      "type": "markdown",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "markdown",
+          "type": "string",
+          "required": true,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
+      "type": "media_player",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "manual",
+            "area",
+            "query",
+            "facet"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false,
+          "when": {
+            "field": "selection_mode",
+            "equals": "manual"
+          }
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "area"
+          }
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "query"
+          }
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": true,
+          "when": {
+            "field": "selection_mode",
+            "equals": "facet"
+          }
+        },
+        {
+          "name": "add",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "remove",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "show_offline",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "mode_chips",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": []
+    },
+    {
+      "type": "plugin_widget",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "plugin_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "widget_id",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "type": "scene_row",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": []
+    },
+    {
+      "type": "stat_summary",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "metrics",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "type": "web_embed",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sandbox_profile",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "one_of": [
+            "readonly_embed",
+            "trusted_internal",
+            "strict_isolated"
+          ]
+        }
+      ]
+    }
+  ],
+  "enums": {
+    "breakpoints": [
+      "mobile",
+      "tablet",
+      "desktop",
+      "tv"
+    ],
+    "flows": [
+      "packed",
+      "free"
+    ],
+    "frame_fits": [
+      "scroll",
+      "fixed"
+    ]
+  },
+  "unknown_types_accepted": true
+}

@@ -1274,6 +1274,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/assets/group/{group}",
             delete(asset_handlers::delete_asset_group),
         )
+        // Before `/dashboards/{id}`, so the literal wins over the wildcard.
+        .route(
+            "/dashboards/vocabulary",
+            get(handlers::get_dashboard_vocabulary),
+        )
         .route("/dashboards/import", post(handlers::import_dashboard))
         .route("/dashboards/reload", post(handlers::reload_dashboards))
         .route(
