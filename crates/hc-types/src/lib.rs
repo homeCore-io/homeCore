@@ -44,6 +44,7 @@ pub mod skin;
 /// See [`vocabulary`] for why that distinction is the whole point.
 #[cfg(feature = "schema")]
 pub mod vocabulary;
+pub mod widget_descriptor;
 
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};
