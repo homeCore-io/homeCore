@@ -332,7 +332,10 @@ pub fn validate(d: &WidgetDescriptor) -> Result<(), String> {
         return Err("widget descriptor requires a non-empty widget_id".to_string());
     }
     if d.title.trim().is_empty() {
-        return Err(format!("widget '{}' requires a non-empty title", d.widget_id));
+        return Err(format!(
+            "widget '{}' requires a non-empty title",
+            d.widget_id
+        ));
     }
 
     let mut seen = Vec::new();

@@ -10497,13 +10497,8 @@ token = "TOKEN-TWO"
         let state = mk_state().await;
         {
             let mut plugins = state.plugins.write().await;
-            let mut record = crate::PluginRecord::managed_seed(
-                "boiler".to_string(),
-                None,
-                None,
-                true,
-                None,
-            );
+            let mut record =
+                crate::PluginRecord::managed_seed("boiler".to_string(), None, None, true, None);
             record.widgets = vec![WidgetDescriptor {
                 widget_id: "boiler_flow".to_string(),
                 title: "Boiler flow".to_string(),
@@ -11196,17 +11191,16 @@ token = "TOKEN-TWO"
         // The NaN trap the rectangles already guard against: NaN compares false
         // against everything, so a range test alone would wave it through and
         // the card would draw nowhere on every client that honoured it.
-        let error = super::validate_dashboard(&dashboard_with_transform(Some(f64::NAN), None))
-            .unwrap_err();
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(Some(f64::NAN), None)).unwrap_err();
         assert!(error.contains("rotation must be finite"), "{error}");
 
-        let error = super::validate_dashboard(&dashboard_with_transform(None, Some(f64::NAN)))
-            .unwrap_err();
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(None, Some(f64::NAN))).unwrap_err();
         assert!(error.contains("opacity must be finite"), "{error}");
 
-        let error =
-            super::validate_dashboard(&dashboard_with_transform(Some(f64::INFINITY), None))
-                .unwrap_err();
+        let error = super::validate_dashboard(&dashboard_with_transform(Some(f64::INFINITY), None))
+            .unwrap_err();
         assert!(error.contains("rotation must be finite"), "{error}");
     }
 
@@ -11278,7 +11272,10 @@ token = "TOKEN-TWO"
         let mut nan = group_box("Wall");
         nan.rotation = Some(f64::NAN);
         let error = super::validate_dashboard(&dashboard_with_groups(vec![nan])).unwrap_err();
-        assert!(error.contains("group 'Wall' rotation must be finite"), "{error}");
+        assert!(
+            error.contains("group 'Wall' rotation must be finite"),
+            "{error}"
+        );
 
         let mut spun = group_box("Wall");
         spun.rotation = Some(-400.0);
@@ -11288,7 +11285,10 @@ token = "TOKEN-TWO"
         let mut percent = group_box("Wall");
         percent.opacity = Some(60.0);
         let error = super::validate_dashboard(&dashboard_with_groups(vec![percent])).unwrap_err();
-        assert!(error.contains("group 'Wall' opacity must be 0 to 1"), "{error}");
+        assert!(
+            error.contains("group 'Wall' opacity must be 0 to 1"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -863,7 +863,6 @@ fn parse_plugin_notices(
         .collect()
 }
 
-
 /// Decode the `widgets` array from a plugin's capability manifest.
 ///
 /// Tolerant in the same two directions as [`parse_plugin_notices`], and for a
@@ -909,8 +908,10 @@ fn parse_plugin_widgets(
             match hc_types::widget_descriptor::validate(&descriptor) {
                 Ok(()) => Some(descriptor),
                 Err(reason) => {
-                    warn!(plugin_id, widget_id, reason,
-                          "Discarding a plugin widget some client could not draw");
+                    warn!(
+                        plugin_id,
+                        widget_id, reason, "Discarding a plugin widget some client could not draw"
+                    );
                     None
                 }
             }

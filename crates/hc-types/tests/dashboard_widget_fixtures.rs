@@ -92,7 +92,10 @@ fn binding(name: &str) -> Binding {
 }
 
 fn gauge() -> RenderElement {
-    el("gauge", json!({"value": "flow", "shape": "radial", "max": 30.0}))
+    el(
+        "gauge",
+        json!({"value": "flow", "shape": "radial", "max": 30.0}),
+    )
 }
 
 /// Every case, as `(name, why, descriptor)`. The verdict is computed.
