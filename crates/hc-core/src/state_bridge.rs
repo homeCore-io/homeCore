@@ -303,10 +303,16 @@ impl StateBridge {
                     };
                     let config_schema = pick("config_schema");
                     let config_descriptor = pick("config_descriptor");
+
+                    let widgets = parse_plugin_widgets(
+                        raw.as_ref().and_then(|v| v.get("widgets")),
+                        plugin_id,
+                    );
                     let _ = self.pub_bus.publish(Event::PluginCapabilities {
                         timestamp: Utc::now(),
                         plugin_id: plugin_id.to_string(),
                         capabilities: caps,
+                        widgets,
                         config_schema,
                         config_descriptor,
                     });
@@ -857,6 +863,61 @@ fn parse_plugin_notices(
         .collect()
 }
 
+/// Decode the `widgets` array from a plugin's capability manifest.
+///
+/// Tolerant in the same two directions as [`parse_plugin_notices`], and for a
+/// reason of its own. A missing or non-array field is every plugin built
+/// against an SDK without widgets, and is indistinguishable from "contributes
+/// none". A single bad entry is dropped rather than failing the batch: reading
+/// the array as `Vec<WidgetDescriptor>` in one go would let one typo take every
+/// other card down with it, silently, and a plugin shipping four cards and one
+/// mistake should serve four.
+///
+/// The *reason* is logged against the widget id, because a rejection is the
+/// whole diagnostic a plugin author gets — core will not draw the card and
+/// nothing else will tell them why.
+///
+/// Validating here rather than at every reader is what makes
+/// [`hc_types::widget_descriptor::WidgetDescriptor`] worth having typed: a
+/// descriptor that reaches `PluginRecord` has already been checked, so no
+/// client has to wonder whether this one can be drawn.
+fn parse_plugin_widgets(
+    raw: Option<&serde_json::Value>,
+    plugin_id: &str,
+) -> Vec<hc_types::widget_descriptor::WidgetDescriptor> {
+    let Some(serde_json::Value::Array(items)) = raw else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let widget_id = item
+                .get("widget_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let descriptor =
+                serde_json::from_value::<hc_types::widget_descriptor::WidgetDescriptor>(
+                    item.clone(),
+                )
+                .map_err(|e| {
+                    warn!(plugin_id, widget_id, error = %e,
+                          "Discarding a plugin widget core could not read")
+                })
+                .ok()?;
+            match hc_types::widget_descriptor::validate(&descriptor) {
+                Ok(()) => Some(descriptor),
+                Err(reason) => {
+                    warn!(
+                        plugin_id,
+                        widget_id, reason, "Discarding a plugin widget some client could not draw"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
 /// Outcome of comparing a plugin's wire protocol against core's.
 #[derive(Debug, PartialEq, Eq)]
 enum ProtocolCheck {
@@ -964,7 +1025,7 @@ fn hardware_field(json: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::{
         apply_partial_merge_patch, check_protocol, is_generic_plugin_external_change,
-        parse_plugin_notices, sdk_versions_compatible, ProtocolCheck,
+        parse_plugin_notices, parse_plugin_widgets, sdk_versions_compatible, ProtocolCheck,
     };
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
@@ -1012,6 +1073,82 @@ mod tests {
         );
         let codes: Vec<&str> = got.iter().map(|n| n.code.as_str()).collect();
         assert_eq!(codes, vec!["good", "also_good"]);
+    }
+
+    #[test]
+    fn widgets_absent_or_wrong_shape_yields_empty() {
+        // Every plugin on an SDK without widgets lands here. "No field" and
+        // "contributes none" must be the same thing, with no warning noise.
+        assert!(parse_plugin_widgets(None, "p").is_empty());
+        assert!(parse_plugin_widgets(Some(&json!("not-an-array")), "p").is_empty());
+        assert!(parse_plugin_widgets(Some(&json!({})), "p").is_empty());
+        assert!(parse_plugin_widgets(Some(&json!([])), "p").is_empty());
+    }
+
+    #[test]
+    fn one_unrenderable_widget_does_not_discard_the_others() {
+        // The manifest is how core learns everything about a plugin. Failing
+        // the batch over one bad card would cost the plugin every card it got
+        // right — and the author would see a plugin that contributes nothing
+        // rather than a card with a typo in it.
+        let got = parse_plugin_widgets(
+            Some(&json!([
+                {
+                    "widget_id": "good",
+                    "title": "Good",
+                    "render": {"kind": "gauge", "value": "flow"}
+                },
+                {
+                    // Code with no render: the portability guarantee.
+                    "widget_id": "web_only",
+                    "title": "Web only",
+                    "code": {"entry": "x.html"}
+                },
+                {
+                    // An element nothing knows how to draw.
+                    "widget_id": "unknown_kind",
+                    "title": "Unknown",
+                    "render": {"kind": "sparkline"}
+                },
+                {
+                    // Not a descriptor at all — decode fails before validation.
+                    "widget_id": "malformed",
+                    "render": {"kind": "gauge", "value": "flow"}
+                },
+                {
+                    "widget_id": "also_good",
+                    "title": "Also good",
+                    "render": {"kind": "row", "children": [
+                        {"kind": "text", "content": "Flow"}
+                    ]}
+                }
+            ])),
+            "p",
+        );
+        let ids: Vec<&str> = got.iter().map(|w| w.widget_id.as_str()).collect();
+        assert_eq!(ids, vec!["good", "also_good"]);
+    }
+
+    #[test]
+    fn a_widget_reaching_a_record_has_already_been_validated() {
+        // The property that makes the descriptor worth typing: no client has to
+        // re-check one, because an invalid one never got this far.
+        let got = parse_plugin_widgets(
+            Some(&json!([{
+                "widget_id": "boiler_flow",
+                "title": "Boiler flow",
+                "bindings": [{
+                    "name": "flow",
+                    "device": "{{config.device_id}}",
+                    "key": "flow_lpm",
+                    "in_from": 0.0, "in_to": 30.0, "out_from": 0.0, "out_to": 1.0
+                }],
+                "render": {"kind": "gauge", "value": "flow"}
+            }])),
+            "p",
+        );
+        assert_eq!(got.len(), 1);
+        assert!(hc_types::widget_descriptor::validate(&got[0]).is_ok());
     }
 
     #[test]

@@ -19,6 +19,17 @@ pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "descriptor")]
 pub mod config_descriptor;
 pub mod dashboard;
+
+/// What core will accept in a widget config — the table `hc-api` validates
+/// against, served so a client can stop mirroring it. See
+/// [`dashboard_vocabulary`] for why this one is declared where the rule
+/// vocabulary is reflected.
+pub mod dashboard_vocabulary;
+
+/// What a stored layout MEANS — the reference implementation of packing,
+/// gravity and the overlap rule, so a client does not have to reimplement
+/// hc-web's grid engine from scratch and hope it agrees.
+pub mod dashboard_layout;
 pub mod device;
 pub mod event;
 pub mod log_line;
@@ -33,6 +44,7 @@ pub mod skin;
 /// See [`vocabulary`] for why that distinction is the whole point.
 #[cfg(feature = "schema")]
 pub mod vocabulary;
+pub mod widget_descriptor;
 
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};

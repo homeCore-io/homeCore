@@ -604,6 +604,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 version: Some("0.1.0-test".into()),
                 supports_management: true,
                 capabilities: Some(hc_captest::capabilities_manifest()),
+                widgets: Vec::new(),
                 config_schema: None,
                 config_descriptor: None,
                 notices: Vec::new(),

@@ -1,0 +1,315 @@
+{
+  "reference": "hc_types::widget_descriptor::validate",
+  "cases": [
+    {
+      "name": "a portable widget is accepted",
+      "why": "The ordinary case: bindings plus instruments core knows. Every client draws this, hc-tui included, and no core release was needed to add it.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "bindings": [
+          {
+            "name": "flow",
+            "device": "{{config.device_id}}",
+            "key": "flow_lpm"
+          }
+        ],
+        "render": {
+          "kind": "gauge",
+          "max": 30.0,
+          "shape": "radial",
+          "value": "flow"
+        }
+      },
+      "accepted": true,
+      "portability": "portable"
+    },
+    {
+      "name": "code registered against a render is accepted",
+      "why": "The Lovelace case. hc-web draws the sandboxed document; every other client draws the gauge. The code is an attachment to the portable description, not a replacement for it.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "bindings": [
+          {
+            "name": "flow",
+            "device": "{{config.device_id}}",
+            "key": "flow_lpm"
+          }
+        ],
+        "render": {
+          "kind": "gauge",
+          "max": 30.0,
+          "shape": "radial",
+          "value": "flow"
+        },
+        "code": {
+          "entry": "boiler_flow.html",
+          "grant": [
+            "{{config.device_id}}"
+          ]
+        }
+      },
+      "accepted": true,
+      "portability": "web_only"
+    },
+    {
+      "name": "code without a render is rejected",
+      "why": "THE portability guarantee. A widget that only a browser can draw would make hc-web the only viable homeCore UI, which is exactly what the two-class split exists to prevent — so it is refused where the declaration arrives, not where it fails to draw.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "code": {
+          "entry": "boiler_flow.html"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' declares code but no render: a code widget must still say what a client without a browser draws",
+      "portability": "web_only"
+    },
+    {
+      "name": "no render at all is rejected",
+      "why": "A widget nothing can draw. Read differently from the case above, because a plugin that has not started is not making the same mistake as one that shipped code and stopped.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water"
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' requires a render",
+      "portability": "portable"
+    },
+    {
+      "name": "an unknown element kind is rejected",
+      "why": "The opposite of an unknown widget `type`, which core accepts on purpose. A type core has never seen is a card some client may still draw; an element kind no client knows is a hole in the page.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "sparkline"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' renders unknown element 'sparkline' (expected column, gauge, icon, row, shape, stack, text)",
+      "portability": "portable"
+    },
+    {
+      "name": "an unknown field on a known element is rejected",
+      "why": "Strict, where a widget config is not. An unknown config key is a client's own drawing preference riding along; an unknown render field is a plugin asking every client to draw something none of them agreed to.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "gauge",
+          "glow": 0.4,
+          "value": "flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' sets unknown field 'glow' on 'gauge'",
+      "portability": "portable"
+    },
+    {
+      "name": "a half-specified range is rejected",
+      "why": "All four bounds or none. A mapping missing one bound is the case where a gauge quietly reads 0-1 — a card that looks like it works until somebody checks it against the boiler.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "bindings": [
+          {
+            "name": "flow",
+            "device": "{{config.device_id}}",
+            "key": "flow_lpm",
+            "in_from": 0.0,
+            "in_to": 30.0,
+            "out_from": 0.0
+          }
+        ],
+        "render": {
+          "kind": "gauge",
+          "max": 30.0,
+          "shape": "radial",
+          "value": "flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' binding 'flow' gives 3 of in_from, in_to, out_from, out_to (all four or none)",
+      "portability": "portable"
+    },
+    {
+      "name": "a complete range is accepted",
+      "why": "The same binding with the fourth bound. Lifted out of hc-web's SvgBinding so a mapping means one thing whether it feeds a portable gauge or a sandboxed drawing.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "bindings": [
+          {
+            "name": "flow",
+            "device": "{{config.device_id}}",
+            "key": "flow_lpm",
+            "in_from": 0.0,
+            "in_to": 30.0,
+            "out_from": 0.0,
+            "out_to": 1.0,
+            "decimals": 1
+          }
+        ],
+        "render": {
+          "kind": "gauge",
+          "max": 30.0,
+          "shape": "radial",
+          "value": "flow"
+        }
+      },
+      "accepted": true,
+      "portability": "portable"
+    },
+    {
+      "name": "a missing required field is rejected",
+      "why": "A gauge with nothing to show is not a gauge.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "gauge",
+          "shape": "bar"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' element 'gauge' requires 'value'",
+      "portability": "portable"
+    },
+    {
+      "name": "a value outside one_of is rejected, and the message says what would work",
+      "why": "Arriving here is nearly always a typo, so the error names the offending value and the legal ones.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "gauge",
+          "shape": "dial",
+          "value": "flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' element 'gauge' field 'shape' has unsupported value 'dial' (expected radial, bar)",
+      "portability": "portable"
+    },
+    {
+      "name": "a container holds children",
+      "why": "row, column and stack are the only kinds that may. Everything else draws itself.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "row",
+          "children": [
+            {
+              "kind": "gauge",
+              "max": 30.0,
+              "shape": "radial",
+              "value": "flow"
+            },
+            {
+              "kind": "text",
+              "content": "Flow"
+            }
+          ]
+        }
+      },
+      "accepted": true,
+      "portability": "portable"
+    },
+    {
+      "name": "children on an instrument are rejected",
+      "why": "A text with children is a mistake worth naming rather than ignoring — ignoring it means one client draws them and the rest do not.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "text",
+          "children": [
+            {
+              "kind": "gauge",
+              "max": 30.0,
+              "shape": "radial",
+              "value": "flow"
+            }
+          ],
+          "content": "Flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' gives children to 'text', which draws itself",
+      "portability": "portable"
+    },
+    {
+      "name": "a bad field inside a child is rejected",
+      "why": "The tree is validated all the way down. A render that is legal at the root and broken two levels in is the shape that would otherwise reach a client.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "column",
+          "children": [
+            {
+              "kind": "icon",
+              "name": "water",
+              "size": 24
+            }
+          ]
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' sets unknown field 'size' on 'icon'",
+      "portability": "portable"
+    },
+    {
+      "name": "a negative thickness is rejected",
+      "why": "Geometry has bounds, and `number` is spelled in this table and nowhere in the widget-config vocabulary, which has no float field.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "Boiler flow",
+        "icon": "water",
+        "render": {
+          "kind": "gauge",
+          "thickness": -2.0,
+          "value": "flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' element 'gauge' field 'thickness' must be at least 0",
+      "portability": "portable"
+    },
+    {
+      "name": "a widget with no title is rejected",
+      "why": "The title is human-facing and owned by the plugin. Core's own widgets have none here because every client already has labels for those; a plugin card has nowhere else to get one.",
+      "descriptor": {
+        "widget_id": "boiler_flow",
+        "title": "",
+        "icon": "water",
+        "render": {
+          "kind": "gauge",
+          "max": 30.0,
+          "shape": "radial",
+          "value": "flow"
+        }
+      },
+      "accepted": false,
+      "error": "widget 'boiler_flow' requires a non-empty title",
+      "portability": "portable"
+    }
+  ]
+}

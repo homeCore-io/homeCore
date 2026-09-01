@@ -44,6 +44,29 @@ pub struct DashboardWidgetPlacement {
     /// same page differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rect: Option<DashboardRect>,
+
+    /// Degrees clockwise, about the element's own centre. Absent means none.
+    ///
+    /// On the placement rather than in the widget's config, unlike `layer` and
+    /// `z`: lifting a card above the grid is a property of the *element* and
+    /// holds at every breakpoint, but an angle is a property of an
+    /// *arrangement*. A card turned eight degrees on a wide canvas is a
+    /// composition; the same card full-width on a phone is a mistake, and a
+    /// document that could not tell those apart would force one of them.
+    ///
+    /// Stored, never acted on — the same contract as `rect` and `flow`. Core
+    /// does not draw and has no opinion about how a turned card looks; it has
+    /// one about two clients disagreeing over where a person put something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+
+    /// 0–1. Absent means fully opaque.
+    ///
+    /// A range rather than a percentage because every renderer takes a
+    /// fraction, and a document that stored 40 while every client divided by
+    /// 100 would be describing the division rather than the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
 }
 
 /// A rectangle in frame units — see [`DashboardFrame`].
@@ -196,6 +219,33 @@ pub struct DashboardGroupBox {
     /// group is a small page rather than a new kind of thing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<DashboardBackground>,
+
+    /// The transform the group's members inherit.
+    ///
+    /// The same two values a placement carries, and the same contract: stored,
+    /// never acted on by core, never part of the layout arithmetic. The
+    /// difference is whose they are — a placement's transform turns one card
+    /// about its own centre, and a group's turns **every member about the
+    /// group's centre**, which is the parent transform a card alone cannot
+    /// express.
+    ///
+    /// Composed with each member's own rather than replacing it: a card turned
+    /// four degrees inside a group turned eight is turned twelve. A group that
+    /// overrode its members would make joining one a destructive edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+
+    /// 0–1, multiplied with each member's own opacity.
+    ///
+    /// Multiplied rather than overriding, for the same reason rotation
+    /// composes, and it is the one part of this that a client cannot make
+    /// exactly right: fading a group as a whole and fading each member by the
+    /// same amount differ wherever two members overlap. Members that overlap
+    /// are rare and the alternative — one paint layer for the whole group —
+    /// costs a saved layer per group on every frame. See
+    /// `docs/dashboard-layout.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
 }
 
 /// What empty space in a layout means.

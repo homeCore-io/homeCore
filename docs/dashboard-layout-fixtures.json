@@ -1,0 +1,565 @@
+{
+  "reference": "hc_types::dashboard_layout::Engine::normalize",
+  "cases": [
+    {
+      "name": "packed closes a gap",
+      "why": "Under `packed`, gravity pulls every card up into the space above it. This is what every dashboard written before `flow` existed meant.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 5,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 1,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "free keeps a gap",
+      "why": "Under `free`, a gap is content: the card stays at row 5 because somebody put it there. This is the whole point of the flag.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 5,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 5,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "an overlap is resolved under packed",
+      "why": "Overlapping cards are a layout to be fixed, never a design.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 1,
+          "y": 1,
+          "w": 2,
+          "h": 2
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 1,
+          "y": 2,
+          "w": 2,
+          "h": 2
+        }
+      ]
+    },
+    {
+      "name": "an overlap is resolved under free too",
+      "why": "A gap being content does not make an overlap acceptable. `free` changes gravity and nothing else.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 1,
+          "y": 1,
+          "w": 2,
+          "h": 2
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 1,
+          "y": 2,
+          "w": 2,
+          "h": 2
+        }
+      ]
+    },
+    {
+      "name": "a cascade pushes each card past the one above it",
+      "why": "Three cards stacked on the same cells resolve in reading order, each dropping to the bottom edge of what blocked it.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2
+        },
+        {
+          "id": "c",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 2,
+          "w": 4,
+          "h": 2
+        },
+        {
+          "id": "c",
+          "x": 0,
+          "y": 4,
+          "w": 4,
+          "h": 2
+        }
+      ]
+    },
+    {
+      "name": "a card wider than the grid is clamped, not rejected",
+      "why": "Core would reject `x + w > columns` outright and the user would lose the whole edit, so the client trims it first.",
+      "columns": 4,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "a",
+          "x": 3,
+          "y": 0,
+          "w": 99,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "negative coordinates come back inside",
+      "why": "A hand-edited or buggy document must open, approximately right rather than broken.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "a",
+          "x": -5,
+          "y": -5,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "zero and negative sizes become one cell",
+      "why": "`w` and `h` are clamped to at least 1 — a zero-size card is invisible and unselectable, which is a card you cannot delete.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 0,
+          "h": -3
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 1,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "items never collide across sections",
+      "why": "Sections partition a layout. Two cards on the same cell in different sections are both legal and neither moves.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1,
+          "section_id": "top"
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1,
+          "section_id": "bottom"
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1,
+          "section_id": "top"
+        },
+        {
+          "id": "b",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1,
+          "section_id": "bottom"
+        }
+      ]
+    },
+    {
+      "name": "a floating element is neither pushed nor pulled",
+      "why": "It sits above the grid: nothing pushes it, it pushes nothing, and gravity does not pull it. The position is the design.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "float",
+          "x": 0,
+          "y": 4,
+          "w": 2,
+          "h": 1,
+          "floating": true
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "float",
+          "x": 0,
+          "y": 4,
+          "w": 2,
+          "h": 1,
+          "floating": true
+        }
+      ]
+    },
+    {
+      "name": "a grid card ignores a floating one above it",
+      "why": "The floating element competes for nothing, so the grid card rises straight through the cells it occupies.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "float",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2,
+          "floating": true
+        },
+        {
+          "id": "a",
+          "x": 0,
+          "y": 6,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "float",
+          "x": 0,
+          "y": 0,
+          "w": 4,
+          "h": 2,
+          "floating": true
+        },
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "a composed element rises under packed",
+      "why": "DOCUMENTED, NOT ENDORSED. `normalize` skips floating elements explicitly and composed ones implicitly (they compete for nothing), but gravity skips only floating — so a composed element never breaks the rise loop and lands at y=0. Usually invisible, because a composed element is drawn from its `rect`; not harmless, because the cells are what core validates and what a frame-unaware client draws. Pinned so a change here is a decision, not a slip.",
+      "columns": 12,
+      "flow": "packed",
+      "input": [
+        {
+          "id": "c",
+          "x": 0,
+          "y": 6,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 10.0,
+            "y": 200.0,
+            "w": 100.0,
+            "h": 40.0
+          }
+        }
+      ],
+      "expected": [
+        {
+          "id": "c",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 10.0,
+            "y": 200.0,
+            "w": 100.0,
+            "h": 40.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a composed element stays put under free",
+      "why": "Which is the flow a composed layout actually uses: it was placed on a canvas, and packing a composition would be the engine overruling the design.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "c",
+          "x": 0,
+          "y": 6,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 10.0,
+            "y": 200.0,
+            "w": 100.0,
+            "h": 40.0
+          }
+        }
+      ],
+      "expected": [
+        {
+          "id": "c",
+          "x": 0,
+          "y": 6,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 10.0,
+            "y": 200.0,
+            "w": 100.0,
+            "h": 40.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "reading order decides who wins a contested cell",
+      "why": "Placement runs in `(y, x)` order, not document order, so a corrupt layout resolves the same way whatever order the JSON happened to be in. Note the input here is deliberately reversed.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "later",
+          "x": 4,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "first",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "first",
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "later",
+          "x": 4,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    },
+    {
+      "name": "an already-legal layout is left alone",
+      "why": "Idempotence, which is what makes it safe to run before every save: a document must not drift a little on each round trip.",
+      "columns": 12,
+      "flow": "free",
+      "input": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 3,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 3,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "c",
+          "x": 0,
+          "y": 7,
+          "w": 4,
+          "h": 1
+        }
+      ],
+      "expected": [
+        {
+          "id": "a",
+          "x": 0,
+          "y": 0,
+          "w": 3,
+          "h": 2
+        },
+        {
+          "id": "b",
+          "x": 3,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "id": "c",
+          "x": 0,
+          "y": 7,
+          "w": 4,
+          "h": 1
+        }
+      ]
+    }
+  ]
+}

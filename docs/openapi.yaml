@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.39"
+  version: "0.1.40"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1433,6 +1433,35 @@ paths:
                 type: object
                 properties:
                   deleted: { type: integer }
+  /dashboards/vocabulary:
+    get:
+      operationId: getDashboardVocabulary
+      summary: The widget config vocabulary core validates against
+      description: |
+        Every widget type core knows, with the config fields it takes, which are
+        required, and which values are legal — plus the document-level enums
+        (breakpoints, flows, frame fits) a client must agree with core about.
+
+        This is the table `validate_widget_config` executes, not a description
+        of it, so a client can check itself against the real rules instead of
+        carrying a hand-written mirror that drifts.
+
+        `unknown_types_accepted` is `true` and says so on purpose: a widget type
+        core has never seen is stored verbatim rather than rejected, which is
+        what lets a plugin contribute a card without a core release. An absent
+        entry means unvalidated, never invalid.
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Dashboard vocabulary document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
   /dashboards:
     get:
       operationId: listDashboards

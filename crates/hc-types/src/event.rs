@@ -107,6 +107,18 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
         capabilities: crate::plugin_capabilities::Capabilities,
+        /// The dashboard widgets the manifest declares, already validated —
+        /// core drops any it cannot promise every client will draw, so a
+        /// consumer of this event never has to ask again.
+        ///
+        /// Carried alongside rather than inside `Capabilities` for the same
+        /// reason `config_schema` is: `spec = "1"` is frozen, and adding a
+        /// field to it would source-break every plugin that builds a manifest
+        /// literally — including the ones outside this repo. Typed all the
+        /// same, because unlike a config schema a descriptor has a validator,
+        /// and a `Value` here would mean every reader running it again.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        widgets: Vec<crate::widget_descriptor::WidgetDescriptor>,
         /// The manifest's `config_schema` field (JSON Schema for the plugin's
         /// operator config), if present. Carried alongside — rather than inside —
         /// the frozen `Capabilities` type so the config editor can render a typed

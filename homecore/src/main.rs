@@ -829,6 +829,7 @@ async fn main() -> Result<()> {
                         version: None,
                         supports_management: false,
                         capabilities: None,
+                        widgets: Vec::new(),
                         config_schema: None,
                         config_descriptor: None,
                         notices: Vec::new(),

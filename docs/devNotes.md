@@ -3642,6 +3642,137 @@ That's it — config, executor, and rule engine need no changes.
 
 ---
 
+## Dashboard layout semantics
+
+Core stores `flow`, `frame`, `groups` and `rect` and never acts on them — it is
+a document store, not a layout engine. The semantics used to live only in
+hc-web's `lib/core/dashboard/grid_engine.dart`, so any other client had to
+reimplement packing and gravity and hope it agreed.
+
+Three artifacts now describe it, in increasing order of authority:
+
+| | |
+|---|---|
+| `docs/dashboard-layout.md` | the rules in prose |
+| `hc_types::dashboard_layout` | the reference implementation |
+| `docs/dashboard-layout-fixtures.json` | 15 cases every client must reproduce |
+
+```
+UPDATE_LAYOUT_FIXTURES=1 cargo test -p hc-types   # regenerate after a change
+```
+
+Why it is pinned this hard: `normalize` runs before every save, and core rejects
+the *entire* dashboard on the first bad placement. A client that normalises
+differently does not draw a page differently — it loses the user's edit.
+
+The short version:
+
+- **Overlap rule.** Two elements compete only when neither is floating, neither
+  is composed (`rect` set), they share a `section_id`, and their rectangles
+  intersect. Overlapping is not competing: a floating element over a card is a
+  design, not a conflict.
+- **`normalize`.** Clamp into the grid → sort by `(y, x)` → push each element
+  down until it competes with nothing → settle. Idempotent.
+- **`flow`.** The only thing that differs is the last step: `packed` pulls cards
+  up into gaps, `free` leaves them. Overlaps are resolved under both — a gap
+  being content does not make an overlap acceptable.
+- **Known asymmetry.** A composed element under `packed` is pulled to `y = 0`,
+  because gravity skips only floating elements while the overlap rule already
+  exempts composed ones. Reproduced deliberately and pinned by a fixture; see
+  `docs/dashboard-layout.md` before changing it.
+
+Editor interactions (`move`, `resize`, drop placement, marquee) are explicitly
+*not* specified: how a card follows a cursor is a client's business.
+
+## Client vocabularies (`GET /automations/vocabulary`, `GET /dashboards/vocabulary`)
+
+Two endpoints that describe *the software*, not the house. Both exist for the
+same reason: every client that edits rules or dashboards used to carry a
+hand-written table of what core accepts, and a hand-written mirror always
+cracks. It already did — core grew a `house_status_hero` widget, shipped it on
+its own default dashboard, and the Dart client's mirror had never heard of it,
+so it coerced the card to `markdown` and would have saved it back as one.
+
+| Endpoint | Committed snapshot | Regenerate |
+|---|---|---|
+| `/automations/vocabulary` | `docs/rule-vocabulary.json` | `UPDATE_VOCABULARY=1 cargo test -p hc-types --features schema` |
+| `/dashboards/vocabulary` | `docs/dashboard-vocabulary.json` | `UPDATE_DASHBOARD_VOCABULARY=1 cargo test -p hc-types` |
+
+Both are read-only, need only the matching read role, and contain no device
+data. A snapshot test fails the build when the served document and the committed
+file disagree, so neither snapshot can quietly fall behind.
+
+### How each one avoids being a mirror
+
+They get the same property by opposite routes, and the difference is worth
+knowing before editing either:
+
+- **Rules are reflected.** `Trigger`, `Condition` and `Action` are Rust enums, so
+  `hc_types::vocabulary::Vocabulary::derive()` reads the variants and their
+  fields straight out of the types through schemars. Add a variant and it
+  appears with no help from anybody.
+- **Dashboards are declared, then executed.** `DashboardWidget::type` is a plain
+  `String` and core accepts unknown types on purpose — closing the set would put
+  every new card, including every plugin card, behind a core release. There is
+  no enum to reflect. So `hc_types::dashboard_vocabulary::catalogue()` is a
+  declared table, and `hc-api`'s `validate_widget_config` **executes** it rather
+  than restating it. A field not in the catalogue is not enforced; a field
+  enforced is in the catalogue by construction.
+
+### Reading the dashboard vocabulary
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/v1/dashboards/vocabulary | jq '.widgets[] | select(.type=="camera_video")'
+```
+
+```json
+{
+  "type": "camera_video",
+  "config_required": true,
+  "extra_fields": true,
+  "fields": [
+    { "name": "source_type", "type": "string", "required": true,
+      "one_of": ["image_refresh", "mjpeg", "hls", "webrtc"] },
+    { "name": "url", "type": "string", "required": true },
+    { "name": "refresh_secs", "type": "integer", "required": false, "min": 1 }
+  ]
+}
+```
+
+Field semantics:
+
+- `required` — core rejects a config that omits it.
+- `allow_empty` — whether `""` counts as present for a required string. Almost
+  always absent (i.e. false): a card pointing at device `""` is a mistake every
+  time. `markdown` is the exception, because an empty note is one nobody has
+  written yet.
+- `min` — inclusive lower bound for an integer.
+- `one_of` — the legal values, when core constrains them. Note that `area_name`
+  and `facet` are *not* constrained: core does not compute areas or facets, and
+  policing a list it cannot evaluate would mean a client that learns a new facet
+  cannot save until core is released too.
+- `when` — the field applies only while another field holds a given value.
+  `area_name` is required when `selection_mode` is `area` and meaningless
+  otherwise.
+- `extra_fields` — true everywhere. Unknown keys are stored verbatim, which is
+  the space a client-side drawing preference like `style` rides in. A client
+  that pruned unknown keys on save would silently delete another client's work.
+
+Document-level enums a client must agree with core about — `breakpoints`,
+`flows`, `frame_fits` — are under `enums`.
+
+`unknown_types_accepted` is `true` and is stated in the document rather than
+left to be inferred: **an absent entry means unvalidated, never invalid.**
+
+### What is deliberately not in it
+
+No labels, icons, sizes or chrome. Core validates configs; it does not know what
+a card looks like, and a vocabulary that told clients how to draw would be core
+taking over presentation — the exact thing `type`-as-a-string exists to avoid.
+Human-facing metadata for a plugin-contributed card belongs to plugin widget
+registration, not here.
+
 ## Event stream reference (`GET /api/v1/events/stream`)
 
 The WebSocket event stream at `/api/v1/events/stream` emits structured JSON events in real time.
