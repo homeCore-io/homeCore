@@ -387,3 +387,76 @@ fn every_case_survives_a_json_round_trip() {
         );
     }
 }
+
+/// The served element list and the table the validator walks must be the same
+/// table.
+///
+/// They are, by construction — `derive` copies `elements()` — which is exactly
+/// why this is worth asserting rather than assuming. The failure it guards
+/// against is somebody advertising a kind the validator rejects, which would
+/// hand every client a contract core refuses to honour.
+#[test]
+fn the_vocabulary_advertises_exactly_the_elements_the_validator_knows() {
+    let vocabulary = hc_types::dashboard_vocabulary::DashboardVocabulary::derive();
+    assert!(
+        !vocabulary.elements.is_empty(),
+        "the vocabulary describes no elements, so no client can know what to draw"
+    );
+
+    for spec in &vocabulary.elements {
+        assert!(
+            hc_types::widget_descriptor::element(&spec.kind).is_some(),
+            "the vocabulary advertises '{}', which the validator has never heard of",
+            spec.kind
+        );
+    }
+    for spec in hc_types::widget_descriptor::elements() {
+        assert!(
+            vocabulary.elements.iter().any(|e| e.kind == spec.kind),
+            "'{}' is drawable and unadvertised, so no client will implement it",
+            spec.kind
+        );
+    }
+}
+
+/// Every advertised element must be usable — not merely known.
+///
+/// Builds the smallest legal node of each kind by filling exactly its required
+/// fields, and asserts core accepts it. This is what catches a required field
+/// with no legal value: a kind that appears in the vocabulary, is enumerable, is
+/// documented, and cannot be written down.
+#[test]
+fn every_advertised_element_can_actually_be_used() {
+    for spec in hc_types::widget_descriptor::elements() {
+        let mut fields = Map::new();
+        for f in spec.fields.iter().filter(|f| f.required) {
+            let value = match (f.one_of.first(), f.r#type.as_str()) {
+                (Some(first), _) => json!(first),
+                (None, "string") => json!("x"),
+                (None, "number") => json!(f.min.unwrap_or(0) as f64),
+                (None, "integer") => json!(f.min.unwrap_or(0)),
+                (None, "boolean") => json!(true),
+                (None, other) => panic!(
+                    "'{}' requires '{}' of type '{other}', which nothing can supply",
+                    spec.kind, f.name
+                ),
+            };
+            fields.insert(f.name.clone(), value);
+        }
+
+        let probe = WidgetDescriptor {
+            render: Some(RenderElement {
+                kind: spec.kind.clone(),
+                children: Vec::new(),
+                fields,
+            }),
+            ..descriptor("probe", None)
+        };
+        assert_eq!(
+            validate(&probe),
+            Ok(()),
+            "'{}' is advertised but its minimal form is rejected",
+            spec.kind
+        );
+    }
+}

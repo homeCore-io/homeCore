@@ -515,5 +515,251 @@
       "fixed"
     ]
   },
-  "unknown_types_accepted": true
+  "unknown_types_accepted": true,
+  "elements": [
+    {
+      "kind": "column",
+      "container": true,
+      "fields": [
+        {
+          "name": "gap",
+          "type": "number",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "gauge",
+      "container": false,
+      "fields": [
+        {
+          "name": "value",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "min",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "max",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "shape",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "radial",
+            "bar"
+          ]
+        },
+        {
+          "name": "start_degrees",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "sweep_degrees",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "thickness",
+          "type": "number",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "round_cap",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "track",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "color_to",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "readout",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "value",
+            "none"
+          ]
+        },
+        {
+          "name": "decimals",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "kind": "icon",
+      "container": false,
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "kind": "row",
+      "container": true,
+      "fields": [
+        {
+          "name": "gap",
+          "type": "number",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "shape",
+      "container": false,
+      "fields": [
+        {
+          "name": "outline",
+          "type": "string",
+          "required": true,
+          "one_of": [
+            "rectangle",
+            "circle",
+            "pill",
+            "octagon",
+            "path"
+          ]
+        },
+        {
+          "name": "corner",
+          "type": "number",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "kind": "stack",
+      "container": true,
+      "fields": [
+        {
+          "name": "gap",
+          "type": "number",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "text",
+      "container": false,
+      "fields": [
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        },
+        {
+          "name": "size_role",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "decimals",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        }
+      ]
+    }
+  ]
 }

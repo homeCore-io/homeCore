@@ -167,6 +167,13 @@ Core validates a plugin widget's config **by running the registered
 per-plugin match arms, ever. A field not in the schema is not enforced; a field
 enforced is in the schema by construction.
 
+A client learns the element table the same way it learns the widget one:
+`GET /api/v1/dashboards/vocabulary` serves `elements` beside `widgets`, and
+`docs/dashboard-vocabulary.json` is the committed snapshot of both. It is the
+only part of the vocabulary that describes drawing, and it earns its place —
+without it a client could learn every widget type on an installation and still
+not know which instruments it had to implement to draw them.
+
 The same applies to `render`: core validates that every element kind and field
 appears in the element vocabulary, and nothing about whether the result looks
 good. Core remains a document store.

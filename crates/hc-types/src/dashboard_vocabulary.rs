@@ -28,12 +28,26 @@
 //!
 //! # What is deliberately absent
 //!
-//! No labels, icons, sizes or chrome. Core validates configs; it does not know
-//! what a card looks like, and a vocabulary that told clients how to draw would
-//! be core taking over presentation — the exact thing `type`-as-a-string exists
-//! to avoid. Human-facing metadata for a card belongs to whoever contributes
-//! it: for core's own widgets each client already has labels, and for plugin
-//! widgets it belongs in plugin widget registration.
+//! No labels, icons, sizes or chrome for core's own widgets. Core validates
+//! configs; it does not know what a card looks like, and a vocabulary that told
+//! clients how to draw one would be core taking over presentation — the exact
+//! thing `type`-as-a-string exists to avoid. Human-facing metadata for a card
+//! belongs to whoever contributes it: for core's own widgets each client
+//! already has labels, and for a plugin widget it arrives in the descriptor.
+//!
+//! # The one exception, and why it is not one
+//!
+//! `elements` describes drawing, and it belongs here anyway. It is not the
+//! chrome of any particular card — it is the set of instruments a client must
+//! implement for a plugin's `render` to mean anything at all. Without it a
+//! client could read this document, learn every widget type on the
+//! installation, and still have no way to know which element kinds it had to
+//! support: the same hole plugin widgets were in before they could be
+//! enumerated, where the thing existed and nothing said what it was.
+//!
+//! Core still has no opinion about how a gauge *looks*. It has one about
+//! whether a client that cannot draw one will silently render half the cards on
+//! this installation as nothing.
 
 use std::sync::OnceLock;
 
@@ -215,6 +229,21 @@ pub struct DashboardVocabulary {
     /// the point — before this, a plugin card could not be enumerated at all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugin_widgets: Vec<crate::widget_descriptor::PluginWidget>,
+
+    /// The instruments a client must be able to draw for a plugin widget's
+    /// `render` to mean anything.
+    ///
+    /// Static, and therefore in the committed snapshot beside the widget table
+    /// — unlike [`DashboardVocabulary::plugin_widgets`], which depends on who
+    /// is connected. Without it a client could learn every widget type that
+    /// exists and still have no idea which element kinds it had to implement,
+    /// which is the same hole plugin widgets were in before they were
+    /// enumerable: the thing existed and nothing said what it was.
+    ///
+    /// This is the one part of the vocabulary that describes *drawing*. Core
+    /// still has no opinion about how a gauge looks — only that a client which
+    /// cannot draw one will not render half the cards on this installation.
+    pub elements: Vec<crate::widget_descriptor::ElementSpec>,
 }
 
 impl DashboardVocabulary {
@@ -233,6 +262,7 @@ impl DashboardVocabulary {
             },
             unknown_types_accepted: true,
             plugin_widgets: Vec::new(),
+            elements: crate::widget_descriptor::elements().to_vec(),
         }
     }
 }
