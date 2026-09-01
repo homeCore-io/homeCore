@@ -27,3 +27,7 @@ build:
 # Release build
 build-release:
     cargo build --workspace --release
+
+# Remove build artifacts
+clean:
+    cargo clean
