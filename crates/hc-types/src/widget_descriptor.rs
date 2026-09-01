@@ -528,3 +528,17 @@ fn validate_element_field(
     }
     Ok(())
 }
+
+/// A descriptor together with the plugin that contributed it.
+///
+/// `plugin_widget` already carries `{plugin_id, widget_id}` on the wire as a
+/// card's identity; this is the other half of that pair — the declaration the
+/// identity points at — which is why the plugin id is flattened alongside the
+/// descriptor rather than nested under it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginWidget {
+    pub plugin_id: String,
+
+    #[serde(flatten)]
+    pub descriptor: WidgetDescriptor,
+}

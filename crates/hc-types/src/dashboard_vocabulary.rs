@@ -191,7 +191,10 @@ pub struct DocumentEnums {
 }
 
 /// The whole dashboard vocabulary, as served to clients.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: a plugin widget describes geometry, and a float
+/// has no equivalence relation to offer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DashboardVocabulary {
     /// Sorted by `type`, so the served document and the committed snapshot are
     /// byte-stable regardless of the order the catalogue is written in.
@@ -202,6 +205,16 @@ pub struct DashboardVocabulary {
     /// promise rather than an oversight. Stated in the document so a client
     /// author does not have to infer it from the absence of an entry.
     pub unknown_types_accepted: bool,
+
+    /// The widgets plugins have contributed, merged in by the endpoint.
+    ///
+    /// Always empty in [`DashboardVocabulary::derive`] and in the committed
+    /// snapshot: core's own widget table is static and belongs in the artifact,
+    /// while these depend on which plugins happen to be connected. A client
+    /// still asks one question to learn every card that exists here, which is
+    /// the point — before this, a plugin card could not be enumerated at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_widgets: Vec<crate::widget_descriptor::PluginWidget>,
 }
 
 impl DashboardVocabulary {
@@ -219,6 +232,7 @@ impl DashboardVocabulary {
                 frame_fits: wire_names(&[DashboardFrameFit::Scroll, DashboardFrameFit::Fixed]),
             },
             unknown_types_accepted: true,
+            plugin_widgets: Vec::new(),
         }
     }
 }

@@ -58,13 +58,21 @@ The element model keeps its own three tiers, unchanged, as a description of how
 much work an author is doing. This document never uses the word for anything
 else.
 
-## What a plugin registers
+## Where a plugin declares them
 
-Plugins already register device capability schemas over
-`homecore/plugins/{id}/register`. Widgets extend that same seam:
+**On the capability manifest — `homecore/plugins/{id}/capabilities` — not on
+`register`.** §6.4 of `designer-direction.md` said to extend the `register`
+seam, and reading the code corrects that: `register` is *per device* and *not
+retained*, so widgets announced there would vanish from core's view on every
+restart until each device happened to re-register. The manifest is retained,
+published once per session after CONNACK, and already carries plugin-level
+properties. Widgets are a property of the plugin, not of any device it found.
 
 ```json
 {
+  "spec": "1",
+  "plugin_id": "boiler",
+  "actions": [],
   "widgets": [
     {
       "widget_id": "boiler_flow",
@@ -77,24 +85,42 @@ Plugins already register device capability schemas over
       "bindings": [
         { "name": "flow", "device": "{{config.device_id}}", "key": "flow_lpm" }
       ],
-      "render": { "kind": "gauge", "value": "flow", "max": "{{config.max_lpm}}" },
+      "render": { "kind": "gauge", "value": "flow", "max": 30 },
       "code": { "entry": "boiler_flow.html", "grant": ["{{config.device_id}}"] }
     }
   ]
 }
 ```
 
+`widgets` rides *alongside* the frozen `Capabilities` type rather than inside
+it, exactly as `config_schema` and `config_descriptor` already do. `spec = "1"`
+is frozen, and adding a field to that struct would source-break every plugin
+that builds a manifest literally — including the ones outside this repo. It is
+typed all the same (`Vec<WidgetDescriptor>` on the event and on
+`PluginRecord`), because unlike a config schema a descriptor has a validator,
+and a raw `Value` would mean every reader running it again.
+
 - `config_schema` uses **the field shape `dashboard-vocabulary.json` already
-  defines** — `name`, `type`, `required`, `one_of`, `min`, `max`. Not a second
-  schema language. The vocabulary endpoint merges core widgets and plugin
-  widgets into one list, so a client asks one question to learn every card that
-  exists on this installation.
+  defines** — `name`, `type`, `required`, `one_of`, `min`. Not a second schema
+  language. `GET /api/v1/dashboards/vocabulary` serves core's widgets and
+  plugin widgets in one response, so a client asks one question to learn every
+  card that exists on this installation. They stay in **separate lists**: core's
+  are types it validates, and a plugin's is a declaration it merely carries.
 - `bindings` name the readings the widget needs. A binding is resolved by the
   client against device state; core stores it and does not evaluate it.
 - `render` is the portable description. **Required.**
 - `code` is optional and web-only. A widget with `code` and no `render` is
-  rejected at registration — that rejection is the whole portability guarantee,
-  and it has to be enforced where the declaration arrives, not where it is drawn.
+  rejected, and that rejection is the whole portability guarantee — enforced
+  where the declaration arrives, not where it fails to draw.
+
+### One bad card does not sink the manifest
+
+A descriptor is accepted or rejected **whole** — the first reason is the one a
+plugin author has to act on. A *manifest* is not: core decodes and validates
+each widget on its own and drops only the ones that fail, with the reason
+logged against the widget id. A plugin shipping four cards and one typo serves
+four. Reading the array as `Vec<WidgetDescriptor>` in one go would have made a
+single malformed entry take every other card down with it, silently.
 
 ## The portable render description
 

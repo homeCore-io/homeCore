@@ -146,6 +146,14 @@ pub struct PluginRecord {
     /// publishes, or if the published manifest failed to decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<hc_types::Capabilities>,
+    /// Dashboard widgets this plugin contributes, from the same manifest and
+    /// already validated by the bridge — anything core could not promise every
+    /// client would draw never reaches here.
+    ///
+    /// Empty for plugins on SDKs predating widgets, which is indistinguishable
+    /// from "contributes none" and needs no special handling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widgets: Vec<hc_types::widget_descriptor::WidgetDescriptor>,
     /// JSON Schema for the plugin's operator config, carried on the capability
     /// manifest. Drives the config editor's typed form; `None` → raw-TOML
     /// fallback. Not shown in the plugin list — served at
@@ -262,6 +270,7 @@ impl PluginRecord {
             supports_management: false,
             notices: Vec::new(),
             capabilities: None,
+            widgets: Vec::new(),
             config_schema: None,
             config_descriptor: None,
             installed_version,
@@ -457,6 +466,7 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             notices: Vec::new(),
@@ -500,6 +510,7 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             notices: Vec::new(),
@@ -528,6 +539,7 @@ pub fn spawn_plugin_registry_listener(
                     plugin_id,
                     timestamp,
                     capabilities,
+                    widgets,
                     config_schema,
                     config_descriptor,
                 }) => {
@@ -551,12 +563,17 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
+                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             notices: Vec::new(),
                             installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);
+                    // Replaced wholesale, like notices: the manifest is the
+                    // plugin's current belief, so a card it stopped declaring
+                    // has been withdrawn and must stop being offered.
+                    rec.widgets = widgets;
                     if config_schema.is_some() {
                         rec.config_schema = config_schema;
                     }

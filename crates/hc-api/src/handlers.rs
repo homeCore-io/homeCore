@@ -3980,8 +3980,8 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
 
     Ok(())
 }
-
-/// What core will accept in a widget config, so a client can stop guessing.
+/// What core will accept in a widget config, so a client can stop guessing —
+/// plus every card a connected plugin contributes.
 ///
 /// The dashboard counterpart to `get_rule_vocabulary`, and it exists for the
 /// same reason. Every client that edits dashboards has carried a hand-written
@@ -3989,10 +3989,46 @@ fn validate_widget_config(widget: &hc_types::dashboard::DashboardWidget) -> Resu
 /// and a hand-written mirror of a validator always cracks. This serves the
 /// table the validator actually executes.
 ///
+/// One question, every card. Before plugin widgets were enumerable a client
+/// could read this table, find nothing for a `plugin_widget`, and have nowhere
+/// else to look: the card existed, core validated its identity, and not one
+/// thing said what it was or how to draw it.
+///
+/// The two lists stay separate on purpose. They are not the same kind of
+/// thing — core's widgets are types it *validates*, and a plugin's is a
+/// declaration it merely *carries*, complete with the title, icon and render
+/// core has no business inventing.
+///
 /// Read access only, and no house data in it: this is a description of the
 /// software, not of anybody's home.
-pub async fn get_dashboard_vocabulary(_: State<AppState>, _: DashboardsRead) -> impl IntoResponse {
-    Json(hc_types::dashboard_vocabulary::DashboardVocabulary::derive())
+pub async fn get_dashboard_vocabulary(
+    State(s): State<AppState>,
+    _: DashboardsRead,
+) -> impl IntoResponse {
+    let mut vocabulary = hc_types::dashboard_vocabulary::DashboardVocabulary::derive();
+
+    {
+        let plugins = s.plugins.read().await;
+        for (plugin_id, record) in plugins.iter() {
+            for descriptor in &record.widgets {
+                vocabulary
+                    .plugin_widgets
+                    .push(hc_types::widget_descriptor::PluginWidget {
+                        plugin_id: plugin_id.clone(),
+                        descriptor: descriptor.clone(),
+                    });
+            }
+        }
+    }
+
+    // Sorted, because a HashMap hands them over in whatever order it likes, and
+    // a response that reshuffles between two identical requests is one no
+    // client can cache and no test can pin.
+    vocabulary.plugin_widgets.sort_by(|a, b| {
+        (&a.plugin_id, &a.descriptor.widget_id).cmp(&(&b.plugin_id, &b.descriptor.widget_id))
+    });
+
+    Json(vocabulary)
 }
 
 pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) -> impl IntoResponse {
@@ -10332,6 +10368,96 @@ token = "TOKEN-TWO"
             response.status(),
             StatusCode::NOT_FOUND,
             "/dashboards/vocabulary was swallowed by /dashboards/{{id}}"
+        );
+    }
+
+    /// A plugin card has to be *findable*, which is the whole point of the
+    /// descriptor: before this, `plugin_widget` named a widget nothing could
+    /// enumerate, so a client read the vocabulary, found no entry, and had
+    /// nowhere else to look.
+    #[tokio::test]
+    async fn the_vocabulary_serves_plugin_widgets_beside_core_widgets() {
+        use hc_types::widget_descriptor::{Portability, RenderElement, WidgetDescriptor};
+
+        let state = mk_state().await;
+        {
+            let mut plugins = state.plugins.write().await;
+            let mut record = crate::PluginRecord::managed_seed(
+                "boiler".to_string(),
+                None,
+                None,
+                true,
+                None,
+            );
+            record.widgets = vec![WidgetDescriptor {
+                widget_id: "boiler_flow".to_string(),
+                title: "Boiler flow".to_string(),
+                icon: Some("water".to_string()),
+                config_schema: Vec::new(),
+                bindings: Vec::new(),
+                render: Some(RenderElement {
+                    kind: "gauge".to_string(),
+                    children: Vec::new(),
+                    fields: serde_json::from_value(serde_json::json!({"value": "flow"})).unwrap(),
+                }),
+                code: None,
+            }];
+            plugins.insert("boiler".to_string(), record);
+        }
+
+        let response = get_dashboard_vocabulary(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims_for("web_user", Role::User)),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        // Core's own table is still there and still separate: a plugin's
+        // declaration is carried, not validated as a type.
+        assert!(
+            json["widgets"]
+                .as_array()
+                .is_some_and(|w| w.iter().any(|s| s["type"] == "device_grid")),
+            "core's widget table went missing: {json}"
+        );
+
+        let plugin_widgets = json["plugin_widgets"].as_array().expect("plugin_widgets");
+        assert_eq!(plugin_widgets.len(), 1, "{json}");
+        assert_eq!(plugin_widgets[0]["plugin_id"], "boiler");
+        assert_eq!(plugin_widgets[0]["widget_id"], "boiler_flow");
+        // Flattened, so the pair `{plugin_id, widget_id}` the wire already
+        // carries reads straight off the entry.
+        assert_eq!(plugin_widgets[0]["render"]["kind"], "gauge");
+        assert_eq!(
+            serde_json::from_value::<WidgetDescriptor>(plugin_widgets[0].clone())
+                .unwrap()
+                .portability(),
+            Portability::Portable
+        );
+    }
+
+    /// A plugin with no widgets must not gain an empty key, and a client with
+    /// no plugins must not have to special-case its absence.
+    #[tokio::test]
+    async fn the_vocabulary_omits_plugin_widgets_when_there_are_none() {
+        let state = mk_state().await;
+        let response = get_dashboard_vocabulary(
+            State(state.clone()),
+            crate::auth_middleware::DashboardsRead(claims_for("web_user", Role::User)),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("plugin_widgets").is_none(),
+            "an empty list should be omitted, not written: {json}"
         );
     }
 
