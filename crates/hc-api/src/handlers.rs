@@ -3189,6 +3189,8 @@ fn default_dashboard_layout(
                     },
                     h: *h,
                     rect: None,
+                    rotation: None,
+                    opacity: None,
                 },
             )
             .collect(),
@@ -3267,6 +3269,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 1,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3275,6 +3279,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 1,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3283,6 +3289,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 1,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3291,6 +3299,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 1,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3299,6 +3309,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 1,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                     ],
                 },
@@ -3319,6 +3331,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 12,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3327,6 +3341,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 5,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3335,6 +3351,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 7,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3343,6 +3361,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 8,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3351,6 +3371,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 4,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                     ],
                 },
@@ -3371,6 +3393,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 12,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3379,6 +3403,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 4,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3387,6 +3413,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 8,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3395,6 +3423,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 8,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3403,6 +3433,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 4,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                     ],
                 },
@@ -3423,6 +3455,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 12,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "media".into(),
@@ -3431,6 +3465,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 4,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "devices".into(),
@@ -3439,6 +3475,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 8,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "log".into(),
@@ -3447,6 +3485,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 8,
                             h: 3,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                         hc_types::dashboard::DashboardWidgetPlacement {
                             widget_id: "modes".into(),
@@ -3455,6 +3495,8 @@ fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
                             w: 4,
                             h: 2,
                             rect: None,
+                            rotation: None,
+                            opacity: None,
                         },
                     ],
                 },
@@ -3687,6 +3729,46 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     "layout {:?} placement '{}' exceeds column count {}",
                     layout.breakpoint, placement.widget_id, layout.columns
                 ));
+            }
+            // The transform, when there is one. Finiteness first and
+            // separately, for the reason the rect checks it that way: NaN
+            // compares false against everything, so a range test alone would
+            // wave it through and the card would draw nowhere.
+            if let Some(rotation) = placement.rotation {
+                if !rotation.is_finite() {
+                    return Err(format!(
+                        "layout {:?} placement '{}' rotation must be finite",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
+                // A full turn either way. Not because 400° is meaningless — it
+                // draws the same as 40° — but because a document that can say
+                // it can also say 4e9, and every client then has to decide
+                // independently what that means.
+                if !(-360.0..=360.0).contains(&rotation) {
+                    return Err(format!(
+                        "layout {:?} placement '{}' rotation must be within one turn",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
+            }
+            if let Some(opacity) = placement.opacity {
+                if !opacity.is_finite() {
+                    return Err(format!(
+                        "layout {:?} placement '{}' opacity must be finite",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
+                // A card at 1.4 opacity is a card somebody meant to write as a
+                // percentage. Rejecting is kinder than silently clamping: the
+                // clamp would look like it worked and the next client to read
+                // the document would be entitled to a different answer.
+                if !(0.0..=1.0).contains(&opacity) {
+                    return Err(format!(
+                        "layout {:?} placement '{}' opacity must be 0 to 1",
+                        layout.breakpoint, placement.widget_id
+                    ));
+                }
             }
             // The composed rectangle, when there is one. Only its size: a card
             // may sit at a negative x or run off the right-hand edge, because
@@ -9660,6 +9742,8 @@ token = "TOKEN-TWO"
                     w: 12,
                     h: 1,
                     rect: None,
+                    rotation: None,
+                    opacity: None,
                 }],
             }],
             widgets: vec![DashboardWidget {
@@ -11027,6 +11111,111 @@ token = "TOKEN-TWO"
             clip: false,
             background: None,
         }
+    }
+
+    fn dashboard_with_transform(
+        rotation: Option<f64>,
+        opacity: Option<f64>,
+    ) -> DashboardDefinition {
+        let mut dashboard = dashboard_with_background(None);
+        dashboard.widgets = vec![hc_types::dashboard::DashboardWidget {
+            id: "a".into(),
+            r#type: "markdown".into(),
+            title: "A".into(),
+            subtitle: None,
+            config: serde_json::json!({"markdown": "hi"}),
+        }];
+        dashboard.layouts[0].placements = vec![hc_types::dashboard::DashboardWidgetPlacement {
+            widget_id: "a".into(),
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 1,
+            rect: None,
+            rotation,
+            opacity,
+        }];
+        dashboard
+    }
+
+    #[test]
+    fn a_placement_with_no_transform_is_the_ordinary_case() {
+        assert!(super::validate_dashboard(&dashboard_with_transform(None, None)).is_ok());
+    }
+
+    #[test]
+    fn a_card_may_be_turned_and_faded() {
+        assert!(
+            super::validate_dashboard(&dashboard_with_transform(Some(-8.0), Some(0.4))).is_ok()
+        );
+        // The ends of both ranges, which is where an off-by-one in a bounds
+        // check lives.
+        assert!(
+            super::validate_dashboard(&dashboard_with_transform(Some(360.0), Some(0.0))).is_ok()
+        );
+        assert!(
+            super::validate_dashboard(&dashboard_with_transform(Some(-360.0), Some(1.0))).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_transform_that_is_not_a_number_is_refused() {
+        // The NaN trap the rectangles already guard against: NaN compares false
+        // against everything, so a range test alone would wave it through and
+        // the card would draw nowhere on every client that honoured it.
+        let error = super::validate_dashboard(&dashboard_with_transform(Some(f64::NAN), None))
+            .unwrap_err();
+        assert!(error.contains("rotation must be finite"), "{error}");
+
+        let error = super::validate_dashboard(&dashboard_with_transform(None, Some(f64::NAN)))
+            .unwrap_err();
+        assert!(error.contains("opacity must be finite"), "{error}");
+
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(Some(f64::INFINITY), None))
+                .unwrap_err();
+        assert!(error.contains("rotation must be finite"), "{error}");
+    }
+
+    #[test]
+    fn a_rotation_beyond_one_turn_is_refused() {
+        // 400° draws the same as 40°, so this is not about meaning. A document
+        // that can say 400 can say 4e9, and every client would then decide
+        // independently what that means.
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(Some(400.0), None)).unwrap_err();
+        assert!(error.contains("within one turn"), "{error}");
+    }
+
+    #[test]
+    fn an_opacity_written_as_a_percentage_is_refused_not_clamped() {
+        // 40 is a person who meant 0.4. Clamping to 1.0 would look like it
+        // worked, and the next client to read the document would be entitled to
+        // a different answer.
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(None, Some(40.0))).unwrap_err();
+        assert!(error.contains("opacity must be 0 to 1"), "{error}");
+
+        let error =
+            super::validate_dashboard(&dashboard_with_transform(None, Some(-0.1))).unwrap_err();
+        assert!(error.contains("opacity must be 0 to 1"), "{error}");
+    }
+
+    #[test]
+    fn a_transform_survives_a_round_trip() {
+        // Absent must stay absent: a page nobody has turned must not gain two
+        // keys by being saved, or every later diff carries rows that changed
+        // nothing.
+        let plain = &dashboard_with_transform(None, None).layouts[0].placements[0];
+        let json = serde_json::to_value(plain).unwrap();
+        assert!(json.get("rotation").is_none(), "{json}");
+        assert!(json.get("opacity").is_none(), "{json}");
+
+        let turned = &dashboard_with_transform(Some(8.0), Some(0.5)).layouts[0].placements[0];
+        let back: hc_types::dashboard::DashboardWidgetPlacement =
+            serde_json::from_value(serde_json::to_value(turned).unwrap()).unwrap();
+        assert_eq!(back.rotation, Some(8.0));
+        assert_eq!(back.opacity, Some(0.5));
     }
 
     #[test]

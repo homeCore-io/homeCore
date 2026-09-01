@@ -39,6 +39,9 @@ A layout is a list of placements in **grid cells**, one layout per breakpoint:
 - `floating` — sits *above* the grid rather than in it.
 - `rect` — where the element really sits, when the layout is composed. The cells
   are then a **snapped approximation** of it.
+- `rotation` — degrees clockwise about the element's own centre. Absent means
+  none.
+- `opacity` — 0 to 1. Absent means fully opaque.
 
 `rect` is the one that surprises people. A composed page still opens, still
 legally, in software that has never heard of frames — approximately right rather
@@ -46,6 +49,33 @@ than broken. That is the only version of composition that is safe to ship to
 documents already in redb, and it means **the cells are never decorative**: they
 are what core validates and what a frame-unaware client draws.
 
+
+## The transform is carried, never computed
+
+`rotation` and `opacity` are on the **placement**, not in the widget's config,
+and the split is deliberate. `layer` and `z` live in the config because lifting
+a card above the grid is a property of the *element* — it holds at every
+breakpoint, and `deriveLayout` carries it across. An angle is a property of an
+*arrangement*: a card turned eight degrees on a wide canvas is a composition,
+and the same card full-width on a phone is a mistake. A document that could not
+tell those apart would force one of them.
+
+**Neither one enters the layout arithmetic.** `normalize`, `is_legal` and `rows`
+do not read them, and `hc_types::dashboard_layout::GridItem` does not carry
+them, so the conformance fixtures are unchanged by their existence. This is not
+an oversight to correct later:
+
+- A turned card still occupies its cells. Packing against a rotated bounding box
+  would make a layout's legality depend on trigonometry, and two clients that
+  rounded differently would disagree about whether a page could be saved.
+- A card at `opacity: 0` still takes its space. Invisible is not absent — a
+  faded card is a design, and reflowing the page around it would make hiding
+  something a destructive edit.
+
+Core validates that both are finite, that rotation is within one turn, and that
+opacity is between 0 and 1. An opacity of 40 — a person who meant 0.4 — is
+**refused rather than clamped**: clamping would look like it worked, and the
+next client to read the document would be entitled to a different answer.
 ## The overlap rule
 
 Everything else inherits from this one predicate. Two elements compete when:

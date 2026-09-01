@@ -30,6 +30,8 @@ fn layout(groups: Vec<DashboardGroupBox>) -> DashboardLayout {
             w: 3,
             h: 2,
             rect: None,
+            rotation: None,
+            opacity: None,
         }],
         derived_from: None,
         flow: DashboardFlow::Free,

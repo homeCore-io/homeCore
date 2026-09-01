@@ -29,6 +29,8 @@ fn layout(derived_from: Option<DashboardBreakpoint>) -> DashboardLayout {
             w: 4,
             h: 2,
             rect: None,
+            rotation: None,
+            opacity: None,
         }],
         derived_from,
         flow: DashboardFlow::default(),

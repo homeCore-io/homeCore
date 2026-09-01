@@ -26,6 +26,8 @@ fn placement(rect: Option<DashboardRect>) -> DashboardWidgetPlacement {
         w: 3,
         h: 2,
         rect,
+        rotation: None,
+        opacity: None,
     }
 }
 
