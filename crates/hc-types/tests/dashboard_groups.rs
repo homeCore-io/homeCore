@@ -48,6 +48,8 @@ fn box_for(path: &str) -> DashboardGroupBox {
         radius: None,
         clip: false,
         background: None,
+        rotation: None,
+        opacity: None,
     }
 }
 
@@ -69,6 +71,8 @@ fn a_styled_group_survives_a_round_trip() {
             blur: 8.0,
             dim: 0.35,
         }),
+        rotation: Some(-8.0),
+        opacity: Some(0.6),
     }]);
     let json = serde_json::to_string(&before).expect("serialise");
     let after: DashboardLayout = serde_json::from_str(&json).expect("deserialise");

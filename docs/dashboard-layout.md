@@ -76,6 +76,26 @@ Core validates that both are finite, that rotation is within one turn, and that
 opacity is between 0 and 1. An opacity of 40 — a person who meant 0.4 — is
 **refused rather than clamped**: clamping would look like it worked, and the
 next client to read the document would be entitled to a different answer.
+
+### A group's transform, and what "inherit" costs
+
+A group box carries the same two values, and they mean something a placement's
+cannot: **every member turns about the group's centre**, which is the parent
+transform a card alone has no way to express.
+
+They *compose* with each member's own rather than replacing it — a card turned
+four degrees inside a group turned eight is turned twelve, and a group that
+overrode its members would make joining one a destructive edit.
+
+Opacity multiplies, and this is the one part a client cannot make exactly
+right. Fading a group as a whole and fading each member by the same amount
+differ wherever two members overlap: the whole-group version paints the overlap
+once, the per-member version paints it twice and it reads darker. The honest
+alternative is one paint layer per group on every frame, which costs more than
+the case is worth — members that overlap are rare, and a group is usually a row
+of cards side by side. A client that wants the exact reading is free to
+composite the group in one layer; the document says what it means, not how to
+draw it.
 ## The overlap rule
 
 Everything else inherits from this one predicate. Two elements compete when:

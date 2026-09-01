@@ -3849,6 +3849,37 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     ));
                 }
             }
+            // The group's transform, on the same terms as a placement's — its
+            // members inherit it, so a group that could say `NaN` would take
+            // every card in it down rather than one.
+            if let Some(rotation) = group.rotation {
+                if !rotation.is_finite() {
+                    return Err(format!(
+                        "layout {:?} group '{}' rotation must be finite",
+                        layout.breakpoint, group.path
+                    ));
+                }
+                if !(-360.0..=360.0).contains(&rotation) {
+                    return Err(format!(
+                        "layout {:?} group '{}' rotation must be within one turn",
+                        layout.breakpoint, group.path
+                    ));
+                }
+            }
+            if let Some(opacity) = group.opacity {
+                if !opacity.is_finite() {
+                    return Err(format!(
+                        "layout {:?} group '{}' opacity must be finite",
+                        layout.breakpoint, group.path
+                    ));
+                }
+                if !(0.0..=1.0).contains(&opacity) {
+                    return Err(format!(
+                        "layout {:?} group '{}' opacity must be 0 to 1",
+                        layout.breakpoint, group.path
+                    ));
+                }
+            }
         }
     }
 
@@ -11110,6 +11141,8 @@ token = "TOKEN-TWO"
             radius: None,
             clip: false,
             background: None,
+            rotation: None,
+            opacity: None,
         }
     }
 
@@ -11228,6 +11261,34 @@ token = "TOKEN-TWO"
             super::validate_dashboard(&dashboard_with_groups(vec![group_box("Nobody/Here")]))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_group_may_be_turned_and_faded() {
+        let mut turned = group_box("Wall");
+        turned.rotation = Some(-8.0);
+        turned.opacity = Some(0.6);
+        assert!(super::validate_dashboard(&dashboard_with_groups(vec![turned])).is_ok());
+    }
+
+    #[test]
+    fn a_group_transform_is_held_to_the_same_bounds_as_a_placement() {
+        // A group's transform is inherited, so a group that could say NaN would
+        // take every card in it down rather than one.
+        let mut nan = group_box("Wall");
+        nan.rotation = Some(f64::NAN);
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![nan])).unwrap_err();
+        assert!(error.contains("group 'Wall' rotation must be finite"), "{error}");
+
+        let mut spun = group_box("Wall");
+        spun.rotation = Some(-400.0);
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![spun])).unwrap_err();
+        assert!(error.contains("within one turn"), "{error}");
+
+        let mut percent = group_box("Wall");
+        percent.opacity = Some(60.0);
+        let error = super::validate_dashboard(&dashboard_with_groups(vec![percent])).unwrap_err();
+        assert!(error.contains("group 'Wall' opacity must be 0 to 1"), "{error}");
     }
 
     #[test]
