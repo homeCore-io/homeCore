@@ -3204,395 +3204,47 @@ fn default_dashboard_layout(
     ]
 }
 
+/// The pages a new house starts with, and the ones a person can add.
+///
+/// **A template is a document, not code.** It was Rust struct literals, which
+/// made every layout tweak a rebuild and a core release — and worse, made the
+/// shipped templates a different kind of thing from the ones people share.
+/// John, seeing it: *"why are the templates being done in rust when they are UI
+/// components?"* They are not components at all; they are pages. So they are
+/// JSON, and the ones core ships use exactly the format a person exports.
+///
+/// Compiled in with `include_str!` rather than read from disk, because a
+/// starter page has to exist on a house with an empty data directory and no
+/// files to read. Parsing is `expect`: a malformed one is a build that should
+/// never have shipped, and the snapshot test below is what catches it.
+///
+/// Editing a page here means editing the JSON. Better still, compose it in the
+/// designer and export it — the format is the same either way, which is the
+/// whole point.
+const SHIPPED_TEMPLATES: &[&str] = &[
+    include_str!("../../../templates/getting_started.json"),
+    include_str!("../../../templates/house.json"),
+    include_str!("../../../templates/room.json"),
+    include_str!("../../../templates/template_living_room.json"),
+    include_str!("../../../templates/template_security.json"),
+];
+
 fn dashboard_templates_for(owner_user_id: &str) -> Vec<DashboardDefinition> {
-    use hc_types::dashboard::{DashboardBreakpoint, DashboardDefinition, DashboardWidget};
-
     let now = chrono::Utc::now();
-    let widget = |id: &str, r#type: &str, title: &str, subtitle: Option<&str>, config: Value| {
-        DashboardWidget {
-            id: id.to_string(),
-            r#type: r#type.to_string(),
-            title: title.to_string(),
-            subtitle: subtitle.map(str::to_string),
-            config,
-        }
-    };
-
-    vec![
-        DashboardDefinition {
-            id: "starter_getting_started".to_string(),
-            name: "Getting Started".to_string(),
-            description: Some("Your home at a glance.".to_string()),
-            owner_user_id: owner_user_id.to_string(),
-            access: Vec::new(),
-            background: None,
-            tags: vec!["starter".into(), "home".into(), "overview".into()],
-            // Not "home": that renders the same house glyph as the Home nav
-            // item. "rocket" reads as onboarding and stays distinct.
-            icon: "rocket".into(),
-            created_at: now,
-            updated_at: now,
-            widgets: vec![
-                widget("hero", "house_status_hero", "Home", None, json!({})),
-                widget(
-                    "media",
-                    "media_player",
-                    "Now Playing",
-                    None,
-                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 4}),
-                ),
-                widget(
-                    "devices",
-                    "device_grid",
-                    "Devices",
-                    None,
-                    json!({"selection_mode": "query", "query": "", "show_offline": true, "limit": 12}),
-                ),
-                widget("log", "event_feed", "Activity", None, json!({"limit": 16})),
-                widget("modes", "mode_chips", "Modes", None, json!({})),
-            ],
-            layouts: vec![
-                hc_types::dashboard::DashboardLayout {
-                    breakpoint: DashboardBreakpoint::Mobile,
-                    columns: 1,
-                    row_height: 100.0,
-                    gap: 12.0,
-                    derived_from: None,
-                    flow: Default::default(),
-                    frame: None,
-                    groups: Vec::new(),
-                    placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "hero".into(),
-                            x: 0,
-                            y: 0,
-                            w: 1,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "media".into(),
-                            x: 0,
-                            y: 2,
-                            w: 1,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "devices".into(),
-                            x: 0,
-                            y: 5,
-                            w: 1,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "log".into(),
-                            x: 0,
-                            y: 8,
-                            w: 1,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "modes".into(),
-                            x: 0,
-                            y: 11,
-                            w: 1,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                    ],
-                },
-                hc_types::dashboard::DashboardLayout {
-                    breakpoint: DashboardBreakpoint::Tablet,
-                    columns: 12,
-                    row_height: 100.0,
-                    gap: 12.0,
-                    derived_from: None,
-                    flow: Default::default(),
-                    frame: None,
-                    groups: Vec::new(),
-                    placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "hero".into(),
-                            x: 0,
-                            y: 0,
-                            w: 12,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "media".into(),
-                            x: 0,
-                            y: 2,
-                            w: 5,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "devices".into(),
-                            x: 5,
-                            y: 2,
-                            w: 7,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "log".into(),
-                            x: 0,
-                            y: 5,
-                            w: 8,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "modes".into(),
-                            x: 8,
-                            y: 5,
-                            w: 4,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                    ],
-                },
-                hc_types::dashboard::DashboardLayout {
-                    breakpoint: DashboardBreakpoint::Desktop,
-                    columns: 12,
-                    row_height: 100.0,
-                    gap: 12.0,
-                    derived_from: None,
-                    flow: Default::default(),
-                    frame: None,
-                    groups: Vec::new(),
-                    placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "hero".into(),
-                            x: 0,
-                            y: 0,
-                            w: 12,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "media".into(),
-                            x: 0,
-                            y: 2,
-                            w: 4,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "devices".into(),
-                            x: 4,
-                            y: 2,
-                            w: 8,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "log".into(),
-                            x: 0,
-                            y: 5,
-                            w: 8,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "modes".into(),
-                            x: 8,
-                            y: 5,
-                            w: 4,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                    ],
-                },
-                hc_types::dashboard::DashboardLayout {
-                    breakpoint: DashboardBreakpoint::Tv,
-                    columns: 12,
-                    row_height: 120.0,
-                    gap: 16.0,
-                    derived_from: None,
-                    flow: Default::default(),
-                    frame: None,
-                    groups: Vec::new(),
-                    placements: vec![
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "hero".into(),
-                            x: 0,
-                            y: 0,
-                            w: 12,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "media".into(),
-                            x: 0,
-                            y: 2,
-                            w: 4,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "devices".into(),
-                            x: 4,
-                            y: 2,
-                            w: 8,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "log".into(),
-                            x: 0,
-                            y: 5,
-                            w: 8,
-                            h: 3,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                        hc_types::dashboard::DashboardWidgetPlacement {
-                            widget_id: "modes".into(),
-                            x: 8,
-                            y: 5,
-                            w: 4,
-                            h: 2,
-                            rect: None,
-                            rotation: None,
-                            opacity: None,
-                        },
-                    ],
-                },
-            ],
-        },
-        DashboardDefinition {
-            id: "template_security".to_string(),
-            name: "Security".to_string(),
-            description: Some("Entry points, alerts, and camera placeholders.".to_string()),
-            owner_user_id: owner_user_id.to_string(),
-            access: Vec::new(),
-            background: None,
-            tags: vec!["security".into()],
-            icon: "shield".into(),
-            created_at: now,
-            updated_at: now,
-            widgets: vec![
-                widget(
-                    "summary",
-                    "stat_summary",
-                    "Security Summary",
-                    None,
-                    json!({"metrics": ["doors_open", "motion_active", "offline"]}),
-                ),
-                widget(
-                    "devices",
-                    "device_list",
-                    "Security Devices",
-                    None,
-                    json!({"selection_mode": "query", "query": "door,motion,lock,camera", "show_offline": true, "limit": 16}),
-                ),
-                widget(
-                    "events",
-                    "event_feed",
-                    "Alerts",
-                    None,
-                    json!({"limit": 12, "types": ["device_state_changed", "system_alert"], "group_by": "device"}),
-                ),
-                widget(
-                    "notes",
-                    "markdown",
-                    "Camera Setup",
-                    None,
-                    json!({"markdown": "Add camera widgets after configuring approved sources and embed policy."}),
-                ),
-            ],
-            layouts: default_dashboard_layout(&[
-                ("summary", 0, 0, 12, 2),
-                ("devices", 0, 2, 7, 3),
-                ("events", 7, 2, 5, 3),
-                ("notes", 0, 5, 12, 1),
-            ]),
-        },
-        DashboardDefinition {
-            id: "template_living_room".to_string(),
-            name: "Living Room".to_string(),
-            description: Some("A room-focused dashboard with devices and media.".to_string()),
-            owner_user_id: owner_user_id.to_string(),
-            access: Vec::new(),
-            background: None,
-            tags: vec!["room".into(), "living_room".into()],
-            icon: "chair".into(),
-            created_at: now,
-            updated_at: now,
-            widgets: vec![
-                widget(
-                    "devices",
-                    "device_grid",
-                    "Living Room Devices",
-                    None,
-                    json!({"selection_mode": "area", "area_name": "Living Room", "show_offline": false, "limit": 8}),
-                ),
-                widget(
-                    "media",
-                    "media_player",
-                    "Media",
-                    None,
-                    json!({"selection_mode": "query", "query": "living", "show_offline": false, "limit": 2}),
-                ),
-                widget("scenes", "scene_row", "Scenes", None, json!({})),
-                widget(
-                    "events",
-                    "event_feed",
-                    "Room Activity",
-                    None,
-                    json!({"limit": 8, "area_name": "Living Room"}),
-                ),
-            ],
-            layouts: default_dashboard_layout(&[
-                ("devices", 0, 0, 7, 3),
-                ("media", 7, 0, 5, 3),
-                ("scenes", 0, 3, 12, 1),
-                ("events", 0, 4, 12, 2),
-            ]),
-        },
-    ]
+    SHIPPED_TEMPLATES
+        .iter()
+        .map(|raw| {
+            let mut template: DashboardDefinition = serde_json::from_str(raw)
+                .expect("a shipped template must parse; see templates/*.json");
+            // The file cannot know who is asking, and its timestamps are from
+            // whenever it was written out. Both belong to the copy, not to the
+            // template.
+            template.owner_user_id = owner_user_id.to_string();
+            template.created_at = now;
+            template.updated_at = now;
+            template
+        })
+        .collect()
 }
 
 fn find_dashboard_template(template_id: &str, owner_user_id: &str) -> Option<DashboardDefinition> {
@@ -4480,10 +4132,32 @@ pub async fn duplicate_dashboard(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
+/// How an export is meant to be used.
+///
+/// **Two jobs, and they want opposite things.** Backing a page up sends it home
+/// to the house it came from, so it keeps the ids and restores exactly. Sharing
+/// hands it to somebody else, where every id is a dangling reference to
+/// hardware they do not have — so it carries slots instead, each labelled with
+/// what belonged there, and the person wires them in the editor.
+///
+/// The default is a backup, because that is what the endpoint has always done
+/// and a caller that has not been updated must not silently start stripping.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ExportQuery {
+    /// `false` to share: every device and scene reference becomes a slot.
+    #[serde(default = "yes")]
+    pub wired: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
 pub async fn export_dashboard(
     State(s): State<AppState>,
     user: DashboardsRead,
     Path(id): Path<String>,
+    Query(query): Query<ExportQuery>,
 ) -> impl IntoResponse {
     let Some(handle) = &s.dashboards else {
         return (
@@ -4496,7 +4170,22 @@ pub async fn export_dashboard(
     let data = handle.read().await;
     match data.dashboards.iter().find(|dashboard| dashboard.id == id) {
         Some(dashboard) if dashboard_visible_to(&user.0, dashboard) => {
-            Json(dashboard).into_response()
+            if query.wired {
+                return Json(dashboard).into_response();
+            }
+            // Shared: the house comes out of it. Widgets keep everything else —
+            // their layout, their look, their titles — because those are the
+            // page, and only the ids are the house.
+            let mut shared = dashboard.clone();
+            for widget in &mut shared.widgets {
+                let label = if widget.title.trim().is_empty() {
+                    widget.r#type.clone()
+                } else {
+                    widget.title.clone()
+                };
+                hc_types::dashboard_vocabulary::unwire(&widget.r#type, &mut widget.config, &label);
+            }
+            Json(shared).into_response()
         }
         Some(_) => (
             StatusCode::FORBIDDEN,
@@ -10903,6 +10592,101 @@ token = "TOKEN-TWO"
         assert!(templates
             .iter()
             .any(|template| template.id == "starter_getting_started"));
+        // Every shipped template parses and would be accepted if somebody
+        // imported it. The FILES are the source now, so nothing else checks
+        // them: a typo in one is a starter page that cannot be created.
+        for template in &templates {
+            assert!(
+                validate_dashboard(template).is_ok(),
+                "{} would be refused on import",
+                template.id
+            );
+            assert!(!template.widgets.is_empty(), "{} is empty", template.id);
+        }
+
+        // The pair the redesign ships: a house page that routes, and a room
+        // page that controls.
+        for id in ["starter_house", "starter_room"] {
+            assert!(
+                templates.iter().any(|t| t.id == id),
+                "{id} is not offered as a template"
+            );
+        }
+
+        // A room template arrives UNWIRED. That is what makes it a template
+        // rather than a copy of somebody's house: every reference is a slot
+        // saying what belongs there, and a person picks the device.
+        let room = templates
+            .iter()
+            .find(|t| t.id == "starter_room")
+            .expect("the room template");
+        let mut slots = 0;
+        for w in &room.widgets {
+            let Some(spec) = hc_types::dashboard_vocabulary::widget(&w.r#type) else {
+                continue;
+            };
+            for field in &spec.fields {
+                if field.reference.is_none() {
+                    continue;
+                }
+                let Some(value) = w.config.get(&field.name) else {
+                    continue;
+                };
+                match value {
+                    serde_json::Value::String(text) => {
+                        assert!(
+                            hc_types::dashboard_vocabulary::slot_label(text).is_some(),
+                            "{}.{} ships a device id, not a slot",
+                            w.id,
+                            field.name
+                        );
+                        slots += 1;
+                    }
+                    serde_json::Value::Array(list) => {
+                        for entry in list {
+                            let text = entry.as_str().unwrap_or_default();
+                            assert!(
+                                hc_types::dashboard_vocabulary::slot_label(text).is_some(),
+                                "{}.{} ships a device id, not a slot",
+                                w.id,
+                                field.name
+                            );
+                            slots += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            slots >= 8,
+            "a room template with {slots} slots is not a room"
+        );
+
+        // And it composes rather than packs: these pages are arrangements, and
+        // packing one would close the gaps that are doing the work.
+        assert!(room
+            .layouts
+            .iter()
+            .all(|l| l.flow == hc_types::dashboard::DashboardFlow::Free));
+        assert!(room
+            .layouts
+            .iter()
+            .all(|l| l.placements.iter().all(|p| p.rect.is_some())));
+
+        // The house page needs no wiring at all: the field counts whatever is
+        // in the rooms, and everything else on it is a query.
+        let house = templates
+            .iter()
+            .find(|t| t.id == "starter_house")
+            .expect("the house template");
+        assert!(house.widgets.iter().any(|w| w.r#type == "room_field"));
+        assert!(
+            !house.widgets.iter().any(|w| w.r#type == "colour_wheel"
+                || w.r#type == "scene_button"
+                || w.r#type == "toggle"),
+            "a control with no subject does not belong on a page about the whole house"
+        );
 
         let resp = create_dashboard_from_template(
             State(state.clone()),
@@ -10920,6 +10704,7 @@ token = "TOKEN-TWO"
             State(state.clone()),
             crate::auth_middleware::DashboardsRead(claims.clone()),
             Path(created.dashboard.id.clone()),
+            Query(ExportQuery { wired: true }),
         )
         .await
         .into_response();

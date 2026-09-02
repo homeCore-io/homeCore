@@ -1,0 +1,207 @@
+{
+  "id": "starter_house",
+  "name": "House",
+  "description": "Every room, sized by what is in it and lit by what is on.",
+  "owner_user_id": "owner",
+  "tags": [
+    "starter",
+    "house",
+    "overview"
+  ],
+  "icon": "grid",
+  "created_at": "2026-09-02T22:14:02.399397271Z",
+  "updated_at": "2026-09-02T22:14:02.399397271Z",
+  "layouts": [
+    {
+      "breakpoint": "desktop",
+      "columns": 12,
+      "row_height": 120.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "glance",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1440.0,
+            "h": 150.0
+          }
+        },
+        {
+          "widget_id": "rooms",
+          "x": 0,
+          "y": 1,
+          "w": 8,
+          "h": 5,
+          "rect": {
+            "x": 0.0,
+            "y": 162.0,
+            "w": 960.0,
+            "h": 640.0
+          }
+        },
+        {
+          "widget_id": "activity",
+          "x": 8,
+          "y": 1,
+          "w": 4,
+          "h": 3,
+          "rect": {
+            "x": 972.0,
+            "y": 162.0,
+            "w": 468.0,
+            "h": 320.0
+          }
+        },
+        {
+          "widget_id": "playing",
+          "x": 8,
+          "y": 4,
+          "w": 4,
+          "h": 3,
+          "rect": {
+            "x": 972.0,
+            "y": 494.0,
+            "w": 468.0,
+            "h": 308.0
+          }
+        },
+        {
+          "widget_id": "modes",
+          "x": 0,
+          "y": 7,
+          "w": 12,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 814.0,
+            "w": 1440.0,
+            "h": 96.0
+          }
+        }
+      ],
+      "flow": "free"
+    },
+    {
+      "breakpoint": "mobile",
+      "columns": 12,
+      "row_height": 120.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "glance",
+          "x": 0,
+          "y": 0,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 390.0,
+            "h": 180.0
+          }
+        },
+        {
+          "widget_id": "rooms",
+          "x": 0,
+          "y": 2,
+          "w": 3,
+          "h": 4,
+          "rect": {
+            "x": 0.0,
+            "y": 192.0,
+            "w": 390.0,
+            "h": 420.0
+          }
+        },
+        {
+          "widget_id": "modes",
+          "x": 0,
+          "y": 5,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 624.0,
+            "w": 390.0,
+            "h": 96.0
+          }
+        },
+        {
+          "widget_id": "playing",
+          "x": 0,
+          "y": 6,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 732.0,
+            "w": 390.0,
+            "h": 220.0
+          }
+        },
+        {
+          "widget_id": "activity",
+          "x": 0,
+          "y": 8,
+          "w": 3,
+          "h": 3,
+          "rect": {
+            "x": 0.0,
+            "y": 964.0,
+            "w": 390.0,
+            "h": 300.0
+          }
+        }
+      ],
+      "flow": "free"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "glance",
+      "type": "house_status_hero",
+      "title": "Home",
+      "config": {}
+    },
+    {
+      "id": "rooms",
+      "type": "room_field",
+      "title": "Rooms",
+      "config": {
+        "gap": 4,
+        "room_page": ""
+      }
+    },
+    {
+      "id": "activity",
+      "type": "event_feed",
+      "title": "Worth knowing",
+      "config": {
+        "group_by": "none",
+        "limit": 12
+      }
+    },
+    {
+      "id": "playing",
+      "type": "media_player",
+      "title": "Playing",
+      "config": {
+        "limit": 4,
+        "query": "",
+        "selection_mode": "query"
+      }
+    },
+    {
+      "id": "modes",
+      "type": "mode_chips",
+      "title": "Modes",
+      "config": {}
+    }
+  ],
+  "access": []
+}

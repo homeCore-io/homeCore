@@ -1,0 +1,209 @@
+{
+  "id": "template_security",
+  "name": "Security",
+  "description": "Entry points, alerts, and camera placeholders.",
+  "owner_user_id": "owner",
+  "tags": [
+    "security"
+  ],
+  "icon": "shield",
+  "created_at": "2026-09-02T22:14:02.399397271Z",
+  "updated_at": "2026-09-02T22:14:02.399397271Z",
+  "layouts": [
+    {
+      "breakpoint": "mobile",
+      "columns": 1,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "summary",
+          "x": 0,
+          "y": 0,
+          "w": 1,
+          "h": 2
+        },
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 1,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "events",
+          "x": 0,
+          "y": 2,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "notes",
+          "x": 0,
+          "y": 3,
+          "w": 1,
+          "h": 1
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tablet",
+      "columns": 12,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "summary",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 2,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "events",
+          "x": 7,
+          "y": 2,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "notes",
+          "x": 0,
+          "y": 5,
+          "w": 12,
+          "h": 1
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "desktop",
+      "columns": 12,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "summary",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 2,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "events",
+          "x": 7,
+          "y": 2,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "notes",
+          "x": 0,
+          "y": 5,
+          "w": 12,
+          "h": 1
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tv",
+      "columns": 12,
+      "row_height": 180.0,
+      "gap": 16.0,
+      "placements": [
+        {
+          "widget_id": "summary",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 2,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "events",
+          "x": 7,
+          "y": 2,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "notes",
+          "x": 0,
+          "y": 5,
+          "w": 12,
+          "h": 1
+        }
+      ],
+      "flow": "packed"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "summary",
+      "type": "stat_summary",
+      "title": "Security Summary",
+      "config": {
+        "metrics": [
+          "doors_open",
+          "motion_active",
+          "offline"
+        ]
+      }
+    },
+    {
+      "id": "devices",
+      "type": "device_list",
+      "title": "Security Devices",
+      "config": {
+        "limit": 16,
+        "query": "door,motion,lock,camera",
+        "selection_mode": "query",
+        "show_offline": true
+      }
+    },
+    {
+      "id": "events",
+      "type": "event_feed",
+      "title": "Alerts",
+      "config": {
+        "group_by": "device",
+        "limit": 12,
+        "types": [
+          "device_state_changed",
+          "system_alert"
+        ]
+      }
+    },
+    {
+      "id": "notes",
+      "type": "markdown",
+      "title": "Camera Setup",
+      "config": {
+        "markdown": "Add camera widgets after configuring approved sources and embed policy."
+      }
+    }
+  ],
+  "access": []
+}
