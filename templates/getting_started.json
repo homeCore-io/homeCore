@@ -1,0 +1,237 @@
+{
+  "id": "starter_getting_started",
+  "name": "Getting Started",
+  "description": "Your home at a glance.",
+  "owner_user_id": "owner",
+  "tags": [
+    "starter",
+    "home",
+    "overview"
+  ],
+  "icon": "rocket",
+  "created_at": "2026-09-02T22:14:02.399397271Z",
+  "updated_at": "2026-09-02T22:14:02.399397271Z",
+  "layouts": [
+    {
+      "breakpoint": "mobile",
+      "columns": 1,
+      "row_height": 100.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "hero",
+          "x": 0,
+          "y": 0,
+          "w": 1,
+          "h": 2
+        },
+        {
+          "widget_id": "media",
+          "x": 0,
+          "y": 2,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 5,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "log",
+          "x": 0,
+          "y": 8,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "modes",
+          "x": 0,
+          "y": 11,
+          "w": 1,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tablet",
+      "columns": 12,
+      "row_height": 100.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "hero",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "media",
+          "x": 0,
+          "y": 2,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "devices",
+          "x": 5,
+          "y": 2,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "log",
+          "x": 0,
+          "y": 5,
+          "w": 8,
+          "h": 3
+        },
+        {
+          "widget_id": "modes",
+          "x": 8,
+          "y": 5,
+          "w": 4,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "desktop",
+      "columns": 12,
+      "row_height": 100.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "hero",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "media",
+          "x": 0,
+          "y": 2,
+          "w": 4,
+          "h": 3
+        },
+        {
+          "widget_id": "devices",
+          "x": 4,
+          "y": 2,
+          "w": 8,
+          "h": 3
+        },
+        {
+          "widget_id": "log",
+          "x": 0,
+          "y": 5,
+          "w": 8,
+          "h": 3
+        },
+        {
+          "widget_id": "modes",
+          "x": 8,
+          "y": 5,
+          "w": 4,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tv",
+      "columns": 12,
+      "row_height": 120.0,
+      "gap": 16.0,
+      "placements": [
+        {
+          "widget_id": "hero",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2
+        },
+        {
+          "widget_id": "media",
+          "x": 0,
+          "y": 2,
+          "w": 4,
+          "h": 3
+        },
+        {
+          "widget_id": "devices",
+          "x": 4,
+          "y": 2,
+          "w": 8,
+          "h": 3
+        },
+        {
+          "widget_id": "log",
+          "x": 0,
+          "y": 5,
+          "w": 8,
+          "h": 3
+        },
+        {
+          "widget_id": "modes",
+          "x": 8,
+          "y": 5,
+          "w": 4,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "hero",
+      "type": "house_status_hero",
+      "title": "Home",
+      "config": {}
+    },
+    {
+      "id": "media",
+      "type": "media_player",
+      "title": "Now Playing",
+      "config": {
+        "limit": 4,
+        "query": "",
+        "selection_mode": "query",
+        "show_offline": true
+      }
+    },
+    {
+      "id": "devices",
+      "type": "device_grid",
+      "title": "Devices",
+      "config": {
+        "limit": 12,
+        "query": "",
+        "selection_mode": "query",
+        "show_offline": true
+      }
+    },
+    {
+      "id": "log",
+      "type": "event_feed",
+      "title": "Activity",
+      "config": {
+        "limit": 16
+      }
+    },
+    {
+      "id": "modes",
+      "type": "mode_chips",
+      "title": "Modes",
+      "config": {}
+    }
+  ],
+  "access": []
+}

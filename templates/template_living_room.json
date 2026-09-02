@@ -1,0 +1,203 @@
+{
+  "id": "template_living_room",
+  "name": "Living Room",
+  "description": "A room-focused dashboard with devices and media.",
+  "owner_user_id": "owner",
+  "tags": [
+    "room",
+    "living_room"
+  ],
+  "icon": "chair",
+  "created_at": "2026-09-02T22:14:02.399397271Z",
+  "updated_at": "2026-09-02T22:14:02.399397271Z",
+  "layouts": [
+    {
+      "breakpoint": "mobile",
+      "columns": 1,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 0,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "media",
+          "x": 0,
+          "y": 1,
+          "w": 1,
+          "h": 3
+        },
+        {
+          "widget_id": "scenes",
+          "x": 0,
+          "y": 2,
+          "w": 1,
+          "h": 1
+        },
+        {
+          "widget_id": "events",
+          "x": 0,
+          "y": 3,
+          "w": 1,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tablet",
+      "columns": 12,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 0,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "media",
+          "x": 7,
+          "y": 0,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "scenes",
+          "x": 0,
+          "y": 3,
+          "w": 12,
+          "h": 1
+        },
+        {
+          "widget_id": "events",
+          "x": 0,
+          "y": 4,
+          "w": 12,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "desktop",
+      "columns": 12,
+      "row_height": 150.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 0,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "media",
+          "x": 7,
+          "y": 0,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "scenes",
+          "x": 0,
+          "y": 3,
+          "w": 12,
+          "h": 1
+        },
+        {
+          "widget_id": "events",
+          "x": 0,
+          "y": 4,
+          "w": 12,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    },
+    {
+      "breakpoint": "tv",
+      "columns": 12,
+      "row_height": 180.0,
+      "gap": 16.0,
+      "placements": [
+        {
+          "widget_id": "devices",
+          "x": 0,
+          "y": 0,
+          "w": 7,
+          "h": 3
+        },
+        {
+          "widget_id": "media",
+          "x": 7,
+          "y": 0,
+          "w": 5,
+          "h": 3
+        },
+        {
+          "widget_id": "scenes",
+          "x": 0,
+          "y": 3,
+          "w": 12,
+          "h": 1
+        },
+        {
+          "widget_id": "events",
+          "x": 0,
+          "y": 4,
+          "w": 12,
+          "h": 2
+        }
+      ],
+      "flow": "packed"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "devices",
+      "type": "device_grid",
+      "title": "Living Room Devices",
+      "config": {
+        "area_name": "Living Room",
+        "limit": 8,
+        "selection_mode": "area",
+        "show_offline": false
+      }
+    },
+    {
+      "id": "media",
+      "type": "media_player",
+      "title": "Media",
+      "config": {
+        "limit": 2,
+        "query": "living",
+        "selection_mode": "query",
+        "show_offline": false
+      }
+    },
+    {
+      "id": "scenes",
+      "type": "scene_row",
+      "title": "Scenes",
+      "config": {}
+    },
+    {
+      "id": "events",
+      "type": "event_feed",
+      "title": "Room Activity",
+      "config": {
+        "area_name": "Living Room",
+        "limit": 8
+      }
+    }
+  ],
+  "access": []
+}

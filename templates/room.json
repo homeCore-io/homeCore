@@ -1,0 +1,461 @@
+{
+  "id": "starter_room",
+  "name": "A room",
+  "description": "One room: its lights, its climate, its keypads and its scenes. Arrives unwired — pick the devices in the editor.",
+  "owner_user_id": "owner",
+  "tags": [
+    "starter",
+    "room",
+    "template"
+  ],
+  "icon": "room",
+  "created_at": "2026-09-02T22:14:02.399397271Z",
+  "updated_at": "2026-09-02T22:14:02.399397271Z",
+  "layouts": [
+    {
+      "breakpoint": "desktop",
+      "columns": 12,
+      "row_height": 120.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "name",
+          "x": 0,
+          "y": 0,
+          "w": 5,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 600.0,
+            "h": 72.0
+          }
+        },
+        {
+          "widget_id": "overhead",
+          "x": 0,
+          "y": 1,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 84.0,
+            "w": 300.0,
+            "h": 72.0
+          }
+        },
+        {
+          "widget_id": "lamp",
+          "x": 3,
+          "y": 1,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 312.0,
+            "y": 84.0,
+            "w": 300.0,
+            "h": 72.0
+          }
+        },
+        {
+          "widget_id": "brightness",
+          "x": 0,
+          "y": 1,
+          "w": 5,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 168.0,
+            "w": 612.0,
+            "h": 72.0
+          }
+        },
+        {
+          "widget_id": "colour",
+          "x": 0,
+          "y": 2,
+          "w": 1,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 252.0,
+            "w": 140.0,
+            "h": 140.0
+          }
+        },
+        {
+          "widget_id": "warmth",
+          "x": 1,
+          "y": 2,
+          "w": 1,
+          "h": 1,
+          "rect": {
+            "x": 152.0,
+            "y": 252.0,
+            "w": 60.0,
+            "h": 140.0
+          }
+        },
+        {
+          "widget_id": "keypad",
+          "x": 2,
+          "y": 2,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 224.0,
+            "y": 252.0,
+            "w": 388.0,
+            "h": 140.0
+          }
+        },
+        {
+          "widget_id": "climate",
+          "x": 5,
+          "y": 1,
+          "w": 3,
+          "h": 3,
+          "rect": {
+            "x": 624.0,
+            "y": 84.0,
+            "w": 300.0,
+            "h": 308.0
+          }
+        },
+        {
+          "widget_id": "playing",
+          "x": 8,
+          "y": 1,
+          "w": 4,
+          "h": 3,
+          "rect": {
+            "x": 936.0,
+            "y": 84.0,
+            "w": 504.0,
+            "h": 308.0
+          }
+        },
+        {
+          "widget_id": "sensors",
+          "x": 5,
+          "y": 3,
+          "w": 7,
+          "h": 2,
+          "rect": {
+            "x": 624.0,
+            "y": 404.0,
+            "w": 816.0,
+            "h": 260.0
+          }
+        },
+        {
+          "widget_id": "scene_a",
+          "x": 0,
+          "y": 3,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 404.0,
+            "w": 300.0,
+            "h": 72.0
+          }
+        },
+        {
+          "widget_id": "scene_b",
+          "x": 3,
+          "y": 3,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 312.0,
+            "y": 404.0,
+            "w": 300.0,
+            "h": 72.0
+          }
+        }
+      ],
+      "flow": "free"
+    },
+    {
+      "breakpoint": "mobile",
+      "columns": 12,
+      "row_height": 120.0,
+      "gap": 12.0,
+      "placements": [
+        {
+          "widget_id": "name",
+          "x": 0,
+          "y": 0,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 390.0,
+            "h": 64.0
+          }
+        },
+        {
+          "widget_id": "overhead",
+          "x": 0,
+          "y": 1,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 76.0,
+            "w": 390.0,
+            "h": 68.0
+          }
+        },
+        {
+          "widget_id": "lamp",
+          "x": 0,
+          "y": 1,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 156.0,
+            "w": 390.0,
+            "h": 68.0
+          }
+        },
+        {
+          "widget_id": "brightness",
+          "x": 0,
+          "y": 2,
+          "w": 3,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 236.0,
+            "w": 390.0,
+            "h": 68.0
+          }
+        },
+        {
+          "widget_id": "colour",
+          "x": 0,
+          "y": 3,
+          "w": 1,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 316.0,
+            "w": 140.0,
+            "h": 140.0
+          }
+        },
+        {
+          "widget_id": "warmth",
+          "x": 1,
+          "y": 3,
+          "w": 1,
+          "h": 1,
+          "rect": {
+            "x": 152.0,
+            "y": 316.0,
+            "w": 60.0,
+            "h": 140.0
+          }
+        },
+        {
+          "widget_id": "climate",
+          "x": 0,
+          "y": 4,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 468.0,
+            "w": 390.0,
+            "h": 280.0
+          }
+        },
+        {
+          "widget_id": "scene_a",
+          "x": 0,
+          "y": 6,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 0.0,
+            "y": 760.0,
+            "w": 189.0,
+            "h": 68.0
+          }
+        },
+        {
+          "widget_id": "scene_b",
+          "x": 2,
+          "y": 6,
+          "w": 2,
+          "h": 1,
+          "rect": {
+            "x": 201.0,
+            "y": 760.0,
+            "w": 189.0,
+            "h": 68.0
+          }
+        },
+        {
+          "widget_id": "keypad",
+          "x": 0,
+          "y": 7,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 840.0,
+            "w": 390.0,
+            "h": 180.0
+          }
+        },
+        {
+          "widget_id": "playing",
+          "x": 0,
+          "y": 9,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 1032.0,
+            "w": 390.0,
+            "h": 220.0
+          }
+        },
+        {
+          "widget_id": "sensors",
+          "x": 0,
+          "y": 11,
+          "w": 3,
+          "h": 2,
+          "rect": {
+            "x": 0.0,
+            "y": 1264.0,
+            "w": 390.0,
+            "h": 260.0
+          }
+        }
+      ],
+      "flow": "free"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "name",
+      "type": "heading",
+      "title": "Room",
+      "config": {
+        "align": "start",
+        "level": "section",
+        "text": "Room"
+      }
+    },
+    {
+      "id": "overhead",
+      "type": "toggle",
+      "title": "Overhead",
+      "config": {
+        "attribute": "on",
+        "device_id": "slot:Overhead light"
+      }
+    },
+    {
+      "id": "lamp",
+      "type": "toggle",
+      "title": "Lamp",
+      "config": {
+        "attribute": "on",
+        "device_id": "slot:Lamp"
+      }
+    },
+    {
+      "id": "brightness",
+      "type": "slider",
+      "title": "Brightness",
+      "config": {
+        "attribute": "brightness_pct",
+        "device_id": "slot:Lamp"
+      }
+    },
+    {
+      "id": "colour",
+      "type": "colour_wheel",
+      "title": "Colour",
+      "config": {
+        "attribute": "color_xy",
+        "device_id": "slot:Lamp"
+      }
+    },
+    {
+      "id": "warmth",
+      "type": "warmth",
+      "title": "Warmth",
+      "config": {
+        "attribute": "color_temp",
+        "axis": "vertical",
+        "device_id": "slot:Lamp"
+      }
+    },
+    {
+      "id": "climate",
+      "type": "thermostat",
+      "title": "Thermostat",
+      "config": {
+        "device_id": "slot:Thermostat"
+      }
+    },
+    {
+      "id": "keypad",
+      "type": "keypad",
+      "title": "Keypad",
+      "config": {
+        "device_id": "slot:Keypad"
+      }
+    },
+    {
+      "id": "playing",
+      "type": "media_player",
+      "title": "Playing here",
+      "config": {
+        "device_ids": [
+          "slot:Speaker",
+          "slot:Television"
+        ],
+        "selection_mode": "manual"
+      }
+    },
+    {
+      "id": "sensors",
+      "type": "device_list",
+      "title": "Everything else here",
+      "config": {
+        "device_ids": [
+          "slot:Sensor 1",
+          "slot:Sensor 2"
+        ],
+        "selection_mode": "manual"
+      }
+    },
+    {
+      "id": "scene_a",
+      "type": "scene_button",
+      "title": "Bright",
+      "config": {
+        "scene_id": "slot:A bright scene"
+      }
+    },
+    {
+      "id": "scene_b",
+      "type": "scene_button",
+      "title": "Dimmed",
+      "config": {
+        "scene_id": "slot:A dim scene"
+      }
+    }
+  ],
+  "access": []
+}
