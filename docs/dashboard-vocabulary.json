@@ -26,6 +26,11 @@
           "type": "integer",
           "required": false,
           "min": 1
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -77,6 +82,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -100,6 +110,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -111,6 +126,11 @@
         {
           "name": "dashboard_ids",
           "type": "array",
+          "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
           "required": false
         }
       ]
@@ -188,6 +208,11 @@
           "name": "show_offline",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -264,6 +289,11 @@
           "name": "show_offline",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -287,6 +317,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -363,6 +398,11 @@
           "name": "show_offline",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -370,7 +410,13 @@
       "type": "divider",
       "config_required": true,
       "extra_fields": true,
-      "fields": []
+      "fields": [
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
     },
     {
       "type": "event_feed",
@@ -410,6 +456,11 @@
             "device",
             "area"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -447,6 +498,11 @@
         },
         {
           "name": "plan",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "on_tap",
           "type": "object",
           "required": false
         }
@@ -558,6 +614,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -585,6 +646,11 @@
             "center",
             "end"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -614,6 +680,11 @@
           "type": "integer",
           "required": false,
           "min": 1
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -621,7 +692,13 @@
       "type": "house_status_hero",
       "config_required": false,
       "extra_fields": true,
-      "fields": []
+      "fields": [
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
     },
     {
       "type": "icon",
@@ -647,6 +724,11 @@
           "name": "backing",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -669,6 +751,11 @@
             "contain",
             "fill"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -712,6 +799,11 @@
             "flat",
             "round"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -725,6 +817,11 @@
           "type": "string",
           "required": true,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -801,6 +898,11 @@
           "name": "show_offline",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -808,7 +910,13 @@
       "type": "mode_chips",
       "config_required": true,
       "extra_fields": true,
-      "fields": []
+      "fields": [
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
     },
     {
       "type": "plugin_widget",
@@ -824,6 +932,11 @@
           "name": "widget_id",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -875,6 +988,11 @@
           "name": "hide_empty",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -898,6 +1016,11 @@
           "name": "ink",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -905,7 +1028,13 @@
       "type": "scene_row",
       "config_required": true,
       "extra_fields": true,
-      "fields": []
+      "fields": [
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
     },
     {
       "type": "shape",
@@ -961,6 +1090,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -999,6 +1133,11 @@
           "name": "max",
           "type": "integer",
           "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1006,7 +1145,13 @@
       "type": "spacer",
       "config_required": true,
       "extra_fields": true,
-      "fields": []
+      "fields": [
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
     },
     {
       "type": "stat_summary",
@@ -1017,6 +1162,11 @@
           "name": "metrics",
           "type": "array",
           "required": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1051,6 +1201,11 @@
           "type": "integer",
           "required": false,
           "min": 1
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1102,6 +1257,11 @@
           "type": "string",
           "required": false,
           "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1165,6 +1325,11 @@
             "middle",
             "bottom"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1192,6 +1357,11 @@
         {
           "name": "ink",
           "type": "string",
+          "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
           "required": false
         }
       ]
@@ -1225,6 +1395,11 @@
             "vertical",
             "horizontal"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     },
@@ -1248,6 +1423,11 @@
             "trusted_internal",
             "strict_isolated"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
         }
       ]
     }

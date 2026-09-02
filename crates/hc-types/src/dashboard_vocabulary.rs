@@ -449,6 +449,27 @@ fn build_catalogue() -> Vec<WidgetSpec> {
     ];
 
     widgets.extend(element_widgets());
+
+    // `on_tap` belongs to every widget, so it is added to every widget rather
+    // than written thirty-four times.
+    //
+    // It is a *property*, not an element. A client asked for a "Button" and a
+    // button turned out to be a look any shape can already wear; what it has
+    // that a shape does not is an action, and an action belongs to all of them
+    // or to none. Declared here so the next client learns that from the
+    // vocabulary rather than from reading somebody else's page and wondering
+    // what the key was.
+    //
+    // An object, and core looks no further in. What it *contains* names a
+    // scene, a mode, a device or a dashboard, and core cannot evaluate any of
+    // those — the same reason `area_name` and `facet` are unconstrained. A
+    // client that meets an action it does not know leaves the key alone and
+    // does nothing, which is the only safe reading of an instruction to change
+    // somebody's house.
+    for widget in &mut widgets {
+        widget.fields.push(WidgetField::new("on_tap", "object"));
+    }
+
     widgets.sort_by(|a, b| a.r#type.cmp(&b.r#type));
     widgets
 }
@@ -724,6 +745,36 @@ fn code_selection_fields() -> Vec<WidgetField> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every widget can be tapped, because an action is a property and not an
+    /// element.
+    #[test]
+    fn every_widget_carries_on_tap() {
+        for spec in catalogue() {
+            assert!(
+                spec.fields.iter().any(|f| f.name == "on_tap"),
+                "{} cannot be given an action",
+                spec.r#type
+            );
+        }
+    }
+
+    /// And core looks no further into it.
+    ///
+    /// What it contains names a scene, a mode, a device or a dashboard, none of
+    /// which core can evaluate — the same reason `area_name` is open.
+    #[test]
+    fn on_tap_is_not_policed() {
+        let f = widget("shape")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "on_tap")
+            .unwrap();
+        assert_eq!(f.r#type, "object");
+        assert!(!f.required);
+        assert!(f.one_of.is_empty());
+    }
 
     /// The drift this table exists to prevent, from the direction that actually
     /// bit: a client grew a whole family of widget types and core never heard.
