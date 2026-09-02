@@ -64,7 +64,8 @@
         {
           "name": "device_ids",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "area_name",
@@ -98,7 +99,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -155,6 +157,7 @@
           "name": "device_ids",
           "type": "array",
           "required": false,
+          "reference": "devices",
           "when": {
             "field": "selection_mode",
             "equals": "manual"
@@ -191,12 +194,14 @@
         {
           "name": "add",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "remove",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "limit",
@@ -236,6 +241,7 @@
           "name": "device_ids",
           "type": "array",
           "required": false,
+          "reference": "devices",
           "when": {
             "field": "selection_mode",
             "equals": "manual"
@@ -272,12 +278,14 @@
         {
           "name": "add",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "remove",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "limit",
@@ -305,7 +313,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -345,6 +354,7 @@
           "name": "device_ids",
           "type": "array",
           "required": false,
+          "reference": "devices",
           "when": {
             "field": "selection_mode",
             "equals": "manual"
@@ -381,12 +391,14 @@
         {
           "name": "add",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "remove",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "limit",
@@ -516,7 +528,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -662,7 +675,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -708,7 +722,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": false
+          "required": false,
+          "reference": "device"
         },
         {
           "name": "facet",
@@ -845,6 +860,7 @@
           "name": "device_ids",
           "type": "array",
           "required": false,
+          "reference": "devices",
           "when": {
             "field": "selection_mode",
             "equals": "manual"
@@ -881,12 +897,14 @@
         {
           "name": "add",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "remove",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "limit",
@@ -1004,7 +1022,8 @@
         {
           "name": "scene_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "scene"
         },
         {
           "name": "label",
@@ -1106,7 +1125,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -1178,7 +1198,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -1239,7 +1260,8 @@
         {
           "name": "device_ids",
           "type": "array",
-          "required": false
+          "required": false,
+          "reference": "devices"
         },
         {
           "name": "area_name",
@@ -1341,7 +1363,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",
@@ -1374,7 +1397,8 @@
         {
           "name": "device_id",
           "type": "string",
-          "required": true
+          "required": true,
+          "reference": "device"
         },
         {
           "name": "attribute",

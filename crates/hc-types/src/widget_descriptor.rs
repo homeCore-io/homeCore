@@ -200,6 +200,7 @@ fn field(name: &str, ty: &str) -> WidgetField {
         allow_empty: false,
         min: None,
         one_of: Vec::new(),
+        reference: None,
         when: None,
     }
 }

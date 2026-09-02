@@ -72,6 +72,22 @@ pub struct FieldCondition {
     pub equals: String,
 }
 
+/// What a field points at.
+///
+/// Three kinds and not one, because they are filled from different lists and
+/// offering the wrong one produces a reference that cannot resolve: a scene is
+/// not a device, and a set of devices is not a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reference {
+    /// One device, by id.
+    Device,
+    /// Several devices, by id — a manual selection.
+    Devices,
+    /// One scene, native or a plugin's scene-device.
+    Scene,
+}
+
 /// One config field of one widget type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetField {
@@ -107,6 +123,25 @@ pub struct WidgetField {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_of: Vec<String>,
 
+    /// What this field POINTS AT, when it points at something in the house.
+    ///
+    /// **This is what makes a page shareable.** A dashboard names devices by
+    /// id, and an id belongs to one house: `hue_001788fffe6841b3_light_…` means
+    /// nothing anywhere else, and nothing here either once the bridge is
+    /// re-paired. Anything that wants to hand a page to somebody else — an
+    /// export, a template, a plugin shipping a starter board — has to know
+    /// which values are ids so it can replace them with a label saying what
+    /// belonged there.
+    ///
+    /// Declared here rather than worked out by each client, for the reason
+    /// this whole table exists: `device_id` is a reference because core says
+    /// so, not because a client recognised the name. A client that invented
+    /// its own list would miss the field a new widget added.
+    ///
+    /// `None` for a field that holds an ordinary value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Reference>,
+
     /// When this field applies at all. `None` means always.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<FieldCondition>,
@@ -125,8 +160,14 @@ impl WidgetField {
             allow_empty: false,
             min: None,
             one_of: Vec::new(),
+            reference: None,
             when: None,
         }
+    }
+
+    fn points_at(mut self, reference: Reference) -> Self {
+        self.reference = Some(reference);
+        self
     }
 
     fn string(name: &str) -> Self {
@@ -334,7 +375,9 @@ fn selection_fields(require_limit: bool) -> Vec<WidgetField> {
         WidgetField::string("selection_mode")
             .required()
             .one_of(&["manual", "area", "query", "facet"]),
-        WidgetField::strings("device_ids").when("selection_mode", "manual"),
+        WidgetField::strings("device_ids")
+            .points_at(Reference::Devices)
+            .when("selection_mode", "manual"),
         WidgetField::string("area_name")
             .required()
             .when("selection_mode", "area"),
@@ -344,8 +387,10 @@ fn selection_fields(require_limit: bool) -> Vec<WidgetField> {
         WidgetField::string("facet")
             .required()
             .when("selection_mode", "facet"),
-        WidgetField::strings("add"),
-        WidgetField::strings("remove"),
+        // The exceptions are ids too: a page that travelled with them would
+        // carry another house's devices as additions to a rule.
+        WidgetField::strings("add").points_at(Reference::Devices),
+        WidgetField::strings("remove").points_at(Reference::Devices),
         if require_limit {
             limit.required()
         } else {
@@ -418,7 +463,9 @@ fn build_catalogue() -> Vec<WidgetSpec> {
         spec(
             "history_chart",
             vec![
-                WidgetField::string("device_id").required(),
+                WidgetField::string("device_id")
+                    .required()
+                    .points_at(Reference::Device),
                 WidgetField::string("attribute").required(),
                 WidgetField::integer("limit", 1),
                 WidgetField::integer("timeframe_hours", 1),
@@ -515,7 +562,9 @@ fn element_widgets() -> Vec<WidgetSpec> {
     // gradient — an ink on either would be a field with nothing to tint.
     let writes_to = || {
         vec![
-            WidgetField::string("device_id").required(),
+            WidgetField::string("device_id")
+                .required()
+                .points_at(Reference::Device),
             WidgetField::string("attribute").required(),
             WidgetField::string("label").allowing_empty(),
         ]
@@ -594,7 +643,7 @@ fn element_widgets() -> Vec<WidgetSpec> {
             // Neither required: hc-web needs a device OR a facet, and `when`
             // cannot say "or". See this function's doc.
             vec![
-                WidgetField::string("device_id"),
+                WidgetField::string("device_id").points_at(Reference::Device),
                 WidgetField::string("facet"),
                 WidgetField::string("ink"),
                 WidgetField::boolean("backing"),
@@ -603,7 +652,9 @@ fn element_widgets() -> Vec<WidgetSpec> {
         spec(
             "device_reading",
             vec![
-                WidgetField::string("device_id").required(),
+                WidgetField::string("device_id")
+                    .required()
+                    .points_at(Reference::Device),
                 WidgetField::string("attribute"),
                 WidgetField::string("unit").allowing_empty(),
             ],
@@ -611,7 +662,9 @@ fn element_widgets() -> Vec<WidgetSpec> {
         spec(
             "gauge",
             vec![
-                WidgetField::string("device_id").required(),
+                WidgetField::string("device_id")
+                    .required()
+                    .points_at(Reference::Device),
                 WidgetField::string("attribute").required(),
                 WidgetField::new("min", "integer"),
                 WidgetField::new("max", "integer"),
@@ -660,7 +713,9 @@ fn element_widgets() -> Vec<WidgetSpec> {
             // does not say. The client that sends knows.
             "scene_button",
             vec![
-                WidgetField::string("scene_id").required(),
+                WidgetField::string("scene_id")
+                    .required()
+                    .points_at(Reference::Scene),
                 WidgetField::string("label").allowing_empty(),
                 WidgetField::string("ink"),
             ],
@@ -735,11 +790,93 @@ fn element_widgets() -> Vec<WidgetSpec> {
 fn code_selection_fields() -> Vec<WidgetField> {
     vec![
         WidgetField::string("selection_mode").one_of(&["manual", "area", "facet", "query"]),
-        WidgetField::strings("device_ids"),
+        WidgetField::strings("device_ids").points_at(Reference::Devices),
         WidgetField::string("area_name").allowing_empty(),
         WidgetField::string("facet"),
         WidgetField::string("query").allowing_empty(),
     ]
+}
+
+/// The spelling of a slot: a reference with a label and no id.
+///
+/// A string rather than an object, and that is load-bearing twice over. This
+/// table declares `device_id` as a string and [`crate::dashboard_vocabulary`]
+/// is what the validator EXECUTES, so an object here would be rejected by any
+/// core that had not been taught about slots. And a client that has never heard
+/// of a slot reads one as a device id it cannot find — which is a control that
+/// goes inert and says so, rather than a document that fails to parse.
+///
+/// No id core issues contains a colon: they are all `plugin_bridge_kind_uuid`.
+pub const SLOT_PREFIX: &str = "slot:";
+
+/// A slot with this label.
+pub fn slot(label: &str) -> String {
+    format!("{SLOT_PREFIX}{}", label.trim())
+}
+
+/// The label, or `None` when this is an ordinary id.
+pub fn slot_label(value: &str) -> Option<&str> {
+    value.strip_prefix(SLOT_PREFIX)
+}
+
+/// Replace every id in a widget's config with a slot saying what belonged
+/// there.
+///
+/// **This is what sharing does.** Backing a page up keeps the ids, because it
+/// is going back to the house it came from. Handing it to somebody else must
+/// not carry this house's hardware — the ids would be dangling references at
+/// best, and a list of the owner's bridge serials at worst.
+///
+/// [`label`] is what the element is called, which is the honest thing to write
+/// on the slot: it is what its author named the thing, rather than a fact about
+/// which device happened to be behind it.
+pub fn unwire(r#type: &str, config: &mut serde_json::Value, label: &str) {
+    let Some(spec) = widget(r#type) else {
+        // A type core does not know: leave the config completely alone. Half
+        // of somebody's plugin card is worse than all of it.
+        return;
+    };
+    let Some(map) = config.as_object_mut() else {
+        return;
+    };
+    for field in &spec.fields {
+        let Some(reference) = field.reference else {
+            continue;
+        };
+        let Some(value) = map.get(&field.name) else {
+            continue;
+        };
+        match reference {
+            Reference::Device | Reference::Scene => {
+                if let Some(text) = value.as_str() {
+                    if text.is_empty() || slot_label(text).is_some() {
+                        continue;
+                    }
+                    map.insert(field.name.clone(), serde_json::json!(slot(label)));
+                }
+            }
+            Reference::Devices => {
+                // The count is kept. A page that came back with an empty grid
+                // would have lost the author's arrangement silently; four slots
+                // say "there were four of these, pick them".
+                if let Some(list) = value.as_array() {
+                    let slots: Vec<_> = list
+                        .iter()
+                        .enumerate()
+                        .map(|(i, existing)| match existing.as_str() {
+                            Some(text) if slot_label(text).is_some() => {
+                                serde_json::json!(text)
+                            }
+                            _ => serde_json::json!(slot(&format!("{label} {}", i + 1))),
+                        })
+                        .collect();
+                    if !slots.is_empty() {
+                        map.insert(field.name.clone(), serde_json::json!(slots));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -774,6 +911,123 @@ mod tests {
         assert_eq!(f.r#type, "object");
         assert!(!f.required);
         assert!(f.one_of.is_empty());
+    }
+
+    /// Sharing strips the house out; backing up does not.
+    #[test]
+    fn unwire_replaces_ids_with_labelled_slots() {
+        let mut config = serde_json::json!({
+            "device_id": "hue_001788fffe6841b3_light_50a2",
+            "attribute": "on",
+            "ink": "accent"
+        });
+        unwire("toggle", &mut config, "Hob light");
+        assert_eq!(config["device_id"], "slot:Hob light");
+        assert_eq!(config["attribute"], "on", "only references are stripped");
+        assert_eq!(config["ink"], "accent");
+    }
+
+    #[test]
+    fn unwire_keeps_a_list_the_length_it_was() {
+        // An empty grid would have lost the author's arrangement in silence.
+        let mut config = serde_json::json!({
+            "selection_mode": "manual",
+            "device_ids": ["a", "b", "c"]
+        });
+        unwire("device_grid", &mut config, "Lamps");
+        assert_eq!(
+            config["device_ids"],
+            serde_json::json!(["slot:Lamps 1", "slot:Lamps 2", "slot:Lamps 3"])
+        );
+        assert_eq!(config["selection_mode"], "manual");
+    }
+
+    #[test]
+    fn unwire_is_idempotent() {
+        let mut config = serde_json::json!({ "scene_id": "slot:Evening" });
+        unwire("scene_button", &mut config, "Anything");
+        assert_eq!(
+            config["scene_id"], "slot:Evening",
+            "sharing twice is not lossy"
+        );
+    }
+
+    #[test]
+    fn unwire_leaves_an_unknown_type_completely_alone() {
+        // Half of somebody's plugin card is worse than all of it.
+        let mut config = serde_json::json!({ "device_id": "keep-me" });
+        unwire("from_a_newer_core", &mut config, "X");
+        assert_eq!(config["device_id"], "keep-me");
+    }
+
+    #[test]
+    fn a_slot_is_not_a_plausible_device_id() {
+        assert_eq!(slot_label("slot:Ceiling light"), Some("Ceiling light"));
+        assert_eq!(slot_label("hue_001788fffe6841b3_light_50a2"), None);
+    }
+
+    /// Every field that names something in the house says so.
+    ///
+    /// Named outright rather than counted, for the reason the element family
+    /// is: a count passes the moment anybody adds anything. A field missed
+    /// here is a device id that survives an export, which means a shared page
+    /// arrives carrying somebody else's hardware.
+    #[test]
+    fn every_reference_field_is_declared() {
+        for (w, field, kind) in [
+            ("toggle", "device_id", Reference::Device),
+            ("slider", "device_id", Reference::Device),
+            ("stepper", "device_id", Reference::Device),
+            ("colour_wheel", "device_id", Reference::Device),
+            ("warmth", "device_id", Reference::Device),
+            ("icon", "device_id", Reference::Device),
+            ("gauge", "device_id", Reference::Device),
+            ("device_reading", "device_id", Reference::Device),
+            ("history_chart", "device_id", Reference::Device),
+            ("scene_button", "scene_id", Reference::Scene),
+            ("device_grid", "device_ids", Reference::Devices),
+            ("device_grid", "add", Reference::Devices),
+            ("device_grid", "remove", Reference::Devices),
+            ("code", "device_ids", Reference::Devices),
+            ("svg", "device_ids", Reference::Devices),
+        ] {
+            let f = widget(w)
+                .unwrap_or_else(|| panic!("{w} is not in the catalogue"))
+                .fields
+                .iter()
+                .find(|f| f.name == field)
+                .unwrap_or_else(|| panic!("{w}.{field} is missing"));
+            assert_eq!(
+                f.reference,
+                Some(kind),
+                "{w}.{field} names something in the house and does not say so"
+            );
+        }
+    }
+
+    /// And nothing else claims to.
+    ///
+    /// An `attribute` marked as a device reference would be stripped on export
+    /// and the card would come back pointing at a device with no setting.
+    #[test]
+    fn nothing_else_claims_to_be_a_reference() {
+        for spec in catalogue() {
+            for f in &spec.fields {
+                if f.reference.is_none() {
+                    continue;
+                }
+                assert!(
+                    f.name == "device_id"
+                        || f.name == "device_ids"
+                        || f.name == "scene_id"
+                        || f.name == "add"
+                        || f.name == "remove",
+                    "{}.{} claims to name something in the house",
+                    spec.r#type,
+                    f.name
+                );
+            }
+        }
     }
 
     /// The drift this table exists to prevent, from the direction that actually

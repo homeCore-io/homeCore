@@ -4480,10 +4480,32 @@ pub async fn duplicate_dashboard(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
+/// How an export is meant to be used.
+///
+/// **Two jobs, and they want opposite things.** Backing a page up sends it home
+/// to the house it came from, so it keeps the ids and restores exactly. Sharing
+/// hands it to somebody else, where every id is a dangling reference to
+/// hardware they do not have — so it carries slots instead, each labelled with
+/// what belonged there, and the person wires them in the editor.
+///
+/// The default is a backup, because that is what the endpoint has always done
+/// and a caller that has not been updated must not silently start stripping.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ExportQuery {
+    /// `false` to share: every device and scene reference becomes a slot.
+    #[serde(default = "yes")]
+    pub wired: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
 pub async fn export_dashboard(
     State(s): State<AppState>,
     user: DashboardsRead,
     Path(id): Path<String>,
+    Query(query): Query<ExportQuery>,
 ) -> impl IntoResponse {
     let Some(handle) = &s.dashboards else {
         return (
@@ -4496,7 +4518,22 @@ pub async fn export_dashboard(
     let data = handle.read().await;
     match data.dashboards.iter().find(|dashboard| dashboard.id == id) {
         Some(dashboard) if dashboard_visible_to(&user.0, dashboard) => {
-            Json(dashboard).into_response()
+            if query.wired {
+                return Json(dashboard).into_response();
+            }
+            // Shared: the house comes out of it. Widgets keep everything else —
+            // their layout, their look, their titles — because those are the
+            // page, and only the ids are the house.
+            let mut shared = dashboard.clone();
+            for widget in &mut shared.widgets {
+                let label = if widget.title.trim().is_empty() {
+                    widget.r#type.clone()
+                } else {
+                    widget.title.clone()
+                };
+                hc_types::dashboard_vocabulary::unwire(&widget.r#type, &mut widget.config, &label);
+            }
+            Json(shared).into_response()
         }
         Some(_) => (
             StatusCode::FORBIDDEN,
@@ -10920,6 +10957,7 @@ token = "TOKEN-TWO"
             State(state.clone()),
             crate::auth_middleware::DashboardsRead(claims.clone()),
             Path(created.dashboard.id.clone()),
+            Query(ExportQuery { wired: true }),
         )
         .await
         .into_response();
