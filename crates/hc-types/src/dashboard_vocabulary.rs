@@ -485,21 +485,24 @@ fn build_catalogue() -> Vec<WidgetSpec> {
 /// core requires neither. Validating less than a client does is safe; validating
 /// more would reject a card that renders perfectly.
 fn element_widgets() -> Vec<WidgetSpec> {
-    // Every drawn control names the device it writes to, and most name the
-    // attribute on it. Written once: five near-copies is five places for the
-    // required flag to drift.
-    let writes_to = |attribute_required: bool| {
-        let attribute = WidgetField::string("attribute");
+    // Every drawn control names the device it writes to and the attribute on
+    // it. Written once: five near-copies is five places for the required flag
+    // to drift.
+    //
+    // `ink` is NOT here. A switch and a stepper are drawn in whatever colour
+    // you choose, but a colour wheel IS the colour and a warmth bar IS the
+    // gradient — an ink on either would be a field with nothing to tint.
+    let writes_to = || {
         vec![
             WidgetField::string("device_id").required(),
-            if attribute_required {
-                attribute.required()
-            } else {
-                attribute
-            },
+            WidgetField::string("attribute").required(),
             WidgetField::string("label").allowing_empty(),
-            WidgetField::string("ink"),
         ]
+    };
+    let tinted = || {
+        let mut f = writes_to();
+        f.push(WidgetField::string("ink"));
+        f
     };
 
     vec![
@@ -611,22 +614,22 @@ fn element_widgets() -> Vec<WidgetSpec> {
             ],
         ),
         // ── The controls: they write ────────────────────────────────────────
-        spec("toggle", writes_to(true)),
-        spec("colour_wheel", writes_to(true)),
+        spec("toggle", tinted()),
+        spec("colour_wheel", writes_to()),
         spec("warmth", {
-            let mut f = writes_to(true);
+            let mut f = writes_to();
             f.push(WidgetField::string("axis").one_of(&["vertical", "horizontal"]));
             f
         }),
         spec("slider", {
-            let mut f = writes_to(true);
+            let mut f = tinted();
             // The page's range, used only where the plugin registered none.
             f.push(WidgetField::new("min", "integer"));
             f.push(WidgetField::new("max", "integer"));
             f
         }),
         spec("stepper", {
-            let mut f = writes_to(true);
+            let mut f = tinted();
             f.push(WidgetField::integer("step", 1));
             f
         }),
