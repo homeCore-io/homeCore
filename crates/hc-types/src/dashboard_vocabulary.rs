@@ -720,6 +720,47 @@ fn element_widgets() -> Vec<WidgetSpec> {
                 WidgetField::string("ink"),
             ],
         ),
+        // ── The three a card grid could not be ──────────────────────────────
+        spec(
+            // The buttons come from the device, not from the config: a keypad
+            // publishes every one a person can press, and core has no business
+            // second-guessing that list.
+            "keypad",
+            vec![
+                WidgetField::string("device_id")
+                    .required()
+                    .points_at(Reference::Device),
+                WidgetField::string("label").allowing_empty(),
+                WidgetField::string("ink"),
+            ],
+        ),
+        spec(
+            "thermostat",
+            vec![
+                WidgetField::string("device_id")
+                    .required()
+                    .points_at(Reference::Device),
+                // Both optional: a thermostat that names its reading
+                // `temperature` and one that names it `current_temperature`
+                // are the same thermostat, and a client can find either.
+                WidgetField::string("attribute"),
+                WidgetField::string("target"),
+                WidgetField::string("label").allowing_empty(),
+            ],
+        ),
+        spec(
+            // The one element whose subject is the HOUSE. It names no device,
+            // because it is about all of them.
+            "room_field",
+            vec![
+                // A dashboard id, and deliberately not marked as a reference:
+                // a page id belongs to the document set being shared, not to
+                // the house's hardware, so an export must leave it alone or a
+                // shared pair of pages would arrive unable to find each other.
+                WidgetField::string("room_page").allowing_empty(),
+                WidgetField::integer("gap", 0),
+            ],
+        ),
         // ── Pictures and drawings ───────────────────────────────────────────
         spec(
             "image",
@@ -1053,6 +1094,9 @@ mod tests {
             "scene_button",
             "colour_wheel",
             "warmth",
+            "keypad",
+            "thermostat",
+            "room_field",
             "image",
             "floor_plan",
             "svg",

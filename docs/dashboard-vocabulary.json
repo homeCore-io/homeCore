@@ -775,6 +775,35 @@
       ]
     },
     {
+      "type": "keypad",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true,
+          "reference": "device"
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
       "type": "line",
       "config_required": true,
       "extra_fields": true,
@@ -950,6 +979,30 @@
           "name": "widget_id",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "room_field",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "room_page",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "gap",
+          "type": "integer",
+          "required": false,
+          "min": 0
         },
         {
           "name": "on_tap",
@@ -1347,6 +1400,40 @@
             "middle",
             "bottom"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "thermostat",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true,
+          "reference": "device"
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "target",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
         },
         {
           "name": "on_tap",
