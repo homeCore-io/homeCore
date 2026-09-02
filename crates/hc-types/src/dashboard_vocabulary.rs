@@ -447,14 +447,383 @@ fn build_catalogue() -> Vec<WidgetSpec> {
             ],
         ),
     ];
+
+    widgets.extend(element_widgets());
     widgets.sort_by(|a, b| a.r#type.cmp(&b.r#type));
     widgets
+}
+
+/// The element family: primitives, drawings, and the controls placed on a page.
+///
+/// These are widget *types* like any other — a placement says `type: "shape"`
+/// the same way it says `type: "device_grid"` — but they went undeclared for
+/// several releases while hc-web grew them, which is the exact drift this
+/// module exists to prevent. It stayed silent because the drift check only ran
+/// one way: `dashboard_vocabulary_test.dart` asked whether this client could
+/// draw everything core validates, and never whether core knew everything this
+/// client draws. A client ahead of core is not a broken card *here*, so nothing
+/// complained; it is a page a second client cannot read, which is the whole
+/// premise of serving a vocabulary at all.
+///
+/// # What core claims about them, and what it does not
+///
+/// Core validates the fields that identify what a card points at — a device, an
+/// attribute, a scene, a URL — and the structural choices that are genuinely
+/// closed sets, `shape` and `align` among them, which it already names in
+/// [`crate::widget_descriptor::elements`].
+///
+/// It says nothing about **presentation**: `ink`, `size`, `weight`, `face`,
+/// `corner` and the gauge's colour ramp are left unconstrained on purpose, for
+/// the same reason `area_name` and `facet` are elsewhere in this table. Those
+/// name entries in a *skin*, core does not have skins, and policing a list it
+/// cannot evaluate would mean a client that adds a tint cannot save a card
+/// until core is released too.
+///
+/// Required-ness mirrors only what a client already refuses to save without,
+/// and only where it is unconditional. `icon` is the instructive one: hc-web
+/// needs *either* a device or a facet, which [`FieldCondition`] cannot say, so
+/// core requires neither. Validating less than a client does is safe; validating
+/// more would reject a card that renders perfectly.
+fn element_widgets() -> Vec<WidgetSpec> {
+    // Every drawn control names the device it writes to, and most name the
+    // attribute on it. Written once: five near-copies is five places for the
+    // required flag to drift.
+    let writes_to = |attribute_required: bool| {
+        let attribute = WidgetField::string("attribute");
+        vec![
+            WidgetField::string("device_id").required(),
+            if attribute_required {
+                attribute.required()
+            } else {
+                attribute
+            },
+            WidgetField::string("label").allowing_empty(),
+            WidgetField::string("ink"),
+        ]
+    };
+
+    vec![
+        // ── The layout primitives ───────────────────────────────────────────
+        spec(
+            "heading",
+            vec![
+                WidgetField::string("text").required(),
+                WidgetField::string("level"),
+                WidgetField::string("align").one_of(&["start", "center", "end"]),
+            ],
+        ),
+        // Which way a divider runs is answered by the shape it was dragged to,
+        // so there is nothing to configure and nothing to validate.
+        spec("divider", vec![]),
+        spec("spacer", vec![]),
+        spec(
+            "text",
+            vec![
+                WidgetField::string("text").required(),
+                WidgetField::string("size"),
+                WidgetField::integer("scale", 1),
+                WidgetField::string("weight"),
+                // Signed: negative tracking is tighter, not invalid.
+                WidgetField::new("tracking", "integer"),
+                WidgetField::string("face"),
+                WidgetField::string("ink"),
+                WidgetField::string("align").one_of(&["start", "center", "end"]),
+                WidgetField::string("vertical").one_of(&["top", "middle", "bottom"]),
+            ],
+        ),
+        spec(
+            "shape",
+            vec![
+                // The same five `elements()` names for a shape's outline, and
+                // deliberately the same spelling: a client implementing one has
+                // implemented the other.
+                WidgetField::string("shape").one_of(&[
+                    "rectangle",
+                    "circle",
+                    "pill",
+                    "octagon",
+                    "path",
+                ]),
+                WidgetField::string("fill"),
+                WidgetField::integer("opacity", 0),
+                WidgetField::string("stroke"),
+                WidgetField::integer("stroke_width", 0),
+                WidgetField::string("corner"),
+                WidgetField::new("rotation", "integer"),
+                WidgetField::string("path").allowing_empty(),
+            ],
+        ),
+        spec(
+            "line",
+            vec![
+                WidgetField::string("ink"),
+                WidgetField::string("ink_end"),
+                WidgetField::integer("thickness", 0),
+                WidgetField::new("angle", "integer"),
+                WidgetField::integer("dash", 0),
+                WidgetField::string("cap").one_of(&["flat", "round"]),
+            ],
+        ),
+        // ── Readings ────────────────────────────────────────────────────────
+        spec(
+            "icon",
+            // Neither required: hc-web needs a device OR a facet, and `when`
+            // cannot say "or". See this function's doc.
+            vec![
+                WidgetField::string("device_id"),
+                WidgetField::string("facet"),
+                WidgetField::string("ink"),
+                WidgetField::boolean("backing"),
+            ],
+        ),
+        spec(
+            "device_reading",
+            vec![
+                WidgetField::string("device_id").required(),
+                WidgetField::string("attribute"),
+                WidgetField::string("unit").allowing_empty(),
+            ],
+        ),
+        spec(
+            "gauge",
+            vec![
+                WidgetField::string("device_id").required(),
+                WidgetField::string("attribute").required(),
+                WidgetField::new("min", "integer"),
+                WidgetField::new("max", "integer"),
+                WidgetField::string("unit").allowing_empty(),
+                WidgetField::string("shape").one_of(&["radial", "bar"]),
+                WidgetField::new("start", "integer"),
+                WidgetField::new("sweep", "integer"),
+                WidgetField::integer("thickness", 0),
+                WidgetField::string("cap").one_of(&["round", "flat"]),
+                WidgetField::string("color"),
+                WidgetField::string("color_to"),
+                // Present here and absent from `elements()`, which is not a
+                // contradiction: a card core validates may carry a field only
+                // some clients honour, while an element kind is a promise every
+                // client keeps. See `elements()` on why glow is not portable.
+                WidgetField::integer("glow", 0),
+                WidgetField::boolean("track"),
+                WidgetField::string("readout").one_of(&["value", "none"]),
+                WidgetField::integer("decimals", 0),
+                WidgetField::string("label").allowing_empty(),
+            ],
+        ),
+        // ── The controls: they write ────────────────────────────────────────
+        spec("toggle", writes_to(true)),
+        spec("colour_wheel", writes_to(true)),
+        spec("warmth", {
+            let mut f = writes_to(true);
+            f.push(WidgetField::string("axis").one_of(&["vertical", "horizontal"]));
+            f
+        }),
+        spec("slider", {
+            let mut f = writes_to(true);
+            // The page's range, used only where the plugin registered none.
+            f.push(WidgetField::new("min", "integer"));
+            f.push(WidgetField::new("max", "integer"));
+            f
+        }),
+        spec("stepper", {
+            let mut f = writes_to(true);
+            f.push(WidgetField::integer("step", 1));
+            f
+        }),
+        spec(
+            // A scene, not a device — and core does not check which of the two
+            // kinds it is, because a plugin scene is a device and the id alone
+            // does not say. The client that sends knows.
+            "scene_button",
+            vec![
+                WidgetField::string("scene_id").required(),
+                WidgetField::string("label").allowing_empty(),
+                WidgetField::string("ink"),
+            ],
+        ),
+        // ── Pictures and drawings ───────────────────────────────────────────
+        spec(
+            "image",
+            vec![
+                WidgetField::string("url").required(),
+                WidgetField::string("fit").one_of(&["cover", "contain", "fill"]),
+            ],
+        ),
+        spec(
+            // `url` is NOT required, unlike `image`: a floor plan may be a
+            // stored `plan` object instead of a picture, and requiring the URL
+            // would reject every drawn plan.
+            "floor_plan",
+            vec![
+                WidgetField::string("url").allowing_empty(),
+                WidgetField::string("fit").one_of(&["contain", "cover", "fill"]),
+                WidgetField::integer("dim", 0),
+                WidgetField::boolean("invert"),
+                WidgetField::new("plan", "object"),
+            ],
+        ),
+        spec(
+            // Core validates that the drawing is a string and leaves its
+            // contents alone. It is not an SVG parser and should not become one.
+            "svg",
+            {
+                let mut f = vec![
+                    WidgetField::string("svg").allowing_empty(),
+                    WidgetField::new("bindings", "array"),
+                ];
+                f.extend(code_selection_fields());
+                f
+            },
+        ),
+        spec("code", {
+            let mut f = vec![
+                WidgetField::string("html").allowing_empty(),
+                WidgetField::boolean("allow_network"),
+            ];
+            f.extend(code_selection_fields());
+            f
+        }),
+        // ── Rooms ───────────────────────────────────────────────────────────
+        spec(
+            "rooms",
+            vec![
+                WidgetField::string("rooms_mode").one_of(&["all", "named"]),
+                WidgetField::strings("rooms"),
+                WidgetField::strings("room_order"),
+                // Not the four-mode `selection_mode` the device widgets take:
+                // a room card is already scoped to its room, so the only
+                // question left is what within it. Unconstrained-value fields
+                // follow the same rule as everywhere else.
+                WidgetField::string("selection_mode").one_of(&["facet", "query"]),
+                WidgetField::string("facet"),
+                WidgetField::string("query").allowing_empty(),
+                WidgetField::boolean("hide_empty"),
+            ],
+        ),
+    ]
+}
+
+/// The looser selection the drawing widgets take.
+///
+/// `code` and `svg` scope themselves to a set of devices without any of the
+/// `add`/`remove` exception machinery [`selection_fields`] carries, and without
+/// requiring the mode at all — a drawing with no devices is a drawing.
+fn code_selection_fields() -> Vec<WidgetField> {
+    vec![
+        WidgetField::string("selection_mode").one_of(&["manual", "area", "facet", "query"]),
+        WidgetField::strings("device_ids"),
+        WidgetField::string("area_name").allowing_empty(),
+        WidgetField::string("facet"),
+        WidgetField::string("query").allowing_empty(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The drift this table exists to prevent, from the direction that actually
+    /// bit: a client grew a whole family of widget types and core never heard.
+    ///
+    /// Named outright rather than counted. A count would pass the moment
+    /// somebody added anything at all, which is exactly how these went missing.
+    #[test]
+    fn the_element_family_is_declared() {
+        for t in [
+            "heading",
+            "divider",
+            "spacer",
+            "text",
+            "shape",
+            "line",
+            "icon",
+            "device_reading",
+            "gauge",
+            "toggle",
+            "slider",
+            "stepper",
+            "scene_button",
+            "colour_wheel",
+            "warmth",
+            "image",
+            "floor_plan",
+            "svg",
+            "code",
+            "rooms",
+        ] {
+            assert!(widget(t).is_some(), "{t} is drawn on pages and undeclared");
+        }
+    }
+
+    /// Every control that writes says which device it writes to.
+    ///
+    /// A control pointed at nothing is not a card with a blank field — it is a
+    /// button that looks live and changes nothing.
+    #[test]
+    fn every_control_names_its_device() {
+        for t in ["toggle", "slider", "stepper", "colour_wheel", "warmth"] {
+            let spec = widget(t).unwrap();
+            let device = spec
+                .fields
+                .iter()
+                .find(|f| f.name == "device_id")
+                .unwrap_or_else(|| panic!("{t} has no device_id"));
+            assert!(device.required, "{t} must require a device");
+            assert!(
+                spec.fields
+                    .iter()
+                    .any(|f| f.name == "attribute" && f.required),
+                "{t} must require the attribute it writes"
+            );
+        }
+        // The exception, and it is not one: a scene is not an attribute on a
+        // device, so it names a scene instead.
+        let scene = widget("scene_button").unwrap();
+        assert!(
+            scene
+                .fields
+                .iter()
+                .any(|f| f.name == "scene_id" && f.required),
+            "a scene button must name its scene"
+        );
+        assert!(
+            !scene.fields.iter().any(|f| f.name == "device_id"),
+            "a scene is activated, not written to"
+        );
+    }
+
+    /// Presentation is not core's to police.
+    ///
+    /// `ink`, `size`, `weight` and the rest name entries in a *skin*. Core has
+    /// no skins, and constraining them would mean a client that adds a tint
+    /// cannot save a card until core is released — the same reasoning that
+    /// leaves `area_name` and `facet` open.
+    #[test]
+    fn presentation_fields_are_left_open() {
+        for (t, field) in [
+            ("text", "ink"),
+            ("text", "size"),
+            ("text", "weight"),
+            ("text", "face"),
+            ("shape", "fill"),
+            ("shape", "corner"),
+            ("line", "ink"),
+            ("icon", "ink"),
+            ("gauge", "color"),
+            ("toggle", "ink"),
+        ] {
+            let f = widget(t)
+                .unwrap()
+                .fields
+                .iter()
+                .find(|f| f.name == field)
+                .unwrap_or_else(|| panic!("{t}.{field} is missing"));
+            assert!(
+                f.one_of.is_empty(),
+                "{t}.{field} constrains a skin's vocabulary, which core cannot evaluate"
+            );
+        }
+    }
     #[test]
     fn catalogue_is_sorted_and_unique() {
         let types: Vec<_> = catalogue().iter().map(|w| w.r#type.as_str()).collect();
