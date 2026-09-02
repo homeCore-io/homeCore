@@ -30,6 +30,80 @@
       ]
     },
     {
+      "type": "code",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "html",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "allow_network",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "manual",
+            "area",
+            "facet",
+            "query"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
+      "type": "colour_wheel",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
       "type": "dashboard_link",
       "config_required": true,
       "extra_fields": true,
@@ -194,6 +268,29 @@
       ]
     },
     {
+      "type": "device_reading",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
       "type": "device_tile",
       "config_required": true,
       "extra_fields": true,
@@ -270,6 +367,12 @@
       ]
     },
     {
+      "type": "divider",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": []
+    },
+    {
       "type": "event_feed",
       "config_required": true,
       "extra_fields": true,
@@ -311,6 +414,181 @@
       ]
     },
     {
+      "type": "floor_plan",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "fit",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "contain",
+            "cover",
+            "fill"
+          ]
+        },
+        {
+          "name": "dim",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "invert",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "plan",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "gauge",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "min",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "shape",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "radial",
+            "bar"
+          ]
+        },
+        {
+          "name": "start",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "sweep",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "thickness",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "cap",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "round",
+            "flat"
+          ]
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "color_to",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "glow",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "track",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "readout",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "value",
+            "none"
+          ]
+        },
+        {
+          "name": "decimals",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "text",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "level",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        }
+      ]
+    },
+    {
       "type": "history_chart",
       "config_required": true,
       "extra_fields": true,
@@ -344,6 +622,98 @@
       "config_required": false,
       "extra_fields": true,
       "fields": []
+    },
+    {
+      "type": "icon",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "backing",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "image",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "fit",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "cover",
+            "contain",
+            "fill"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "line",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "ink_end",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "thickness",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "angle",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "dash",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "cap",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "flat",
+            "round"
+          ]
+        }
+      ]
     },
     {
       "type": "markdown",
@@ -458,7 +828,182 @@
       ]
     },
     {
+      "type": "rooms",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "rooms_mode",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "all",
+            "named"
+          ]
+        },
+        {
+          "name": "rooms",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "room_order",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "facet",
+            "query"
+          ]
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "hide_empty",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "scene_button",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "scene_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
       "type": "scene_row",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": []
+    },
+    {
+      "type": "shape",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "shape",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "rectangle",
+            "circle",
+            "pill",
+            "octagon",
+            "path"
+          ]
+        },
+        {
+          "name": "fill",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "opacity",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "stroke",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "stroke_width",
+          "type": "integer",
+          "required": false,
+          "min": 0
+        },
+        {
+          "name": "corner",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "rotation",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
+      "type": "slider",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "min",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "spacer",
       "config_required": true,
       "extra_fields": true,
       "fields": []
@@ -472,6 +1017,214 @@
           "name": "metrics",
           "type": "array",
           "required": true
+        }
+      ]
+    },
+    {
+      "type": "stepper",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "step",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        }
+      ]
+    },
+    {
+      "type": "svg",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "svg",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "bindings",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "selection_mode",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "manual",
+            "area",
+            "facet",
+            "query"
+          ]
+        },
+        {
+          "name": "device_ids",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "area_name",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "facet",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "text",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "scale",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "weight",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "tracking",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "face",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "align",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "start",
+            "center",
+            "end"
+          ]
+        },
+        {
+          "name": "vertical",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "top",
+            "middle",
+            "bottom"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "toggle",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "warmth",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "attribute",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "axis",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "vertical",
+            "horizontal"
+          ]
         }
       ]
     },
