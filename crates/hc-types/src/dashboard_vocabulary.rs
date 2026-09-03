@@ -618,6 +618,11 @@ fn element_widgets() -> Vec<WidgetSpec> {
                     "path",
                 ]),
                 WidgetField::string("fill"),
+                // A second colour makes it a gradient, the way `ink_end` does
+                // for a line. Absent is a flat fill, so nothing drawn before
+                // this changes.
+                WidgetField::string("fill_to"),
+                WidgetField::new("fill_angle", "integer"),
                 WidgetField::integer("opacity", 0),
                 WidgetField::string("stroke"),
                 WidgetField::integer("stroke_width", 0),
