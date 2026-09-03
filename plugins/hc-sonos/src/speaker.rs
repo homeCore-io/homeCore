@@ -168,6 +168,35 @@ pub async fn poll(speaker: &Speaker) -> Result<SpeakerState> {
     let (title, artist, album, media_image_url, duration, position) =
         poll_track_details(speaker).await?;
 
+    // **What is playing is sometimes not what you are listening to.**
+    //
+    // On a radio stream the *track* is an HLS chunk: its `dc:title` is the
+    // literal filename with the query string attached — `hls.m3u8?rj-ttl=5&…`
+    // — and it carries no art at all. That string went out as `media_title`
+    // and appeared on the dashboard, which is how the Bathroom speaker came to
+    // announce that it was playing a URL.
+    //
+    // The thing a person is actually listening to is the *enclosing* stream,
+    // and Sonos says what it is: `GetMediaInfo`'s `CurrentURIMetaData` carries
+    // `ALT Radio` and the station's logo. So that is the fallback — the
+    // station's name when the track has no usable one, the station's art when
+    // the track has none.
+    //
+    // A fallback rather than an override: a queue of real tracks has better
+    // answers of its own, and there the enclosing metadata is the queue and
+    // says nothing.
+    let station = poll_enclosing(speaker).await.unwrap_or_default();
+    let title = match title {
+        Some(t) if !looks_like_a_url(&t) => Some(t),
+        other => station.title.clone().or(other),
+    };
+    let media_image_url = media_image_url.or_else(|| {
+        station
+            .image_url
+            .as_deref()
+            .map(|uri| absolutize_media_url(speaker, uri))
+    });
+
     Ok(SpeakerState {
         playing,
         volume,
@@ -323,6 +352,57 @@ async fn poll_track_details(
         duration,
         position,
     ))
+}
+
+/// The metadata of the thing the *queue* is playing, rather than of the track.
+///
+/// For a radio stream this is the station: its name and its logo. For a queue
+/// of files it is the queue itself and says nothing, which is why everything
+/// here is a fallback rather than a preference.
+///
+/// Never an error: a speaker that will not answer this question still has a
+/// perfectly good track, and losing the whole poll over a fallback would be a
+/// worse outcome than not having one.
+async fn poll_enclosing(speaker: &Speaker) -> Option<crate::events::TrackMetadata> {
+    let urn = URN::service("schemas-upnp-org", "AVTransport", 1);
+    let mut map = speaker
+        .action(&urn, "GetMediaInfo", "<InstanceID>0</InstanceID>")
+        .await
+        .ok()?;
+    let metadata = map.remove("CurrentURIMetaData")?;
+    if metadata.is_empty() || metadata.eq_ignore_ascii_case("NOT_IMPLEMENTED") {
+        return None;
+    }
+    crate::events::parse_track_metadata(&metadata)
+}
+
+/// Whether this "title" is really a URL or the tail of one.
+///
+/// Sonos hands back the HLS chunk's filename as the track title on a radio
+/// stream, so the test has to catch both a whole URL and the bare
+/// `hls.m3u8?rj-ttl=5&…` that a filename with a query string looks like.
+///
+/// Deliberately narrow. A title is a person's words about music and almost
+/// anything can be one — "://" and a query string on something ending in a
+/// file extension are the two shapes that never are.
+pub fn looks_like_a_url(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.contains("://") {
+        return true;
+    }
+    let Some((name, _query)) = t.split_once('?') else {
+        return false;
+    };
+    matches!(
+        name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()),
+        Some(ext) if matches!(
+            ext.as_str(),
+            "m3u8" | "m3u" | "mp3" | "mp4" | "aac" | "flac" | "wav" | "ogg" | "pls"
+        )
+    )
 }
 
 fn parse_position_secs(value: &str) -> Option<u32> {
@@ -607,5 +687,77 @@ mod tests {
             json["sonos"]["group_coordinator"].as_str(),
             Some("media.living_room")
         );
+    }
+}
+
+#[cfg(test)]
+mod station_fallback_tests {
+    use super::*;
+
+    /// What the Bathroom speaker actually returned, trimmed of nothing that
+    /// matters. A radio stream's *track* is an HLS chunk, and its title is the
+    /// filename with the query string still on it.
+    const HLS_TRACK: &str = concat!(
+        r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+        r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+        r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+        r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+        r#"<item id="-1" parentID="-1" restricted="true">"#,
+        r#"<res protocolInfo="sonos.com-hls-radio:*:audio/mpegurl:*">"#,
+        r#"hls-radio://http://n01b-e2.revma.ihrhls.com/zc4447/hls.m3u8?rj-ttl=5</res>"#,
+        r#"<r:streamContent></r:streamContent>"#,
+        r#"<dc:title>hls.m3u8?rj-ttl=5&amp;rj-tok=AAABoGh4&amp;fbbroadcast=0</dc:title>"#,
+        r#"<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"#,
+        "</item></DIDL-Lite>",
+    );
+
+    /// And what `GetMediaInfo` says about the same speaker: the station.
+    const STATION: &str = concat!(
+        r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+        r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+        r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+        r#"<item id="-1" parentID="-1" restricted="true">"#,
+        r#"<dc:title>ALT Radio</dc:title>"#,
+        r#"<upnp:albumArtURI>https://i.iheart.com/v3/re/assets.streams/66a2</upnp:albumArtURI>"#,
+        "</item></DIDL-Lite>",
+    );
+
+    #[test]
+    fn an_hls_chunk_filename_is_not_a_title() {
+        let track = crate::events::parse_track_metadata(HLS_TRACK).expect("parses");
+        let title = track.title.expect("the speaker did send one");
+        assert!(
+            looks_like_a_url(&title),
+            "this is what went out as media_title: {title}"
+        );
+    }
+
+    #[test]
+    fn the_station_is_what_a_person_is_listening_to() {
+        let station = crate::events::parse_track_metadata(STATION).expect("parses");
+        assert_eq!(station.title.as_deref(), Some("ALT Radio"));
+        assert!(station.image_url.is_some(), "and it has a logo");
+    }
+
+    #[test]
+    fn a_real_title_is_never_replaced_by_the_station() {
+        // The fallback is a fallback. A queue of real tracks has better answers
+        // than its container, and overriding them would be worse than the bug.
+        assert!(!looks_like_a_url("Long Hard Road Out of Hell"));
+        assert!(!looks_like_a_url("Symphony No. 5"));
+        assert!(!looks_like_a_url("What's Going On?"));
+        assert!(!looks_like_a_url("Track 3"));
+    }
+
+    #[test]
+    fn a_url_is_a_url_in_the_shapes_sonos_produces() {
+        assert!(looks_like_a_url("http://example.com/a.mp3"));
+        assert!(looks_like_a_url("x-file-cifs://host/song.flac"));
+        assert!(looks_like_a_url("hls.m3u8?rj-ttl=5&rj-tok=AAAB"));
+        assert!(looks_like_a_url("stream.mp3?token=1"));
+        // A question mark alone is not a query string, and a title may end in
+        // one — see the test above.
+        assert!(!looks_like_a_url("Is This It?"));
+        assert!(!looks_like_a_url(""));
     }
 }
