@@ -362,7 +362,72 @@ impl Bridge {
         };
 
         for (uuid, speaker, was_available) in handles {
-            let reachable = speaker.is_playing().await.is_ok();
+            // **The heartbeat is the floor under GENA, not just a ping.**
+            //
+            // State used to be published from events and from nothing else, so
+            // when the events stopped the dashboard froze — and nothing
+            // noticed, because this loop proved the speaker was reachable and
+            // went on reporting it available. It was found by asking a speaker
+            // what it was doing and finding that core had been saying `paused`
+            // for an hour and fifty minutes while the thing played.
+            //
+            // Nothing about *why* the events stopped needs to be understood for
+            // this to be right. GENA is the fast path and always will be; a
+            // poll every sixty seconds is the promise that the page is never
+            // wronger than a minute, whatever the network does to multicast, to
+            // a callback address, or to a subscription lease.
+            //
+            // It costs nothing extra. The reachability test was already a round
+            // trip to the speaker (`is_playing`) whose answer was thrown away;
+            // this asks for all of it instead and keeps it.
+            let polled = speaker::poll(&speaker).await;
+            let reachable = polled.is_ok();
+
+            if let Ok(state) = polled {
+                let publish = {
+                    let mut st = self.state.write().await;
+                    match st.speakers.get_mut(&uuid) {
+                        // Only when something actually moved. A speaker sitting
+                        // still should not put a message on the bus every
+                        // minute for every room in the house.
+                        Some(entry) if entry.last_state.as_ref() != Some(&state) => {
+                            // The fields GENA owns and a poll cannot see: the
+                            // group topology and the content catalogues arrive
+                            // on their own timers, and a poll that answered
+                            // "no favourites" would erase them every minute.
+                            let mut merged = state.clone();
+                            if let Some(previous) = entry.last_state.as_ref() {
+                                merged.group_coordinator = previous.group_coordinator.clone();
+                                merged.group_members = previous.group_members.clone();
+                                merged.available_favorites = previous.available_favorites.clone();
+                                merged.available_playlists = previous.available_playlists.clone();
+                                merged.available_favorite_items =
+                                    previous.available_favorite_items.clone();
+                                merged.available_playlist_items =
+                                    previous.available_playlist_items.clone();
+                            }
+                            if entry.last_state.as_ref() == Some(&merged) {
+                                None
+                            } else {
+                                entry.last_state = Some(merged.clone());
+                                Some((entry.hc_id.clone(), merged))
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some((hc_id, state)) = publish {
+                    let json = speaker::to_json(&state);
+                    let pub2 = self.publisher.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = pub2.publish_state(&hc_id, &json).await {
+                            warn!(hc_id, error = %e, "Failed to publish polled state");
+                        } else {
+                            debug!(hc_id, "State published by heartbeat");
+                        }
+                    });
+                }
+            }
 
             match (was_available, reachable) {
                 (true, false) => {

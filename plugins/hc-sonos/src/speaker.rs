@@ -761,3 +761,103 @@ mod station_fallback_tests {
         assert!(!looks_like_a_url(""));
     }
 }
+
+#[cfg(test)]
+mod heartbeat_floor_tests {
+    use super::*;
+
+    fn state() -> SpeakerState {
+        SpeakerState {
+            playing: false,
+            volume: 20,
+            muted: false,
+            shuffle: false,
+            repeat: "none".into(),
+            title: Some("Long Hard Road Out of Hell".into()),
+            artist: Some("Marilyn Manson".into()),
+            album: None,
+            media_image_url: None,
+            duration: Some(261),
+            position: Some(58),
+            bass: 0,
+            treble: 0,
+            loudness: false,
+            group_coordinator: Some("sonos_office_1".into()),
+            group_members: vec!["sonos_office_1".into()],
+            available_favorites: vec!["ALT Radio".into()],
+            available_playlists: vec![],
+            available_favorite_items: vec![serde_json::json!({"title": "ALT Radio"})],
+            available_playlist_items: vec![],
+        }
+    }
+
+    #[test]
+    fn a_speaker_that_started_playing_is_a_change() {
+        // The bug this is the floor under: core said `paused` for an hour and
+        // fifty minutes while the speaker played, because state was published
+        // from GENA events and from nothing else.
+        let before = state();
+        let mut after = state();
+        after.playing = true;
+        assert_ne!(before, after, "or the heartbeat would publish nothing");
+    }
+
+    #[test]
+    fn a_speaker_sitting_still_is_not() {
+        // Sixty seconds is a short interval and a house has a lot of rooms. A
+        // poll that published every time would put a message on the bus per
+        // speaker per minute forever.
+        assert_eq!(state(), state());
+    }
+
+    #[test]
+    fn the_position_moving_is_a_change_worth_sending() {
+        // It is what a progress bar is made of.
+        let mut moved = state();
+        moved.position = Some(59);
+        assert_ne!(state(), moved);
+    }
+
+    #[test]
+    fn what_a_poll_cannot_see_is_what_it_must_not_erase() {
+        // Groups and catalogues arrive on their own timers and a `poll` returns
+        // them empty. Publishing that would blank the favourites on every page
+        // in the house once a minute — so the heartbeat carries them across,
+        // and this is the shape of the state it has to carry.
+        let polled = super::poll_shaped_like_a_fresh_poll();
+        assert!(polled.available_favorites.is_empty());
+        assert!(polled.group_members.is_empty());
+        assert!(polled.available_favorite_items.is_empty());
+    }
+}
+
+/// The shape `poll` returns: everything it can see, and nothing it cannot.
+///
+/// Exists so a test can state the thing the heartbeat has to compensate for
+/// without reaching a real speaker — the group topology and the content
+/// catalogues are filled in by their own timers, and a poll leaves them empty.
+#[cfg(test)]
+pub fn poll_shaped_like_a_fresh_poll() -> SpeakerState {
+    SpeakerState {
+        playing: true,
+        volume: 20,
+        muted: false,
+        shuffle: false,
+        repeat: "none".into(),
+        title: None,
+        artist: None,
+        album: None,
+        media_image_url: None,
+        duration: None,
+        position: None,
+        bass: 0,
+        treble: 0,
+        loudness: false,
+        group_coordinator: None,
+        group_members: vec![],
+        available_favorites: vec![],
+        available_playlists: vec![],
+        available_favorite_items: vec![],
+        available_playlist_items: vec![],
+    }
+}
