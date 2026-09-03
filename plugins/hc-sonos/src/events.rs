@@ -199,3 +199,79 @@ fn parse_hms(s: &str) -> Option<u32> {
     let sec: u32 = sec_str.split('.').next()?.parse().ok()?;
     Some(h * 3600 + m * 60 + sec)
 }
+
+#[cfg(test)]
+mod streaming_art_tests {
+    use super::*;
+
+    /// Exactly what Office-1 returned while playing Apple Music, entities and
+    /// all. Captured rather than composed: the two things that matter about it
+    /// — a *relative* art path, and `upnp:album` sitting next to
+    /// `upnp:albumArtURI` — are both things a hand-written fixture would have
+    /// got tidy and wrong.
+    const APPLE_MUSIC: &str = concat!(
+        r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+        r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+        r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+        r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+        r#"<item id="-1" parentID="-1" restricted="true">"#,
+        r#"<res protocolInfo="sonos.com-http:*:audio/mp4:*" duration="0:04:53">"#,
+        r#"x-sonos-http:song%3a1531535287.mp4?sid=204&amp;flags=8232&amp;sn=15</res>"#,
+        r#"<r:streamContent></r:streamContent>"#,
+        r#"<upnp:albumArtURI>/getaa?s=1&amp;u=x-sonos-http%3asong%253a1531535287"#,
+        r#".mp4%3fsid%3d204%26flags%3d8232%26sn%3d15</upnp:albumArtURI>"#,
+        r#"<dc:title>Crazy Train</dc:title>"#,
+        r#"<upnp:class>object.item.audioItem.musicTrack</upnp:class>"#,
+        r#"<dc:creator>Ozzy Osbourne</dc:creator>"#,
+        r#"<upnp:album>Blizzard of Ozz (40th Anniversary Expanded Edition)</upnp:album>"#,
+        "</item></DIDL-Lite>",
+    );
+
+    #[test]
+    fn a_streaming_service_does_carry_album_art() {
+        // The local file that started this enquiry had none anywhere — absent
+        // from its DIDL, and `/getaa` answered 404 for every encoding of its
+        // URI. That is a property of that track, not of the plugin, and this
+        // is the proof: the same speaker, a streaming service, art present.
+        let meta = parse_track_metadata(APPLE_MUSIC).expect("parses");
+        assert_eq!(meta.title.as_deref(), Some("Crazy Train"));
+        assert_eq!(meta.artist.as_deref(), Some("Ozzy Osbourne"));
+        assert!(meta.image_url.is_some(), "Apple Music sends one");
+    }
+
+    #[test]
+    fn the_art_path_is_relative_and_needs_the_speaker_to_resolve() {
+        // `/getaa?...` is not fetchable by itself. `absolutize_media_url` puts
+        // the speaker in front of it, which is the only reason this works at
+        // all — and the reason art has to be resolved where the speaker is
+        // known rather than in the client.
+        let meta = parse_track_metadata(APPLE_MUSIC).expect("parses");
+        let art = meta.image_url.expect("present");
+        assert!(art.starts_with('/'), "relative: {art}");
+        assert!(!art.starts_with("http"), "{art}");
+    }
+
+    #[test]
+    fn the_entities_are_decoded_or_the_url_is_a_404() {
+        // The path arrives as `&amp;` in the XML and has to come out as `&`.
+        // Fetching it with the entity still in is a request for a different
+        // URL, and the speaker answers 404 to that.
+        let meta = parse_track_metadata(APPLE_MUSIC).expect("parses");
+        let art = meta.image_url.expect("present");
+        assert!(art.contains("&u="), "{art}");
+        assert!(!art.contains("&amp;"), "{art}");
+    }
+
+    #[test]
+    fn the_album_is_the_album_and_not_the_art() {
+        // `upnp:album` and `upnp:albumArtURI` sit next to each other and one is
+        // a prefix of the other. A tag test that matched on a prefix would put
+        // the art URL in the album field — which is exactly what a regex over
+        // this document does, and what the element walk here does not.
+        let meta = parse_track_metadata(APPLE_MUSIC).expect("parses");
+        assert_eq!(
+            meta.album.as_deref(),
+            Some("Blizzard of Ozz (40th Anniversary Expanded Edition)")
+        );
+    }
+}

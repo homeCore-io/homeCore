@@ -3622,6 +3622,24 @@ fn optional_i64_min(
     Ok(())
 }
 
+/// Whether a binding supplies [property], so the config need not.
+///
+/// Bindings live in the widget's own config as `bindings: [{property, …}]` —
+/// the same place `group`, `layer` and `style` live, for the same reason: core
+/// stores the object verbatim and a client-side idea needs no schema. This is
+/// the one place core has to *read* one, because a required field is a promise
+/// about what the element can draw and a binding is one of the ways it keeps
+/// that promise.
+fn is_bound(map: &serde_json::Map<String, Value>, property: &str) -> bool {
+    map.get("bindings")
+        .and_then(Value::as_array)
+        .is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|binding| binding.get("property").and_then(Value::as_str) == Some(property))
+        })
+}
+
 /// Validates one config field against its spec.
 ///
 /// The spec comes from `hc_types::dashboard_vocabulary`, which is the same
@@ -3633,6 +3651,21 @@ fn validate_spec_field(
     field: &hc_types::dashboard_vocabulary::WidgetField,
     widget_id: &str,
 ) -> Result<(), String> {
+    // **A bound field has a value; it just is not written here.**
+    //
+    // A binding says "this property comes from a device" — the words on a text
+    // element from a temperature, a shape's colour from a battery level. The
+    // author then clears the placeholder, because a placeholder is exactly what
+    // it was, and the save is refused for a field that has never been more
+    // supplied.
+    //
+    // Not a special case for text: it is what `bindings` *means* everywhere,
+    // and a required field is a promise that the element has something to
+    // draw rather than that a particular key is present in this map.
+    if is_bound(map, &field.name) {
+        return Ok(());
+    }
+
     let present = map.get(&field.name);
 
     // Absent. Fine unless the spec says otherwise; the messages are the ones
@@ -11216,6 +11249,75 @@ token = "TOKEN-TWO"
 
         let taken: HashSet<String> = ["Office".to_string()].into_iter().collect();
         assert_eq!(super::dashboard_copy_name("Office", &taken), "Office Copy");
+    }
+
+    fn text_widget(config: serde_json::Value) -> hc_types::dashboard::DashboardWidget {
+        hc_types::dashboard::DashboardWidget {
+            id: "reading".to_string(),
+            r#type: "text".to_string(),
+            title: "Reading".to_string(),
+            subtitle: None,
+            config,
+        }
+    }
+
+    #[test]
+    fn a_required_field_is_still_required() {
+        // The check this is about is not being weakened. A text element with
+        // nothing to draw and nothing to draw it from is still refused.
+        let widget = text_widget(serde_json::json!({ "text": "" }));
+        assert!(super::validate_widget_config(&widget).is_err());
+        let widget = text_widget(serde_json::json!({}));
+        assert!(super::validate_widget_config(&widget).is_err());
+    }
+
+    #[test]
+    fn a_bound_field_supplies_itself() {
+        // The words come from a temperature. There is nothing to write in
+        // `text`, and the author has cleared the placeholder that was there —
+        // which is what a placeholder is for.
+        let widget = text_widget(serde_json::json!({
+            "bindings": [{
+                "property": "text",
+                "device_id": "sensor_office",
+                "key": "temperature",
+            }],
+        }));
+        assert!(
+            super::validate_widget_config(&widget).is_ok(),
+            "a page that binds a reading has to be savable"
+        );
+    }
+
+    #[test]
+    fn a_binding_to_something_else_does_not_excuse_it() {
+        // Binding the *colour* says nothing about whether there are words.
+        let widget = text_widget(serde_json::json!({
+            "bindings": [{
+                "property": "ink",
+                "device_id": "sensor_office",
+                "key": "battery",
+            }],
+        }));
+        assert!(super::validate_widget_config(&widget).is_err());
+    }
+
+    #[test]
+    fn a_bindings_list_of_nonsense_is_ignored_rather_than_trusted() {
+        // A hand-edited document should not be able to turn the required-field
+        // check off by putting the wrong shape in `bindings`.
+        for bindings in [
+            serde_json::json!("not a list"),
+            serde_json::json!([{ "device_id": "x" }]),
+            serde_json::json!([7]),
+            serde_json::json!([]),
+        ] {
+            let widget = text_widget(serde_json::json!({ "bindings": bindings }));
+            assert!(
+                super::validate_widget_config(&widget).is_err(),
+                "bindings: {bindings}"
+            );
+        }
     }
 
     fn dashboard_with_transform(
