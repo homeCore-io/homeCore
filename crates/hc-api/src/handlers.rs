@@ -3376,7 +3376,24 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     layout.breakpoint, placement.widget_id
                 ));
             }
-            if placement.x + placement.w > layout.columns {
+            // **The columns only bind a layout that USES them.**
+            //
+            // On a composed layout the rectangle is the truth and the cell
+            // values are a fallback for a client that packs — `dashboard-
+            // layout.md` says so, and `rectOfItem` is built on it. Policing
+            // the fallback against the column count refuses any element wider
+            // than one cell on a one-column phone layout, which is every
+            // element on every composed mobile page: 390 pixels is three cells
+            // and a phone has one column. There is no way to write that page.
+            //
+            // So the check stands exactly where it means something — a packed
+            // layout, where x and w ARE the position — and a composed
+            // placement carrying its own rectangle is left alone. A composed
+            // placement with NO rect is still checked, because then the cells
+            // are all it has.
+            let composed =
+                layout.flow == hc_types::dashboard::DashboardFlow::Free && placement.rect.is_some();
+            if !composed && placement.x + placement.w > layout.columns {
                 return Err(format!(
                     "layout {:?} placement '{}' exceeds column count {}",
                     layout.breakpoint, placement.widget_id, layout.columns
@@ -10574,6 +10591,72 @@ token = "TOKEN-TWO"
             .as_str()
             .expect("error string")
             .contains("source_type"));
+    }
+
+    /// A composed layout is not policed by a grid it does not use.
+    ///
+    /// This blocked every composed MOBILE page there could be: a phone layout
+    /// has one column, a full-width element is 390 pixels, and 390 rounds to
+    /// three cells. The document was refused for a fallback nothing reads.
+    #[test]
+    fn a_composed_placement_may_exceed_the_columns() {
+        use hc_types::dashboard::{
+            DashboardBreakpoint, DashboardFlow, DashboardLayout, DashboardRect, DashboardWidget,
+            DashboardWidgetPlacement,
+        };
+
+        let placement = |rect: Option<DashboardRect>| DashboardWidgetPlacement {
+            widget_id: "w".into(),
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 2,
+            rect,
+            rotation: None,
+            opacity: None,
+        };
+        let page = |flow: DashboardFlow, rect: Option<DashboardRect>| {
+            let mut d = dashboard_templates_for("owner")
+                .into_iter()
+                .find(|t| t.id == "starter_getting_started")
+                .expect("a template to borrow the shape from");
+            d.widgets = vec![DashboardWidget {
+                id: "w".into(),
+                r#type: "markdown".into(),
+                title: "W".into(),
+                subtitle: None,
+                config: json!({ "markdown": "hi" }),
+            }];
+            d.layouts = vec![DashboardLayout {
+                breakpoint: DashboardBreakpoint::Mobile,
+                columns: 1,
+                row_height: 120.0,
+                gap: 12.0,
+                derived_from: None,
+                flow,
+                frame: None,
+                groups: Vec::new(),
+                placements: vec![placement(rect)],
+            }];
+            d
+        };
+        let rect = Some(DashboardRect {
+            x: 0.0,
+            y: 0.0,
+            w: 390.0,
+            h: 200.0,
+        });
+
+        // Composed, with a rectangle: the cells are a fallback and are ignored.
+        assert!(validate_dashboard(&page(DashboardFlow::Free, rect.clone())).is_ok());
+
+        // Packed: x and w ARE the position, so they still have to fit.
+        assert!(validate_dashboard(&page(DashboardFlow::Packed, rect)).is_err());
+
+        // Composed with NO rectangle: the cells are all it has, so they are
+        // checked — a placement that says nothing about where it goes twice
+        // over is not a placement.
+        assert!(validate_dashboard(&page(DashboardFlow::Free, None)).is_err());
     }
 
     #[tokio::test]
