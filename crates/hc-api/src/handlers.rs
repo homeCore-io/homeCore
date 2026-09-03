@@ -10787,7 +10787,7 @@ token = "TOKEN-TWO"
         });
 
         // Composed, with a rectangle: the cells are a fallback and are ignored.
-        assert!(validate_dashboard(&page(DashboardFlow::Free, rect.clone())).is_ok());
+        assert!(validate_dashboard(&page(DashboardFlow::Free, rect)).is_ok());
 
         // Packed: x and w ARE the position, so they still have to fit.
         assert!(validate_dashboard(&page(DashboardFlow::Packed, rect)).is_err());
