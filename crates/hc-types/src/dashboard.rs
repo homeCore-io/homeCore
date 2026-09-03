@@ -215,6 +215,27 @@ pub struct DashboardGroupBox {
     #[serde(default)]
     pub clip: bool,
 
+    /// Whether this box is a **coordinate space** rather than a decoration.
+    ///
+    /// A group's members hold page coordinates and the box is drawn around
+    /// wherever they happen to be. A **frame's** members hold coordinates
+    /// relative to the frame, so moving it takes them with it — which is what
+    /// gives a template an *inside* for things to be placed in.
+    ///
+    /// Core stores it and reads nothing into it, like `rotation` and `opacity`
+    /// beside it: resolving a position is the drawing client's arithmetic, and
+    /// the cells core validates are unaffected either way.
+    ///
+    /// **It has to be here even so.** Everything else the designer invented —
+    /// `group`, `layer`, `style`, `pin` — rides inside a widget's `config`,
+    /// which is a `Value` and survives untouched. A group box is a *typed*
+    /// struct, so a key it does not declare is not ignored, it is **dropped on
+    /// the way back**: a frame would round-trip through core as an ordinary
+    /// group, every member's local rectangle would then be read as a page one,
+    /// and the page would come back scrambled by having been saved.
+    #[serde(default)]
+    pub frame: bool,
+
     /// What the group sits on — the same shape the page's background has, so a
     /// group is a small page rather than a new kind of thing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
