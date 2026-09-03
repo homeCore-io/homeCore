@@ -47,6 +47,7 @@ fn box_for(path: &str) -> DashboardGroupBox {
         padding: 0.0,
         radius: None,
         clip: false,
+        frame: false,
         background: None,
         rotation: None,
         opacity: None,
@@ -66,6 +67,7 @@ fn a_styled_group_survives_a_round_trip() {
         padding: 12.0,
         radius: Some(18.0),
         clip: true,
+        frame: false,
         background: Some(DashboardBackground {
             image: Some("hc-asset://wall.jpg".into()),
             blur: 8.0,
@@ -150,4 +152,49 @@ fn a_box_outlives_the_group_it_describes() {
     let json = serde_json::to_string(&before).expect("serialise");
     let after: DashboardLayout = serde_json::from_str(&json).expect("deserialise");
     assert_eq!(after.groups[0].path, "Nobody/Here");
+}
+
+#[test]
+fn a_frame_survives_the_round_trip_it_would_otherwise_die_on() {
+    // The one field on this struct whose *absence* silently corrupts a page
+    // rather than merely losing a decoration.
+    //
+    // A frame's members hold rectangles stated INSIDE it. Drop the flag on the
+    // way back and the same numbers are read as page coordinates: every child
+    // of every frame lands at the page origin plus its own offset, and the
+    // document comes back scrambled by having been saved. Everything else the
+    // designer invented rides inside a widget's `config`, which is a `Value`
+    // and cannot be dropped — a group box is typed, so it can.
+    let before = layout(vec![DashboardGroupBox {
+        path: "Panel".into(),
+        rect: Some(DashboardRect {
+            x: 100.0,
+            y: 80.0,
+            w: 300.0,
+            h: 200.0,
+        }),
+        frame: true,
+        clip: true,
+        ..box_for("Panel")
+    }]);
+
+    let json = serde_json::to_string(&before).expect("serialise");
+    assert!(
+        json.contains("\"frame\":true"),
+        "and it is on the wire: {json}"
+    );
+
+    let after: DashboardLayout = serde_json::from_str(&json).expect("deserialise");
+    assert!(after.groups[0].frame);
+    assert_eq!(after.groups[0].rect, before.groups[0].rect);
+}
+
+#[test]
+fn a_group_that_says_nothing_about_frames_is_not_one() {
+    // Absence reads as false, which is what every document written before
+    // frames existed says — and what keeps those documents drawing exactly as
+    // they did.
+    let json = r#"{"path": "Wall", "clip": true}"#;
+    let parsed: DashboardGroupBox = serde_json::from_str(json).expect("deserialise");
+    assert!(!parsed.frame);
 }

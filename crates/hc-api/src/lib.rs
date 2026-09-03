@@ -1261,6 +1261,13 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/dashboards/templates/{id}",
             post(handlers::create_dashboard_from_template),
         )
+        // The other direction: a page you have designed becomes something to
+        // start the next one from. `/template` rather than `/templates/{id}`
+        // because the id in the path is the *page's*.
+        .route(
+            "/dashboards/{id}/template",
+            post(handlers::save_dashboard_as_template),
+        )
         .route(
             "/skins",
             get(skin_handlers::list_skins).post(skin_handlers::create_skin),

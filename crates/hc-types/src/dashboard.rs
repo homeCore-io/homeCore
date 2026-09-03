@@ -215,6 +215,27 @@ pub struct DashboardGroupBox {
     #[serde(default)]
     pub clip: bool,
 
+    /// Whether this box is a **coordinate space** rather than a decoration.
+    ///
+    /// A group's members hold page coordinates and the box is drawn around
+    /// wherever they happen to be. A **frame's** members hold coordinates
+    /// relative to the frame, so moving it takes them with it — which is what
+    /// gives a template an *inside* for things to be placed in.
+    ///
+    /// Core stores it and reads nothing into it, like `rotation` and `opacity`
+    /// beside it: resolving a position is the drawing client's arithmetic, and
+    /// the cells core validates are unaffected either way.
+    ///
+    /// **It has to be here even so.** Everything else the designer invented —
+    /// `group`, `layer`, `style`, `pin` — rides inside a widget's `config`,
+    /// which is a `Value` and survives untouched. A group box is a *typed*
+    /// struct, so a key it does not declare is not ignored, it is **dropped on
+    /// the way back**: a frame would round-trip through core as an ordinary
+    /// group, every member's local rectangle would then be read as a page one,
+    /// and the page would come back scrambled by having been saved.
+    #[serde(default)]
+    pub frame: bool,
+
     /// What the group sits on — the same shape the page's background has, so a
     /// group is a small page rather than a new kind of thing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +352,29 @@ pub struct DashboardDefinition {
     /// migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<DashboardBackground>,
+
+    /// Whether this document is a **starting point** rather than a page.
+    ///
+    /// A template is a dashboard and nothing else — same storage, same access
+    /// rules, same export, same editor. The only thing this changes is which
+    /// list it appears in: `GET /dashboards` is the pages you use, and
+    /// `GET /dashboards/templates` is the ones you start from.
+    ///
+    /// **A copy, never a link.** Making a page from a template copies it and
+    /// the two have nothing to do with each other afterwards — John:
+    /// *"template are starting points"*. That decision is what keeps this one
+    /// boolean instead of an instance model: there is nothing to re-sync,
+    /// nothing to override, and no question about who wins when a template
+    /// changes under a page made from it.
+    ///
+    /// Templates carried `slot:` device ids rather than real ones, so a
+    /// starting point can be shared between houses — see `device_slot.dart`
+    /// and `unwire`. Nothing enforces that: a template with real ids is a
+    /// perfectly good starting point for the house it came from.
+    ///
+    /// Absent means a page, which is every dashboard ever saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub template: bool,
 }
 
 /// An image behind the whole page, and what makes it survivable behind live

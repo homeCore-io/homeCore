@@ -3376,7 +3376,24 @@ fn validate_dashboard(dashboard: &DashboardDefinition) -> Result<(), String> {
                     layout.breakpoint, placement.widget_id
                 ));
             }
-            if placement.x + placement.w > layout.columns {
+            // **The columns only bind a layout that USES them.**
+            //
+            // On a composed layout the rectangle is the truth and the cell
+            // values are a fallback for a client that packs — `dashboard-
+            // layout.md` says so, and `rectOfItem` is built on it. Policing
+            // the fallback against the column count refuses any element wider
+            // than one cell on a one-column phone layout, which is every
+            // element on every composed mobile page: 390 pixels is three cells
+            // and a phone has one column. There is no way to write that page.
+            //
+            // So the check stands exactly where it means something — a packed
+            // layout, where x and w ARE the position — and a composed
+            // placement carrying its own rectangle is left alone. A composed
+            // placement with NO rect is still checked, because then the cells
+            // are all it has.
+            let composed =
+                layout.flow == hc_types::dashboard::DashboardFlow::Free && placement.rect.is_some();
+            if !composed && placement.x + placement.w > layout.columns {
                 return Err(format!(
                     "layout {:?} placement '{}' exceeds column count {}",
                     layout.breakpoint, placement.widget_id, layout.columns
@@ -3810,6 +3827,12 @@ pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) ->
     let mut dashboards: Vec<_> = data
         .dashboards
         .iter()
+        // Templates live in the same store and answer to the same access
+        // rules — they differ in one thing, which is the list they belong to.
+        // A starting point appearing among the pages you use is clutter at
+        // best and, since it is wired to nothing, a page of dead controls at
+        // worst.
+        .filter(|dashboard| !dashboard.template)
         .filter(|dashboard| dashboard_visible_to(&user.0, dashboard))
         .map(|dashboard| dashboard_response_for(dashboard, default_id))
         .collect();
@@ -3817,13 +3840,121 @@ pub async fn list_dashboards(State(s): State<AppState>, user: DashboardsRead) ->
     Json(dashboards).into_response()
 }
 
+/// The starting points: the ones that ship, and the ones this house has made.
+///
+/// Shipped templates are documents compiled into the binary and belong to
+/// nobody; a saved one is an ordinary dashboard with `template` set, and is
+/// therefore subject to the same access rules as any other. Both kinds arrive
+/// in one list because from the front of the app they are the same thing —
+/// something to start a page from.
 pub async fn list_dashboard_templates(
-    _: State<AppState>,
+    State(s): State<AppState>,
     user: DashboardsRead,
 ) -> impl IntoResponse {
     let mut templates = dashboard_templates_for(&user.0.uid);
+    if let Some(handle) = &s.dashboards {
+        let data = handle.read().await;
+        templates.extend(
+            data.dashboards
+                .iter()
+                .filter(|dashboard| dashboard.template)
+                .filter(|dashboard| dashboard_visible_to(&user.0, dashboard))
+                .cloned(),
+        );
+    }
     templates.sort_by(|a, b| a.name.cmp(&b.name));
     Json(templates).into_response()
+}
+
+/// Save a page as a starting point.
+///
+/// The mirror of [`create_dashboard_from_template`], and the half that was
+/// missing: templates were five JSON files compiled into this binary, so every
+/// good page anybody designed stayed a one-off. Read-only starting points are
+/// not a template system, they are a set of examples.
+///
+/// **A copy, and the house comes out of it.** The page carries on being the
+/// page — this does not convert it — and the template it leaves behind is
+/// unwired, because a starting point carrying one house's device ids is a
+/// starting point for exactly one house. The transform is the one `export`
+/// already does; sharing a design and saving one are the same operation with
+/// different destinations.
+pub async fn save_dashboard_as_template(
+    State(s): State<AppState>,
+    user: DashboardsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(handle) = &s.dashboards else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+    let Some(store) = &s.dashboard_store else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": "dashboards unavailable" })),
+        )
+            .into_response();
+    };
+
+    let response = {
+        let mut data = handle.write().await;
+        let Some(source) = data.dashboards.iter().find(|item| item.id == id).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard not found" })),
+            )
+                .into_response();
+        };
+        if !dashboard_visible_to(&user.0, &source) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "dashboard access denied" })),
+            )
+                .into_response();
+        }
+
+        let existing_names: HashSet<String> = data
+            .dashboards
+            .iter()
+            .filter(|item| item.template)
+            .map(|item| item.name.clone())
+            .collect();
+        let now = chrono::Utc::now();
+        let mut template = source.clone();
+        template.id = format!("dashboard_{}", Uuid::new_v4().simple());
+        template.owner_user_id = user.0.uid.clone();
+        template.created_at = now;
+        template.updated_at = now;
+        template.template = true;
+        // Named against the OTHER templates, not against the pages: a template
+        // called "Room" beside a page called "Room" is not a collision, it is
+        // the ordinary case — the page is what the template is for.
+        template.name = if existing_names.contains(&source.name) {
+            dashboard_copy_name(&source.name, &existing_names)
+        } else {
+            source.name.clone()
+        };
+        // A starting point is nobody's default, and the grants on a page are
+        // about that page. Neither belongs on a copy that exists to be copied
+        // again.
+        template.access.clear();
+        unwire_dashboard(&mut template);
+
+        data.dashboards.push(template.clone());
+        if let Err(e) = store.save(&data) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        template
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 pub async fn get_dashboard(
@@ -3926,13 +4057,6 @@ pub async fn create_dashboard_from_template(
     user: DashboardsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(template) = find_dashboard_template(&id, &user.0.uid) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "dashboard template not found" })),
-        )
-            .into_response();
-    };
     let Some(handle) = &s.dashboards else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -3950,13 +4074,33 @@ pub async fn create_dashboard_from_template(
 
     let response = {
         let mut data = handle.write().await;
+        // Shipped first, then this house's own. One id space, because from the
+        // front of the app they are the same list.
+        let Some(template) = find_dashboard_template(&id, &user.0.uid).or_else(|| {
+            data.dashboards
+                .iter()
+                .find(|item| item.template && item.id == id)
+                .filter(|item| dashboard_visible_to(&user.0, item))
+                .cloned()
+        }) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "dashboard template not found" })),
+            )
+                .into_response();
+        };
         let existing_names: HashSet<String> = data
             .dashboards
             .iter()
+            .filter(|item| !item.template)
             .map(|item| item.name.clone())
             .collect();
         let now = chrono::Utc::now();
         let mut dashboard = template.clone();
+        // **The copy is a page.** Starting from a template must not make a
+        // second template, or the list you pick from fills up with everything
+        // anybody ever started.
+        dashboard.template = false;
         dashboard.id = format!("dashboard_{}", Uuid::new_v4().simple());
         dashboard.owner_user_id = user.0.uid.clone();
         dashboard.created_at = now;
@@ -4153,6 +4297,27 @@ fn yes() -> bool {
     true
 }
 
+/// Take the house out of a dashboard, leaving the page.
+///
+/// Every device id becomes `slot:<the widget's name>`, which a client shows as
+/// an unwired thing to be pointed at a real device — see `device_slot.dart` and
+/// the wiring panel. Widgets keep everything else: their layout, their look,
+/// their titles, because those are the page and only the ids are the house.
+///
+/// Shared by export and by saving a page as a template, which are the same
+/// transform for the same reason: a starting point that carries one house's
+/// device ids is a starting point for exactly one house.
+fn unwire_dashboard(dashboard: &mut DashboardDefinition) {
+    for widget in &mut dashboard.widgets {
+        let label = if widget.title.trim().is_empty() {
+            widget.r#type.clone()
+        } else {
+            widget.title.clone()
+        };
+        hc_types::dashboard_vocabulary::unwire(&widget.r#type, &mut widget.config, &label);
+    }
+}
+
 pub async fn export_dashboard(
     State(s): State<AppState>,
     user: DashboardsRead,
@@ -4173,18 +4338,8 @@ pub async fn export_dashboard(
             if query.wired {
                 return Json(dashboard).into_response();
             }
-            // Shared: the house comes out of it. Widgets keep everything else —
-            // their layout, their look, their titles — because those are the
-            // page, and only the ids are the house.
             let mut shared = dashboard.clone();
-            for widget in &mut shared.widgets {
-                let label = if widget.title.trim().is_empty() {
-                    widget.r#type.clone()
-                } else {
-                    widget.title.clone()
-                };
-                hc_types::dashboard_vocabulary::unwire(&widget.r#type, &mut widget.config, &label);
-            }
+            unwire_dashboard(&mut shared);
             Json(shared).into_response()
         }
         Some(_) => (
@@ -9441,6 +9596,7 @@ token = "TOKEN-TWO"
             description: Some("Test dashboard".to_string()),
             owner_user_id: owner_user_id.to_string(),
             access: Vec::new(),
+            template: false,
             background: None,
             tags: vec!["home".to_string()],
             icon: "dashboard".to_string(),
@@ -10576,6 +10732,72 @@ token = "TOKEN-TWO"
             .contains("source_type"));
     }
 
+    /// A composed layout is not policed by a grid it does not use.
+    ///
+    /// This blocked every composed MOBILE page there could be: a phone layout
+    /// has one column, a full-width element is 390 pixels, and 390 rounds to
+    /// three cells. The document was refused for a fallback nothing reads.
+    #[test]
+    fn a_composed_placement_may_exceed_the_columns() {
+        use hc_types::dashboard::{
+            DashboardBreakpoint, DashboardFlow, DashboardLayout, DashboardRect, DashboardWidget,
+            DashboardWidgetPlacement,
+        };
+
+        let placement = |rect: Option<DashboardRect>| DashboardWidgetPlacement {
+            widget_id: "w".into(),
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 2,
+            rect,
+            rotation: None,
+            opacity: None,
+        };
+        let page = |flow: DashboardFlow, rect: Option<DashboardRect>| {
+            let mut d = dashboard_templates_for("owner")
+                .into_iter()
+                .find(|t| t.id == "starter_getting_started")
+                .expect("a template to borrow the shape from");
+            d.widgets = vec![DashboardWidget {
+                id: "w".into(),
+                r#type: "markdown".into(),
+                title: "W".into(),
+                subtitle: None,
+                config: json!({ "markdown": "hi" }),
+            }];
+            d.layouts = vec![DashboardLayout {
+                breakpoint: DashboardBreakpoint::Mobile,
+                columns: 1,
+                row_height: 120.0,
+                gap: 12.0,
+                derived_from: None,
+                flow,
+                frame: None,
+                groups: Vec::new(),
+                placements: vec![placement(rect)],
+            }];
+            d
+        };
+        let rect = Some(DashboardRect {
+            x: 0.0,
+            y: 0.0,
+            w: 390.0,
+            h: 200.0,
+        });
+
+        // Composed, with a rectangle: the cells are a fallback and are ignored.
+        assert!(validate_dashboard(&page(DashboardFlow::Free, rect.clone())).is_ok());
+
+        // Packed: x and w ARE the position, so they still have to fit.
+        assert!(validate_dashboard(&page(DashboardFlow::Packed, rect)).is_err());
+
+        // Composed with NO rectangle: the cells are all it has, so they are
+        // checked — a placement that says nothing about where it goes twice
+        // over is not a placement.
+        assert!(validate_dashboard(&page(DashboardFlow::Free, None)).is_err());
+    }
+
     #[tokio::test]
     async fn dashboard_templates_duplicate_export_and_import_work() {
         let state = mk_state().await;
@@ -10841,6 +11063,7 @@ token = "TOKEN-TWO"
             widgets: vec![],
             access: Vec::new(),
             background,
+            template: false,
         }
     }
 
@@ -10919,11 +11142,80 @@ token = "TOKEN-TWO"
             rect: None,
             padding: 0.0,
             radius: None,
+            frame: false,
             clip: false,
             background: None,
             rotation: None,
             opacity: None,
         }
+    }
+
+    fn wired_page() -> DashboardDefinition {
+        let mut page = dashboard_with_background(None);
+        page.name = "Office".into();
+        page.widgets = vec![
+            hc_types::dashboard::DashboardWidget {
+                id: "lamp".into(),
+                r#type: "toggle".into(),
+                title: "Desk lamp".into(),
+                subtitle: None,
+                config: serde_json::json!({"device_id": "hue_0x1234"}),
+            },
+            hc_types::dashboard::DashboardWidget {
+                id: "words".into(),
+                r#type: "heading".into(),
+                title: "Heading".into(),
+                subtitle: None,
+                config: serde_json::json!({"text": "Office"}),
+            },
+        ];
+        page
+    }
+
+    #[test]
+    fn saving_a_page_as_a_template_takes_the_house_out_of_it() {
+        // The whole reason saving is not just "copy with a flag". A starting
+        // point carrying one house's device ids is a starting point for
+        // exactly one house — `hue_0x1234` names a bulb that exists here and
+        // nowhere else, so what a template has to carry is the *shape* of the
+        // wiring and a name for the thing that is missing.
+        let mut template = wired_page();
+        super::unwire_dashboard(&mut template);
+
+        assert_eq!(
+            template.widgets[0].config["device_id"],
+            serde_json::json!("slot:Desk lamp"),
+            "and named for the widget, so the wiring panel can say what to point it at"
+        );
+    }
+
+    #[test]
+    fn unwiring_leaves_everything_that_is_not_the_house() {
+        // Widgets keep their layout, their look and their titles, because
+        // those are the page. Only the ids are the house.
+        let mut template = wired_page();
+        super::unwire_dashboard(&mut template);
+
+        assert_eq!(
+            template.widgets[1].config,
+            serde_json::json!({"text": "Office"})
+        );
+        assert_eq!(template.widgets[0].title, "Desk lamp");
+        assert_eq!(template.layouts, wired_page().layouts);
+        assert_eq!(template.name, "Office");
+    }
+
+    #[test]
+    fn a_template_is_named_against_the_other_templates_only() {
+        // A template called "Office" beside a PAGE called "Office" is not a
+        // collision — it is the ordinary case, because the page is what the
+        // template was made from. Naming it against every dashboard would give
+        // everybody a library of "Office Copy".
+        let templates: HashSet<String> = HashSet::new();
+        assert!(!templates.contains("Office"));
+
+        let taken: HashSet<String> = ["Office".to_string()].into_iter().collect();
+        assert_eq!(super::dashboard_copy_name("Office", &taken), "Office Copy");
     }
 
     fn dashboard_with_transform(
