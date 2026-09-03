@@ -352,6 +352,29 @@ pub struct DashboardDefinition {
     /// migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<DashboardBackground>,
+
+    /// Whether this document is a **starting point** rather than a page.
+    ///
+    /// A template is a dashboard and nothing else — same storage, same access
+    /// rules, same export, same editor. The only thing this changes is which
+    /// list it appears in: `GET /dashboards` is the pages you use, and
+    /// `GET /dashboards/templates` is the ones you start from.
+    ///
+    /// **A copy, never a link.** Making a page from a template copies it and
+    /// the two have nothing to do with each other afterwards — John:
+    /// *"template are starting points"*. That decision is what keeps this one
+    /// boolean instead of an instance model: there is nothing to re-sync,
+    /// nothing to override, and no question about who wins when a template
+    /// changes under a page made from it.
+    ///
+    /// Templates carried `slot:` device ids rather than real ones, so a
+    /// starting point can be shared between houses — see `device_slot.dart`
+    /// and `unwire`. Nothing enforces that: a template with real ids is a
+    /// perfectly good starting point for the house it came from.
+    ///
+    /// Absent means a page, which is every dashboard ever saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub template: bool,
 }
 
 /// An image behind the whole page, and what makes it survivable behind live

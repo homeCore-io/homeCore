@@ -1681,6 +1681,37 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /dashboards/{id}/template:
+    post:
+      operationId: saveDashboardAsTemplate
+      summary: Save a page as a starting point for new pages
+      description: >
+        Copies the dashboard into a new one marked as a template, with every
+        device id replaced by a `slot:` placeholder so the result is a starting
+        point for any house rather than for this one. The page itself is not
+        changed. Templates are copies, never links: a page made from one has no
+        further relationship with it.
+      tags: [dashboards]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: The template that was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardDefinition"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /dashboards/{id}/duplicate:
     post:
       operationId: duplicateDashboard
@@ -7956,6 +7987,16 @@ components:
             $ref: "#/components/schemas/DashboardLayout"
         background:
           $ref: "#/components/schemas/DashboardBackground"
+        template:
+          type: boolean
+          default: false
+          description: >
+            Whether this document is a starting point rather than a page. A
+            template is an ordinary dashboard in every other respect — same
+            storage, same access rules, same editor — and differs only in which
+            list it appears in: `GET /dashboards` returns pages,
+            `GET /dashboards/templates` returns starting points. Absent means a
+            page.
         widgets:
           type: array
           items:
