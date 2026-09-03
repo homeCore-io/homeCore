@@ -1131,6 +1131,16 @@
           "required": false
         },
         {
+          "name": "fill_to",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fill_angle",
+          "type": "integer",
+          "required": false
+        },
+        {
           "name": "opacity",
           "type": "integer",
           "required": false,
