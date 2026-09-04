@@ -657,6 +657,8 @@ fn element_widgets() -> Vec<WidgetSpec> {
             vec![
                 WidgetField::integer("limit", 1),
                 WidgetField::string("area_name").allowing_empty(),
+                WidgetField::strings("watch"),
+                WidgetField::integer("low_battery", 1),
                 WidgetField::new("faults_only", "boolean"),
             ],
         ),
