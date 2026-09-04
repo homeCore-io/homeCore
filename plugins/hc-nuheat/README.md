@@ -22,47 +22,57 @@ src/
 
 ## Signing in — read this before installing
 
-NuHeat's API is **OAuth2-only**. The session endpoint that older third-party
-NuHeat integrations used (`POST /api/authenticate/user`, returning a
-`SessionId`) no longer exists — it answers 404. Which OAuth2 flow you can use
-depends entirely on your client id, and the identity server is stricter than
-its own documentation suggests. Measured against the live server:
+**You supply your own NuHeat API credentials.** Request them from NuHeat
+support — <https://api.mynuheat.com/> has the link — and enter the client id
+and redirect URI under **NuHeat account** in the plugin's configuration.
+
+This plugin deliberately ships no client id of its own. A client id identifies
+*an application* to NuHeat: it is what their rate limits are counted against,
+what appears in their logs, and what a user's consent is granted to. Shipping
+one would put every homeCore installation behind a single identity that nobody
+here controls.
+
+NuHeat's API is OAuth2-only. The session endpoint that older third-party NuHeat
+integrations used (`POST /api/authenticate/user`, returning a `SessionId`) no
+longer exists — it answers 404.
+
+### Which flow — `[nuheat.auth] mode`
+
+NuHeat decides per client id which grants it may use, so the mode has to match
+what they enabled for yours.
+
+- **`oauth`** (default) — authorization code + PKCE, requesting
+  `offline_access`. Returns a refresh token (15 days, rolling), so the plugin
+  keeps itself signed in and runs unattended. **This is the one to ask NuHeat
+  for.** The `state` returned in the redirect is verified. A client secret is
+  only needed if they issued you a confidential client; a public client uses
+  PKCE alone.
+- **`access_token`** — the implicit flow, for a client id that only permits it.
+  Returns a **one-hour token with no refresh token**, so you re-paste every
+  hour. Useful for a first look; the plugin raises a notice saying as much.
+
+Either way, press **Link NuHeat account**, open the link it shows, sign in, and
+paste back the address you land on. The plugin checks the result against
+`GET /api/v2/Account` before saying you are linked, so a bad paste fails
+immediately rather than showing up later as thermostats that never appear.
+
+### What the identity server actually permits
+
+Worth knowing when NuHeat tells you which flow your client has. Measured
+against the live server rather than read off the documentation, which
+contradicts itself:
 
 | client | grant | result |
 |---|---|---|
-| `swagger` | implicit (`token`, `id_token token`), scope `openapi` | accepted |
-| `swagger` | implicit **+ `offline_access`** | rejected |
-| `swagger` | `code`, hybrid | rejected |
+| a client with implicit enabled | `token`, `id_token token`, scope `openapi` | accepted |
+| the same | implicit **+ `offline_access`** | rejected |
+| `swagger` (NuHeat's own docs client) | `code`, hybrid | rejected |
 | `swagger` | any redirect_uri but NuHeat's own | rejected |
 | `swagger`, `js` | password, device_code | `unauthorized_client` |
 
-`swagger` is the client id NuHeat's own Swagger UI ships, registered and usable
-by anyone. So there are two modes, and the difference between them is whether
-this plugin can stay signed in on its own.
-
-### `mode = "access_token"` — works today, expires hourly
-
-No application to NuHeat. Press **Link NuHeat account**, open the link it
-shows, sign in, and paste back the URL you land on. The plugin checks the token
-against `GET /api/v2/Account` before saying you are linked, so a bad paste
-fails immediately rather than showing up later as thermostats that never
-appear.
-
-The catch is structural, not an implementation gap: **implicit tokens last one
-hour and cannot be renewed.** There is no refresh token to have. This mode is
-for evaluating the plugin, and it raises a notice telling you so.
-
-### `mode = "oauth"` — unattended
-
-Ask NuHeat support for a client id ("Request access to the API" on
-<https://api.mynuheat.com/>). Set `client_id` and a `redirect_uri` registered
-against it, then link the same way — you paste the `code` from the redirect
-instead of a token. With `offline_access` the plugin gets a refresh token (15
-days, rolling) and keeps itself signed in from then on.
-
-PKCE (S256) is used, and the `state` returned in the redirect is checked
-against the one sent. A client secret is only needed if NuHeat issued you a
-confidential client.
+The practical consequences: implicit can never give you a refresh token, and a
+redirect URI has to be one actually registered against your client id —
+`localhost` included, if that is what you register.
 
 ### Where the tokens go
 

@@ -223,49 +223,58 @@ pub fn config_descriptor() -> serde_json::Value {
         .section(
             Section::new("account", "NuHeat account")
                 .help(
-                    "NuHeat's API is OAuth2-only. Which mode you want depends on whether \
-                     you have a client id from NuHeat support.",
+                    "NuHeat's API is OAuth2-only, and you sign in with your own API \
+                     credentials. Request them from NuHeat support — \
+                     https://api.mynuheat.com/ has the link.",
                 )
-                .field(
-                    Field::enumeration("nuheat.auth.mode")
-                        .label("How to sign in")
-                        .render("segmented")
-                        .default("access_token")
-                        .option("access_token", "Paste a token")
-                        .option("oauth", "Your own client id")
-                        .help(
-                            "Paste a token: works immediately with no application to NuHeat, \
-                             but the token expires after an hour and has to be pasted again — \
-                             fine for trying this out, not for leaving running. Your own \
-                             client id: ask NuHeat support for one, and the plugin keeps \
-                             itself signed in.",
-                        ),
-                )
-                .field(Field::note(
-                    "Use the \"Link NuHeat account\" button on this page to sign in. \
-                         It opens NuHeat, you sign in there, and paste the result back.",
-                ))
                 .field(
                     Field::text("nuheat.auth.client_id")
                         .label("Client ID")
-                        .visible_when(Cond::eq("nuheat.auth.mode", "oauth"))
-                        .help("Issued by NuHeat support."),
-                )
-                .field(
-                    Field::secret("nuheat.auth.client_secret")
-                        .label("Client secret")
-                        .visible_when(Cond::eq("nuheat.auth.mode", "oauth"))
-                        .help("Only if NuHeat issued a confidential client. Leave empty for PKCE."),
+                        .required()
+                        .help(
+                            "The client id NuHeat support issued to you. This plugin does \
+                             not ship one: a client id identifies an application to NuHeat, \
+                             and it is what their rate limits and their logs are counted \
+                             against.",
+                        ),
                 )
                 .field(
                     Field::url("nuheat.auth.redirect_uri")
                         .label("Redirect URI")
-                        .visible_when(Cond::eq("nuheat.auth.mode", "oauth"))
+                        .required()
                         .help(
                             "One of the redirect URIs registered against your client id. \
-                             It only has to show you the code in the browser.",
+                             It only has to receive the browser and show you what came back \
+                             — this plugin never calls it.",
                         ),
-                ),
+                )
+                .field(
+                    Field::secret("nuheat.auth.client_secret")
+                        .label("Client secret")
+                        .help(
+                            "Only if NuHeat issued you a confidential client. Leave empty \
+                             for a public client, which uses PKCE instead.",
+                        ),
+                )
+                .field(
+                    Field::enumeration("nuheat.auth.mode")
+                        .label("Which flow your client allows")
+                        .render("segmented")
+                        .default("oauth")
+                        .option("oauth", "Authorization code")
+                        .option("access_token", "Implicit")
+                        .help(
+                            "NuHeat decides per client id which flows it may use. \
+                             Authorization code is the one to ask for: it returns a refresh \
+                             token, so the plugin stays signed in on its own. Implicit \
+                             returns a one-hour token with no way to renew it, so you have \
+                             to paste a new one every hour.",
+                        ),
+                )
+                .field(Field::note(
+                    "Then use the \"Link NuHeat account\" button on this page. It opens \
+                     NuHeat, you sign in there, and paste back the address you land on.",
+                )),
         )
         .section(
             Section::new("thermostats", "Thermostats")
@@ -453,7 +462,7 @@ mod tests {
         assert_eq!(cfg.homecore.plugin_id, "plugin.nuheat");
         assert_eq!(cfg.homecore.broker_host, "127.0.0.1");
         assert_eq!(cfg.nuheat.poll_interval_secs, 120);
-        assert_eq!(cfg.nuheat.auth.mode, AuthMode::AccessToken);
+        assert_eq!(cfg.nuheat.auth.mode, AuthMode::OAuth);
         assert!(cfg.nuheat.only_serials.is_empty());
         assert_eq!(cfg.nuheat.default_hold_hours, None);
     }
@@ -465,8 +474,17 @@ mod tests {
     fn an_empty_config_still_loads() {
         let cfg: Config = toml::from_str("").expect("should load");
         assert_eq!(cfg.homecore.plugin_id, "plugin.nuheat");
-        assert_eq!(cfg.nuheat.auth.mode, AuthMode::AccessToken);
+        // The unattended flow is the default; the hourly one is opt-in.
+        assert_eq!(cfg.nuheat.auth.mode, AuthMode::OAuth);
         assert!(cfg.nuheat.auth.client_id.is_none());
+    }
+
+    /// The implicit fallback still has to be selectable by name.
+    #[test]
+    fn the_implicit_mode_can_be_chosen_explicitly() {
+        let cfg: Config =
+            toml::from_str("[nuheat.auth]\nmode = \"access_token\"\n").expect("should load");
+        assert_eq!(cfg.nuheat.auth.mode, AuthMode::AccessToken);
     }
 
     #[test]

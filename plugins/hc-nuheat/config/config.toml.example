@@ -57,22 +57,29 @@ config_scale = "celsius"
 # min_setpoint = 10
 
 # ── Signing in ───────────────────────────────────────────────────────────────
-# NuHeat's API is OAuth2-only; the old session endpoint no longer exists.
+# NuHeat's API is OAuth2-only; the old session endpoint no longer exists, and
+# you sign in with YOUR OWN API credentials.
 #
-#   mode = "access_token"  No paperwork: sign in through NuHeat's own page and
-#                          paste the token back with the "Link NuHeat account"
-#                          button. The token lasts one hour and cannot be
-#                          renewed, so this is for trying the plugin out.
+# Request them from NuHeat support — https://api.mynuheat.com/ has the link.
+# This plugin deliberately ships no client id of its own: a client id
+# identifies an application to NuHeat, and it is what their rate limits, their
+# logs and a user's consent are all counted against.
 #
-#   mode = "oauth"         Your own client id from NuHeat support. The plugin
-#                          gets a refresh token and keeps itself signed in.
+# `mode` says which flow NuHeat enabled for your client id — they decide that
+# per client:
+#
+#   mode = "oauth"         Authorization code + PKCE, asking for offline_access.
+#                          Returns a refresh token, so the plugin keeps itself
+#                          signed in. This is the one to ask NuHeat for.
+#
+#   mode = "access_token"  Implicit. Returns a one-hour token with no way to
+#                          renew it, so you re-paste every hour. Useful for a
+#                          first look, not for leaving running.
 #
 # Either way, tokens are never written to this file — they go to homeCore's own
 # durable plugin state, the same place hc-hue keeps its bridge key.
 [nuheat.auth]
-mode = "access_token"
-
-# Only for mode = "oauth":
-# client_id     = "your-client-id"
-# client_secret = ""                              # only for a confidential client
-# redirect_uri  = "https://example.invalid/callback"
+mode          = "oauth"
+client_id     = ""          # required — from NuHeat support
+redirect_uri  = ""          # required — one registered against that client id
+client_secret = ""          # only for a confidential client; empty uses PKCE

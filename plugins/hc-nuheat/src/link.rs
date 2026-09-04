@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use crate::api::NuHeatApi;
 use crate::auth::{Auth, AuthMode};
-use crate::runtime::{NOTICE_NOT_LINKED, NOTICE_TOKEN_EXPIRING};
+use crate::runtime::{NOTICE_NOT_CONFIGURED, NOTICE_NOT_LINKED, NOTICE_TOKEN_EXPIRING};
 
 /// What the link and sign-out actions need to do their work.
 #[derive(Clone)]
@@ -134,6 +134,9 @@ async fn link_account(ctx: StreamContext, _params: Value, h: LinkHandle) -> Resu
 
     match h.api.account(&bearer).await {
         Ok(account) => {
+            // A sign-in that reached NuHeat proves the credentials are there,
+            // so both notices are disproved at once.
+            h.notices.clear(NOTICE_NOT_CONFIGURED);
             h.notices.clear(NOTICE_NOT_LINKED);
             h.notices.clear(NOTICE_TOKEN_EXPIRING);
             let _ = h.wake.try_send(());

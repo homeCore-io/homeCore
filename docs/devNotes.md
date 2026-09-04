@@ -5118,33 +5118,49 @@ nothing else, so there is no local protocol to speak.
 Source: `plugins/hc-nuheat/` (in this repo). Plugin README:
 `plugins/hc-nuheat/README.md`.
 
-### Signing in — the constraint that shapes the plugin
+### Signing in — operator-supplied credentials
+
+**The operator enters their own NuHeat API credentials** (`client_id`,
+`redirect_uri`, optional `client_secret`) under `[nuheat.auth]`. The plugin
+ships none and falls back to none: a client id identifies an application to
+NuHeat and is what their rate limits, their logs and a user's consent are
+counted against, so shipping one would put every homeCore install behind a
+single identity nobody here controls. Credentials are requested from NuHeat
+support — https://api.mynuheat.com/ has the link.
+
+An unconfigured plugin raises a `not_configured` notice and polls nothing.
+That is deliberately a *different* notice from `not_linked`: no credentials and
+"credentials present, not signed in yet" send an operator to different places.
 
 NuHeat's API is OAuth2-only. The session endpoint older third-party NuHeat
 integrations used (`POST /api/authenticate/user` → `SessionId`) is **gone** —
-it answers 404. Which grant is available depends on the client id, and the
-identity server permits less than its documentation implies. Measured against
-the live server at `identity.mynuheat.com`:
+it answers 404 as of 2026-09-04. There is no unofficial fallback.
+
+`mode` picks the flow, because NuHeat enables grants per client id:
+
+- `mode = "oauth"` (**default**) — authorization code + PKCE with
+  `offline_access`. Refresh token, 15 days rolling, runs unattended. The `state`
+  returned in the redirect is verified. This is the mode to request.
+- `mode = "access_token"` — implicit, for a client id that only permits it.
+  One-hour token, **no refresh token**, re-pasted by hand. Raises a notice
+  saying so.
+
+Both go through the streaming `link_account` action, which verifies the result
+against `GET /api/v2/Account` before reporting success.
+
+Measured against the live `identity.mynuheat.com` (its documentation
+contradicts itself; these are probed facts, useful when NuHeat tells you which
+grant your client has):
 
 | client | grant | result |
 |---|---|---|
-| `swagger` | implicit (`token`, `id_token token`), scope `openapi` | accepted |
-| `swagger` | implicit + `offline_access` | rejected |
-| `swagger` | `code`, hybrid | rejected |
+| implicit-enabled client | `token` / `id_token token`, scope `openapi` | works |
+| the same | implicit + `offline_access` | rejected |
+| `swagger` (NuHeat's own docs client) | `code` / hybrid | rejected |
 | `swagger` | any redirect_uri but NuHeat's own | rejected |
 | `swagger`, `js` | password, device_code | `unauthorized_client` |
 
-`swagger` is the client id NuHeat's own Swagger UI ships (`/swagger/index.js`)
-and is usable by anyone. Hence two modes in `[nuheat.auth]`:
-
-- `mode = "access_token"` — implicit via `swagger`. No application to NuHeat,
-  but a **one-hour token with no refresh token**, pasted by hand through the
-  `link_account` action. For evaluation; the plugin raises a notice saying so.
-- `mode = "oauth"` — authorization code + PKCE against a client id from NuHeat
-  support, with `offline_access`. Refresh token (15 days, rolling), so the
-  plugin stays signed in. The `state` in the redirect is verified.
-
-Tokens are persisted to **core's learned state**
+Tokens persist to **core's learned state**
 (`homecore/plugins/plugin.nuheat/state`) via `PluginStateWriter`, not to the
 config file — same pattern as hc-hue's bridge `app_key`, and for the same
 reason: writing to the core-owned config would trip the hot-reload watcher.

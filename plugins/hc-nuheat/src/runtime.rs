@@ -34,6 +34,7 @@ use crate::config::NuHeatSection;
 use crate::device::{self, CommandContext, Intent, ScaleCheck};
 use crate::units;
 
+pub const NOTICE_NOT_CONFIGURED: &str = "not_configured";
 pub const NOTICE_NOT_LINKED: &str = "not_linked";
 pub const NOTICE_TOKEN_EXPIRING: &str = "token_expiring";
 pub const NOTICE_AUTH_REJECTED: &str = "auth_rejected";
@@ -115,6 +116,26 @@ impl Runtime {
     /// One poll: fetch every thermostat, publish it, reconcile if the fetch
     /// was trustworthy.
     pub async fn poll(&self) {
+        // Two different problems with two different fixes, and telling them
+        // apart is the whole point of raising them separately: a fresh install
+        // has no API credentials, whereas a configured one has simply not
+        // signed in yet. "Not signed in" sends someone to the wrong button.
+        if !self.auth.is_configured() {
+            self.notices.raise(
+                PluginNotice::warning(
+                    NOTICE_NOT_CONFIGURED,
+                    "No NuHeat API credentials, so no thermostats are published.",
+                )
+                .with_remedy(
+                    "Enter the client id and redirect URI NuHeat support issued you, under \
+                     \"NuHeat account\" in this plugin's configuration. Request them from \
+                     NuHeat at https://api.mynuheat.com/ if you do not have them yet.",
+                ),
+            );
+            return;
+        }
+        self.notices.clear(NOTICE_NOT_CONFIGURED);
+
         let bearer = match self.auth.bearer().await {
             Ok(b) => b,
             Err(e) => {
@@ -471,6 +492,7 @@ impl Runtime {
     pub fn status(&self) -> Value {
         let guard = self.known.lock().expect("known mutex");
         serde_json::json!({
+            "configured": self.auth.is_configured(),
             "linked": self.auth.is_linked(),
             "auth_mode": match self.auth.mode() {
                 AuthMode::AccessToken => "access_token",
@@ -545,10 +567,13 @@ mod tests {
         assert!(rt.wanted("anything"));
     }
 
+    /// A fresh install is unconfigured *and* unlinked, and the status has to
+    /// distinguish them — they send an operator to different places.
     #[test]
     fn a_status_snapshot_reports_what_the_plugin_knows() {
         let rt = runtime(NuHeatSection::default());
         let status = rt.status();
+        assert_eq!(status["configured"], serde_json::json!(false));
         assert_eq!(status["linked"], serde_json::json!(false));
         assert_eq!(status["auth_mode"], serde_json::json!("access_token"));
         assert_eq!(status["thermostats"], serde_json::json!(0));

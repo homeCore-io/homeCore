@@ -19,24 +19,44 @@
 //! | `swagger` | any redirect_uri but NuHeat's own | rejected |
 //! | `swagger`, `js` | password, device_code | `unauthorized_client` |
 //!
-//! `swagger` is the client id NuHeat's own Swagger UI ships
-//! (`/swagger/index.js`), and it is registered and usable by anyone. That makes
-//! it the no-paperwork path — but implicit cannot issue refresh tokens, so what
-//! it yields is a **one-hour access token and nothing to renew it with**.
+//! (`swagger` is the client id NuHeat's own Swagger UI ships in
+//! `/swagger/index.js`. It is registered, so the table above is a statement
+//! about a *real* client rather than a hypothetical one — but this plugin does
+//! not use it, and does not fall back to it. See "Whose client id" below.)
+//!
+//! ## Whose client id
+//!
+//! **The operator's own, always.** `client_id`, `client_secret` and
+//! `redirect_uri` come from `[nuheat.auth]` in the plugin configuration, in
+//! both modes, and nothing here substitutes a default when they are missing —
+//! an unconfigured plugin says so and stops rather than signing in as someone
+//! else's application.
+//!
+//! That is a deliberate choice and not merely a tidy one. A client id
+//! identifies *an application* to NuHeat: it is what their rate limits are
+//! counted against, what appears in their logs, and what an operator's consent
+//! is granted to. Borrowing the one their documentation tool ships would put
+//! every homeCore installation in the world behind one identity that nobody
+//! here controls and NuHeat never issued for this purpose — so a change at
+//! their end, or another user's traffic, would break every install at once.
 //!
 //! ## The two modes, and why both exist
 //!
-//! [`AuthMode::AccessToken`] is that path: the operator signs in at NuHeat, the
-//! token lands in the fragment of NuHeat's own redirect page, and they paste it
-//! into the `link_account` action. It works today with no application to file,
-//! and it needs redoing every hour, so it is for trying the plugin out rather
-//! than for leaving it running.
+//! Which grants a client id may use is decided per-client at NuHeat's end, so
+//! the operator's own credentials might permit one flow or the other:
 //!
-//! [`AuthMode::OAuth`] is the authorization-code flow against a client id
-//! issued by NuHeat support. With `offline_access` it returns a refresh token
-//! (15 days, rolling), which is what lets the plugin run unattended: this
-//! module renews the access token in the background and persists each new
-//! refresh token as it arrives.
+//! [`AuthMode::AccessToken`] is the implicit flow. The operator signs in at
+//! NuHeat, the token lands in the fragment of the redirect page, and they paste
+//! it into the `link_account` action. Implicit cannot issue refresh tokens, so
+//! this yields a **one-hour token with nothing to renew it with** — it needs
+//! redoing every hour, which makes it a way to try the plugin out rather than
+//! to leave it running.
+//!
+//! [`AuthMode::OAuth`] is the authorization-code flow with PKCE. With
+//! `offline_access` it returns a refresh token (15 days, rolling), which is
+//! what lets the plugin run unattended: this module renews the access token in
+//! the background and persists each new refresh token as it arrives. This is
+//! the mode to ask NuHeat for when requesting access.
 //!
 //! Both modes converge on [`Auth::bearer`], so nothing above this module knows
 //! which one is in play.
@@ -63,15 +83,6 @@ use tracing::{info, warn};
 pub const IDENTITY_BASE: &str = "https://identity.mynuheat.com";
 pub const API_BASE: &str = "https://api.mynuheat.com";
 
-/// The client id NuHeat's own Swagger UI is configured with, and the only one
-/// a third party can use without applying for access. Implicit grant only.
-pub const PUBLIC_CLIENT_ID: &str = "swagger";
-
-/// The one redirect URI registered for [`PUBLIC_CLIENT_ID`]. Anything else —
-/// localhost included — is rejected at `/connect/authorize`, which is why the
-/// token has to be copied out of the browser by hand in that mode.
-pub const PUBLIC_REDIRECT_URI: &str = "https://api.mynuheat.com/swagger/oauth2-redirect.html";
-
 /// Renew this long before the access token actually expires.
 ///
 /// A poll that starts just inside the deadline and takes a moment to reach the
@@ -89,9 +100,9 @@ const EXPIRY_WARNING: Duration = Duration::minutes(10);
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
-    /// Paste a token obtained through the implicit flow. No client id needed;
-    /// expires hourly with no way to renew.
-    #[default]
+    /// Paste a token obtained through the implicit flow. Expires hourly with
+    /// no way to renew, so it is the fallback for a client id NuHeat did not
+    /// enable the authorization-code grant for.
     AccessToken,
     /// Authorization code + PKCE against your own client id, with
     /// `offline_access` for a refresh token. Runs unattended.
@@ -99,6 +110,11 @@ pub enum AuthMode {
     /// Renamed explicitly: `rename_all = "snake_case"` turns `OAuth` into
     /// `o_auth`, which is not what the config descriptor offers or what anyone
     /// would type.
+    ///
+    /// The default, because it is the only mode that runs unattended and the
+    /// one to ask NuHeat for. A plugin defaulting to the hourly-expiry flow
+    /// would quietly be the wrong shape for almost every install.
+    #[default]
     #[serde(rename = "oauth")]
     OAuth,
 }
@@ -185,24 +201,16 @@ impl Auth {
         http: reqwest::Client,
         writer: PluginStateWriter,
     ) -> Self {
-        // In AccessToken mode the ids are fixed: they are the only pair the
-        // identity server will accept without a registration, so letting an
-        // operator override them would only produce a rejected authorize.
-        let (client_id, redirect_uri) = match mode {
-            AuthMode::AccessToken => (
-                PUBLIC_CLIENT_ID.to_string(),
-                PUBLIC_REDIRECT_URI.to_string(),
-            ),
-            AuthMode::OAuth => (
-                client_id.unwrap_or_default(),
-                redirect_uri.unwrap_or_default(),
-            ),
-        };
+        // The operator's credentials, in both modes, with no fallback. See
+        // "Whose client id" in the module documentation: signing in as an
+        // application NuHeat did not issue to this operator is not a default
+        // worth having.
+        let trimmed = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         Self {
             mode,
-            client_id,
-            client_secret: client_secret.filter(|s| !s.is_empty()),
-            redirect_uri,
+            client_id: trimmed(client_id).unwrap_or_default(),
+            client_secret: trimmed(client_secret),
+            redirect_uri: trimmed(redirect_uri).unwrap_or_default(),
             http,
             tokens: Arc::new(Mutex::new(Tokens::default())),
             writer,
@@ -256,12 +264,19 @@ impl Auth {
             }
             // Implicit tokens cannot be renewed; the pasted one is all there is.
             (AuthMode::AccessToken, _) => {
-                let guard = self.tokens.lock().expect("token mutex");
-                match guard.access_token.clone() {
+                let existing = {
+                    let guard = self.tokens.lock().expect("token mutex");
+                    guard.access_token.clone()
+                };
+                match existing {
                     Some(t) if !t.is_empty() => Ok(t),
-                    _ => bail!(
-                        "no access token — run the \"Link NuHeat account\" action and paste a fresh one"
-                    ),
+                    _ => {
+                        self.require_credentials()?;
+                        bail!(
+                            "no access token — run the \"Link NuHeat account\" action and paste \
+                             a fresh one"
+                        )
+                    }
                 }
             }
         }
@@ -289,6 +304,30 @@ impl Auth {
         guard.access_token.is_some() || guard.refresh_token.is_some()
     }
 
+    /// Whether the operator has supplied the credentials this plugin signs in
+    /// with. False is a configuration problem, not a sign-in one, and the two
+    /// deserve different notices.
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.redirect_uri.is_empty()
+    }
+
+    /// Name the missing configuration field, singular and specific.
+    fn require_credentials(&self) -> Result<()> {
+        if self.client_id.is_empty() {
+            bail!(
+                "no NuHeat client id — set nuheat.auth.client_id to the one NuHeat support \
+                 issued you"
+            );
+        }
+        if self.redirect_uri.is_empty() {
+            bail!(
+                "no redirect URI — set nuheat.auth.redirect_uri to one registered against \
+                 your NuHeat client id"
+            );
+        }
+        Ok(())
+    }
+
     /// The URL the operator opens to sign in, plus the PKCE secret that has to
     /// survive until they paste the result back.
     pub fn begin_authorization(&self) -> Result<PendingAuthorization> {
@@ -296,10 +335,16 @@ impl Auth {
         let verifier = random_urlsafe(48);
         let challenge = pkce_challenge(&verifier);
 
+        // Both modes, one check. There is no default to fall back on, so an
+        // unconfigured plugin has to say which field is missing rather than
+        // sending the operator to an identity-server error page that only says
+        // "invalid request".
+        self.require_credentials()?;
+
         let url = match self.mode {
             // Implicit: the access token comes back in the URL *fragment* of
-            // NuHeat's own redirect page, so there is no code to exchange and
-            // no PKCE to verify — the operator copies the token itself.
+            // the redirect page, so there is no code to exchange and no PKCE to
+            // verify — the operator copies the token itself.
             AuthMode::AccessToken => format!(
                 "{IDENTITY_BASE}/connect/authorize?client_id={}&response_type=token\
                  &scope=openapi&redirect_uri={}&state={state}&nonce={}",
@@ -307,22 +352,14 @@ impl Auth {
                 urlencoding::encode(&self.redirect_uri),
                 random_urlsafe(12),
             ),
-            AuthMode::OAuth => {
-                if self.client_id.is_empty() {
-                    bail!("oauth mode needs a client id — set nuheat.auth.client_id");
-                }
-                if self.redirect_uri.is_empty() {
-                    bail!("oauth mode needs a redirect uri — set nuheat.auth.redirect_uri");
-                }
-                format!(
-                    "{IDENTITY_BASE}/connect/authorize?client_id={}&response_type=code\
-                     &scope={}&redirect_uri={}&state={state}\
-                     &code_challenge={challenge}&code_challenge_method=S256",
-                    urlencoding::encode(&self.client_id),
-                    urlencoding::encode("openid openapi offline_access"),
-                    urlencoding::encode(&self.redirect_uri),
-                )
-            }
+            AuthMode::OAuth => format!(
+                "{IDENTITY_BASE}/connect/authorize?client_id={}&response_type=code\
+                 &scope={}&redirect_uri={}&state={state}\
+                 &code_challenge={challenge}&code_challenge_method=S256",
+                urlencoding::encode(&self.client_id),
+                urlencoding::encode("openid openapi offline_access"),
+                urlencoding::encode(&self.redirect_uri),
+            ),
         };
 
         Ok(PendingAuthorization {
@@ -601,21 +638,115 @@ mod tests {
         assert_eq!(extract_query_param(url, "nope"), None);
     }
 
-    /// The public client only works with NuHeat's own registered redirect, so
-    /// an operator's config values must not be able to break it.
+    /// Both modes sign in as the operator's own application. Nothing
+    /// substitutes a client id they did not enter.
     #[test]
-    fn access_token_mode_ignores_configured_client_details() {
-        let a = auth(AuthMode::AccessToken);
-        let pending = a.begin_authorization().expect("builds");
-        assert!(pending.url.contains("client_id=swagger"), "{}", pending.url);
+    fn both_modes_use_the_configured_client_details() {
+        for mode in [AuthMode::AccessToken, AuthMode::OAuth] {
+            let pending = auth(mode).begin_authorization().expect("builds");
+            assert!(
+                pending.url.contains("client_id=my-client"),
+                "{mode:?}: {}",
+                pending.url
+            );
+            let encoded_redirect = urlencoding::encode("http://localhost:9/cb").into_owned();
+            assert!(
+                pending.url.contains(&encoded_redirect),
+                "{mode:?}: {}",
+                pending.url
+            );
+        }
+    }
+
+    /// Implicit asks for a token directly and must not ask for
+    /// `offline_access`: the identity server rejects the combination, so a
+    /// stray scope turns a working link into an error page.
+    #[test]
+    fn access_token_mode_asks_for_a_token_without_offline_access() {
+        let pending = auth(AuthMode::AccessToken)
+            .begin_authorization()
+            .expect("builds");
         assert!(
             pending.url.contains("response_type=token"),
             "{}",
             pending.url
         );
-        // offline_access here is rejected by the identity server, so asking for
-        // it would turn a working link into an error page.
         assert!(!pending.url.contains("offline_access"), "{}", pending.url);
+    }
+
+    /// The regression this guards: an earlier version silently signed in as the
+    /// client id NuHeat's Swagger UI ships whenever the operator had not
+    /// configured one. That put every install behind one borrowed identity.
+    #[test]
+    fn no_mode_falls_back_to_a_borrowed_client_id() {
+        for mode in [AuthMode::AccessToken, AuthMode::OAuth] {
+            let a = Auth::new(
+                mode,
+                None,
+                None,
+                None,
+                reqwest::Client::new(),
+                PluginStateWriter::test_instance("plugin.nuheat"),
+            );
+            assert!(
+                !a.is_configured(),
+                "{mode:?} looked configured with nothing set"
+            );
+            let err = a.begin_authorization().expect_err("no credentials");
+            assert!(
+                err.to_string().contains("nuheat.auth.client_id"),
+                "{mode:?}: the error must name the field to fill in: {err}"
+            );
+            assert!(
+                !err.to_string().contains("swagger"),
+                "{mode:?}: must not suggest borrowing a client id: {err}"
+            );
+        }
+    }
+
+    /// A client id with no redirect URI cannot complete either flow, and the
+    /// message has to say which of the two is missing.
+    #[test]
+    fn a_missing_redirect_uri_is_named_separately() {
+        let a = Auth::new(
+            AuthMode::OAuth,
+            Some("my-client".into()),
+            None,
+            None,
+            reqwest::Client::new(),
+            PluginStateWriter::test_instance("plugin.nuheat"),
+        );
+        assert!(!a.is_configured());
+        let err = a.begin_authorization().expect_err("no redirect uri");
+        assert!(
+            err.to_string().contains("nuheat.auth.redirect_uri"),
+            "{err}"
+        );
+    }
+
+    /// Whitespace around a pasted client id is what copying out of an email
+    /// gives you, and an untrimmed one fails as an opaque identity-server
+    /// error rather than as anything a person could act on.
+    #[test]
+    fn credentials_are_trimmed() {
+        let a = Auth::new(
+            AuthMode::OAuth,
+            Some("  my-client \n".into()),
+            Some("   ".into()),
+            Some(" http://localhost:9/cb ".into()),
+            reqwest::Client::new(),
+            PluginStateWriter::test_instance("plugin.nuheat"),
+        );
+        assert!(a.is_configured());
+        let pending = a.begin_authorization().expect("builds");
+        assert!(
+            pending.url.contains("client_id=my-client"),
+            "{}",
+            pending.url
+        );
+        // A secret that is only spaces is no secret: it must not be sent as
+        // one, or a public client's token request is rejected.
+        assert!(a.client_secret.is_none());
     }
 
     #[test]
