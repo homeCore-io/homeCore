@@ -469,6 +469,7 @@ fn build_catalogue() -> Vec<WidgetSpec> {
                 WidgetField::string("attribute").required(),
                 WidgetField::integer("limit", 1),
                 WidgetField::integer("timeframe_hours", 1),
+                WidgetField::new("bare", "boolean"),
             ],
         ),
         spec(
@@ -629,6 +630,27 @@ fn element_widgets() -> Vec<WidgetSpec> {
                 WidgetField::string("corner"),
                 WidgetField::new("rotation", "integer"),
                 WidgetField::string("path").allowing_empty(),
+            ],
+        ),
+        // What a set of devices is made of, as proportional bars. A
+        // `stat_summary` answers how many; this answers how many next to
+        // everything else, which is the question a breakdown asks.
+        spec(
+            "device_breakdown",
+            vec![
+                WidgetField::string("group_by").allowing_empty(),
+                WidgetField::integer("limit", 1),
+                WidgetField::string("ink").allowing_empty(),
+            ],
+        ),
+        // What wants attention, as a short list — as opposed to `event_feed`,
+        // which is what just happened. A house page needs the first and was
+        // being given the second.
+        spec(
+            "worth_knowing",
+            vec![
+                WidgetField::integer("limit", 1),
+                WidgetField::new("faults_only", "boolean"),
             ],
         ),
         spec(
