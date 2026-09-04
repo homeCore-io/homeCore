@@ -26,11 +26,62 @@ fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     }
 }
 
+/// A writable attribute, with its range where it has one.
+fn rw(kind: AttributeKind, display: &str, unit: Option<&str>) -> AttributeSchema {
+    AttributeSchema {
+        kind,
+        writable: true,
+        display_name: Some(display.to_string()),
+        unit: unit.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+/// **What a dimmer is, said out loud.**
+///
+/// `translate_output_state` has always published `brightness_pct` and
+/// `translate_command` has always accepted it — the level round trip works and
+/// always has. What was missing was the *declaration*, and a client that will
+/// not offer a control the plugin has not promised is left with nothing to
+/// draw: every Lutron dimmer in the house showed a brightness it could read
+/// and a slider it could not move. John, on the Office's Overhead: *"The
+/// brightness shows 25% but there's no visible bar."*
+///
+/// Only the kinds that really take one. A Switch is on or off, a Pico accepts
+/// nothing at all, and declaring a level for either would be the opposite
+/// mistake.
+fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>> {
+    match kind {
+        DeviceKind::Dimmer => Some(vec![
+            ("on".into(), rw(AttributeKind::Bool, "Power", None)),
+            (
+                "brightness_pct".into(),
+                AttributeSchema {
+                    min: Some(0.0),
+                    max: Some(100.0),
+                    step: Some(1.0),
+                    ..rw(AttributeKind::Integer, "Brightness", Some("%"))
+                },
+            ),
+        ]),
+        DeviceKind::Switch => Some(vec![("on".into(), rw(AttributeKind::Bool, "Power", None))]),
+        _ => None,
+    }
+}
+
 /// The schema for one device, or `None` for kinds with nothing to declare.
 ///
 /// A Pico gets one: it accepts no commands at all (truly read-only hardware),
 /// but its button catalogue is exactly what a trigger picker needs.
 pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
+    if let Some(attrs) = output_attributes(&cfg.kind) {
+        let schema = DeviceSchema {
+            attributes: attrs.into_iter().collect(),
+            ..Default::default()
+        };
+        return serde_json::to_value(&schema).ok();
+    }
+
     match cfg.kind {
         DeviceKind::Keypad | DeviceKind::Vcrx | DeviceKind::Pico => {}
         _ => return None,
@@ -208,7 +259,14 @@ mod tests {
 
     #[test]
     fn a_dimmer_has_no_button_schema() {
-        assert!(device_schema_json(&cfg(DeviceKind::Dimmer, vec![])).is_none());
+        // It has a schema now — its level, which it always accepted and never
+        // declared — but nothing about buttons, which is what this has always
+        // been about. A dimmer has no buttons and takes no press.
+        let v = device_schema_json(&cfg(DeviceKind::Dimmer, vec![])).unwrap();
+        let attrs = v["attributes"].as_object().unwrap();
+        assert!(!attrs.keys().any(|k| k.starts_with("button")));
+        assert!(attrs.get("available_buttons").is_none());
+        assert!(v.get("actions").is_none());
     }
 
     #[test]
@@ -250,5 +308,62 @@ mod tests {
         let src = &v["actions"][0]["params"][0]["options_from"]["attribute"];
         assert_eq!(src["label_key"], "name");
         assert_eq!(src["value_key"], "number");
+    }
+}
+
+#[cfg(test)]
+mod output_schema_tests {
+    use super::*;
+    use crate::config::DeviceConfig;
+
+    fn cfg(kind: DeviceKind) -> DeviceConfig {
+        DeviceConfig {
+            integration_id: 1,
+            name: "Test".into(),
+            kind,
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons: vec![],
+            all_buttons: vec![],
+            button_names: vec![],
+            ccis: vec![],
+        }
+    }
+
+    /// **A dimmer that never said it could be dimmed.**
+    ///
+    /// The level round trip has always worked — `translate_output_state`
+    /// publishes `brightness_pct` and `translate_command` accepts it — but
+    /// nothing declared it, and a client that refuses to offer a control the
+    /// plugin has not promised had nothing to draw. Every Lutron dimmer in the
+    /// house showed a brightness it could read and a slider it could not move.
+    #[test]
+    fn a_dimmer_declares_the_level_it_already_takes() {
+        let v = device_schema_json(&cfg(DeviceKind::Dimmer)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        let b = &attrs["brightness_pct"];
+        assert_eq!(b["writable"], true);
+        assert_eq!(b["min"], 0.0);
+        assert_eq!(b["max"], 100.0);
+        assert_eq!(b["unit"], "%");
+        assert_eq!(attrs["on"]["writable"], true);
+    }
+
+    #[test]
+    fn a_switch_declares_power_and_no_level() {
+        // Declaring a level for something that is on or off would be the
+        // opposite mistake: a slider that cannot mean anything.
+        let v = device_schema_json(&cfg(DeviceKind::Switch)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert_eq!(attrs["on"]["writable"], true);
+        assert!(!attrs.contains_key("brightness_pct"));
+    }
+
+    #[test]
+    fn a_shade_is_left_alone() {
+        // Phase 2, and a control declared before the command path takes it is
+        // exactly the failure this fixes, pointed the other way.
+        assert!(device_schema_json(&cfg(DeviceKind::Shade)).is_none());
     }
 }
