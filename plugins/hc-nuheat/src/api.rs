@@ -258,16 +258,24 @@ impl NuHeatApi {
             return Err(ApiError::Unauthorized);
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            // NuHeat publishes `X-Rate-Limit-Reset`; `Retry-After` is the
-            // standard header and may appear instead. Either is better than
-            // guessing an interval.
-            let retry_after = response
-                .headers()
+            // Two headers, two formats, and they are not interchangeable:
+            // NuHeat's 429 carries `Retry-After` in whole seconds, while
+            // `X-Rate-Limit-Reset` is an ISO-8601 instant. Parsing the latter
+            // as a number silently yields nothing, which is how "retrying in
+            // about N s" quietly stops appearing in the notice.
+            let headers = response.headers();
+            let retry_after = headers
                 .get("retry-after")
-                .or_else(|| response.headers().get("x-rate-limit-reset"))
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Duration::from_secs);
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .or_else(|| {
+                    let reset = headers.get("x-rate-limit-reset")?.to_str().ok()?;
+                    let at = chrono::DateTime::parse_from_rfc3339(reset.trim()).ok()?;
+                    (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                        .to_std()
+                        .ok()
+                });
             return Err(ApiError::RateLimited { retry_after });
         }
         let body = response.text().await.unwrap_or_default();
@@ -319,6 +327,28 @@ mod tests {
         assert_eq!(t.current_temperature, None);
         assert_eq!(t.mode, None);
         assert!(!t.online);
+    }
+
+    /// The two rate-limit headers carry different formats. Reading the
+    /// ISO-8601 one as a number is silent — it just never produces a delay —
+    /// so both shapes are pinned here.
+    #[test]
+    fn both_rate_limit_header_formats_are_understood() {
+        // Retry-After: whole seconds, per NuHeat's documented 429.
+        assert_eq!("58".trim().parse::<u64>().ok(), Some(58));
+
+        // X-Rate-Limit-Reset: an instant, not a count.
+        let reset = (chrono::Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&reset)
+            .expect("an ISO-8601 instant")
+            .with_timezone(&chrono::Utc);
+        let left = (parsed - chrono::Utc::now())
+            .to_std()
+            .expect("in the future");
+        assert!((85..=90).contains(&left.as_secs()), "{} s", left.as_secs());
+
+        // ...and read as a number it yields nothing at all, which is the bug.
+        assert_eq!(reset.parse::<u64>().ok(), None);
     }
 
     #[test]
