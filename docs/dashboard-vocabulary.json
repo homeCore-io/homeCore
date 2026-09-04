@@ -1617,6 +1617,17 @@
           "allow_empty": true
         },
         {
+          "name": "watch",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "low_battery",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
           "name": "faults_only",
           "type": "boolean",
           "required": false
