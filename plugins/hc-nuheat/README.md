@@ -22,19 +22,58 @@ src/
 
 ## Signing in — read this before installing
 
-**You supply your own NuHeat API credentials.** Request them from NuHeat
-support — <https://api.mynuheat.com/> has the link — and enter the client id
-and redirect URI under **NuHeat account** in the plugin's configuration.
-
-This plugin deliberately ships no client id of its own. A client id identifies
-*an application* to NuHeat: it is what their rate limits are counted against,
-what appears in their logs, and what a user's consent is granted to. Shipping
-one would put every homeCore installation behind a single identity that nobody
-here controls.
+**You supply your own NuHeat API credentials.** This plugin ships no client id
+of its own — see [Why per-user credentials](#why-per-user-credentials) — so the
+first step is requesting your own from NuHeat, and it is worth doing before you
+install anything, because it involves waiting on a human.
 
 NuHeat's API is OAuth2-only. The session endpoint that older third-party NuHeat
 integrations used (`POST /api/authenticate/user`, returning a `SessionId`) no
 longer exists — it answers 404.
+
+### Requesting credentials
+
+Use the **Request access to the API** link on <https://api.mynuheat.com/>. Ask
+for specifically this, because the defaults are unlikely to be what you need:
+
+| | |
+|---|---|
+| **Grant types** | `authorization_code` **and** `refresh_token` |
+| **Scopes** | `openid`, `openapi`, `offline_access` |
+| **Redirect URI** | one you choose — `http://127.0.0.1:8127/nuheat/callback` is fine |
+
+Something you can send:
+
+> I'd like a ClientID for the NuHeat OpenAPI, to connect my own NuHeat
+> thermostats to a self-hosted home automation server. Please configure it with
+> grant types `authorization_code` and `refresh_token`, scopes `openid`,
+> `openapi` and `offline_access`, and the redirect URI
+> `http://127.0.0.1:8127/nuheat/callback`.
+
+**Ask for the authorization code flow, not implicit.** Implicit cannot issue a
+refresh token — I verified that their server rejects `offline_access` on it —
+so an implicit-only client leaves you pasting a new token every hour. If that
+is all they will give you, the plugin still works: set `mode = "access_token"`.
+
+Nothing needs to be listening on the redirect URI. You sign in, NuHeat sends
+your browser there with `?code=…`, the browser shows a connection error, and
+you copy the address out of the address bar. Use *exactly* the URI they
+registered — NuHeat rejects any difference, a trailing slash included.
+
+### Why per-user credentials
+
+The usual arrangement for an integration like this is one client id registered
+to the project, with each user signing in under it. That was considered and is
+not what this does, for one practical reason: it requires a **public** client,
+because a secret shipped inside an open-source plugin is not a secret. NuHeat
+is unlikely to issue one, and a confidential client's secret cannot be
+distributed.
+
+So each installation registers its own. It is more work for you once, and in
+exchange the credentials are yours: your consent, your logs at NuHeat's end,
+and — per their documentation — your own rate-limit budget, since limits are
+counted "per user & per client" and one client's users do not affect each
+other.
 
 ### Which flow — `[nuheat.auth] mode`
 

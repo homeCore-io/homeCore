@@ -60,10 +60,22 @@ config_scale = "celsius"
 # NuHeat's API is OAuth2-only; the old session endpoint no longer exists, and
 # you sign in with YOUR OWN API credentials.
 #
-# Request them from NuHeat support — https://api.mynuheat.com/ has the link.
-# This plugin deliberately ships no client id of its own: a client id
-# identifies an application to NuHeat, and it is what their rate limits, their
-# logs and a user's consent are all counted against.
+# Request them via the "Request access to the API" link at
+# https://api.mynuheat.com/, and ask for exactly this:
+#
+#     grant types:  authorization_code and refresh_token
+#     scopes:       openid, openapi, offline_access
+#     redirect URI: http://127.0.0.1:8127/nuheat/callback   (or your own)
+#
+# Ask for the authorization code flow, NOT implicit — implicit cannot issue a
+# refresh token, so it leaves you pasting a new one every hour.
+#
+# Nothing needs to listen on the redirect URI: you sign in, NuHeat sends the
+# browser there with ?code=..., and you copy the address out of the address bar.
+#
+# This plugin ships no client id of its own. The usual one-client-per-project
+# arrangement needs a PUBLIC client, since a secret inside an open-source plugin
+# is not a secret, and NuHeat is unlikely to issue one.
 #
 # `mode` says which flow NuHeat enabled for your client id — they decide that
 # per client:

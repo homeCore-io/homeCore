@@ -224,9 +224,23 @@ pub fn config_descriptor() -> serde_json::Value {
             Section::new("account", "NuHeat account")
                 .help(
                     "NuHeat's API is OAuth2-only, and you sign in with your own API \
-                     credentials. Request them from NuHeat support — \
-                     https://api.mynuheat.com/ has the link.",
+                     credentials. Request them from NuHeat support — the \
+                     \"Request access to the API\" link at https://api.mynuheat.com/.",
                 )
+                // An end user requesting API access has to know what to ask
+                // for, and NuHeat's own page does not tell them. Without this
+                // the likely outcome is an implicit-only client, which cannot
+                // hold a refresh token — so the plugin would work for an hour
+                // and then stop, for a reason nothing on this page explains.
+                .field(Field::note(
+                    "What to ask NuHeat for: a ClientID for the NuHeat OpenAPI with grant \
+                     types \"authorization_code\" and \"refresh_token\", scopes \"openid\", \
+                     \"openapi\" and \"offline_access\", and a redirect URI of your choosing \
+                     — \"http://127.0.0.1:8127/nuheat/callback\" is fine, and nothing needs \
+                     to be listening on it. Ask for the authorization code flow rather than \
+                     implicit: implicit cannot issue a refresh token, so you would have to \
+                     paste a new one every hour.",
+                ))
                 .field(
                     Field::text("nuheat.auth.client_id")
                         .label("Client ID")
@@ -243,17 +257,19 @@ pub fn config_descriptor() -> serde_json::Value {
                         .label("Redirect URI")
                         .required()
                         .help(
-                            "One of the redirect URIs registered against your client id. \
-                             It only has to receive the browser and show you what came back \
-                             — this plugin never calls it.",
+                            "Exactly the redirect URI registered against your client id — \
+                             NuHeat rejects any difference, including a trailing slash. It \
+                             only has to receive the browser so you can copy the address; \
+                             this plugin never calls it, and nothing needs to be listening.",
                         ),
                 )
                 .field(
                     Field::secret("nuheat.auth.client_secret")
                         .label("Client secret")
                         .help(
-                            "Only if NuHeat issued you a confidential client. Leave empty \
-                             for a public client, which uses PKCE instead.",
+                            "NuHeat will most likely issue a confidential client, which \
+                             comes with a secret — paste it here. Leave empty only if they \
+                             issued a public client, which uses PKCE alone.",
                         ),
                 )
                 .field(

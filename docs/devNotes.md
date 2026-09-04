@@ -5121,12 +5121,32 @@ Source: `plugins/hc-nuheat/` (in this repo). Plugin README:
 ### Signing in — operator-supplied credentials
 
 **The operator enters their own NuHeat API credentials** (`client_id`,
-`redirect_uri`, optional `client_secret`) under `[nuheat.auth]`. The plugin
-ships none and falls back to none: a client id identifies an application to
-NuHeat and is what their rate limits, their logs and a user's consent are
-counted against, so shipping one would put every homeCore install behind a
-single identity nobody here controls. Credentials are requested from NuHeat
-support — https://api.mynuheat.com/ has the link.
+`redirect_uri`, `client_secret`) under `[nuheat.auth]`. The plugin ships none
+and falls back to none.
+
+Decided by John, 2026-09-04, after weighing the usual alternative: one client
+id registered to the homeCore project with every user signing in under it. That
+model is the norm for this kind of integration, and NuHeat's rate limits would
+permit it — their docs say limits are "per user & per client basis... it does
+not affect the other users of that client id", so a shared client id would
+**not** pool anyone's budget. It was rejected on one practical ground: it needs
+a **public** client, because a secret shipped inside an open-source plugin is
+not a secret, and NuHeat is unlikely to issue a public client. A confidential
+client's secret cannot be distributed, so per-user registration it is.
+
+(This supersedes an earlier rationale in the git history claiming a shared
+client id would pool rate limits. Their documentation says otherwise. The
+argument that stands is about the secret, not the limits.)
+
+Credentials are requested through the "Request access to the API" link at
+https://api.mynuheat.com/. **The plugin tells the operator what to ask for** —
+a note in the config descriptor, repeated in the README and example config —
+because NuHeat's page does not, and the likely default is an implicit-only
+client that cannot hold a refresh token: the plugin would work for an hour and
+then stop for a reason nothing on the page explains. Ask for
+`authorization_code` + `refresh_token`, scopes `openid`/`openapi`/
+`offline_access`, and any redirect URI (nothing listens on it — the operator
+copies the address bar).
 
 An unconfigured plugin raises a `not_configured` notice and polls nothing.
 That is deliberately a *different* notice from `not_linked`: no credentials and
