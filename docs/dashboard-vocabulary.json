@@ -250,6 +250,11 @@
           "required": false
         },
         {
+          "name": "picks",
+          "type": "boolean",
+          "required": false
+        },
+        {
           "name": "on_tap",
           "type": "object",
           "required": false

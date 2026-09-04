@@ -419,7 +419,19 @@ fn spec(r#type: &str, fields: Vec<WidgetField>) -> WidgetSpec {
 
 fn build_catalogue() -> Vec<WidgetSpec> {
     let mut widgets = vec![
-        spec("device_grid", selection_fields(false)),
+        spec("device_grid", {
+            let mut f = selection_fields(false);
+            // Only the grid. Whether tapping a tile aims the page's controls at
+            // that device rather than opening it — a room has four lamps and
+            // one set of controls, and which lamp they point at is the
+            // viewer's decision. Declared here rather than on the shared
+            // selection block because the other three elements that share it
+            // have no such control, and core advertising a field no editor
+            // offers is a setting a document can carry and this app cannot
+            // change.
+            f.push(WidgetField::new("picks", "boolean"));
+            f
+        }),
         spec("device_list", selection_fields(false)),
         spec("device_tile", selection_fields(false)),
         spec("media_player", selection_fields(false)),
