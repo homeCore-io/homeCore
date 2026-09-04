@@ -5153,8 +5153,13 @@ That is deliberately a *different* notice from `not_linked`: no credentials and
 "credentials present, not signed in yet" send an operator to different places.
 
 NuHeat's API is OAuth2-only. The session endpoint older third-party NuHeat
-integrations used (`POST /api/authenticate/user` → `SessionId`) is **gone** —
-it answers 404 as of 2026-09-04. There is no unofficial fallback.
+integrations used (`POST /api/authenticate/user` → `SessionId`, email/password,
+no client id) is **gone with its host**: `www.mynuheat.com` is decommissioned.
+`api.mynuheat.com` is a different service and never served those routes — an
+earlier note here said "answers 404", which was a probe against the wrong host.
+There is no unofficial fallback. The RTI driver at
+`~/Github/simplextech/rti_nuheat` is built on that dead API and is useful now
+only as a record of the old wire format.
 
 `mode` picks the flow, because NuHeat enables grants per client id:
 
@@ -5188,10 +5193,13 @@ reason: writing to the core-owned config would trip the hot-reload watcher.
 ### Temperature units
 
 NuHeat's wire format is **integer hundredths of a degree Celsius** — their
-documented example is `"setPointTemp": 3000` = 30.00 °C = 86 °F. Their prose
-says "1/10 °C" and every worked example contradicts it, so this is inferred.
+documented example is `"setPointTemp": 3000` = 30.00 °C = 86 °F. Corroborated
+independently by the RTI driver (`lib/Utils.js`: `JCtoC` = `input / 100`,
+`FtoJC` = `°C * 100`), which ran against the live service. Their prose still
+says "1/10 °C", so this is well-supported but never actually documented.
 
-Because being wrong there would be wrong by a factor of ten and silent,
+Because it is corroborated rather than documented, and being wrong would be
+wrong by a factor of ten and silent,
 `units::decode_celsius` refuses any reading that decodes outside −30..70 °C:
 the value is withheld and an `implausible_reading` error notice is raised
 rather than publishing plausible nonsense.

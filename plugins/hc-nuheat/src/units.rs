@@ -6,6 +6,19 @@
 //! the NuHeat app shows as its maximum. Everything else in the API uses the
 //! same units, `currentTemperature` included.
 //!
+//! Two independent sources agree on that. Besides NuHeat's own example, the
+//! RTI control driver for these thermostats did exactly this against the live
+//! service, in `lib/Utils.js`:
+//!
+//! ```js
+//! function JCtoC(input) { var _JC = input / 100; ... }   // raw ÷ 100 = °C
+//! function FtoJC(input) { ... var _JC = _C * 100; ... }  // °C × 100 = raw
+//! ```
+//!
+//! (It drove the older `www.mynuheat.com` session API, since decommissioned,
+//! but the thermostats and their firmware are the same and the field carried
+//! the same units.)
+//!
 //! homeCore publishes and accepts **degrees Celsius as a float**, because that
 //! is what every other plugin in this repository does and what the `thermostat`
 //! dashboard widget binds to. The operator may prefer Fahrenheit, which is a
@@ -16,9 +29,9 @@
 //!
 //! ## Why the range check exists
 //!
-//! The unit scale is inferred from NuHeat's documented example rather than
-//! stated outright in their reference — the prose says "1/10 °C" in one place
-//! and every worked example contradicts it. If that inference is ever wrong,
+//! The scale is nowhere *stated* — their prose says "1/10 °C" in one place and
+//! both sources above contradict it. Corroborated is not the same as
+//! documented, and if the reading is ever wrong,
 //! being wrong by a factor of ten is the failure mode, and it is silent: a
 //! plugin that reads `2100` as 210 °C publishes a plausible-looking number
 //! that no rule threshold will ever match. [`decode_celsius`] therefore
@@ -177,12 +190,17 @@ mod tests {
     /// Their reference sends `"setPointTemp": 3000` as an ordinary comfortable
     /// hold. That is 30.00 °C / 86 °F under this scale and 300 °C under the
     /// "1/10 °C" the prose claims, which is what settles which reading is real.
+    /// The RTI driver's `JCtoC` (`input / 100`) is the second source that
+    /// agrees.
     #[test]
     fn the_documented_example_decodes_to_a_floor_temperature() {
         assert_eq!(decode_celsius(3000), Some(30.0));
         assert_eq!(c_to_f(30.0), 86.0);
     }
 
+    /// 2222 is also exactly what the RTI driver's `FtoJC` produces for 72 °F
+    /// — `round((72 - 32) * 5/9 * 100)` — so this pins agreement with a driver
+    /// that ran against the real service, not just with the documentation.
     #[test]
     fn a_room_temperature_round_trips() {
         // 72 °F, the number a person actually sets.

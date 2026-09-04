@@ -27,9 +27,13 @@ of its own — see [Why per-user credentials](#why-per-user-credentials) — so 
 first step is requesting your own from NuHeat, and it is worth doing before you
 install anything, because it involves waiting on a human.
 
-NuHeat's API is OAuth2-only. The session endpoint that older third-party NuHeat
-integrations used (`POST /api/authenticate/user`, returning a `SessionId`) no
-longer exists — it answers 404.
+NuHeat's API is OAuth2-only, and there is no way around that. The session
+endpoint older third-party NuHeat integrations used — `POST
+/api/authenticate/user` with an email and password, returning a `SessionId`,
+needing no client id at all — went away with the host that served it:
+`www.mynuheat.com` is decommissioned. `api.mynuheat.com` is a different service
+and never had those routes. Anything you find describing that flow, including
+existing drivers built on it, no longer works.
 
 ### Requesting credentials
 
@@ -181,10 +185,11 @@ advertises the narrowed range so clients draw sliders that stop there.
 
 NuHeat carries temperatures as integer **hundredths of a degree Celsius** —
 their documented hold example is `"setPointTemp": 3000`, i.e. 30.00 °C / 86 °F.
-Their prose says "1/10 °C" in one place and every worked example contradicts
-it, so this is inferred rather than stated.
+The RTI control driver for these thermostats did the same arithmetic against
+the live service (`JCtoC` is `input / 100`), so two independent sources agree.
 
-Being wrong about that would be wrong by a factor of ten, silently. So
+Their prose still says "1/10 °C" in one place, and corroborated is not the same
+as documented. Being wrong here would be wrong by a factor of ten, silently. So
 `units::decode_celsius` refuses to publish a reading that decodes to something
 no floor reaches, and the plugin raises an error notice instead. If NuHeat ever
 changes the scale, this plugin stops rather than publishing plausible nonsense.

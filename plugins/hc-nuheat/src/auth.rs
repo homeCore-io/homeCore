@@ -1,10 +1,12 @@
 //! Getting — and keeping — a bearer token for the NuHeat OpenAPI.
 //!
 //! Every endpoint is `security: [{oauth2: []}]`, and the old session API that
-//! third-party NuHeat integrations used to call (`POST /api/authenticate/user`,
-//! returning a `SessionId`) is gone: it answers 404. So OAuth2 against
-//! `identity.mynuheat.com` is the only way in, and which flow is available
-//! depends entirely on the client id.
+//! third-party NuHeat integrations used to call — `POST /api/authenticate/user`
+//! returning a `SessionId`, with email and password and no client id at all —
+//! is gone with the host that served it. That API lived on `www.mynuheat.com`,
+//! which is decommissioned; `api.mynuheat.com` is a different service and has
+//! never had those routes. So OAuth2 against `identity.mynuheat.com` is the
+//! only way in, and which flow is available depends entirely on the client id.
 //!
 //! ## What the identity server actually permits
 //!
