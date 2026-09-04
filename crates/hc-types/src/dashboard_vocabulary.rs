@@ -430,6 +430,10 @@ fn build_catalogue() -> Vec<WidgetSpec> {
             // offers is a setting a document can carry and this app cannot
             // change.
             f.push(WidgetField::new("picks", "boolean"));
+            // Tiles or pills. A pill is as wide as its name, so a row of them
+            // never cuts one off — which a fixed tile does the moment the name
+            // is longer than the box.
+            f.push(WidgetField::string("layout").allowing_empty());
             f
         }),
         spec("device_list", selection_fields(false)),
