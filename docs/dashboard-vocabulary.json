@@ -1611,6 +1611,12 @@
           "min": 1
         },
         {
+          "name": "area_name",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
           "name": "faults_only",
           "type": "boolean",
           "required": false
