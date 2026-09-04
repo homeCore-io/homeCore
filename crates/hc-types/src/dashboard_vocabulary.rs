@@ -656,6 +656,7 @@ fn element_widgets() -> Vec<WidgetSpec> {
             "worth_knowing",
             vec![
                 WidgetField::integer("limit", 1),
+                WidgetField::string("area_name").allowing_empty(),
                 WidgetField::new("faults_only", "boolean"),
             ],
         ),
