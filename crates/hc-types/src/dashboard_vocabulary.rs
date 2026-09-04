@@ -502,6 +502,16 @@ fn build_catalogue() -> Vec<WidgetSpec> {
             vec![
                 WidgetField::string("scope").allowing_empty(),
                 WidgetField::string("room").allowing_empty(),
+                // Whose scenes, when the scope is `device`. A Hue scene belongs
+                // to a room's group, so listing them beside a room's lights AND
+                // under the picked light says them twice.
+                //
+                // `device_id`, not `device`: export strips device references by
+                // field NAME, so one spelled any other way would survive an
+                // export still pointing at another house's device.
+                WidgetField::string("device_id")
+                    .allowing_empty()
+                    .points_at(Reference::Device),
             ],
         ),
         WidgetSpec {

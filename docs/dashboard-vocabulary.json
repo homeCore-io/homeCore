@@ -1174,6 +1174,13 @@
           "allow_empty": true
         },
         {
+          "name": "device_id",
+          "type": "string",
+          "required": false,
+          "allow_empty": true,
+          "reference": "device"
+        },
+        {
           "name": "on_tap",
           "type": "object",
           "required": false
