@@ -214,12 +214,17 @@
         },
         {
           "name": "facet",
-          "type": "string",
+          "type": "string_or_strings",
           "required": true,
           "when": {
             "field": "selection_mode",
             "equals": "facet"
           }
+        },
+        {
+          "name": "except",
+          "type": "array",
+          "required": false
         },
         {
           "name": "add",
@@ -298,12 +303,17 @@
         },
         {
           "name": "facet",
-          "type": "string",
+          "type": "string_or_strings",
           "required": true,
           "when": {
             "field": "selection_mode",
             "equals": "facet"
           }
+        },
+        {
+          "name": "except",
+          "type": "array",
+          "required": false
         },
         {
           "name": "add",
@@ -411,12 +421,17 @@
         },
         {
           "name": "facet",
-          "type": "string",
+          "type": "string_or_strings",
           "required": true,
           "when": {
             "field": "selection_mode",
             "equals": "facet"
           }
+        },
+        {
+          "name": "except",
+          "type": "array",
+          "required": false
         },
         {
           "name": "add",
@@ -951,12 +966,17 @@
         },
         {
           "name": "facet",
-          "type": "string",
+          "type": "string_or_strings",
           "required": true,
           "when": {
             "field": "selection_mode",
             "equals": "facet"
           }
+        },
+        {
+          "name": "except",
+          "type": "array",
+          "required": false
         },
         {
           "name": "add",
