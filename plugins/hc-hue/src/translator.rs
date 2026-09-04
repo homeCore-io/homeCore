@@ -249,6 +249,7 @@ pub fn light_state(light: &HueLight) -> Value {
     }
     if let Some(mirek) = light.color_temp_mirek {
         state["color_temp_mirek"] = json!(mirek);
+        state["color_temp"] = json!(kelvin_from_mirek(mirek));
     }
     if let Some((x, y)) = light.color_xy {
         state["color_xy"] = json!({ "x": x, "y": y });
@@ -275,12 +276,38 @@ pub fn light_state(light: &HueLight) -> Value {
     }
     if let Some(min) = light.mirek_min {
         state["color_temp_mirek_min"] = json!(min);
+        // Mirek runs backwards to Kelvin, so the smallest mirek is the
+        // *largest* Kelvin. Getting this pair the obvious way round would
+        // hand every warmth control an inverted scale.
+        state["color_temp_max"] = json!(kelvin_from_mirek(min));
     }
     if let Some(max) = light.mirek_max {
         state["color_temp_mirek_max"] = json!(max);
+        state["color_temp_min"] = json!(kelvin_from_mirek(max));
     }
 
     state
+}
+
+/// Kelvin from mirek — the reciprocal megakelvin Hue speaks in.
+///
+/// homeCore's own vocabulary for colour temperature is Kelvin: the device
+/// schema advertises `color_temp` in K, and the warmth control paints a
+/// blue-to-amber scale that only means anything the Kelvin way round. Mirek
+/// stops at this boundary, which is where the bridge's units belong.
+pub fn kelvin_from_mirek(mirek: u16) -> u32 {
+    if mirek == 0 {
+        return 0;
+    }
+    (1_000_000f64 / f64::from(mirek)).round() as u32
+}
+
+/// Mirek from Kelvin, clamped to the range every Hue light accepts.
+pub fn mirek_from_kelvin(kelvin: f64) -> u16 {
+    if kelvin <= 0.0 {
+        return 500;
+    }
+    ((1_000_000f64 / kelvin).round() as i64).clamp(153, 500) as u16
 }
 
 pub fn light_capabilities(light: &HueLight) -> Value {
@@ -657,5 +684,55 @@ mod tests {
             state.get("supports_identify").and_then(Value::as_bool),
             Some(true)
         );
+    }
+}
+
+#[cfg(test)]
+mod colour_temperature_tests {
+    use super::*;
+
+    /// **The schema promised Kelvin and the plugin only ever spoke mirek.**
+    ///
+    /// `build_light_schema` advertises `color_temp` as a writable attribute in
+    /// Kelvin, 2000–6535. Nothing published it and nothing accepted it, so a
+    /// warmth control on a Hue light read `—` forever and every drag went
+    /// nowhere. Found by putting one on a page and looking at it.
+    #[test]
+    fn kelvin_and_mirek_are_reciprocal() {
+        // The two ends of the range every Hue light reports.
+        assert_eq!(kelvin_from_mirek(153), 6536);
+        assert_eq!(kelvin_from_mirek(500), 2000);
+        // The lamp on the office page, which read nothing at all.
+        assert_eq!(kelvin_from_mirek(366), 2732);
+    }
+
+    #[test]
+    fn a_kelvin_write_lands_on_the_mirek_the_bridge_wants() {
+        assert_eq!(mirek_from_kelvin(2732.0), 366);
+        assert_eq!(mirek_from_kelvin(2000.0), 500);
+        assert_eq!(mirek_from_kelvin(6535.0), 153);
+    }
+
+    #[test]
+    fn a_write_outside_the_range_is_clamped_rather_than_refused() {
+        // A slider handed the schema's own bounds can land a hair outside
+        // them; the bridge rejects the whole command for one stray unit.
+        assert_eq!(mirek_from_kelvin(10_000.0), 153);
+        assert_eq!(mirek_from_kelvin(1_000.0), 500);
+        assert_eq!(mirek_from_kelvin(0.0), 500);
+        assert_eq!(mirek_from_kelvin(-5.0), 500);
+    }
+
+    #[test]
+    fn a_round_trip_keeps_the_value_the_light_reported() {
+        for mirek in [153u16, 200, 250, 300, 366, 400, 500] {
+            let back = mirek_from_kelvin(f64::from(kelvin_from_mirek(mirek)));
+            assert_eq!(back, mirek, "round trip through Kelvin moved {mirek}");
+        }
+    }
+
+    #[test]
+    fn zero_mirek_is_not_a_division_by_zero() {
+        assert_eq!(kelvin_from_mirek(0), 0);
     }
 }

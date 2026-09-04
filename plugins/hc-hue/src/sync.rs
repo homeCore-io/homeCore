@@ -576,6 +576,13 @@ async fn apply_event_item(
                         .and_then(|v| v.as_u64())
                     {
                         patch.insert("color_temp_mirek".to_string(), json!(mirek));
+                        // The schema promises `color_temp` in Kelvin. Without
+                        // this the promise was fiction: a control bound to the
+                        // writable attribute read nothing, forever.
+                        patch.insert(
+                            "color_temp".to_string(),
+                            json!(crate::translator::kelvin_from_mirek(mirek as u16)),
+                        );
                     }
                     if let Some((x, y)) =
                         item.get("color").and_then(|c| c.get("xy")).and_then(|xy| {
