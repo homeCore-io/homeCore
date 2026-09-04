@@ -105,6 +105,14 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         found_light_field = true;
     }
 
+    // Kelvin is what the schema says is writable, so it has to be what a
+    // control can send. Mirek stays accepted: anything already speaking it
+    // keeps working.
+    if let Some(kelvin) = payload.get("color_temp").and_then(Value::as_f64) {
+        light.color_temp_mirek = Some(crate::translator::mirek_from_kelvin(kelvin));
+        found_light_field = true;
+    }
+
     if let Some(color_xy) = payload.get("color_xy").and_then(Value::as_object) {
         let x = color_xy.get("x").and_then(Value::as_f64);
         let y = color_xy.get("y").and_then(Value::as_f64);

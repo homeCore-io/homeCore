@@ -477,7 +477,13 @@ fn build_catalogue() -> Vec<WidgetSpec> {
             vec![WidgetField::strings("dashboard_ids")],
         ),
         spec("mode_chips", vec![]),
-        spec("scene_row", vec![]),
+        spec(
+            "scene_row",
+            vec![
+                WidgetField::string("scope").allowing_empty(),
+                WidgetField::string("room").allowing_empty(),
+            ],
+        ),
         WidgetSpec {
             // Drawn client-side from the live device map, so a null config means
             // "all six systems" rather than a malformed card.

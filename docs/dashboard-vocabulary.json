@@ -1137,6 +1137,18 @@
       "extra_fields": true,
       "fields": [
         {
+          "name": "scope",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "room",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
           "name": "on_tap",
           "type": "object",
           "required": false
