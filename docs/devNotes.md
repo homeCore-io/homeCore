@@ -5107,6 +5107,124 @@ Device cleanup is deliberately manual. A Roku that is unplugged, or a TV that is
 
 ---
 
+## NuHeat (`hc-nuheat` plugin)
+
+HomeCore integrates NuHeat Signature floor-heating thermostats via the
+**`hc-nuheat`** plugin, a workspace member at `plugins/hc-nuheat/`. Each
+thermostat on the NuHeat account registers as one `thermostat` device,
+`nuheat_<serial>`. Everything is cloud-polled: a Signature talks to NuHeat and
+nothing else, so there is no local protocol to speak.
+
+Source: `plugins/hc-nuheat/` (in this repo). Plugin README:
+`plugins/hc-nuheat/README.md`.
+
+### Signing in — the constraint that shapes the plugin
+
+NuHeat's API is OAuth2-only. The session endpoint older third-party NuHeat
+integrations used (`POST /api/authenticate/user` → `SessionId`) is **gone** —
+it answers 404. Which grant is available depends on the client id, and the
+identity server permits less than its documentation implies. Measured against
+the live server at `identity.mynuheat.com`:
+
+| client | grant | result |
+|---|---|---|
+| `swagger` | implicit (`token`, `id_token token`), scope `openapi` | accepted |
+| `swagger` | implicit + `offline_access` | rejected |
+| `swagger` | `code`, hybrid | rejected |
+| `swagger` | any redirect_uri but NuHeat's own | rejected |
+| `swagger`, `js` | password, device_code | `unauthorized_client` |
+
+`swagger` is the client id NuHeat's own Swagger UI ships (`/swagger/index.js`)
+and is usable by anyone. Hence two modes in `[nuheat.auth]`:
+
+- `mode = "access_token"` — implicit via `swagger`. No application to NuHeat,
+  but a **one-hour token with no refresh token**, pasted by hand through the
+  `link_account` action. For evaluation; the plugin raises a notice saying so.
+- `mode = "oauth"` — authorization code + PKCE against a client id from NuHeat
+  support, with `offline_access`. Refresh token (15 days, rolling), so the
+  plugin stays signed in. The `state` in the redirect is verified.
+
+Tokens are persisted to **core's learned state**
+(`homecore/plugins/plugin.nuheat/state`) via `PluginStateWriter`, not to the
+config file — same pattern as hc-hue's bridge `app_key`, and for the same
+reason: writing to the core-owned config would trip the hot-reload watcher.
+
+### Temperature units
+
+NuHeat's wire format is **integer hundredths of a degree Celsius** — their
+documented example is `"setPointTemp": 3000` = 30.00 °C = 86 °F. Their prose
+says "1/10 °C" and every worked example contradicts it, so this is inferred.
+
+Because being wrong there would be wrong by a factor of ten and silent,
+`units::decode_celsius` refuses any reading that decodes outside −30..70 °C:
+the value is withheld and an `implausible_reading` error notice is raised
+rather than publishing plausible nonsense.
+
+### State and commands
+
+Published: `current_temperature`, `setpoint` (°C, matching hc-thermostat's
+spelling so the `thermostat` dashboard widget binds without configuration),
+`current_temperature_f` / `setpoint_f` (derived), `mode`
+(`auto` | `hold` | `permanent_hold`), `heating`, `online`, `hold_until`,
+`error_state`, `serial_number`.
+
+Accepted, as attribute writes and as declared device actions:
+
+```bash
+# a target; temporary hold by default, permanent if setpoint_holds_permanently
+curl -X PATCH localhost:8080/api/v1/devices/nuheat_12345678/state \
+  -H 'Content-Type: application/json' -d '{"setpoint": 22.5}'
+# back to the thermostat's schedule
+curl -X PATCH localhost:8080/api/v1/devices/nuheat_12345678/state \
+  -H 'Content-Type: application/json' -d '{"mode": "auto"}'
+# hold 24 °C for three hours
+curl -X PATCH localhost:8080/api/v1/devices/nuheat_12345678/state \
+  -H 'Content-Type: application/json' \
+  -d '{"action": "hold_temperature", "temperature": 24, "hours": 3}'
+```
+
+Commands never publish optimistically: the plugin writes, waits ~1.5 s for
+NuHeat's cloud to settle, re-reads the thermostat, and publishes what it
+actually reports. A refused command leaves state where it was.
+
+A hold longer than **23 hours** is refused locally — NuHeat caps it there and
+their rejection is a bare 400.
+
+### `max_setpoint` — set it
+
+A NuHeat will drive a slab to 30 °C / 86 °F and floor coverings generally will
+not survive that (engineered hardwood is typically rated to ~27 °C / 80 °F).
+NuHeat enforces nothing. `nuheat.max_setpoint` (in `nuheat.config_scale` units)
+clamps every write and narrows the range advertised in the device schema, so
+clients draw sliders that stop there.
+
+### Notices
+
+`not_linked`, `token_expiring`, `auth_rejected`, `api_unreachable`,
+`rate_limited`, `no_thermostats`, `implausible_reading` — each raised while its
+condition holds and cleared on the poll that disproves it. `ApiError` is
+classified (Unauthorized / RateLimited / Transport / Api) specifically so an
+expired token does not present as "your thermostat is offline".
+
+### Reconcile is guarded
+
+Devices come from a cloud account, so an empty fetch is a *fetch failure*, not
+an empty account. `reconcile_devices` runs only after a `GET /api/v2/Thermostat`
+that actually succeeded — the `all_sources_succeeded` shape. Unregistering on a
+failed fetch would confidently delete healthy thermostats.
+
+### Not covered
+
+- v1 `EnergyLog` (Day/Week/Month: heating minutes, estimated kWh and charge)
+- v1 `Group` (away mode across several thermostats)
+- `Schedule` endpoints are **disabled server-side** — all three answer 405, so
+  no client can edit a NuHeat schedule through the API.
+- SignalR change notifications (`/v2/notificationsHost`) would replace polling,
+  but there is no mature Rust SignalR client and the rate limits (1000 req/10 s)
+  make polling free.
+
+---
+
 ## WLED (`hc-wled` plugin)
 
 HomeCore integrates [WLED](https://kno.wled.ge) LED controllers via the **`hc-wled`** plugin, a standalone Rust binary that talks to WLED's JSON HTTP API and WebSocket interface. Each configured WLED device registers as a single `wled_light` device in homeCore.
@@ -6916,6 +7034,7 @@ volume on first run by `entrypoint.sh`; edit the volume copy to enable plugins.
 | `hc-zwave.toml` | `plugin.zwave` | ws:// URL of zwave-js-server |
 | `hc-wled.toml` | `plugin.wled` | `[[devices]]` per WLED controller |
 | `hc-isy.toml` | `plugin.isy` | host, port, username, password, tls |
+| `hc-nuheat.toml` | `plugin.nuheat` | `[nuheat.auth]` mode; tokens live in core state |
 
 ### Plugin distribution
 

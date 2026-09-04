@@ -1,0 +1,78 @@
+# hc-nuheat — example configuration.
+#
+# In a normal install you never copy this file. homeCore seeds the real one at
+# `config/plugins/plugin.nuheat.toml` when the plugin is installed, hands that
+# path to the process, and restarts the plugin when it changes. This copy is
+# for running the binary by hand during development:
+#
+#   cargo run -p hc-nuheat -- config/config.toml
+
+# ── Broker connection ────────────────────────────────────────────────────────
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.nuheat"
+password    = ""            # set when the broker has [[broker.clients]] auth
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logging]
+level             = "info"  # this plugin's own log file; accepts filters too
+log_forward_level = "info"  # what reaches homeCore's live log stream
+rotation          = "daily" # hourly | daily | weekly | never
+max_size_mb       = 100     # rotate at this size too; 0 disables
+compress          = true    # gzip rotated files
+prune_after_days  = 0       # delete rotated files older than this; 0 = never
+
+# ── NuHeat ───────────────────────────────────────────────────────────────────
+[nuheat]
+# How often to ask NuHeat for the current state of every thermostat. A floor
+# slab moves slowly, so this mostly decides how quickly a change made in the
+# NuHeat app appears here. Well inside NuHeat's rate limits at any sane value.
+poll_interval_secs = 120
+
+# What a plain setpoint change means. false = hold it for a while and then let
+# the thermostat's schedule take over; true = hold until something changes it.
+setpoint_holds_permanently = false
+
+# How long a temporary hold lasts when the command does not say. Commented out
+# means "let NuHeat resume at its next scheduled event", which is its own
+# default. NuHeat allows at most 23 hours.
+# default_hold_hours = 4
+
+# Publish only these thermostats. Empty (or absent) means all of them.
+# only_serials = ["12345678"]
+
+# Where these devices land in homeCore. Optional.
+# area = "Bathrooms"
+
+# Only affects numbers typed into THIS FILE (the two limits below) — published
+# state is always °C, with a Fahrenheit companion alongside.
+config_scale = "celsius"
+
+# Safety limits for the floor covering, in `config_scale` units. A NuHeat will
+# drive a slab to 30 °C / 86 °F and floor coverings generally will not survive
+# it — engineered hardwood is usually rated to about 27 °C / 80 °F. Anything
+# asking for more is held here. Commented out means the thermostat's own range.
+# max_setpoint = 27
+# min_setpoint = 10
+
+# ── Signing in ───────────────────────────────────────────────────────────────
+# NuHeat's API is OAuth2-only; the old session endpoint no longer exists.
+#
+#   mode = "access_token"  No paperwork: sign in through NuHeat's own page and
+#                          paste the token back with the "Link NuHeat account"
+#                          button. The token lasts one hour and cannot be
+#                          renewed, so this is for trying the plugin out.
+#
+#   mode = "oauth"         Your own client id from NuHeat support. The plugin
+#                          gets a refresh token and keeps itself signed in.
+#
+# Either way, tokens are never written to this file — they go to homeCore's own
+# durable plugin state, the same place hc-hue keeps its bridge key.
+[nuheat.auth]
+mode = "access_token"
+
+# Only for mode = "oauth":
+# client_id     = "your-client-id"
+# client_secret = ""                              # only for a confidential client
+# redirect_uri  = "https://example.invalid/callback"
