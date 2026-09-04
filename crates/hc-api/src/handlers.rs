@@ -3734,6 +3734,29 @@ fn validate_spec_field(
                 ));
             }
         }
+        // One value or several of them. `facet` is the only field shaped this
+        // way, and it has to be: a panel can want lights AND switches, and
+        // every card written before that stores a bare string. `any` was tried
+        // first and is wrong — it is unconstrained by design, so an empty facet
+        // sailed through and a card that selects the whole house came back.
+        "string_or_strings" => {
+            let good = match value {
+                serde_json::Value::String(text) => !text.trim().is_empty(),
+                serde_json::Value::Array(items) => {
+                    !items.is_empty()
+                        && items
+                            .iter()
+                            .all(|i| i.as_str().is_some_and(|s| !s.trim().is_empty()))
+                }
+                _ => false,
+            };
+            if !good {
+                return Err(format!(
+                    "widget '{widget_id}' requires non-empty string '{}'",
+                    field.name
+                ));
+            }
+        }
         "integer" => optional_i64_min(map, &field.name, field.min.unwrap_or(i64::MIN), widget_id)?,
         "boolean" => optional_bool(map, &field.name, widget_id)?,
         // `object` and `any` are unconstrained by design — see the module doc on
@@ -11034,6 +11057,41 @@ token = "TOKEN-TWO"
             serde_json::json!({"selection_mode": "facet", "facet": ""}),
             serde_json::json!({"selection_mode": "facet", "facet": "   "}),
             serde_json::json!({"selection_mode": "facet", "facet": 7}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_err(),
+                "accepted {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_facet_may_be_several() {
+        // A panel can want lights AND switches: a Lutron switch called
+        // "Holiday Lights" is a light to the person looking at it and a
+        // `switch` to the house. One kind per panel could not say that.
+        for config in [
+            serde_json::json!({"selection_mode": "facet", "facet": "lights"}),
+            serde_json::json!({"selection_mode": "facet",
+                               "facet": ["lights", "switches"]}),
+        ] {
+            let widget = selection_widget(config.clone());
+            assert!(
+                super::validate_widget_config(&widget).is_ok(),
+                "rejected {config}"
+            );
+        }
+
+        // And the empty shapes are still refused, in either spelling: a card
+        // whose facet is missing selects the whole house rather than nothing,
+        // which is the failure that is hard to see.
+        for config in [
+            serde_json::json!({"selection_mode": "facet", "facet": []}),
+            serde_json::json!({"selection_mode": "facet", "facet": [""]}),
+            serde_json::json!({"selection_mode": "facet", "facet": ["  "]}),
+            serde_json::json!({"selection_mode": "facet", "facet": [7]}),
+            serde_json::json!({"selection_mode": "facet", "facet": {}}),
         ] {
             let widget = selection_widget(config.clone());
             assert!(

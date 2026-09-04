@@ -384,9 +384,17 @@ fn selection_fields(require_limit: bool) -> Vec<WidgetField> {
         WidgetField::string("query")
             .allowing_empty()
             .when("selection_mode", "query"),
-        WidgetField::string("facet")
+        // A kind, or several. `any` rather than a shape, for the reason the
+        // module doc gives for `object`: core does not police what it does not
+        // render, and it cannot compute a facet at all — the client derives one
+        // from a device's type and its attributes. Policing the spelling here
+        // would only mean a newer client's page is rejected by an older core
+        // for naming a kind that is perfectly real.
+        WidgetField::new("facet", "string_or_strings")
             .required()
             .when("selection_mode", "facet"),
+        // Whatever the rule selects, minus these kinds.
+        WidgetField::strings("except"),
         // The exceptions are ids too: a page that travelled with them would
         // carry another house's devices as additions to a rule.
         WidgetField::strings("add").points_at(Reference::Devices),
