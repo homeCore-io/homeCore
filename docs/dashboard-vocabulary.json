@@ -138,6 +138,36 @@
       ]
     },
     {
+      "type": "device_breakdown",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "group_by",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "ink",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
       "type": "device_grid",
       "config_required": true,
       "extra_fields": true,
@@ -694,6 +724,11 @@
           "type": "integer",
           "required": false,
           "min": 1
+        },
+        {
+          "name": "bare",
+          "type": "boolean",
+          "required": false
         },
         {
           "name": "on_tap",
@@ -1544,6 +1579,29 @@
             "trusted_internal",
             "strict_isolated"
           ]
+        },
+        {
+          "name": "on_tap",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "worth_knowing",
+      "config_required": true,
+      "extra_fields": true,
+      "fields": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "min": 1
+        },
+        {
+          "name": "faults_only",
+          "type": "boolean",
+          "required": false
         },
         {
           "name": "on_tap",
