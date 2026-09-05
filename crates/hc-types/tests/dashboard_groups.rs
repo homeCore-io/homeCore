@@ -48,6 +48,8 @@ fn box_for(path: &str) -> DashboardGroupBox {
         radius: None,
         clip: false,
         frame: false,
+        stack: false,
+        stack_gap: None,
         background: None,
         rotation: None,
         opacity: None,
@@ -68,6 +70,8 @@ fn a_styled_group_survives_a_round_trip() {
         radius: Some(18.0),
         clip: true,
         frame: false,
+        stack: false,
+        stack_gap: None,
         background: Some(DashboardBackground {
             image: Some("hc-asset://wall.jpg".into()),
             blur: 8.0,
@@ -174,6 +178,8 @@ fn a_frame_survives_the_round_trip_it_would_otherwise_die_on() {
             h: 200.0,
         }),
         frame: true,
+        stack: false,
+        stack_gap: None,
         clip: true,
         ..box_for("Panel")
     }]);
