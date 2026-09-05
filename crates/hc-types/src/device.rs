@@ -309,6 +309,19 @@ pub struct DeviceState {
     /// `"window"`, `"garage"`, or `"gate"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_hint: Option<String>,
+    /// Optional user-set names for this device's buttons, by button number.
+    ///
+    /// **The same contract as [`name_override`], for the same reason.** A
+    /// keypad's engravings arrive from the bridge — Lutron reads them out of
+    /// DbXML — and they arrive again on every re-registration, so a rename
+    /// written where the plugin publishes would be wiped the next time it
+    /// reconnected. This is the field registration never touches.
+    ///
+    /// Keyed by the button's component number as a string, because that is
+    /// what a JSON object key is. An entry that is absent means *whatever the
+    /// bridge calls it*; clearing the map reverts every button at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button_names: Option<std::collections::HashMap<String, String>>,
     /// What the thing actually is, as its own system reports it.
     ///
     /// Nothing in homeCore reads these — they exist for the operator staring
@@ -366,6 +379,7 @@ impl DeviceState {
             status_icon: None,
             name: name.into(),
             name_override: None,
+            button_names: None,
             plugin_id: plugin_id.into(),
             area: None,
             area_override: None,

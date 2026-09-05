@@ -385,7 +385,27 @@ impl Bridge {
         match action {
             DeviceAction::Press => {
                 let attr = format!("button_{component}");
-                let patch = serde_json::json!({ &attr: "press" });
+                // **Which button, last.** `button_N` accumulates the last
+                // action *per button*, so a keypad's state says which buttons
+                // have ever fired and in no order at all — a client asking
+                // "what happened here?" had nothing to show but a dash. This
+                // is the one fact the state was missing, and the plugin is the
+                // only place that knows it.
+                let named = self
+                    .devices
+                    .get(&integration_id)
+                    .and_then(|dev| {
+                        crate::schema::buttons_with_labels(&dev.config)
+                            .into_iter()
+                            .find(|(b, _)| *b == component)
+                            .map(|(_, label)| label)
+                    })
+                    .unwrap_or_else(|| format!("Button {component}"));
+                let patch = serde_json::json!({
+                    &attr: "press",
+                    "last_button": component,
+                    "last_button_name": named,
+                });
                 let _ = self.publisher.publish_state_partial(&hc_id, &patch).await;
 
                 // Start software hold timer (fires if button is not released within threshold)
