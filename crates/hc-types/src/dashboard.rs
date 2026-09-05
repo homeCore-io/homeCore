@@ -236,6 +236,26 @@ pub struct DashboardGroupBox {
     #[serde(default)]
     pub frame: bool,
 
+    /// Whether this box lays its members out one under another.
+    ///
+    /// A rectangle says where a thing starts; a stack says an *order*.
+    /// Everything else on a composed page is placed absolutely, which is what
+    /// makes it a design surface — and it is also why a band that hides leaves
+    /// a hole: the space its elements occupied can be reclaimed by measuring
+    /// them, but the padding *between* them was never occupied by anything, so
+    /// hiding cannot free it. Only laying them out can.
+    ///
+    /// Stored and not read, like `frame` beside it — and here for the same
+    /// reason `frame` is: a group box is a typed struct, so a key it does not
+    /// declare is dropped on the way back rather than ignored, and a stack
+    /// would round-trip through core as an ordinary group.
+    #[serde(default)]
+    pub stack: bool,
+
+    /// The space between members of a stack, in page units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_gap: Option<f64>,
+
     /// What the group sits on — the same shape the page's background has, so a
     /// group is a small page rather than a new kind of thing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

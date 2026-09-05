@@ -11337,6 +11337,8 @@ token = "TOKEN-TWO"
             padding: 0.0,
             radius: None,
             frame: false,
+            stack: false,
+            stack_gap: None,
             clip: false,
             background: None,
             rotation: None,
