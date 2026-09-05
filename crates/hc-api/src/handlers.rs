@@ -701,6 +701,36 @@ pub async fn update_device(
                     };
                 }
             }
+            // **The engravings, when the wall is wrong about them.**
+            //
+            // A keypad's button names arrive from the bridge and arrive again
+            // on every re-registration, so a rename written where the plugin
+            // publishes would be wiped the next time it reconnected. This is
+            // the field registration never touches — the same contract
+            // `name_override` has, for the same reason.
+            //
+            // Null clears the lot; an empty or blank name for one button
+            // removes just that entry, which is how a single button goes back
+            // to whatever the bridge calls it.
+            if let Some(names) = body.get("button_names") {
+                if names.is_null() {
+                    device.button_names = None;
+                } else if let Some(map) = names.as_object() {
+                    let mut kept: std::collections::HashMap<String, String> =
+                        device.button_names.clone().unwrap_or_default();
+                    for (button, value) in map {
+                        match value.as_str().map(str::trim) {
+                            Some(name) if !name.is_empty() => {
+                                kept.insert(button.clone(), name.to_string());
+                            }
+                            _ => {
+                                kept.remove(button);
+                            }
+                        }
+                    }
+                    device.button_names = if kept.is_empty() { None } else { Some(kept) };
+                }
+            }
             if let Some(canonical_name) = body.get("canonical_name") {
                 if canonical_name.is_null() {
                     device.canonical_name = None;
@@ -10025,6 +10055,79 @@ token = "TOKEN-TWO"
             .expect("d2 exists");
         assert_eq!(d1.area, None);
         assert_eq!(d2.area, None);
+    }
+
+    /// **The engravings, when the wall is wrong about them.**
+    ///
+    /// A keypad's button names arrive from the bridge — Lutron reads them out
+    /// of DbXML — and arrive again on every re-registration, so a rename
+    /// written where the plugin publishes would be wiped the next time it
+    /// reconnected. This is the field registration never touches.
+    #[tokio::test]
+    async fn a_button_can_be_renamed_and_put_back() {
+        let state = mk_state().await;
+        seed_device(&state, "keypad_1", Some("Hallway")).await;
+
+        let resp = update_device(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Path("keypad_1".to_string()),
+            Json(json!({ "button_names": { "2": "Overhead", "4": "All Off" } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state
+            .store
+            .get_device("keypad_1")
+            .await
+            .expect("load")
+            .expect("exists");
+        let names = stored.button_names.clone().expect("names");
+        assert_eq!(names.get("2").map(String::as_str), Some("Overhead"));
+        assert_eq!(names.get("4").map(String::as_str), Some("All Off"));
+
+        // One button back to whatever the bridge calls it, the other kept: a
+        // blank is how you say "no opinion about this one".
+        let resp = update_device(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Path("keypad_1".to_string()),
+            Json(json!({ "button_names": { "2": "  " } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state
+            .store
+            .get_device("keypad_1")
+            .await
+            .expect("load")
+            .expect("exists");
+        let names = stored.button_names.clone().expect("names");
+        assert!(!names.contains_key("2"));
+        assert_eq!(names.get("4").map(String::as_str), Some("All Off"));
+
+        // And null clears the lot, which is the revert-everything gesture.
+        let resp = update_device(
+            State(state.clone()),
+            DevicesWrite(whitelist_claims()),
+            Path("keypad_1".to_string()),
+            Json(json!({ "button_names": null })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state
+            .store
+            .get_device("keypad_1")
+            .await
+            .expect("load")
+            .expect("exists");
+        assert!(stored.button_names.is_none());
     }
 
     #[tokio::test]
