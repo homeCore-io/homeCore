@@ -1187,6 +1187,12 @@
           "reference": "device"
         },
         {
+          "name": "scene_ids",
+          "type": "array",
+          "required": false,
+          "reference": "scenes"
+        },
+        {
           "name": "on_tap",
           "type": "object",
           "required": false
