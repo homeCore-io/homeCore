@@ -634,6 +634,19 @@ fn element_widgets() -> Vec<WidgetSpec> {
             "text",
             vec![
                 WidgetField::string("text").required(),
+                // **A number the house decides, in the author's own type.**
+                // A page that says "7 LIGHTS ON" has to be able to mean it,
+                // and the alternative was a second element that reimplemented
+                // every type control this one already has. The words stay
+                // required: they are what a client draws when it does not know
+                // the tally, and what the designer shows while you place it.
+                WidgetField::string("count").one_of(&[
+                    "devices",
+                    "lights",
+                    "lights_on",
+                    "offline",
+                    "playing",
+                ]),
                 WidgetField::string("size"),
                 WidgetField::integer("scale", 1),
                 WidgetField::string("weight"),
