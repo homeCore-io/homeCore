@@ -401,6 +401,13 @@ fn selection_fields(require_limit: bool) -> Vec<WidgetField> {
         // carry another house's devices as additions to a rule.
         WidgetField::strings("add").points_at(Reference::Devices),
         WidgetField::strings("remove").points_at(Reference::Devices),
+        // **The order to draw them in.** A rule answers *which* devices and
+        // says nothing about their order, so a list took whatever the
+        // selection happened to return — and somebody who wanted the door
+        // sensor first had no way to say so. Ids named here come first, in
+        // this order; anything the rule matched and this does not name follows
+        // in the order it always had.
+        WidgetField::strings("order").points_at(Reference::Devices),
         if require_limit {
             limit.required()
         } else {
@@ -528,6 +535,23 @@ fn build_catalogue() -> Vec<WidgetSpec> {
                 // way would travel to another house still pointing at this
                 // one's scenes.
                 WidgetField::strings("scene_ids").points_at(Reference::Scenes),
+                // **The scenes a room has that none of its lights offer.** A
+                // Hue scene belongs to a room's group and is shown under the
+                // light it sets, so a room row listing every scene in the room
+                // says those twice — while a Lutron or Caseta scene, which is
+                // attached to no light at all, had nowhere on a room page to
+                // be. This is the difference between the two.
+                WidgetField::boolean("skip_light_scenes"),
+                // Whether an empty row draws nothing rather than saying it is
+                // empty. Most rooms have no scenes of their own, and a heading
+                // over the words "No scenes in this room" is a hole in the
+                // page where a room's own scenes are the exception.
+                WidgetField::boolean("hide_when_empty"),
+                // A heading drawn by the row itself. A page cannot hide a
+                // separate label when the row beneath it turns out to be
+                // empty — the label is a text element and knows nothing about
+                // scenes — so a row that can vanish has to carry its own.
+                WidgetField::string("heading").allowing_empty(),
             ],
         ),
         WidgetSpec {
@@ -1126,6 +1150,7 @@ mod tests {
             ("scene_button", "scene_id", Reference::Scene),
             ("scene_row", "scene_ids", Reference::Scenes),
             ("device_grid", "device_ids", Reference::Devices),
+            ("device_grid", "order", Reference::Devices),
             ("device_grid", "add", Reference::Devices),
             ("device_grid", "remove", Reference::Devices),
             ("code", "device_ids", Reference::Devices),
@@ -1162,7 +1187,8 @@ mod tests {
                         || f.name == "scene_id"
                         || f.name == "scene_ids"
                         || f.name == "add"
-                        || f.name == "remove",
+                        || f.name == "remove"
+                        || f.name == "order",
                     "{}.{} claims to name something in the house",
                     spec.r#type,
                     f.name
