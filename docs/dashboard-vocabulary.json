@@ -239,6 +239,12 @@
           "reference": "devices"
         },
         {
+          "name": "order",
+          "type": "array",
+          "required": false,
+          "reference": "devices"
+        },
+        {
           "name": "limit",
           "type": "integer",
           "required": false,
@@ -334,6 +340,12 @@
         },
         {
           "name": "remove",
+          "type": "array",
+          "required": false,
+          "reference": "devices"
+        },
+        {
+          "name": "order",
           "type": "array",
           "required": false,
           "reference": "devices"
@@ -452,6 +464,12 @@
         },
         {
           "name": "remove",
+          "type": "array",
+          "required": false,
+          "reference": "devices"
+        },
+        {
+          "name": "order",
           "type": "array",
           "required": false,
           "reference": "devices"
@@ -1002,6 +1020,12 @@
           "reference": "devices"
         },
         {
+          "name": "order",
+          "type": "array",
+          "required": false,
+          "reference": "devices"
+        },
+        {
           "name": "limit",
           "type": "integer",
           "required": false,
@@ -1191,6 +1215,22 @@
           "type": "array",
           "required": false,
           "reference": "scenes"
+        },
+        {
+          "name": "skip_light_scenes",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "hide_when_empty",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "heading",
+          "type": "string",
+          "required": false,
+          "allow_empty": true
         },
         {
           "name": "on_tap",
