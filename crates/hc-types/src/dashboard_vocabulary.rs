@@ -86,6 +86,8 @@ pub enum Reference {
     Devices,
     /// One scene, native or a plugin's scene-device.
     Scene,
+    /// Several scenes, by id — a hand-picked list, in the order it is shown.
+    Scenes,
 }
 
 /// One config field of one widget type.
@@ -516,6 +518,16 @@ fn build_catalogue() -> Vec<WidgetSpec> {
                 WidgetField::string("device_id")
                     .allowing_empty()
                     .points_at(Reference::Device),
+                // **Which ones, by hand.** A scope answers *whose* scenes, and
+                // a house with fifty-eight of them still wants six on the
+                // footer. Empty means every scene the scope allows, so every
+                // page written before this keeps what it had.
+                //
+                // A reference, and named for what it holds: export replaces
+                // ids with labels by field name, and a list spelled any other
+                // way would travel to another house still pointing at this
+                // one's scenes.
+                WidgetField::strings("scene_ids").points_at(Reference::Scenes),
             ],
         ),
         WidgetSpec {
@@ -979,7 +991,10 @@ pub fn unwire(r#type: &str, config: &mut serde_json::Value, label: &str) {
                     map.insert(field.name.clone(), serde_json::json!(slot(label)));
                 }
             }
-            Reference::Devices => {
+            // A hand-picked list of scenes travels the same way a hand-picked
+            // list of devices does, and for the same reason: the count is the
+            // author's arrangement, and the ids are this house's.
+            Reference::Devices | Reference::Scenes => {
                 // The count is kept. A page that came back with an empty grid
                 // would have lost the author's arrangement silently; four slots
                 // say "there were four of these, pick them".
@@ -1109,6 +1124,7 @@ mod tests {
             ("device_reading", "device_id", Reference::Device),
             ("history_chart", "device_id", Reference::Device),
             ("scene_button", "scene_id", Reference::Scene),
+            ("scene_row", "scene_ids", Reference::Scenes),
             ("device_grid", "device_ids", Reference::Devices),
             ("device_grid", "add", Reference::Devices),
             ("device_grid", "remove", Reference::Devices),
@@ -1144,6 +1160,7 @@ mod tests {
                     f.name == "device_id"
                         || f.name == "device_ids"
                         || f.name == "scene_id"
+                        || f.name == "scene_ids"
                         || f.name == "add"
                         || f.name == "remove",
                     "{}.{} claims to name something in the house",
