@@ -1446,6 +1446,18 @@
           "required": true
         },
         {
+          "name": "count",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "devices",
+            "lights",
+            "lights_on",
+            "offline",
+            "playing"
+          ]
+        },
+        {
           "name": "size",
           "type": "string",
           "required": false
