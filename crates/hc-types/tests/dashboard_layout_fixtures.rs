@@ -208,6 +208,32 @@ fn situations() -> Vec<(
             vec![composed("c", 0, 6, 2, 1)],
         ),
         (
+            "a grid card rises straight through a composed one",
+            "A composed element competes for nothing — `overlaps` answers no \
+             the moment either side carries a `rect` — so a grid card is not \
+             blocked by the cells it covers. Pinned because dropping the \
+             composed check from `overlaps` leaves every other case passing: \
+             without this, a client can treat a composition as an obstacle and \
+             agree with the fixtures anyway.",
+            12,
+            DashboardFlow::Packed,
+            vec![composed("c", 0, 0, 4, 3), item("a", 0, 6, 2, 1)],
+        ),
+        (
+            "reading order is (y, x), not (x, y)",
+            "Two cards competing for the same cells resolve by the order \
+             somebody reads the page in: the one higher up keeps its place and \
+             the one to its left-but-lower moves. Sorting by column first would \
+             swap them. Pinned because no other case distinguishes the two \
+             orders — every earlier cascade happens to agree.",
+            12,
+            DashboardFlow::Free,
+            vec![
+                item("right-and-high", 4, 0, 4, 2),
+                item("left-and-low", 0, 1, 6, 2),
+            ],
+        ),
+        (
             "reading order decides who wins a contested cell",
             "Placement runs in `(y, x)` order, not document order, so a corrupt \
              layout resolves the same way whatever order the JSON happened to \
