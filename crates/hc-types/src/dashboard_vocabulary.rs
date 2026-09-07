@@ -408,6 +408,12 @@ fn selection_fields(require_limit: bool) -> Vec<WidgetField> {
         // this order; anything the rule matched and this does not name follows
         // in the order it always had.
         WidgetField::strings("order").points_at(Reference::Devices),
+        // **What order the ones nobody arranged come in.** A rule answers
+        // which devices and says nothing about their order, so a list came out
+        // in whatever order the house was walked in. `order` above is the
+        // hand-made arrangement and wins for the ids it names; this is what
+        // happens to the rest, which on a room card is all of them.
+        WidgetField::string("sort").one_of(&["name", "room", "kind", "on"]),
         if require_limit {
             limit.required()
         } else {
