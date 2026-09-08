@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "hc-caseta"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "hc-hue"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "hc-isy"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "hc-lutron"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "hc-yolink"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "hc-zwave"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.62"
+version = "0.1.63"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
