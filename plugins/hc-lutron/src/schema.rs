@@ -11,11 +11,12 @@
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Source};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use serde_json::Value;
 
-use crate::config::{DeviceConfig, DeviceKind};
+use crate::config::{DeviceConfig, DeviceKind, SceneConfig};
+use crate::lip::protocol::led_component_for_phantom_button;
 
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     AttributeSchema {
@@ -273,7 +274,27 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
 /// then the scene declares the action and nothing to read.
 pub fn scene_schema_json(reports_state: bool) -> Value {
     let mut attrs = std::collections::HashMap::new();
+    // Which phantom button this scene is, and — when there is one — which LED
+    // reports it. Declared and published so "supports status" is something a
+    // client can *show*, with the plumbing behind it, rather than a fact it
+    // has to infer from an attribute being absent. It is also the first thing
+    // anyone needs when a scene will not report: the button is right, the LED
+    // was never assigned.
+    attrs.insert(
+        "phantom_button".to_string(),
+        AttributeSchema {
+            category: Some(AttributeCategory::Diagnostic),
+            ..ro(AttributeKind::Integer, "Phantom button")
+        },
+    );
     if reports_state {
+        attrs.insert(
+            "led_component".to_string(),
+            AttributeSchema {
+                category: Some(AttributeCategory::Diagnostic),
+                ..ro(AttributeKind::Integer, "Status LED")
+            },
+        );
         attrs.insert(
             "on".to_string(),
             AttributeSchema {
@@ -294,6 +315,20 @@ pub fn scene_schema_json(reports_state: bool) -> Value {
         ..Default::default()
     };
     with_actions(&schema, vec![activate_action()])
+}
+
+/// What a scene publishes about its own plumbing, to fill the attributes
+/// [`scene_schema_json`] declares.
+///
+/// `led_component` appears only once the scene is known to report: an
+/// unassigned phantom button has no LED to name.
+pub fn scene_plumbing_state(cfg: &SceneConfig, reports_state: bool) -> Value {
+    let mut state = serde_json::json!({ "phantom_button": cfg.button_component });
+    if reports_state {
+        state["led_component"] =
+            serde_json::json!(led_component_for_phantom_button(cfg.button_component));
+    }
+    state
 }
 
 /// Number and engraving for every button, with a sensible name where Lutron
@@ -594,10 +629,48 @@ mod scene_schema_tests {
     /// Declaring `on` there would give a client a confident toggle reporting a
     /// value nothing confirms.
     #[test]
-    fn a_scene_declares_nothing_to_read_until_its_led_reports() {
+    fn a_scene_declares_no_state_until_its_led_reports() {
         let v = scene_schema_json(false);
-        assert!(v["attributes"].as_object().expect("attributes").is_empty());
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert!(
+            !attrs.contains_key("on"),
+            "nothing confirms it, so nothing claims it"
+        );
         assert_eq!(v["actions"][0]["id"], "activate");
+    }
+
+    fn cfg() -> SceneConfig {
+        SceneConfig {
+            name: "Deck On".into(),
+            main_repeater_id: 1,
+            button_component: 3,
+        }
+    }
+
+    /// "Supports status" is something a client can show, not infer: the scene
+    /// names the button it is and the LED that reports it.
+    #[test]
+    fn a_reporting_scene_names_the_led_behind_its_status() {
+        let v = scene_schema_json(true);
+        assert_eq!(v["attributes"]["led_component"]["category"], "diagnostic");
+
+        let state = scene_plumbing_state(&cfg(), true);
+        assert_eq!(state["phantom_button"], 3);
+        assert_eq!(state["led_component"], 103); // button + 100
+    }
+
+    /// A scene with no LED still says which button it is — that is the first
+    /// thing anyone needs when asking why it never reports.
+    #[test]
+    fn a_scene_without_one_still_names_its_button() {
+        let v = scene_schema_json(false);
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert!(attrs.contains_key("phantom_button"));
+        assert!(!attrs.contains_key("led_component"));
+
+        let state = scene_plumbing_state(&cfg(), false);
+        assert_eq!(state["phantom_button"], 3);
+        assert!(state.get("led_component").is_none());
     }
 
     #[test]

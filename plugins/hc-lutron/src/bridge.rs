@@ -16,8 +16,9 @@ use crate::devices::{DeviceEntry, SceneEntry, TimeclockEntry};
 use crate::lip::connection::{connect, send_cmd, send_keepalive};
 use crate::lip::protocol::{
     button_for_led_component, cmd_device_action, cmd_timeclock_enable, cmd_timeclock_execute,
-    is_led_state, led_component_for_button, query_device_led, query_output, DeviceAction,
-    LipMessage, OccupancyState, OutputAction,
+    is_led_state, led_component_for_button, led_component_for_phantom_button, query_device_led,
+    query_output, DeviceAction, LipMessage, OccupancyState, OutputAction, LED_COMPONENT_OFFSET,
+    PHANTOM_LED_COMPONENT_OFFSET,
 };
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{DevicePublisher, PluginNotices};
@@ -315,62 +316,58 @@ impl Bridge {
     ) {
         // Check for phantom scene LED events on the main repeater.
         // These arrive as ~DEVICE,{repeater_id},{led_component},9,{state}.
-        //
-        // LED component offsets differ by device type:
-        //   - Keypads: button + 80  (e.g., button 3 → component 83)
-        //   - Main repeater phantom buttons: button + 100  (e.g., button 6 → component 106)
-        //
-        // Try +80 first (keypads), then +100 (repeater phantoms).  We check
-        // the scene lookup with each candidate — not just whether the subtraction
-        // yields a positive number.
         if let DeviceAction::Led(state) = action {
-            // Candidate button numbers from each known offset.
-            let candidates = [
-                component.checked_sub(80).filter(|&b| b > 0), // keypad offset
-                component.checked_sub(100).filter(|&b| b > 0), // repeater phantom offset
-            ];
-            for button in candidates.into_iter().flatten() {
-                if let Some(&scene_idx) =
-                    self.repeater_button_to_scene.get(&(integration_id, button))
-                {
-                    let scene = &self.scenes[scene_idx];
-                    // 255 means no LED is assigned to this phantom button, and
-                    // `> 0` used to read that as the scene being active.
-                    if !is_led_state(state) {
-                        return;
-                    }
-                    let on = state > 0; // 1=on, 2=flash, 3=rapid → all "on"
-                    let patch = serde_json::json!({ "on": on });
-                    let hc_id = scene.hc_id.clone();
-                    if let Err(e) = self.publisher.publish_state(&hc_id, &patch).await {
-                        warn!(hc_id, error = %e, "Failed to publish scene LED state");
-                    }
-                    // This scene has an LED, so its `on` is reported rather
-                    // than optimistic. Say so — once, and it stays said,
-                    // because the schema topic is retained.
-                    if !self.scenes[scene_idx].reports_state {
-                        self.scenes[scene_idx].reports_state = true;
-                        let schema = crate::schema::scene_schema_json(true);
-                        if let Err(e) = self
-                            .publisher
-                            .register_device_schema_json(&hc_id, &schema)
-                            .await
-                        {
-                            warn!(hc_id, error = %e, "Failed to publish scene schema");
-                        } else {
-                            info!(hc_id, "Scene reports its own state; schema updated");
-                        }
-                    }
-                    debug!(
-                        hc_id,
-                        on,
-                        led_state = state,
-                        component,
-                        button,
-                        "Scene LED state updated"
-                    );
+            if let Some((scene_idx, button)) =
+                scene_for_led(&self.repeater_button_to_scene, integration_id, component)
+            {
+                let scene = &self.scenes[scene_idx];
+                // 255 means no LED is assigned to this phantom button, and
+                // `> 0` used to read that as the scene being active.
+                if !is_led_state(state) {
                     return;
                 }
+                let on = state > 0; // 1=on, 2=flash, 3=rapid → all "on"
+                let patch = serde_json::json!({ "on": on });
+                let hc_id = scene.hc_id.clone();
+                if let Err(e) = self.publisher.publish_state(&hc_id, &patch).await {
+                    warn!(hc_id, error = %e, "Failed to publish scene LED state");
+                }
+                // This scene has an LED, so its `on` is reported rather
+                // than optimistic. Say so — once, and it stays said,
+                // because the schema topic is retained.
+                if !self.scenes[scene_idx].reports_state {
+                    self.scenes[scene_idx].reports_state = true;
+                    let cfg = self.scenes[scene_idx].config.clone();
+                    let schema = crate::schema::scene_schema_json(true);
+                    if let Err(e) = self
+                        .publisher
+                        .register_device_schema_json(&hc_id, &schema)
+                        .await
+                    {
+                        warn!(hc_id, error = %e, "Failed to publish scene schema");
+                    } else {
+                        info!(hc_id, "Scene reports its own state; schema updated");
+                    }
+                    // Name the LED that backs it, so a client can show
+                    // what "supports status" rests on.
+                    let plumbing = crate::schema::scene_plumbing_state(&cfg, true);
+                    if let Err(e) = self
+                        .publisher
+                        .publish_state_partial(&hc_id, &plumbing)
+                        .await
+                    {
+                        warn!(hc_id, error = %e, "Failed to publish scene plumbing state");
+                    }
+                }
+                debug!(
+                    hc_id,
+                    on,
+                    led_state = state,
+                    component,
+                    button,
+                    "Scene LED state updated"
+                );
+                return;
             }
         }
 
@@ -684,6 +681,14 @@ impl Bridge {
             {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
             }
+            let plumbing = crate::schema::scene_plumbing_state(&scene.config, scene.reports_state);
+            if let Err(e) = self
+                .publisher
+                .publish_state_partial(&scene.hc_id, &plumbing)
+                .await
+            {
+                warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene plumbing state");
+            }
         }
         for tc in &self.time_clocks {
             if let Err(e) = self
@@ -769,7 +774,7 @@ impl Bridge {
         // Query LED state for phantom scene buttons on the main repeater.
         // Main repeater uses LED component = button + 100 (not +80 like keypads).
         for scene in &self.scenes {
-            let led_comp = scene.config.button_component + 100;
+            let led_comp = led_component_for_phantom_button(scene.config.button_component);
             let q = query_device_led(scene.config.main_repeater_id, led_comp);
             if let Err(e) = send_cmd(write_tx, &q).await {
                 warn!(hc_id = %scene.hc_id, button = scene.config.button_component,
@@ -777,6 +782,37 @@ impl Bridge {
             }
         }
     }
+}
+
+/// Which scene, if any, an LED event on this integration ID is about — and the
+/// phantom button it belongs to.
+///
+/// **The offsets overlap.** A main repeater's phantom LEDs are `button + 100`
+/// and a keypad's are `button + 80`, so component 106 is button 6's LED while
+/// 106 − 80 = 26 is also a perfectly real phantom button number. Trying +80
+/// first and taking whichever subtraction happened to land on a configured
+/// scene meant a house with scenes on both button 6 and button 26 reported
+/// button 6's LED against button 26's scene — and, since a scene's schema is
+/// now learned from these events, would have declared the wrong scene able to
+/// report its state.
+///
+/// This map only ever holds main-repeater phantom buttons, so +100 is the
+/// offset that applies. +80 stays as a fallback for a repeater that answers
+/// with the keypad offset, but it is consulted only when +100 matches nothing.
+fn scene_for_led(
+    scenes: &HashMap<(u32, u32), usize>,
+    integration_id: u32,
+    component: u32,
+) -> Option<(usize, u32)> {
+    for offset in [PHANTOM_LED_COMPONENT_OFFSET, LED_COMPONENT_OFFSET] {
+        let Some(button) = component.checked_sub(offset).filter(|&b| b > 0) else {
+            continue;
+        };
+        if let Some(&idx) = scenes.get(&(integration_id, button)) {
+            return Some((idx, button));
+        }
+    }
+    None
 }
 
 /// Rewrite a declared action into the attribute form the translator speaks.
@@ -813,6 +849,44 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
         // raise/lower/stop. Each is a boolean the translator already reads.
         "activate" | "raise" | "lower" | "stop" => serde_json::json!({ action: true }),
         _ => cmd.clone(),
+    }
+}
+
+#[cfg(test)]
+mod scene_led_tests {
+    use super::*;
+
+    /// **The overlap that misattributed a scene's state.** Phantom LEDs are
+    /// `button + 100`, keypad LEDs are `button + 80`, and both subtractions
+    /// land on real phantom button numbers: component 106 is button 6's LED,
+    /// but 106 − 80 = 26 is a button someone may well have a scene on. The
+    /// +100 reading is the one that applies to this map.
+    #[test]
+    fn the_phantom_offset_wins_when_both_would_match() {
+        let mut scenes = HashMap::new();
+        scenes.insert((1, 6), 0); // Deck On, phantom button 6
+        scenes.insert((1, 26), 1); // some other scene, phantom button 26
+
+        assert_eq!(scene_for_led(&scenes, 1, 106), Some((0, 6)));
+    }
+
+    /// A repeater that answers with the keypad offset is still understood —
+    /// but only when the phantom reading matches nothing.
+    #[test]
+    fn the_keypad_offset_is_a_fallback_not_a_first_guess() {
+        let mut scenes = HashMap::new();
+        scenes.insert((1, 26), 1);
+
+        assert_eq!(scene_for_led(&scenes, 1, 106), Some((1, 26)));
+    }
+
+    #[test]
+    fn an_led_on_another_device_is_not_a_scene() {
+        let mut scenes = HashMap::new();
+        scenes.insert((1, 6), 0);
+
+        assert_eq!(scene_for_led(&scenes, 9, 106), None);
+        assert_eq!(scene_for_led(&scenes, 1, 199), None);
     }
 }
 

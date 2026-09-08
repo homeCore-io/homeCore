@@ -6683,7 +6683,7 @@ see.
 | Fan control | `on`, `speed` (`off`/`low`/`medium`/`medium-high`/`high`), `speed_pct` | — |
 | Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
 | Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
-| Phantom scene | `on`, **only when the scene really reports it** | `activate` |
+| Phantom scene | `phantom_button`, `led_component` and `on` — the last two **only when the scene really reports** | `activate` |
 | Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
 
 **A scene's state is its phantom button's LED, and not every phantom button has
@@ -6696,8 +6696,23 @@ So `on` is declared only for the scenes that genuinely report it. Which ones
 those are is *learned*, not configured: the startup LED query answers within a
 second of connect, and the first real state to arrive flips the scene to
 reporting and republishes its schema (retained, so it stays said). A scene
-whose LED never answers keeps a schema with the `activate` action and nothing
-to read.
+whose LED never answers keeps a schema with the `activate` action and no `on`.
+
+Every scene also publishes the plumbing behind that, declared `diagnostic`:
+`phantom_button` always, and `led_component` (button + 100) once the scene is
+known to report. So "this scene supports status" is something a client can
+*show* — with the LED it rests on — rather than infer from an absent
+attribute, and a scene that never reports still names the button to check.
+
+**The two LED offsets overlap, and the resolution order matters.** Phantom
+LEDs are `button + 100`, keypad LEDs are `button + 80`, and both subtractions
+land on real phantom button numbers: component 106 is button 6's LED, but
+106 − 80 = 26 is a button someone may have a scene on. `scene_for_led` reads
++100 first — that is the offset that applies to a map of main-repeater phantom
+buttons — and falls back to +80 only when +100 matches nothing. Trying +80
+first (as it did) reported button 6's LED against button 26's scene, and once
+the schema is learned from these events it would have declared the wrong scene
+able to report.
 
 Declared actions carry no parameters here, so `{"action":"activate"}` and the
 hand-written `{"activate":true}` are normalised to the same payload before any
