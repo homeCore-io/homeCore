@@ -6693,10 +6693,16 @@ what it optimistically wrote when it pressed the button. A client that cannot
 tell the two apart shows a confident toggle for both.
 
 So `on` is declared only for the scenes that genuinely report it. Which ones
-those are is *learned*, not configured: the startup LED query answers within a
-second of connect, and the first real state to arrive flips the scene to
-reporting and republishes its schema (retained, so it stays said). A scene
-whose LED never answers keeps a schema with the `activate` action and no `on`.
+those are is *learned*, not configured, and the default is "reports": a phantom
+button on the main repeater normally has an LED, and the exception is a scene
+tied to a Pico, which has no LEDs at all. The startup LED query settles it
+within a second of connect — an explicit 255 ("no LED assigned") is the one
+answer that retires a scene's `on` and republishes its schema without it
+(retained, so it stays said).
+
+Assuming the other way round — declaring no status until an LED event proved
+otherwise — meant every scene in the house went schema-less-for-status for the
+second between connecting and the query coming back, on every reconnect.
 
 Every scene also publishes the plumbing behind that, declared `diagnostic`:
 `phantom_button` always, and `led_component` (button + 100) once the scene is

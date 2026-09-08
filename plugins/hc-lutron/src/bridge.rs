@@ -321,44 +321,26 @@ impl Bridge {
                 scene_for_led(&self.repeater_button_to_scene, integration_id, component)
             {
                 let scene = &self.scenes[scene_idx];
-                // 255 means no LED is assigned to this phantom button, and
-                // `> 0` used to read that as the scene being active.
+                let hc_id = scene.hc_id.clone();
+                // 255 means no LED is assigned to this phantom button — the
+                // shape a scene tied to a Pico has, since a Pico has no LEDs.
+                // `> 0` used to read that as the scene being active; now it is
+                // also the one answer that can retire a scene's `on`.
                 if !is_led_state(state) {
+                    self.scenes[scene_idx].reports_state = Some(false);
+                    self.republish_scene_schema(scene_idx).await;
                     return;
                 }
                 let on = state > 0; // 1=on, 2=flash, 3=rapid → all "on"
                 let patch = serde_json::json!({ "on": on });
-                let hc_id = scene.hc_id.clone();
                 if let Err(e) = self.publisher.publish_state(&hc_id, &patch).await {
                     warn!(hc_id, error = %e, "Failed to publish scene LED state");
                 }
-                // This scene has an LED, so its `on` is reported rather
-                // than optimistic. Say so — once, and it stays said,
-                // because the schema topic is retained.
-                if !self.scenes[scene_idx].reports_state {
-                    self.scenes[scene_idx].reports_state = true;
-                    let cfg = self.scenes[scene_idx].config.clone();
-                    let schema = crate::schema::scene_schema_json(true);
-                    if let Err(e) = self
-                        .publisher
-                        .register_device_schema_json(&hc_id, &schema)
-                        .await
-                    {
-                        warn!(hc_id, error = %e, "Failed to publish scene schema");
-                    } else {
-                        info!(hc_id, "Scene reports its own state; schema updated");
-                    }
-                    // Name the LED that backs it, so a client can show
-                    // what "supports status" rests on.
-                    let plumbing = crate::schema::scene_plumbing_state(&cfg, true);
-                    if let Err(e) = self
-                        .publisher
-                        .publish_state_partial(&hc_id, &plumbing)
-                        .await
-                    {
-                        warn!(hc_id, error = %e, "Failed to publish scene plumbing state");
-                    }
-                }
+                // A real state confirms the LED. Only republishes when it
+                // contradicts what was declared — a scene that answered 255
+                // once and has since been given an LED in programming.
+                self.scenes[scene_idx].reports_state = Some(true);
+                self.republish_scene_schema(scene_idx).await;
                 debug!(
                     hc_id,
                     on,
@@ -616,6 +598,44 @@ impl Bridge {
         }
     }
 
+    /// Republish one scene's schema when what it can report has changed.
+    ///
+    /// The schema topic is retained, so this is said once and stays said; the
+    /// guard is what keeps an LED event from republishing on every press.
+    async fn republish_scene_schema(&mut self, scene_idx: usize) {
+        let declares = self.scenes[scene_idx].declares_status();
+        if declares == self.scenes[scene_idx].declared_status {
+            return;
+        }
+        self.scenes[scene_idx].declared_status = declares;
+
+        let hc_id = self.scenes[scene_idx].hc_id.clone();
+        let cfg = self.scenes[scene_idx].config.clone();
+        let schema = crate::schema::scene_schema_json(declares);
+        if let Err(e) = self
+            .publisher
+            .register_device_schema_json(&hc_id, &schema)
+            .await
+        {
+            warn!(hc_id, error = %e, "Failed to publish scene schema");
+        } else {
+            info!(
+                hc_id,
+                declares, "Scene status support changed; schema updated"
+            );
+        }
+        // Name the LED that backs it, so a client can show what "supports
+        // status" rests on.
+        let plumbing = crate::schema::scene_plumbing_state(&cfg, declares);
+        if let Err(e) = self
+            .publisher
+            .publish_state_partial(&hc_id, &plumbing)
+            .await
+        {
+            warn!(hc_id, error = %e, "Failed to publish scene plumbing state");
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Device registration (sent on every LIP connection)
     // -----------------------------------------------------------------------
@@ -673,7 +693,7 @@ impl Bridge {
             }
             // Whether this one reports its own state is learned from its LED,
             // so a reconnect re-states what we know rather than forgetting it.
-            let schema = crate::schema::scene_schema_json(scene.reports_state);
+            let schema = crate::schema::scene_schema_json(scene.declares_status());
             if let Err(e) = self
                 .publisher
                 .register_device_schema_json(&scene.hc_id, &schema)
@@ -681,7 +701,8 @@ impl Bridge {
             {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
             }
-            let plumbing = crate::schema::scene_plumbing_state(&scene.config, scene.reports_state);
+            let plumbing =
+                crate::schema::scene_plumbing_state(&scene.config, scene.declares_status());
             if let Err(e) = self
                 .publisher
                 .publish_state_partial(&scene.hc_id, &plumbing)
