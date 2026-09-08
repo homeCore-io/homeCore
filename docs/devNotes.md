@@ -6654,6 +6654,27 @@ names — no need to wait for the next poll tick.
 
 ---
 
+## Plugin Notes — hc-roku
+
+### `device_info` carries no ticking counters
+
+The full ECP `device-info` map is published as a nested `device_info`
+attribute. One field in it, `uptime`, counts seconds — so the object differed
+on **every poll**, and every poll became a `device_state_changed` event for a
+device that had done nothing. Measured on the reference house: 111 of the last
+200 events system-wide were two Rokus reporting that time had passed, and
+`uptime` was the only field that differed in 111 of those 111.
+
+`VOLATILE_FIELDS` in `state.rs` is the exclusion list, and a test asserts that
+two snapshots differing only in `uptime` produce byte-identical state. Add to
+it if Roku ever ships another self-changing field.
+
+The value is not worth the noise: nothing in the plugin reads it, a reboot
+already shows as availability dropping, and core records `last_seen` for every
+device. hc-hue skips `zigbee_connectivity` state for the same reason.
+
+---
+
 ## Plugin Notes — hc-lutron
 
 ### Scenes availability
