@@ -26,6 +26,10 @@ use crate::{fetch_custom_server, http_get_json, GwDialect};
 pub struct GatewayDevice {
     pub hc_id: String,
     pub mac: String,
+    /// The attribute names the published schema covers, so it is republished
+    /// when the set changes and not on every poll. Same rule the sensor
+    /// registry follows.
+    pub published_attrs: Vec<String>,
 }
 
 pub type GatewayDeviceState = Arc<Mutex<Option<GatewayDevice>>>;
@@ -108,6 +112,7 @@ pub async fn refresh(
             *g = Some(GatewayDevice {
                 hc_id: hc_id.clone(),
                 mac: mac.clone(),
+                published_attrs: Vec::new(),
             });
         }
     }
@@ -244,6 +249,28 @@ pub async fn refresh(
         .await
     {
         debug!(hc_id = %hc_id, error = %e, "gateway identity re-register failed");
+    }
+
+    // The sensors have described themselves since the registry was written;
+    // the gateway never did, so its ip, model, firmware and timezone arrived
+    // as attributes no client could label or categorise.
+    let mut names: Vec<String> = attrs.keys().cloned().collect();
+    names.sort();
+    let describe_now = {
+        let mut g = state.lock().await;
+        match g.as_mut() {
+            Some(dev) if dev.published_attrs != names => {
+                dev.published_attrs = names;
+                true
+            }
+            _ => false,
+        }
+    };
+    if describe_now {
+        let value = Value::Object(attrs.clone());
+        if let Err(e) = crate::schema::publish(publisher, &hc_id, &value).await {
+            warn!(hc_id = %hc_id, error = %e, "Failed to publish gateway schema");
+        }
     }
 
     publisher

@@ -150,6 +150,25 @@ mod tests {
         schema_for_state(v.as_object().unwrap())
     }
 
+    /// The gateway describes itself too. It publishes ip, mac, model,
+    /// firmware and timezone and never had a schema, so those arrived as
+    /// attributes no client could label or categorise.
+    #[test]
+    fn a_gateway_describes_its_own_identity() {
+        let s = schema(json!({
+            "ip": "192.168.1.50",
+            "model": "GW1100B",
+            "firmware": "Version: GW1100B_V2.4.5",
+            "update_available": false,
+        }));
+        assert!(matches!(s.attributes["ip"].kind, AttributeKind::String));
+        assert!(matches!(s.attributes["model"].kind, AttributeKind::String));
+        assert!(!s.attributes["model"].writable, "a gateway is read-only");
+        let flag = &s.attributes["update_available"];
+        assert!(matches!(flag.kind, AttributeKind::Bool));
+        assert!(flag.states.is_some(), "a boolean names both of its states");
+    }
+
     /// Every boolean names both of its states — including one nobody has named.
     #[test]
     fn every_boolean_names_both_of_its_states() {
