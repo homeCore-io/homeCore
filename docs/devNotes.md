@@ -6654,6 +6654,49 @@ names — no need to wait for the next poll tick.
 
 ---
 
+## Plugin Notes — hc-wled
+
+### State is published as a partial, and the info fields survive it
+
+A WLED controller has two publishers: the bridge (WebSocket pushes and polls
+of on/brightness/colour/effect) and `bridge_info` (a five-minute refresh of
+sixteen read-only attributes — LED layout, WiFi signal, catalogue counts).
+
+The bridge published its half as a **full** state, which replaces the retained
+document — deleting all sixteen info attributes every time, with the next
+refresh putting them back. Every cycle produced a `device_state_changed`
+listing sixteen attributes, in both directions, for a controller that had done
+nothing. `state_to_json` emits a fixed key set, so the light state is published
+as a partial now and says exactly as much.
+
+`uptime_secs` and `device_time` are no longer published at all: both change on
+their own, so either one guarantees an event per refresh. Same reasoning as
+hc-roku's `uptime`.
+
+### Attribute names are snake_case, like everywhere else
+
+`led.count`, `wifi.rssi`, `effects.count` and the rest were dotted. Nothing in
+homeCore treats a dot specially, so they worked — but no other plugin names
+attributes that way, and a client humanising `led.count` renders "Led.count".
+They are `led_count`, `wifi_rssi`, `effects_count` now. **A rule or dashboard
+binding to a dotted name needs updating**; they were all diagnostics, so most
+installs will have none.
+
+### Read and write the same name
+
+The schema declared `preset` and the command path took `preset`, while the
+device published `preset_id`. Same for `effect`/`effect_id` and
+`palette`/`palette_id`. So three attributes were readable under one name and
+writable under another, and a client echoing back what it had just read was
+silently dropped. The published names are the declared ones now, and the
+command path accepts both spellings.
+
+The schema also declares what it had been leaving out — colour, the effect and
+palette controls, and the sixteen hardware facts as `diagnostic` — and a WLED
+controller registers as a `light`, which it never did before.
+
+---
+
 ## Plugin Notes — hc-roku
 
 ### `device_info` carries no ticking counters

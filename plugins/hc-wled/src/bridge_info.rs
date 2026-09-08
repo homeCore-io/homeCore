@@ -146,59 +146,57 @@ async fn build_attrs(
     // LED hardware layout
     if let Some(leds) = info.get("leds") {
         if let Some(n) = leds.get("count").and_then(Value::as_u64) {
-            attrs.insert("led.count".into(), json!(n));
+            attrs.insert("led_count".into(), json!(n));
         }
         if let Some(n) = leds.get("pwr").and_then(Value::as_u64) {
-            attrs.insert("led.power_mw".into(), json!(n));
+            attrs.insert("led_power_mw".into(), json!(n));
         }
         if let Some(n) = leds.get("maxpwr").and_then(Value::as_u64) {
             if n > 0 {
-                attrs.insert("led.max_power_mw".into(), json!(n));
+                attrs.insert("led_max_power_mw".into(), json!(n));
             }
         }
         if let Some(n) = leds.get("maxseg").and_then(Value::as_u64) {
-            attrs.insert("led.max_segments".into(), json!(n));
+            attrs.insert("led_max_segments".into(), json!(n));
         }
         if let Some(b) = leds.get("rgbw").and_then(Value::as_bool) {
-            attrs.insert("led.rgbw".into(), json!(b));
+            attrs.insert("led_rgbw".into(), json!(b));
         }
     }
 
     // Effect / palette catalog sizes
     if let Some(n) = info.get("fxcount").and_then(Value::as_u64) {
-        attrs.insert("effects.count".into(), json!(n));
+        attrs.insert("effects_count".into(), json!(n));
     }
     if let Some(n) = info.get("palcount").and_then(Value::as_u64) {
-        attrs.insert("palettes.count".into(), json!(n));
+        attrs.insert("palettes_count".into(), json!(n));
     }
 
     // WiFi link quality
     if let Some(w) = info.get("wifi") {
         if let Some(n) = w.get("signal").and_then(Value::as_i64) {
-            attrs.insert("wifi.signal_pct".into(), json!(n));
+            attrs.insert("wifi_signal_pct".into(), json!(n));
         }
         if let Some(n) = w.get("rssi").and_then(Value::as_i64) {
-            attrs.insert("wifi.rssi".into(), json!(n));
+            attrs.insert("wifi_rssi".into(), json!(n));
         }
         if let Some(n) = w.get("channel").and_then(Value::as_i64) {
-            attrs.insert("wifi.channel".into(), json!(n));
+            attrs.insert("wifi_channel".into(), json!(n));
         }
     }
-
-    // Uptime + on-device clock
-    if let Some(n) = info.get("uptime").and_then(Value::as_u64) {
-        attrs.insert("uptime_secs".into(), json!(n));
-    }
-    if let Some(s) = info.get("time").and_then(Value::as_str) {
-        attrs.insert("device_time".into(), json!(s));
-    }
+    // **No uptime, and no device clock.** Both change on their own between
+    // refreshes, so publishing either makes every refresh a
+    // `device_state_changed` for a controller that did nothing — the same
+    // churn hc-roku's `uptime` caused, on a five-minute tick instead of a
+    // ten-second one. A WLED reboot already shows as availability dropping,
+    // and core records `last_seen`.
 
     // Peer mesh — size only; the full list is too long to be useful
     // as an attribute, but a count tells the operator "yes this is
     // syncing with N other WLEDs" at a glance.
     if let Ok(nodes) = fetch_json(http, base, "/json/nodes").await {
         if let Some(arr) = nodes.get("nodes").and_then(Value::as_array) {
-            attrs.insert("peers.count".into(), json!(arr.len()));
+            attrs.insert("peers_count".into(), json!(arr.len()));
         }
     }
 
@@ -208,7 +206,7 @@ async fn build_attrs(
     if let Ok(presets) = fetch_json(http, base, "/presets.json").await {
         if let Some(obj) = presets.as_object() {
             let count = obj.len().saturating_sub(usize::from(obj.contains_key("0")));
-            attrs.insert("presets.count".into(), json!(count));
+            attrs.insert("presets_count".into(), json!(count));
         }
     }
 

@@ -1,5 +1,14 @@
 //! Bridge: manages per-device state polling, WebSocket subscriptions,
 //! and command execution.
+//!
+//! **Light state is published as a *partial*, never a full state.** A full
+//! publish replaces the retained document, and `bridge_info` merges sixteen
+//! read-only attributes — LED layout, WiFi signal, catalogue counts — onto
+//! that same device on its own slow tick. Publishing the light state whole
+//! deleted all sixteen, and the next info refresh put them back: a
+//! `device_state_changed` listing sixteen attributes, in both directions,
+//! forever. `state_to_json` emits a fixed key set, so a partial says exactly
+//! as much and disturbs nothing else.
 
 use std::collections::HashMap;
 
@@ -75,7 +84,7 @@ impl Bridge {
                         if let Ok(state) = client.get_state().await {
                             let j = state_to_json(&state);
                             if let Err(e) = publisher
-                                .publish_state_for_command(&hc_id2, &j, &cmd, "hc-wled")
+                                .publish_state_partial_for_command(&hc_id2, &j, &cmd, "hc-wled")
                                 .await
                             {
                                 warn!(hc_id = %hc_id2, error = %e, "Failed to publish state");
@@ -112,7 +121,7 @@ async fn startup_device(
             let _ = publisher.set_available(&dev.hc_id, true).await;
             if let Ok(state) = client.get_state().await {
                 let _ = publisher
-                    .publish_state(&dev.hc_id, &state_to_json(&state))
+                    .publish_state_partial(&dev.hc_id, &state_to_json(&state))
                     .await;
             }
             info.ws >= 0
@@ -144,7 +153,9 @@ async fn run_websocket(
                         Ok(Message::Text(text)) => {
                             if let Ok(state) = serde_json::from_str::<WledState>(&text) {
                                 let j = state_to_json(&state);
-                                if let Err(e) = publisher.publish_state(&dev.hc_id, &j).await {
+                                if let Err(e) =
+                                    publisher.publish_state_partial(&dev.hc_id, &j).await
+                                {
                                     warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish WS state");
                                 }
                             }
@@ -160,7 +171,7 @@ async fn run_websocket(
                 warn!(hc_id = %dev.hc_id, error = %e, "WebSocket connect failed; falling back to poll");
                 if let Ok(state) = client.get_state().await {
                     let _ = publisher
-                        .publish_state(&dev.hc_id, &state_to_json(&state))
+                        .publish_state_partial(&dev.hc_id, &state_to_json(&state))
                         .await;
                     let _ = publisher.set_available(&dev.hc_id, true).await;
                 } else {
@@ -188,7 +199,7 @@ async fn run_poller(dev: DeviceConfig, publisher: DevicePublisher, poll_secs: u6
                     online = true;
                 }
                 let j = state_to_json(&state);
-                if let Err(e) = publisher.publish_state(&dev.hc_id, &j).await {
+                if let Err(e) = publisher.publish_state_partial(&dev.hc_id, &j).await {
                     warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish state");
                 }
             }
@@ -219,7 +230,16 @@ async fn execute_command(client: &WledClient, cmd: &Value) -> Result<()> {
     if let Some(ms) = cmd.get("transition").and_then(Value::as_u64) {
         body.insert("tt".into(), json!((ms / 100).min(65535)));
     }
-    if let Some(ps) = cmd.get("preset").and_then(Value::as_i64) {
+    // `preset_id` is what the device *publishes*, so it is what a client
+    // reads and sends back; `preset` is the original wire key and what older
+    // rules say. Same for `effect_id`/`effect` and `palette_id`/`palette`
+    // below — three attributes that were readable under one name and
+    // writable under another, so echoing back what you just read did nothing.
+    if let Some(ps) = cmd
+        .get("preset_id")
+        .or_else(|| cmd.get("preset"))
+        .and_then(Value::as_i64)
+    {
         body.insert("ps".into(), json!(ps));
     }
     // `apply_preset` is an explicit alias for the convenience of the
@@ -260,7 +280,11 @@ async fn execute_command(client: &WledClient, cmd: &Value) -> Result<()> {
     if let Some(color) = cmd.get("color").and_then(Value::as_array) {
         seg.insert("col".into(), json!([color]));
     }
-    if let Some(fx) = cmd.get("effect").and_then(Value::as_u64) {
+    if let Some(fx) = cmd
+        .get("effect_id")
+        .or_else(|| cmd.get("effect"))
+        .and_then(Value::as_u64)
+    {
         seg.insert("fx".into(), json!(fx));
     }
     if let Some(sx) = cmd.get("effect_speed").and_then(Value::as_u64) {
@@ -269,7 +293,11 @@ async fn execute_command(client: &WledClient, cmd: &Value) -> Result<()> {
     if let Some(ix) = cmd.get("effect_intensity").and_then(Value::as_u64) {
         seg.insert("ix".into(), json!((ix.min(255)) as u8));
     }
-    if let Some(pal) = cmd.get("palette").and_then(Value::as_u64) {
+    if let Some(pal) = cmd
+        .get("palette_id")
+        .or_else(|| cmd.get("palette"))
+        .and_then(Value::as_u64)
+    {
         seg.insert("pal".into(), json!(pal));
     }
 
