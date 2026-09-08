@@ -6761,6 +6761,38 @@ holds it to it: every speed offered is one `translate_command` accepts.
 
 ---
 
+## Device schema — which attributes are the point of the device
+
+`AttributeSchema.category` says what a reading is *for* when it is not what the
+device exists to report: `diagnostic` for health and identity (battery, RSSI,
+firmware, ip, model, a `*_unit` sibling), `config` for a setting that shapes
+behaviour. **Absent means primary**, so a client leads with what carries no
+category.
+
+The field has been on the schema and read by both clients for a while —
+hc-web-lit skips diagnostic and config attributes when building controls,
+Flutter demotes them through `isDiagnostic` — but until now **no plugin set
+it**, so a lock's battery was declared exactly as primary as whether it was
+locked, and clients kept a hardcoded list of names to demote instead
+(hc-web-lit's `UNDECLARED_HOUSEKEEPING`, filed as homeCore#28).
+
+The lexicon lives in `hc_types::AttributeCategory::for_name` — one list, in the
+crate that defines the field, rather than one per plugin. Plugins that build
+attributes from a name call it:
+
+| Plugin | Where |
+| --- | --- |
+| hc-zwave | `describe()` — every node attribute, including `name` and `location` |
+| hc-ecowitt | `describe()` — plus `units.*` / `customserver.*` as `config` |
+| hc-yolink | the shared `battery()` helper, across all six kinds that report one |
+| hc-isy | `unit` on a generic sensor, set locally — the lexicon does not claim a bare `unit`, since a thermostat could have a writable one |
+
+A plugin that knows something the lexicon cannot still sets the category
+itself; the lexicon only holds names whose meaning is fixed across every
+integration.
+
+---
+
 ## Core — DeviceState device_type field
 
 Added `device_type: Option<String>` to `DeviceState` in `hc-types`

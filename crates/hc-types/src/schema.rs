@@ -229,6 +229,55 @@ pub enum AttributeCategory {
     Config,
 }
 
+impl AttributeCategory {
+    /// The category a conventionally-named attribute belongs to, or `None`
+    /// when the name says nothing — which means primary.
+    ///
+    /// **One lexicon, in the crate that defines the field.** Every plugin
+    /// publishes a battery under the same name, so each one deciding for
+    /// itself is three chances to disagree; and while nobody decides, clients
+    /// keep the list instead. hc-web-lit carries exactly this set as
+    /// `UNDECLARED_HOUSEKEEPING`, described in its own comment as a stopgap
+    /// for a gap that is filed — a client hardcoding plugin semantics, which
+    /// is what [`DeviceAction`] and [`BoolStates`] exist to stop.
+    ///
+    /// Only names whose meaning is fixed across every integration belong here.
+    /// A plugin that knows something this cannot — that its `unit` is metadata
+    /// about a reading rather than a setting — still sets the category itself.
+    pub fn for_name(name: &str) -> Option<Self> {
+        // The `_unit` sibling is homeCore convention: `temperature` carries
+        // `temperature_unit`, and the sibling is never the reading.
+        if name.ends_with("_unit") {
+            return Some(Self::Diagnostic);
+        }
+        match name {
+            // Health and connectivity.
+            "battery"
+            | "battery_pct"
+            | "battery_low"
+            | "battery_kind"
+            | "battery_state"
+            | "rssi"
+            | "lqi"
+            | "signal_strength"
+            | "link_quality"
+            | "firmware"
+            | "sw_version"
+            | "hw_version"
+            | "uptime"
+            | "last_seen" => Some(Self::Diagnostic),
+            // What the thing is and where it lives, as opposed to what it is
+            // doing. A device's own record already carries these; republished
+            // as attributes they are never the reading anyone came for.
+            "ip" | "mac" | "model" | "manufacturer" | "serial" | "serial_number" | "name"
+            | "area" | "location" | "kind" | "bridge_id" | "resource_id" | "node_id" => {
+                Some(Self::Diagnostic)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Describes a single attribute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchema {
@@ -449,6 +498,20 @@ pub enum AttributeKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// A lock reports whether it is locked; it also reports battery. Only one
+    /// of those is the point of the device, and until this said so every
+    /// client kept the list itself.
+    #[test]
+    fn housekeeping_is_named_and_readings_are_left_alone() {
+        use AttributeCategory as C;
+        for name in ["battery", "rssi", "firmware", "ip", "model", "temperature_unit"] {
+            assert_eq!(C::for_name(name), Some(C::Diagnostic), "{name}");
+        }
+        for name in ["temperature", "humidity", "on", "locked", "position", "speed"] {
+            assert_eq!(C::for_name(name), None, "{name} is the reading");
+        }
+    }
     use super::*;
     use serde_json::json;
 

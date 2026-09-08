@@ -18,7 +18,7 @@
 //! control that silently does nothing. The tests check both directions.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use std::collections::HashMap;
@@ -132,7 +132,12 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
 
         DeviceKind::Sensor => {
             a.insert("value".into(), ro(AttributeKind::Float, "Value"));
-            a.insert("unit".into(), ro(AttributeKind::String, "Unit"));
+            // Metadata about the reading, not a reading. The cross-plugin
+            // lexicon does not claim a bare `unit` — a thermostat could have a
+            // writable one — but here it is plainly the sibling of `value`.
+            let mut unit = ro(AttributeKind::String, "Unit");
+            unit.category = Some(AttributeCategory::Diagnostic);
+            a.insert("unit".into(), unit);
         }
 
         DeviceKind::Lock => {

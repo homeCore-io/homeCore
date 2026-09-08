@@ -19,7 +19,7 @@
 //! does nothing. The schema asks it directly.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -119,6 +119,10 @@ pub fn describe(name: &str, value: &Value, translator: &Translator) -> Attribute
     };
     a = a.labelled(humanise(name));
     a.unit = unit_for(name).map(|u| u.to_string());
+    // A node reports its battery and its name alongside whether it is locked.
+    // Saying which of those is the point of the device is the difference
+    // between a client leading with the lock and leading with the battery.
+    a.category = AttributeCategory::for_name(name);
     if matches!(value, Value::Bool(_)) {
         a.states = Some(states_for(name));
     }
@@ -155,6 +159,25 @@ pub fn schema_json(state: &Value, translator: &Translator) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A lock reports whether it is locked; it also reports battery, and its
+    /// own name. Only the first is the point of the device.
+    #[test]
+    fn housekeeping_is_declared_and_the_reading_is_left_primary() {
+        let s = schema(json!({
+            "locked": true,
+            "battery": 80,
+            "name": "Front Door",
+        }));
+        assert_eq!(s.attributes["locked"].category, None);
+        for name in ["battery", "name"] {
+            assert_eq!(
+                s.attributes[name].category,
+                Some(AttributeCategory::Diagnostic),
+                "{name}"
+            );
+        }
+    }
 
     fn schema(v: Value) -> DeviceSchema {
         let t = Translator::new();

@@ -3749,6 +3749,18 @@ paths:
                           description: Fixed option list for the `enum` kind
                           items:
                             type: string
+                        category:
+                          type: string
+                          enum: [diagnostic, config]
+                          description: |
+                            What this reading is *for*, when it is not the point
+                            of the device. `diagnostic` is health and identity —
+                            battery, RSSI, firmware, ip, model; `config` is a
+                            setting that shapes behaviour rather than reporting
+                            what the device is doing.
+
+                            **Absent means primary**, so a client leads with the
+                            attributes that carry no category.
               example:
                 attributes:
                   on:
@@ -3759,6 +3771,11 @@ paths:
                     writable: true
                     min: 0
                     max: 255
+                  battery:
+                    kind: integer
+                    writable: false
+                    unit: "%"
+                    category: diagnostic
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
