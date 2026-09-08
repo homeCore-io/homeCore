@@ -1,4 +1,10 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
+
+use plugin_sdk_rs::device_actions::{with_actions, Action};
+use plugin_sdk_rs::types::schema::{
+    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 
 use crate::hue::models::{BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene};
 
@@ -441,11 +447,57 @@ pub fn scene_state(scene: &HueScene) -> Value {
     state
 }
 
+/// **What a Hue scene is: one thing to do, and — from the bridge — whether it
+/// is the one currently applied.**
+///
+/// Hue reports `status.active` as `"inactive" | "static" | "dynamic_palette"`
+/// and this plugin flattens it to a bool, so `active` is declared `Bool`:
+/// declaring the enum would describe a value nothing publishes.
+///
+/// `reports_status` is not a guess — `fetch_scenes` either found `status` on
+/// the resource or it did not, and a bridge too old to report it would
+/// otherwise leave a client rendering a state row that never fills in.
+pub fn scene_schema(reports_status: bool) -> Value {
+    let mut attrs = HashMap::new();
+    if reports_status {
+        attrs.insert(
+            "active".to_string(),
+            AttributeSchema {
+                kind: AttributeKind::Bool,
+                // Recalling the scene is the action; assigning to `active` is
+                // not a command this plugin dispatches.
+                writable: false,
+                display_name: Some("Active".to_string()),
+                states: Some(BoolStates {
+                    when_true: StateLabel::verbed("active", "activates"),
+                    when_false: StateLabel::verbed("inactive", "deactivates"),
+                }),
+                ..Default::default()
+            },
+        );
+    }
+    let schema = DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    };
+    with_actions(
+        &schema,
+        vec![Action::new("activate")
+            .label("Activate the scene")
+            .category("Scenes")
+            .icon("scene")
+            .sentence("activate {device}")],
+    )
+}
+
 pub fn scene_capabilities() -> Value {
     json!({
         "action": {
             "type": "string",
-            "enum": ["activate_scene"]
+            // Both, because both are accepted: `activate` is what the schema
+            // declares and what hc-lutron's scenes use, `activate_scene` is
+            // what this plugin has always taken.
+            "enum": ["activate_scene", "activate"]
         }
     })
 }
@@ -567,6 +619,43 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
         }
     }
     Value::Object(caps)
+}
+
+#[cfg(test)]
+mod scene_schema_tests {
+    use super::*;
+
+    /// A scene had capabilities but no schema, so a client had no action to
+    /// offer and nothing to render.
+    #[test]
+    fn a_scene_declares_the_one_thing_it_does() {
+        let v = scene_schema(true);
+        assert_eq!(v["actions"][0]["id"], "activate");
+        assert_eq!(v["actions"].as_array().expect("actions").len(), 1);
+    }
+
+    /// Hue reports `status.active` as a string enum and this plugin flattens
+    /// it to a bool, so `Bool` is what the state carries and `Bool` is what
+    /// the schema must say. Activation is the action; assigning to `active`
+    /// is not a command this plugin dispatches.
+    #[test]
+    fn a_scene_that_reports_declares_active_as_the_bool_it_publishes() {
+        let v = scene_schema(true);
+        let active = &v["attributes"]["active"];
+        assert_eq!(active["kind"], "bool");
+        assert_eq!(active["writable"], false);
+        assert_eq!(active["states"]["when_true"]["label"], "active");
+        assert_eq!(active["states"]["when_false"]["label"], "inactive");
+    }
+
+    /// A bridge that does not report `status` on its scenes would otherwise
+    /// leave a client rendering a state row that never fills in.
+    #[test]
+    fn a_scene_from_a_bridge_that_does_not_report_declares_no_state() {
+        let v = scene_schema(false);
+        assert!(v["attributes"].as_object().expect("attributes").is_empty());
+        assert_eq!(v["actions"][0]["id"], "activate");
+    }
 }
 
 #[cfg(test)]

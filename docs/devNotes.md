@@ -6752,6 +6752,25 @@ the Scenes page includes them alongside native HC scenes.
 `{"action": "activate_scene"}` (commit c1b99e4). This allows plugin scenes
 to be activated from hc-web using the same code path as Lutron scenes.
 
+`{"action": "activate"}` is accepted too, and `activate` is the id the scene
+schema *declares* — the same one hc-lutron declares, so a client has one
+action for "run this scene" whatever runs it. `activate_scene` keeps working
+for the rules and clients that send it.
+
+### Scene schema
+
+A Hue scene declares the `activate` action and, when the bridge reports it,
+a read-only `active`.
+
+Hue reports scene `status.active` as a string enum
+(`"inactive" | "static" | "dynamic_palette"`) and this plugin flattens it to a
+bool, so `active` is declared `Bool` — declaring the enum would describe a
+value nothing publishes. Whether a scene reports at all is not a guess:
+`fetch_scenes` either found `status` on the resource or it did not, and
+`RegisteredScene.reports_status` remembers what the published schema claimed,
+so a scene whose answer changes republishes rather than leaving a client with
+a state row that never fills in.
+
 ---
 
 ## hc-web Notes

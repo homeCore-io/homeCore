@@ -168,7 +168,28 @@ pub async fn refresh_bridge_state(
                         )
                         .await?;
                     publisher.subscribe_commands(&scene.device_id).await?;
+                    // Scenes had capabilities but no schema, so a client had
+                    // nothing to render them from — no action to offer, and no
+                    // way to know the bridge reports which scene is applied.
+                    publisher
+                        .register_device_schema_json(
+                            &scene.device_id,
+                            &translator::scene_schema(scene.active.is_some()),
+                        )
+                        .await
+                        .ok();
                     debug!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
+                } else if registry.scene_status_support_changed(&scene) {
+                    publisher
+                        .register_device_schema_json(
+                            &scene.device_id,
+                            &translator::scene_schema(scene.active.is_some()),
+                        )
+                        .await
+                        .ok();
+                    debug!(device_id = %scene.device_id,
+                        reports_status = scene.active.is_some(),
+                        "Hue scene status support changed; schema updated");
                 }
 
                 publisher

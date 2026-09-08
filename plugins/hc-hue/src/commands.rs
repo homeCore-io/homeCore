@@ -27,7 +27,11 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         if action == "pair_bridge" {
             return PluginCommand::PairBridge;
         }
-        if action == "activate_scene" {
+        // `activate` is the declared id — the same one hc-lutron declares, so a
+        // client has one action for "run this scene" whatever ran it.
+        // `activate_scene` is what this plugin has always accepted and what
+        // older rules send.
+        if action == "activate_scene" || action == "activate" {
             let scene_id = payload
                 .get("scene_id")
                 .and_then(Value::as_str)
@@ -194,6 +198,23 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The mirror of the declaration: `activate` is the action id a scene's
+    /// schema offers, so the parser has to accept it. `activate_scene` is what
+    /// this plugin has always taken and what older rules send.
+    #[test]
+    fn both_spellings_of_activation_reach_the_same_command() {
+        for payload in [
+            json!({ "action": "activate" }),
+            json!({ "action": "activate_scene" }),
+            json!({ "activate": true }),
+        ] {
+            match parse_homecore_command(payload.clone()) {
+                PluginCommand::ActivateScene { .. } => {}
+                other => panic!("expected ActivateScene for {payload}, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn parses_accessory_enabled_command() {
