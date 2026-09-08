@@ -98,6 +98,19 @@ fn humanise(name: &str) -> String {
     }
 }
 
+/// Whether this name is the translator's synthetic form for an unmapped
+/// command-class value — `cc113_alarmlevel`, `cc112_e2_3`.
+///
+/// Deliberately narrow: `cc`, digits, then `_`. Nothing in the alias table
+/// starts this way, and a real attribute named `ccx_level` is not one of these.
+fn is_synthetic_cc_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("cc") else {
+        return false;
+    };
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && rest[digits..].starts_with('_')
+}
+
 /// Describe one attribute from its reported value and the translator.
 pub fn describe(name: &str, value: &Value, translator: &Translator) -> AttributeSchema {
     let kind = match value {
@@ -122,7 +135,15 @@ pub fn describe(name: &str, value: &Value, translator: &Translator) -> Attribute
     // A node reports its battery and its name alongside whether it is locked.
     // Saying which of those is the point of the device is the difference
     // between a client leading with the lock and leading with the battery.
-    a.category = AttributeCategory::for_name(name);
+    a.category = AttributeCategory::for_name(name).or_else(|| {
+        // A `cc{n}_{property}` name is what the translator emits for a value
+        // the alias table does **not** map — so it is raw by definition:
+        // `cc114_manufacturerid` is identity and `cc112_3` is a configuration
+        // parameter nobody named. Surfacing them is right; ranking them beside
+        // the reading a node exists for is not. A live switch ranked
+        // `[on, cc112_19, cc112_3, cc114_manufacturerid]`.
+        is_synthetic_cc_name(name).then_some(AttributeCategory::Diagnostic)
+    });
     if matches!(value, Value::Bool(_)) {
         a.states = Some(states_for(name));
     }
@@ -177,6 +198,37 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A live switch ranked `[on, cc112_19, cc112_3, cc114_manufacturerid]`.
+    /// The `cc` names are values the alias table did not map — raw by
+    /// definition, and never what a node is for.
+    #[test]
+    fn unmapped_command_class_values_are_not_the_reading() {
+        let s = schema(json!({
+            "on": true,
+            "cc112_19": 0,
+            "cc114_manufacturerid": 271,
+            "cc113_e2_alarmlevel": 0,
+        }));
+        assert_eq!(s.attributes["on"].category, None);
+        for name in ["cc112_19", "cc114_manufacturerid", "cc113_e2_alarmlevel"] {
+            assert_eq!(
+                s.attributes[name].category,
+                Some(AttributeCategory::Diagnostic),
+                "{name}"
+            );
+        }
+    }
+
+    /// Narrow on purpose: an ordinary name that merely starts with "cc" is a
+    /// reading like any other.
+    #[test]
+    fn a_name_that_only_looks_synthetic_is_left_alone() {
+        assert!(is_synthetic_cc_name("cc112_3"));
+        assert!(!is_synthetic_cc_name("ccx_level"));
+        assert!(!is_synthetic_cc_name("cc_level"));
+        assert!(!is_synthetic_cc_name("current_a"));
     }
 
     fn schema(v: Value) -> DeviceSchema {

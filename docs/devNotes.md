@@ -6707,8 +6707,10 @@ otherwise — meant every scene in the house went schema-less-for-status for the
 second between connecting and the query coming back, on every reconnect.
 
 Every scene also publishes the plumbing behind that, declared `diagnostic`:
-`phantom_button` always, and `led_component` (button + 100) once the scene is
-known to report. So "this scene supports status" is something a client can
+`phantom_button` with its initial state, and `led_component` (button + 100)
+published once the repeater has actually answered for that scene — a state
+publish cannot unsay a key, so naming an LED on the assumption would strand a
+stale `led_component` on every Pico-tied scene. So "this scene supports status" is something a client can
 *show* — with the LED it rests on — rather than infer from an absent
 attribute, and a scene that never reports still names the button to check.
 
@@ -6839,6 +6841,19 @@ attributes from a name call it:
 A plugin that knows something the lexicon cannot still sets the category
 itself; the lexicon only holds names whose meaning is fixed across every
 integration.
+
+Two of those plugin-local judgements, both found by reading the live house
+rather than the code:
+
+- **hc-yolink hand-declares its attributes**, so nothing asked the lexicon
+  until every declared attribute did. A temperature sensor ranked
+  `temperature_unit` beside its temperature, as primary as the reading it
+  qualifies.
+- **hc-zwave's `cc{n}_{property}` names are unmapped values by definition** —
+  `cc114_manufacturerid` is identity, `cc112_3` is a configuration parameter
+  nobody named. Surfacing them is right; ranking them beside the reading a node
+  exists for is not. A live switch ranked
+  `[on, cc112_19, cc112_3, cc114_manufacturerid]`.
 
 ---
 
