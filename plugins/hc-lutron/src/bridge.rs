@@ -339,8 +339,25 @@ impl Bridge {
                 // A real state confirms the LED. Only republishes when it
                 // contradicts what was declared — a scene that answered 255
                 // once and has since been given an LED in programming.
+                // Confirmed: this scene really is LED-backed. The schema
+                // republishes only if that contradicts what was declared, but
+                // the LED number is published either way — the common case is
+                // a scene confirming the assumption, which changes no schema
+                // and left the number unsaid.
+                let first_answer = self.scenes[scene_idx].reports_state != Some(true);
                 self.scenes[scene_idx].reports_state = Some(true);
                 self.republish_scene_schema(scene_idx).await;
+                if first_answer {
+                    let cfg = self.scenes[scene_idx].config.clone();
+                    let plumbing = crate::schema::scene_plumbing_state(&cfg, true);
+                    if let Err(e) = self
+                        .publisher
+                        .publish_state_partial(&hc_id, &plumbing)
+                        .await
+                    {
+                        warn!(hc_id, error = %e, "Failed to publish scene plumbing state");
+                    }
+                }
                 debug!(
                     hc_id,
                     on,
@@ -613,7 +630,6 @@ impl Bridge {
         self.scenes[scene_idx].declared_status = declares;
 
         let hc_id = self.scenes[scene_idx].hc_id.clone();
-        let cfg = self.scenes[scene_idx].config.clone();
         let schema = crate::schema::scene_schema_json(declares);
         if let Err(e) = self
             .publisher
@@ -626,16 +642,6 @@ impl Bridge {
                 hc_id,
                 declares, "Scene status support changed; schema updated"
             );
-        }
-        // Name the LED that backs it, so a client can show what "supports
-        // status" rests on.
-        let plumbing = crate::schema::scene_plumbing_state(&cfg, declares);
-        if let Err(e) = self
-            .publisher
-            .publish_state_partial(&hc_id, &plumbing)
-            .await
-        {
-            warn!(hc_id, error = %e, "Failed to publish scene plumbing state");
         }
     }
 
@@ -704,8 +710,13 @@ impl Bridge {
             {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
             }
-            let plumbing =
-                crate::schema::scene_plumbing_state(&scene.config, scene.declares_status());
+            // The LED number waits until the repeater has answered for this
+            // scene — see `scene_plumbing_state`. `reports_state` is an
+            // assumption until then, and a state publish cannot unsay a key.
+            let plumbing = crate::schema::scene_plumbing_state(
+                &scene.config,
+                scene.reports_state == Some(true),
+            );
             if let Err(e) = self
                 .publisher
                 .publish_state_partial(&scene.hc_id, &plumbing)
@@ -766,9 +777,17 @@ impl Bridge {
     // -----------------------------------------------------------------------
 
     async fn publish_scene_initial_states(&self) {
-        let patch = serde_json::json!({ "on": false });
         for scene in &self.scenes {
-            if let Err(e) = self.publisher.publish_state(&scene.hc_id, &patch).await {
+            // **One full publish, carrying everything.** This used to send a
+            // bare `{"on": false}`, which replaced the retained state — and
+            // with it the `phantom_button` that `register_all_devices` had
+            // just published moments earlier. Every scene that then confirmed
+            // its LED kept a schema declaring plumbing attributes its state no
+            // longer had, so "this scene supports status, via LED 103" could
+            // not be shown for the scenes that actually do.
+            let mut state = crate::schema::scene_plumbing_state(&scene.config, false);
+            state["on"] = serde_json::json!(false);
+            if let Err(e) = self.publisher.publish_state(&scene.hc_id, &state).await {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene initial state");
             }
         }

@@ -384,11 +384,13 @@ pub fn timeclock_schema_json() -> Value {
 /// What a scene publishes about its own plumbing, to fill the attributes
 /// [`scene_schema_json`] declares.
 ///
-/// `led_component` appears only once the scene is known to report: an
-/// unassigned phantom button has no LED to name.
-pub fn scene_plumbing_state(cfg: &SceneConfig, reports_state: bool) -> Value {
+/// `include_led` only once the repeater has **answered** for this scene: a
+/// state publish cannot unsay a key, so naming an LED before knowing there is
+/// one would leave a stale `led_component` on every Pico-tied scene for the
+/// life of the retained topic. Absent until confirmed, then published once.
+pub fn scene_plumbing_state(cfg: &SceneConfig, include_led: bool) -> Value {
     let mut state = serde_json::json!({ "phantom_button": cfg.button_component });
-    if reports_state {
+    if include_led {
         state["led_component"] =
             serde_json::json!(led_component_for_phantom_button(cfg.button_component));
     }
@@ -765,6 +767,21 @@ mod scene_schema_tests {
         let state = scene_plumbing_state(&cfg(), true);
         assert_eq!(state["phantom_button"], 3);
         assert_eq!(state["led_component"], 103); // button + 100
+    }
+
+    /// **The button is published before anything is known; the LED only once
+    /// it is.** A state publish cannot unsay a key, so naming an LED on the
+    /// assumption a scene has one would leave every Pico-tied scene carrying a
+    /// stale `led_component` forever.
+    #[test]
+    fn the_button_goes_out_first_and_the_led_only_when_confirmed() {
+        let before = scene_plumbing_state(&cfg(), false);
+        assert_eq!(before["phantom_button"], 3);
+        assert!(before.get("led_component").is_none());
+
+        let confirmed = scene_plumbing_state(&cfg(), true);
+        assert_eq!(confirmed["phantom_button"], 3);
+        assert_eq!(confirmed["led_component"], 103);
     }
 
     /// A scene with no LED still says which button it is — that is the first

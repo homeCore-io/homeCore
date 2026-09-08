@@ -58,10 +58,6 @@ fn battery() -> AttributeSchema {
     let mut a = ro_unit(AttributeKind::Integer, "Battery", "%");
     a.min = Some(0.0);
     a.max = Some(100.0);
-    // Every kind here reports one, beside the reading it exists for. A client
-    // that trusted the declaration used to have no way to tell a leak sensor's
-    // water_detected from its battery.
-    a.category = AttributeCategory::for_name("battery");
     a
 }
 
@@ -196,6 +192,18 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
         DeviceKind::Hub | DeviceKind::Unknown(_) => return None,
     }
 
+    // **Every attribute, not only the battery.** This plugin hand-declares its
+    // attributes, so nothing asked the shared lexicon until now and only
+    // `battery()` carried a category — which left a temperature sensor ranking
+    // `temperature_unit` beside its temperature, as primary as the reading it
+    // qualifies. Only fills what is not already set, so a kind that knows
+    // better keeps what it said.
+    for (name, attr) in a.iter_mut() {
+        if attr.category.is_none() {
+            attr.category = AttributeCategory::for_name(name);
+        }
+    }
+
     Some(DeviceSchema {
         attributes: a,
         ..Default::default()
@@ -226,6 +234,22 @@ mod tests {
     use crate::config::TemperatureUnit;
     use serde_json::json;
 
+    /// A temperature sensor ranked `temperature_unit` beside its temperature,
+    /// because only `battery()` asked the lexicon. Every declared attribute
+    /// asks it now.
+    #[test]
+    fn the_unit_sibling_is_not_a_reading() {
+        let s = schema_for(&DeviceKind::THSensor).expect("a schema");
+        assert_eq!(s.attributes["temperature"].category, None);
+        for name in s.attributes.keys().filter(|k| k.ends_with("_unit")) {
+            assert_eq!(
+                s.attributes[name].category,
+                Some(AttributeCategory::Diagnostic),
+                "{name}"
+            );
+        }
+    }
+
     /// A leak sensor's reading is whether there is water, not how much charge
     /// is left in it. Both were declared equally primary.
     #[test]
@@ -239,8 +263,11 @@ mod tests {
                     "{kind:?} battery"
                 );
             }
+            // Whatever the kind exists to report stays primary. Only the
+            // names the shared lexicon claims — battery, and a `*_unit`
+            // sibling — are housekeeping.
             for (name, a) in &s.attributes {
-                if name != "battery" {
+                if AttributeCategory::for_name(name).is_none() {
                     assert_eq!(a.category, None, "{kind:?} {name} is the reading");
                 }
             }
