@@ -3,7 +3,8 @@ use std::collections::HashMap;
 
 use plugin_sdk_rs::device_actions::{with_actions, Action};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 
 use crate::hue::models::{BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene};
@@ -447,6 +448,101 @@ pub fn scene_state(scene: &HueScene) -> Value {
     state
 }
 
+/// **What a Hue bridge is: whether it is reachable, whether it is paired, and
+/// the two things you can tell it to do.**
+///
+/// The last device in the house declaring nothing. It publishes its host, its
+/// pairing status and a whole API summary blob, and a client had to infer
+/// every one of them — including which of those is the point of the device,
+/// which for a bridge is not obvious from the names alone.
+///
+/// `primary` is declared here rather than left to core: `fill_primary` ranks
+/// what no table names alphabetically, which would lead with
+/// `integration_state` — the machine's word for what `pairing_status` says in
+/// a person's. A plugin that knows better is meant to say so.
+pub fn bridge_schema() -> Value {
+    let ro = |kind: AttributeKind, display: &str| AttributeSchema {
+        kind,
+        writable: false,
+        display_name: Some(display.to_string()),
+        ..Default::default()
+    };
+    let diagnostic = |kind: AttributeKind, display: &str| AttributeSchema {
+        category: Some(AttributeCategory::Diagnostic),
+        ..ro(kind, display)
+    };
+    let enum_of = |display: &str, options: &[&str]| AttributeSchema {
+        options: Some(options.iter().map(|o| AttributeOption::new(*o)).collect()),
+        ..ro(AttributeKind::Enum, display)
+    };
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "online".to_string(),
+        AttributeSchema {
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("online", "comes online"),
+                when_false: StateLabel::verbed("offline", "goes offline"),
+            }),
+            ..ro(AttributeKind::Bool, "Online")
+        },
+    );
+    attrs.insert(
+        "pairing_status".to_string(),
+        enum_of("Pairing", &["paired", "unpaired", "unreachable", "unknown"]),
+    );
+    // The raw form `pairing_status` is derived from — same fact, the API's
+    // words. Declared so it is not inferred, categorised so it does not
+    // compete with the reading it explains.
+    attrs.insert(
+        "integration_state".to_string(),
+        AttributeSchema {
+            category: Some(AttributeCategory::Diagnostic),
+            ..enum_of(
+                "Integration state",
+                &["connected", "auth_required", "unreachable", "unknown"],
+            )
+        },
+    );
+    // What the bridge is and where it lives. `bridge_id`, `name` and `kind`
+    // the shared lexicon already claims; `host` it does not, and only this
+    // plugin knows it is an address rather than a reading.
+    attrs.insert(
+        "host".to_string(),
+        diagnostic(AttributeKind::String, "Host"),
+    );
+    // The whole API summary, kept for the operator looking at a bridge that
+    // has stopped working. No dedicated control, and never the headline.
+    attrs.insert(
+        "summary".to_string(),
+        diagnostic(AttributeKind::Json, "Summary"),
+    );
+
+    let schema = DeviceSchema {
+        attributes: attrs,
+        primary: vec!["online".to_string(), "pairing_status".to_string()],
+        ..Default::default()
+    };
+
+    with_actions(
+        &schema,
+        vec![
+            Action::new("refresh")
+                .label("Refresh from the bridge")
+                .category("Bridge")
+                .icon("refresh")
+                .description("Re-reads lights, groups, scenes and sensors now.")
+                .sentence("refresh {device}"),
+            Action::new("pair_bridge")
+                .label("Pair with the bridge")
+                .category("Bridge")
+                .icon("link")
+                .description("Press the bridge's link button first, then run this.")
+                .sentence("pair with {device}"),
+        ],
+    )
+}
+
 /// **What a Hue scene is: one thing to do, and — from the bridge — whether it
 /// is the one currently applied.**
 ///
@@ -619,6 +715,87 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
         }
     }
     Value::Object(caps)
+}
+
+#[cfg(test)]
+mod bridge_schema_tests {
+    use super::*;
+    use crate::hue::models::BridgeTarget;
+
+    /// The declaration must cover what `bridge_state` actually publishes,
+    /// or a client is back to inferring the difference between a reading and
+    /// an address.
+    #[test]
+    fn every_attribute_the_bridge_publishes_is_declared() {
+        let target = BridgeTarget {
+            bridge_id: "abc".into(),
+            host: "10.0.0.2".into(),
+            name: "hue-abc".into(),
+            app_key: None,
+            verify_tls: false,
+            allow_self_signed: true,
+        };
+        let state = bridge_state(&target, true, json!({ "integration_state": "connected" }));
+        let schema = bridge_schema();
+        let declared = schema["attributes"].as_object().expect("attributes");
+
+        for name in state.as_object().expect("state").keys() {
+            // `bridge_id`, `name` and `kind` are named by the shared lexicon
+            // and demoted there; the rest this plugin declares itself.
+            if matches!(name.as_str(), "bridge_id" | "name" | "kind") {
+                continue;
+            }
+            assert!(
+                declared.contains_key(name),
+                "{name} is published but not declared"
+            );
+        }
+    }
+
+    /// A bridge is for whether it is reachable and paired. Left to the
+    /// alphabet, `integration_state` would lead — the machine's word for what
+    /// `pairing_status` says in a person's.
+    #[test]
+    fn the_bridge_says_which_of_its_readings_lead() {
+        let schema = bridge_schema();
+        assert_eq!(
+            schema["primary"].as_array().expect("primary"),
+            &[json!("online"), json!("pairing_status")]
+        );
+        assert_eq!(
+            schema["attributes"]["online"]["states"]["when_false"]["label"],
+            "offline"
+        );
+        assert_eq!(
+            schema["attributes"]["integration_state"]["category"],
+            "diagnostic"
+        );
+        assert_eq!(schema["attributes"]["summary"]["category"], "diagnostic");
+    }
+
+    /// The mirror of the declaration: both actions are payloads
+    /// `parse_homecore_command` really dispatches.
+    #[test]
+    fn both_declared_actions_are_accepted() {
+        use crate::commands::{parse_homecore_command, PluginCommand};
+        let schema = bridge_schema();
+        let ids: Vec<&str> = schema["actions"]
+            .as_array()
+            .expect("actions")
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["refresh", "pair_bridge"]);
+
+        assert!(matches!(
+            parse_homecore_command(json!({ "action": "refresh" })),
+            PluginCommand::Refresh
+        ));
+        assert!(matches!(
+            parse_homecore_command(json!({ "action": "pair_bridge" })),
+            PluginCommand::PairBridge
+        ));
+    }
 }
 
 #[cfg(test)]
