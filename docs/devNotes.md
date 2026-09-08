@@ -6776,6 +6776,36 @@ it**, so a lock's battery was declared exactly as primary as whether it was
 locked, and clients kept a hardcoded list of names to demote instead
 (hc-web-lit's `UNDECLARED_HOUSEKEEPING`, filed as homeCore#28).
 
+### Enum options carry a label and an icon
+
+`AttributeSchema.options` accepts two forms in the same list: a bare value, or
+`{value, label, icon}`. It closes a gap attributes had against action
+parameters — `ParamSpec.options` has carried `value` + `label` since actions
+existed, so a thermostat's `medium-high` reached every client as
+`medium-high` and each one prettified it alone. Booleans were better served
+than enums, since `BoolStates` names both states of a `bool` and enums had no
+equivalent.
+
+`icon` is a semantic name, not a font codepoint — the same convention
+`DeviceAction.icon` uses.
+
+**An option carrying neither extra serialises back as the plain string it came
+in as**, so a schema that declares nothing new puts nothing new on the wire and
+existing clients are unaffected. That guarantee is pinned by a test. It also
+means the *clients must be updated before any plugin declares a label*: today
+Flutter does `(json['options'] as List?)?.cast<String>()` and hc-web-lit types
+it `string[]`, and both would fail on the object form.
+
+Plugin-side authoring:
+
+```rust
+AttributeOption::new("cool").labelled("Cooling").icon("snowflake")
+```
+
+Twelve enum attributes exist to be upgraded when the clients are ready:
+hc-thermostat's mode, hc-isy's fan mode and operating state, hc-roku's source,
+the glue `select` type, and the fan speed ladders in hc-lutron and hc-caseta.
+
 ### Which reading leads
 
 `category` demotes what is not the point of the device. `DeviceSchema.primary`

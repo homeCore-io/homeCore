@@ -3763,9 +3763,23 @@ paths:
                           type: number
                         options:
                           type: array
-                          description: Fixed option list for the `enum` kind
+                          description: |
+                            Fixed option list for the `enum` kind.
+
+                            Each entry is a bare value, or a value with a label
+                            and an icon. **Both forms are valid in the same
+                            list**, and an option carrying neither extra is
+                            serialised as a plain string — so a schema that
+                            declares nothing new looks exactly as it always did.
+
+                            A client must accept both. One that decodes this as
+                            a list of strings will fail on the object form the
+                            moment a plugin declares a label.
                           items:
-                            type: string
+                            oneOf:
+                              - type: string
+                                description: The value, with no label or icon.
+                              - $ref: "#/components/schemas/AttributeOption"
                         states:
                           type: object
                           description: |
@@ -8086,6 +8100,32 @@ components:
       enum: [grid, stack, row]
 
     # ---- Devices ----
+
+    AttributeOption:
+      type: object
+      required: [value]
+      description: |
+        One value an `enum` attribute can take: what to send, what to call it,
+        and what to draw for it. The attribute-side equivalent of an action
+        parameter's option, which has carried a label since actions existed.
+      properties:
+        value:
+          type: string
+          description: The value on the wire — what a write actually sends.
+        label:
+          type: string
+          description: |
+            What to call it. Absent means the client humanises `value` itself.
+        icon:
+          type: string
+          description: |
+            Semantic icon name, not a font codepoint — the same convention
+            device actions use. A client maps it through its own icon set and
+            falls back visibly on a name it does not know.
+      example:
+        value: medium-high
+        label: Medium High
+        icon: fan
 
     StateLabel:
       type: object

@@ -15,7 +15,9 @@
 //! `remaining_secs` does nothing. Only the attributes a command path genuinely
 //! honours are declared writable; the rest are reported.
 
-use hc_types::schema::{AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel};
+use hc_types::schema::{
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 use std::collections::HashMap;
 
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
@@ -29,7 +31,7 @@ fn ro_unit(kind: AttributeKind, label: &str, unit: &str) -> AttributeSchema {
 }
 
 fn enum_of(mut a: AttributeSchema, options: &[&str]) -> AttributeSchema {
-    a.options = Some(options.iter().map(|s| s.to_string()).collect());
+    a.options = Some(options.iter().copied().map(AttributeOption::from).collect());
     a
 }
 
@@ -280,8 +282,8 @@ mod tests {
     fn a_timer_offers_its_states() {
         let s = schema_for("timer").unwrap();
         let opts = s.attributes["state"].options.clone().unwrap();
-        assert!(opts.contains(&"finished".to_string()), "{opts:?}");
-        assert!(opts.contains(&"running".to_string()));
+        assert!(opts.iter().any(|o| o.value == "finished"), "{opts:?}");
+        assert!(opts.iter().any(|o| o.value == "running"));
         assert!(matches!(s.attributes["state"].kind, AttributeKind::Enum));
     }
 

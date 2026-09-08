@@ -11,7 +11,8 @@
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Source};
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use serde_json::Value;
 
@@ -79,7 +80,8 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
                     options: Some(
                         FAN_SPEEDS
                             .iter()
-                            .map(|s| (*s).to_string())
+                            .copied()
+                            .map(AttributeOption::from)
                             .collect::<Vec<_>>(),
                     ),
                     ..rw(AttributeKind::Enum, "Speed", None)

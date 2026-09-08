@@ -381,6 +381,111 @@ impl AttributeCategory {
     }
 }
 
+/// One value an `Enum` attribute can take: what to send, what to call it, and
+/// what to draw for it.
+///
+/// **Attributes were behind action parameters here.** `ParamSpec.options` has
+/// carried `value` + `label` since actions existed, while an attribute's
+/// options were bare strings — so a thermostat's `medium-high` reached every
+/// client as `medium-high` and each one prettified it alone. Booleans were
+/// better served than enums: [`BoolStates`] names both states of a `bool` and
+/// enums had no equivalent.
+///
+/// Both forms are accepted, so nothing that already ships has to change:
+/// `"cool"` and `{"value": "cool", "label": "Cooling", "icon": "snowflake"}`
+/// are both valid, and one that carries neither extra is written back out as
+/// the bare string it came in as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeOption {
+    /// The value on the wire — what a write actually sends.
+    pub value: String,
+    /// What to call it. Absent means the client humanises `value` itself, as
+    /// every client does today.
+    pub label: Option<String>,
+    /// Semantic icon name, not a font codepoint — the same convention
+    /// [`DeviceAction::icon`] already uses, so a client maps it through its own
+    /// set and falls back visibly on a name it does not know.
+    pub icon: Option<String>,
+}
+
+impl AttributeOption {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: None,
+            icon: None,
+        }
+    }
+
+    pub fn labelled(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn icon(mut self, icon: impl Into<String>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+
+    /// Whether this option says anything a bare string could not.
+    fn is_bare(&self) -> bool {
+        self.label.is_none() && self.icon.is_none()
+    }
+}
+
+impl From<&str> for AttributeOption {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for AttributeOption {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl Serialize for AttributeOption {
+    /// A bare option goes back on the wire as the string it was, so adding
+    /// this type changed no payload that existed before it.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_bare() {
+            return serializer.serialize_str(&self.value);
+        }
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("value", &self.value)?;
+        if let Some(label) = &self.label {
+            map.serialize_entry("label", label)?;
+        }
+        if let Some(icon) = &self.icon {
+            map.serialize_entry("icon", icon)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AttributeOption {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Bare(String),
+            Rich {
+                value: String,
+                #[serde(default)]
+                label: Option<String>,
+                #[serde(default)]
+                icon: Option<String>,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Bare(value) => Self::new(value),
+            Wire::Rich { value, label, icon } => Self { value, label, icon },
+        })
+    }
+}
+
 /// Describes a single attribute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchema {
@@ -405,8 +510,13 @@ pub struct AttributeSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<f64>,
     /// Fixed option list for `Enum` kind.
+    ///
+    /// Each option is a bare value, or a value with a label and an icon. The
+    /// two forms are the same field: a plain string decodes with both extras
+    /// absent and **serialises back as a plain string**, so a declaration that
+    /// says nothing new puts nothing new on the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
+    pub options: Option<Vec<AttributeOption>>,
     /// What kind of thing this reading is *for*, when it is not the point of
     /// the device.
     ///
@@ -601,6 +711,57 @@ pub enum AttributeKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The compatibility promise.** A declaration that says nothing new puts
+    /// nothing new on the wire — a bare option goes back out as the string it
+    /// came in as, so a client that hard-casts `options` to a list of strings
+    /// keeps working until the plugin actually declares a label.
+    #[test]
+    fn a_bare_option_is_unchanged_by_the_round_trip() {
+        let attr = AttributeSchema {
+            options: Some(vec!["off".into(), "low".into(), "high".into()]),
+            ..AttributeSchema::new(AttributeKind::Enum)
+        };
+        let wire = serde_json::to_value(&attr).unwrap();
+        assert_eq!(wire["options"], serde_json::json!(["off", "low", "high"]));
+    }
+
+    /// Both spellings decode to the same shape, so a plugin can label one
+    /// option and leave the rest bare.
+    #[test]
+    fn a_label_and_an_icon_survive_but_only_when_given() {
+        let parsed: Vec<AttributeOption> = serde_json::from_value(serde_json::json!([
+            "off",
+            { "value": "medium-high", "label": "Medium High", "icon": "fan" },
+            { "value": "high" },
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed[0], AttributeOption::new("off"));
+        assert_eq!(parsed[1].label.as_deref(), Some("Medium High"));
+        assert_eq!(parsed[1].icon.as_deref(), Some("fan"));
+        assert_eq!(parsed[2], AttributeOption::new("high"));
+
+        // Only the one carrying something extra is written as an object.
+        let wire = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(wire[0], serde_json::json!("off"));
+        assert_eq!(
+            wire[1],
+            serde_json::json!({ "value": "medium-high", "label": "Medium High", "icon": "fan" })
+        );
+        assert_eq!(wire[2], serde_json::json!("high"));
+    }
+
+    /// An attribute enum can now say what an action parameter always could.
+    #[test]
+    fn attributes_have_caught_up_with_action_parameters() {
+        let o = AttributeOption::new("cool")
+            .labelled("Cooling")
+            .icon("snowflake");
+        assert_eq!(o.value, "cool");
+        assert_eq!(o.label.as_deref(), Some("Cooling"));
+        assert_eq!(o.icon.as_deref(), Some("snowflake"));
+    }
 
     fn schema(names: &[(&str, Option<AttributeCategory>)]) -> DeviceSchema {
         let mut attributes = HashMap::new();

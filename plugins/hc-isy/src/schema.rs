@@ -18,7 +18,8 @@
 //! control that silently does nothing. The tests check both directions.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use std::collections::HashMap;
@@ -41,7 +42,7 @@ fn ranged(mut a: AttributeSchema, min: f64, max: f64, unit: Option<&str>) -> Att
 }
 
 fn enum_of(mut a: AttributeSchema, options: &[&str]) -> AttributeSchema {
-    a.options = Some(options.iter().map(|s| s.to_string()).collect());
+    a.options = Some(options.iter().copied().map(AttributeOption::from).collect());
     a
 }
 
@@ -314,7 +315,7 @@ mod tests {
                         json!({ name.as_str(): 50 })
                     }
                     AttributeKind::Enum => json!({
-                        name.as_str(): attr.options.as_ref().unwrap()[0].as_str()
+                        name.as_str(): attr.options.as_ref().unwrap()[0].value.as_str()
                     }),
                     _ => continue,
                 };

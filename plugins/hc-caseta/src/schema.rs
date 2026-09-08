@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use plugin_sdk_rs::device_actions::{with_actions, Action};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use serde_json::Value;
 
@@ -72,7 +72,13 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
             (
                 "speed".into(),
                 AttributeSchema {
-                    options: Some(FAN_SPEEDS.iter().map(|s| (*s).to_string()).collect()),
+                    options: Some(
+                        FAN_SPEEDS
+                            .iter()
+                            .copied()
+                            .map(AttributeOption::from)
+                            .collect(),
+                    ),
                     ..rw(AttributeKind::Enum, "Speed", None)
                 },
             ),
