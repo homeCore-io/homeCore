@@ -236,6 +236,19 @@ pub fn led_component_for_button(button: u32) -> u32 {
     button + LED_COMPONENT_OFFSET
 }
 
+/// A main repeater's phantom buttons use a different offset: LED component =
+/// button + 100. Button 6 → component 106.
+///
+/// The two offsets overlap on the same repeater — component 106 is button 6's
+/// LED, but 106 − 80 = 26 is also a real phantom button number — so which
+/// offset applies has to be decided by what the component *is*, never by
+/// whichever subtraction happens to land on a configured button first.
+pub const PHANTOM_LED_COMPONENT_OFFSET: u32 = 100;
+
+pub fn led_component_for_phantom_button(button: u32) -> u32 {
+    button + PHANTOM_LED_COMPONENT_OFFSET
+}
+
 /// Reverse mapping: button component from a received LED component number.
 /// Returns `None` if the component number is not in the LED range (≤ 80).
 pub fn button_for_led_component(led_component: u32) -> Option<u32> {

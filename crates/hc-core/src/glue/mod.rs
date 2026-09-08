@@ -27,7 +27,7 @@ pub mod timer;
 use crate::EventBus;
 use chrono::Utc;
 use hc_state::StateStore;
-use hc_types::device::DeviceChange;
+use hc_types::device::{DeviceChange, DeviceState};
 use hc_types::event::Event;
 use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
 use serde_json::Value;
@@ -378,6 +378,41 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
 
 /// Give core's own devices the schema they never had.
 ///
+/// Write the schema for a core-owned device, unless it already has one.
+///
+/// Cheap enough to call on any path that writes a device: a device that has
+/// its schema costs one read, and a device whose type we do not model costs
+/// nothing at all.
+pub async fn ensure_device_schema(store: &StateStore, dev: &DeviceState) {
+    if matches!(store.get_device_schema(&dev.device_id).await, Ok(Some(_))) {
+        return;
+    }
+    let Some(schema) = schema::for_device(&dev.plugin_id, dev.device_type.as_deref()) else {
+        return;
+    };
+    if let Err(e) = store.upsert_device_schema(&dev.device_id, &schema).await {
+        warn!(device_id = %dev.device_id, error = %e, "Glue schema: failed to persist");
+    }
+}
+
+/// Create or update a core-owned device together with its schema.
+///
+/// Every creation path goes through here so the two never drift apart.
+/// [`publish_core_device_schemas`] only sees devices that already exist when
+/// it runs, so a device created after it — a timer added through the API, or
+/// one seeded from config while the sweep was already listing — would
+/// otherwise stay schema-less until the next restart, and clients would infer
+/// its attributes: a timer's `state` became a text box wanting `"finished"`
+/// with the quotes.
+pub async fn upsert_device_with_schema(
+    store: &StateStore,
+    dev: &DeviceState,
+) -> anyhow::Result<()> {
+    store.upsert_device(dev).await?;
+    ensure_device_schema(store, dev).await;
+    Ok(())
+}
+
 /// Glue devices are created directly in the state store rather than registered
 /// over MQTT, so the schema-publishing path plugins use never applied to them
 /// and clients were left inferring every attribute. Runs on startup beside
@@ -394,15 +429,9 @@ pub async fn publish_core_device_schemas(store: &StateStore) {
 
     let mut written = 0u32;
     for dev in devices {
-        let schema = match dev.plugin_id.as_str() {
-            GLUE_PLUGIN_ID => match dev.device_type.as_deref() {
-                Some(t) => schema::schema_for(t),
-                None => None,
-            },
-            "core.mode" => Some(schema::mode_schema()),
-            _ => None,
+        let Some(schema) = schema::for_device(&dev.plugin_id, dev.device_type.as_deref()) else {
+            continue;
         };
-        let Some(schema) = schema else { continue };
 
         if let Err(e) = store.upsert_device_schema(&dev.device_id, &schema).await {
             warn!(device_id = %dev.device_id, error = %e,
@@ -446,5 +475,108 @@ pub async fn recalculate_all_groups(state: &StateStore, pub_bus: &EventBus) {
 
     if done > 0 {
         info!(groups = done, "Groups recalculated at startup");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store() -> StateStore {
+        let tmp = std::env::temp_dir().join(format!("hc_glue_schema_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).expect("temp dir");
+        StateStore::open(
+            tmp.join("state.redb").to_str().unwrap(),
+            tmp.join("history.db").to_str().unwrap(),
+        )
+        .await
+        .expect("store opens")
+    }
+
+    fn glue(device_id: &str, device_type: &str) -> DeviceState {
+        let mut dev = DeviceState::new(device_id, device_id, GLUE_PLUGIN_ID);
+        dev.device_type = Some(device_type.to_string());
+        dev
+    }
+
+    #[tokio::test]
+    async fn a_timer_created_after_the_startup_sweep_still_gets_its_schema() {
+        let store = store().await;
+        // The sweep runs against an empty store, as it does when it wins the
+        // race with the GlueManager.
+        publish_core_device_schemas(&store).await;
+
+        upsert_device_with_schema(&store, &glue("timer_kettle", "timer"))
+            .await
+            .expect("timer is written");
+
+        let schema = store
+            .get_device_schema("timer_kettle")
+            .await
+            .expect("schema reads")
+            .expect("a timer created later still has a schema");
+        assert!(
+            schema.attributes.contains_key("state"),
+            "a timer declares the state it reports"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mode_is_core_owned_too() {
+        let store = store().await;
+        let dev = DeviceState::new("mode_night", "Night", "core.mode");
+        upsert_device_with_schema(&store, &dev)
+            .await
+            .expect("mode is written");
+        assert!(store
+            .get_device_schema("mode_night")
+            .await
+            .expect("schema reads")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_plugin_device_is_left_to_publish_its_own() {
+        let store = store().await;
+        let dev = DeviceState::new("lutron_9", "Sconce", "plugin.lutron");
+        upsert_device_with_schema(&store, &dev)
+            .await
+            .expect("device is written");
+        assert!(
+            store
+                .get_device_schema("lutron_9")
+                .await
+                .expect("schema reads")
+                .is_none(),
+            "core must not invent a schema for a device it does not own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_published_schema_is_not_overwritten() {
+        let store = store().await;
+        let dev = glue("switch_porch", "switch");
+        store.upsert_device(&dev).await.expect("device is written");
+
+        let mut mine = hc_types::DeviceSchema::default();
+        mine.attributes
+            .insert("on".into(), hc_types::AttributeSchema::default());
+        store
+            .upsert_device_schema("switch_porch", &mine)
+            .await
+            .expect("schema is written");
+
+        ensure_device_schema(&store, &dev).await;
+
+        let after = store
+            .get_device_schema("switch_porch")
+            .await
+            .expect("schema reads")
+            .expect("schema survives");
+        assert_eq!(
+            after.attributes.len(),
+            1,
+            "an existing schema is left as it was found"
+        );
     }
 }

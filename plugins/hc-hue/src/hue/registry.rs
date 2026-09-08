@@ -21,6 +21,11 @@ pub struct RegisteredGroup {
 pub struct RegisteredScene {
     pub bridge_id: String,
     pub scene_rid: String,
+    /// Whether the bridge reported `status.active` for this scene, which is
+    /// what the published schema claims. Kept so a scene whose answer changes
+    /// — a new scene, a bridge that gains the field — republishes its schema
+    /// rather than declaring a state row that never fills in.
+    pub reports_status: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +49,8 @@ pub struct HueRegistry {
     groups_by_device_id: HashMap<String, RegisteredGroup>,
     scenes_by_device_id: HashMap<String, RegisteredScene>,
     aux_by_device_id: HashMap<String, RegisteredAux>,
+    /// publish device id → the attribute names its published schema covers.
+    aux_schema_attrs: HashMap<String, Vec<String>>,
 }
 
 impl HueRegistry {
@@ -145,8 +152,26 @@ impl HueRegistry {
             RegisteredScene {
                 bridge_id: scene.bridge_id.clone(),
                 scene_rid: scene.resource_id.clone(),
+                reports_status: scene.active.is_some(),
             },
         );
+        true
+    }
+
+    /// Whether what this scene can report has changed since its schema was
+    /// published, recording the new answer.
+    ///
+    /// False for a scene just added by [`Self::ensure_scene`] — that one's
+    /// schema goes out with its registration.
+    pub fn scene_status_support_changed(&mut self, scene: &HueScene) -> bool {
+        let Some(known) = self.scenes_by_device_id.get_mut(&scene.device_id) else {
+            return false;
+        };
+        let reports = scene.active.is_some();
+        if known.reports_status == reports {
+            return false;
+        }
+        known.reports_status = reports;
         true
     }
 
@@ -221,6 +246,21 @@ impl HueRegistry {
                 None
             }
         })
+    }
+
+    /// Whether an auxiliary device's published attribute set has changed since
+    /// its schema was last described, recording the new set.
+    ///
+    /// A sensor's attributes depend on which Hue resources compacted onto it,
+    /// so the schema is derived from what it published rather than declared up
+    /// front — and republished only when that set changes, not on every poll.
+    pub fn aux_schema_changed(&mut self, device_id: &str, names: &[String]) -> bool {
+        if self.aux_schema_attrs.get(device_id).map(Vec::as_slice) == Some(names) {
+            return false;
+        }
+        self.aux_schema_attrs
+            .insert(device_id.to_string(), names.to_vec());
+        true
     }
 
     pub fn is_primary_device_id(&self, device_id: &str) -> bool {
@@ -400,9 +440,46 @@ impl HueRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hue::models::HueAuxDevice;
+    use crate::hue::models::{HueAuxDevice, HueScene};
     use serde_json::json;
     use std::collections::HashSet;
+
+    fn scene(device_id: &str, active: Option<bool>) -> HueScene {
+        HueScene {
+            bridge_id: "bridge-1".to_string(),
+            resource_id: format!("rid-{device_id}"),
+            device_id: device_id.to_string(),
+            name: "Evening".to_string(),
+            area: None,
+            group_kind: None,
+            active,
+            group_rid: None,
+            group_name: None,
+        }
+    }
+
+    /// A freshly registered scene publishes its schema with its registration,
+    /// so it must not also count as a change.
+    #[test]
+    fn a_new_scene_is_not_a_change() {
+        let mut registry = HueRegistry::default();
+        let s = scene("hue_scene_1", Some(false));
+        assert!(registry.ensure_scene(&s));
+        assert!(!registry.scene_status_support_changed(&s));
+    }
+
+    /// A bridge that starts reporting `status.active` — or a scene replaced by
+    /// one that does — has to republish, or the schema keeps denying a state
+    /// the device now publishes.
+    #[test]
+    fn gaining_or_losing_status_republishes_once() {
+        let mut registry = HueRegistry::default();
+        registry.ensure_scene(&scene("hue_scene_1", None));
+
+        assert!(registry.scene_status_support_changed(&scene("hue_scene_1", Some(true))));
+        assert!(!registry.scene_status_support_changed(&scene("hue_scene_1", Some(false))));
+        assert!(registry.scene_status_support_changed(&scene("hue_scene_1", None)));
+    }
 
     fn aux(device_id: &str, publish_device_id: &str) -> (HueAuxDevice, String) {
         (

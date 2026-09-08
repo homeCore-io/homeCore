@@ -284,12 +284,39 @@ impl DeviceEntry {
 pub struct SceneEntry {
     pub config: SceneConfig,
     pub hc_id: String,
+    /// Whether this scene's phantom button has an LED that reports back.
+    ///
+    /// `None` until the repeater answers the startup LED query. A phantom
+    /// button on the main repeater normally has an LED — the ones that do not
+    /// are scenes tied to a Pico, which has no LEDs at all — so unknown is
+    /// treated as reporting, and only an explicit 255 ("no LED assigned")
+    /// turns it into `Some(false)`.
+    ///
+    /// Assuming the other way round meant every scene in the house declared no
+    /// status for the second between connecting and the query coming back, on
+    /// every reconnect.
+    pub reports_state: Option<bool>,
+    /// What the last published schema claimed, so a schema is republished when
+    /// the answer changes it and not on every LED event.
+    pub declared_status: bool,
 }
 
 impl SceneEntry {
     pub fn new(config: SceneConfig) -> Self {
         let hc_id = config.hc_id();
-        Self { config, hc_id }
+        Self {
+            config,
+            hc_id,
+            reports_state: None,
+            declared_status: true,
+        }
+    }
+
+    /// Whether this scene should declare a readable `on`.
+    ///
+    /// Unknown counts as yes: see [`Self::reports_state`].
+    pub fn declares_status(&self) -> bool {
+        self.reports_state != Some(false)
     }
 }
 
@@ -312,6 +339,27 @@ impl TimeclockEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A phantom button on the main repeater normally has an LED. The
+    /// exception is a scene tied to a Pico, which has none — and the repeater
+    /// says so with 255. So unknown means reporting, and only that answer
+    /// retires the scene's `on`.
+    #[test]
+    fn a_scene_is_assumed_to_report_until_the_repeater_says_otherwise() {
+        let mut scene = SceneEntry::new(SceneConfig {
+            name: "Deck On".into(),
+            main_repeater_id: 1,
+            button_component: 5,
+        });
+        assert!(scene.declares_status(), "unknown is not a denial");
+
+        scene.reports_state = Some(false); // the repeater answered 255
+        assert!(!scene.declares_status());
+
+        scene.reports_state = Some(true);
+        assert!(scene.declares_status());
+    }
+
     use crate::config::DeviceConfig;
 
     fn dev(kind: DeviceKind) -> DeviceEntry {

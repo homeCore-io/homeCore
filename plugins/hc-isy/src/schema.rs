@@ -18,7 +18,8 @@
 //! control that silently does nothing. The tests check both directions.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use std::collections::HashMap;
@@ -41,7 +42,7 @@ fn ranged(mut a: AttributeSchema, min: f64, max: f64, unit: Option<&str>) -> Att
 }
 
 fn enum_of(mut a: AttributeSchema, options: &[&str]) -> AttributeSchema {
-    a.options = Some(options.iter().map(|s| s.to_string()).collect());
+    a.options = Some(options.iter().copied().map(AttributeOption::from).collect());
     a
 }
 
@@ -132,7 +133,12 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
 
         DeviceKind::Sensor => {
             a.insert("value".into(), ro(AttributeKind::Float, "Value"));
-            a.insert("unit".into(), ro(AttributeKind::String, "Unit"));
+            // Metadata about the reading, not a reading. The cross-plugin
+            // lexicon does not claim a bare `unit` — a thermostat could have a
+            // writable one — but here it is plainly the sibling of `value`.
+            let mut unit = ro(AttributeKind::String, "Unit");
+            unit.category = Some(AttributeCategory::Diagnostic);
+            a.insert("unit".into(), unit);
         }
 
         DeviceKind::Lock => {
@@ -309,7 +315,7 @@ mod tests {
                         json!({ name.as_str(): 50 })
                     }
                     AttributeKind::Enum => json!({
-                        name.as_str(): attr.options.as_ref().unwrap()[0].as_str()
+                        name.as_str(): attr.options.as_ref().unwrap()[0].value.as_str()
                     }),
                     _ => continue,
                 };

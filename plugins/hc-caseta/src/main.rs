@@ -285,6 +285,14 @@ async fn try_start(
         if let Err(e) = publisher.publish_availability(&scene.hc_id, true).await {
             warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene availability");
         }
+        // Caséta has no LED reporting, so a scene is a trigger and nothing
+        // more — but a client still needs to be told that much to offer it.
+        if let Err(e) = publisher
+            .register_device_schema_json(&scene.hc_id, &crate::schema::scene_schema_json())
+            .await
+        {
+            warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
+        }
     }
 
     info!(

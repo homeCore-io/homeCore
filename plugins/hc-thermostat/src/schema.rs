@@ -17,7 +17,7 @@
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use serde_json::Value;
@@ -38,7 +38,7 @@ fn ro_unit(kind: AttributeKind, label: &str, unit: &str) -> AttributeSchema {
 
 fn ro_enum(label: &str, options: &[&str]) -> AttributeSchema {
     let mut a = ro(AttributeKind::Enum, label);
-    a.options = Some(options.iter().map(|s| s.to_string()).collect());
+    a.options = Some(options.iter().copied().map(AttributeOption::from).collect());
     a
 }
 

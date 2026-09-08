@@ -398,7 +398,11 @@ pub async fn list_devices(
             .get_device_schema(&device.device_id)
             .await
             .ok()
-            .flatten();
+            .flatten()
+            .map(|mut schema| {
+                schema.fill_primary(device.device_type.as_deref());
+                schema
+            });
         entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
         out.push(entry);
     }
@@ -558,7 +562,22 @@ pub async fn get_device_schema(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match s.store.get_device_schema(&id).await {
-        Ok(Some(schema)) => (StatusCode::OK, Json(json!(schema))),
+        Ok(Some(mut schema)) => {
+            // Which readings the device is *for*, ranked. Derived here rather
+            // than in each plugin: the device's own type already says what it
+            // is, so a temperature sensor leads with temperature without any
+            // plugin declaring it, and every client gets the same answer
+            // instead of keeping its own table.
+            let device_type = s
+                .store
+                .get_device(&id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|d| d.device_type);
+            schema.fill_primary(device_type.as_deref());
+            (StatusCode::OK, Json(json!(schema)))
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "schema not found" })),
@@ -1117,7 +1136,7 @@ pub async fn create_timer(
     dev.attributes.insert("remaining_secs".into(), json!(0_u64));
     dev.attributes.insert("repeat".into(), json!(false));
 
-    match s.store.upsert_device(&dev).await {
+    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1247,7 +1266,7 @@ pub async fn create_switch(
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
-    match s.store.upsert_device(&dev).await {
+    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1478,7 +1497,7 @@ pub async fn create_glue(
         _ => {}
     }
 
-    if let Err(e) = s.store.upsert_device(&dev).await {
+    if let Err(e) = hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

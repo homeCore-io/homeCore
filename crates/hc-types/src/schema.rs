@@ -25,6 +25,120 @@ pub struct DeviceSchema {
     /// omitted from the wire form when it is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<DeviceAction>,
+    /// The readings this device is *for*, most important first.
+    ///
+    /// [`AttributeCategory`] demotes what is not the point of the device; this
+    /// ranks what is left. A temperature/humidity sensor leads with
+    /// temperature, and a multi-sensor that reports motion leads with motion —
+    /// a client that has to pick one row cannot work either out from an
+    /// unordered map, and `attributes` is a `HashMap`, so "the first one" is
+    /// not even stable between reads.
+    ///
+    /// Usually derived rather than declared: [`DeviceSchema::fill_primary`]
+    /// works it out from the device's type, so a plugin says nothing and still
+    /// ranks correctly. A plugin that knows better sets it and keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary: Vec<String>,
+}
+
+/// The readings a device of this type exists to report, in the order a person
+/// reads them.
+///
+/// Keyed on the `device_type` a plugin registers, which is the thing that
+/// already says what a device *is* — so a temperature sensor leads with
+/// temperature without any plugin declaring it.
+fn readings_for_type(device_type: &str) -> &'static [&'static str] {
+    match device_type {
+        "light" => &["on", "brightness_pct", "color_temp", "color_xy"],
+        "switch" | "virtual_switch" => &["on"],
+        "fan" => &["on", "speed", "speed_pct"],
+        "cover" => &["position"],
+        "lock" => &["locked"],
+        "contact_sensor" => &["open", "contact"],
+        "motion_sensor" | "occupancy_sensor" => &["motion", "occupied", "occupancy"],
+        "water_sensor" => &["water_detected"],
+        "temperature_sensor" => &["temperature", "humidity"],
+        "sensor" => &["value"],
+        "binary_sensor" => &["on", "state"],
+        "thermostat" => &["current_temperature", "setpoint", "mode"],
+        "media_player" => &["state"],
+        "scene" => &["active", "on"],
+        "timer" => &["state", "remaining_secs"],
+        "counter" => &["count"],
+        "group" | "schedule" => &["active"],
+        "threshold" => &["above"],
+        _ => &[],
+    }
+}
+
+/// How much a reading matters when its device's type does not say — a Z-Wave
+/// node is `zwave` and nothing more, whatever it reports.
+///
+/// **A multi-sensor that reports motion is a motion sensor.** Presence and
+/// safety come before measurement, and measurement before everything else.
+const READING_RANK: [&str; 22] = [
+    "motion",
+    "occupancy",
+    "occupied",
+    "open",
+    "contact",
+    "water_detected",
+    "smoke",
+    "tampered",
+    "locked",
+    "on",
+    "active",
+    "state",
+    "position",
+    "speed",
+    "brightness_pct",
+    "current_temperature",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "lux",
+    "power_w",
+    "value",
+];
+
+impl DeviceSchema {
+    /// Work out [`primary`](Self::primary) from the device's type, unless the
+    /// plugin already said.
+    ///
+    /// Deterministic by construction: the type's own readings first, then
+    /// anything else that is not housekeeping by [`READING_RANK`], then the
+    /// remainder alphabetically. Sorting the tail matters — `attributes` is a
+    /// `HashMap`, so an unsorted tail would reorder itself between reads and a
+    /// client would show a different headline each refresh.
+    pub fn fill_primary(&mut self, device_type: Option<&str>) {
+        if !self.primary.is_empty() {
+            return;
+        }
+
+        let mut candidates: Vec<String> = self
+            .attributes
+            .iter()
+            .filter(|(_, a)| a.category.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        candidates.sort();
+
+        let mut ordered: Vec<String> = Vec::with_capacity(candidates.len());
+        let take = |name: &str, out: &mut Vec<String>, left: &mut Vec<String>| {
+            if let Some(i) = left.iter().position(|c| c == name) {
+                out.push(left.remove(i));
+            }
+        };
+
+        for name in readings_for_type(device_type.unwrap_or("")) {
+            take(name, &mut ordered, &mut candidates);
+        }
+        for name in READING_RANK {
+            take(name, &mut ordered, &mut candidates);
+        }
+        ordered.append(&mut candidates);
+        self.primary = ordered;
+    }
 }
 
 /// One declared command: what it is called on the wire, how to label it, and
@@ -229,6 +343,149 @@ pub enum AttributeCategory {
     Config,
 }
 
+impl AttributeCategory {
+    /// The category a conventionally-named attribute belongs to, or `None`
+    /// when the name says nothing — which means primary.
+    ///
+    /// **One lexicon, in the crate that defines the field.** Every plugin
+    /// publishes a battery under the same name, so each one deciding for
+    /// itself is three chances to disagree; and while nobody decides, clients
+    /// keep the list instead. hc-web-lit carries exactly this set as
+    /// `UNDECLARED_HOUSEKEEPING`, described in its own comment as a stopgap
+    /// for a gap that is filed — a client hardcoding plugin semantics, which
+    /// is what [`DeviceAction`] and [`BoolStates`] exist to stop.
+    ///
+    /// Only names whose meaning is fixed across every integration belong here.
+    /// A plugin that knows something this cannot — that its `unit` is metadata
+    /// about a reading rather than a setting — still sets the category itself.
+    pub fn for_name(name: &str) -> Option<Self> {
+        // The `_unit` sibling is homeCore convention: `temperature` carries
+        // `temperature_unit`, and the sibling is never the reading.
+        if name.ends_with("_unit") {
+            return Some(Self::Diagnostic);
+        }
+        match name {
+            // Health and connectivity.
+            "battery" | "battery_pct" | "battery_low" | "battery_kind" | "battery_state"
+            | "rssi" | "lqi" | "signal_strength" | "link_quality" | "firmware" | "sw_version"
+            | "hw_version" | "uptime" | "last_seen" => Some(Self::Diagnostic),
+            // What the thing is and where it lives, as opposed to what it is
+            // doing. A device's own record already carries these; republished
+            // as attributes they are never the reading anyone came for.
+            "ip" | "mac" | "model" | "manufacturer" | "serial" | "serial_number" | "name"
+            | "area" | "location" | "kind" | "bridge_id" | "resource_id" | "node_id" => {
+                Some(Self::Diagnostic)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One value an `Enum` attribute can take: what to send, what to call it, and
+/// what to draw for it.
+///
+/// **Attributes were behind action parameters here.** `ParamSpec.options` has
+/// carried `value` + `label` since actions existed, while an attribute's
+/// options were bare strings — so a thermostat's `medium-high` reached every
+/// client as `medium-high` and each one prettified it alone. Booleans were
+/// better served than enums: [`BoolStates`] names both states of a `bool` and
+/// enums had no equivalent.
+///
+/// Both forms are accepted, so nothing that already ships has to change:
+/// `"cool"` and `{"value": "cool", "label": "Cooling", "icon": "snowflake"}`
+/// are both valid, and one that carries neither extra is written back out as
+/// the bare string it came in as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeOption {
+    /// The value on the wire — what a write actually sends.
+    pub value: String,
+    /// What to call it. Absent means the client humanises `value` itself, as
+    /// every client does today.
+    pub label: Option<String>,
+    /// Semantic icon name, not a font codepoint — the same convention
+    /// [`DeviceAction::icon`] already uses, so a client maps it through its own
+    /// set and falls back visibly on a name it does not know.
+    pub icon: Option<String>,
+}
+
+impl AttributeOption {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: None,
+            icon: None,
+        }
+    }
+
+    pub fn labelled(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn icon(mut self, icon: impl Into<String>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+
+    /// Whether this option says anything a bare string could not.
+    fn is_bare(&self) -> bool {
+        self.label.is_none() && self.icon.is_none()
+    }
+}
+
+impl From<&str> for AttributeOption {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for AttributeOption {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl Serialize for AttributeOption {
+    /// A bare option goes back on the wire as the string it was, so adding
+    /// this type changed no payload that existed before it.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_bare() {
+            return serializer.serialize_str(&self.value);
+        }
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("value", &self.value)?;
+        if let Some(label) = &self.label {
+            map.serialize_entry("label", label)?;
+        }
+        if let Some(icon) = &self.icon {
+            map.serialize_entry("icon", icon)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AttributeOption {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Bare(String),
+            Rich {
+                value: String,
+                #[serde(default)]
+                label: Option<String>,
+                #[serde(default)]
+                icon: Option<String>,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Bare(value) => Self::new(value),
+            Wire::Rich { value, label, icon } => Self { value, label, icon },
+        })
+    }
+}
+
 /// Describes a single attribute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchema {
@@ -253,8 +510,13 @@ pub struct AttributeSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<f64>,
     /// Fixed option list for `Enum` kind.
+    ///
+    /// Each option is a bare value, or a value with a label and an icon. The
+    /// two forms are the same field: a plain string decodes with both extras
+    /// absent and **serialises back as a plain string**, so a declaration that
+    /// says nothing new puts nothing new on the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
+    pub options: Option<Vec<AttributeOption>>,
     /// What kind of thing this reading is *for*, when it is not the point of
     /// the device.
     ///
@@ -449,6 +711,167 @@ pub enum AttributeKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The compatibility promise.** A declaration that says nothing new puts
+    /// nothing new on the wire — a bare option goes back out as the string it
+    /// came in as, so a client that hard-casts `options` to a list of strings
+    /// keeps working until the plugin actually declares a label.
+    #[test]
+    fn a_bare_option_is_unchanged_by_the_round_trip() {
+        let attr = AttributeSchema {
+            options: Some(vec!["off".into(), "low".into(), "high".into()]),
+            ..AttributeSchema::new(AttributeKind::Enum)
+        };
+        let wire = serde_json::to_value(&attr).unwrap();
+        assert_eq!(wire["options"], serde_json::json!(["off", "low", "high"]));
+    }
+
+    /// Both spellings decode to the same shape, so a plugin can label one
+    /// option and leave the rest bare.
+    #[test]
+    fn a_label_and_an_icon_survive_but_only_when_given() {
+        let parsed: Vec<AttributeOption> = serde_json::from_value(serde_json::json!([
+            "off",
+            { "value": "medium-high", "label": "Medium High", "icon": "fan" },
+            { "value": "high" },
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed[0], AttributeOption::new("off"));
+        assert_eq!(parsed[1].label.as_deref(), Some("Medium High"));
+        assert_eq!(parsed[1].icon.as_deref(), Some("fan"));
+        assert_eq!(parsed[2], AttributeOption::new("high"));
+
+        // Only the one carrying something extra is written as an object.
+        let wire = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(wire[0], serde_json::json!("off"));
+        assert_eq!(
+            wire[1],
+            serde_json::json!({ "value": "medium-high", "label": "Medium High", "icon": "fan" })
+        );
+        assert_eq!(wire[2], serde_json::json!("high"));
+    }
+
+    /// An attribute enum can now say what an action parameter always could.
+    #[test]
+    fn attributes_have_caught_up_with_action_parameters() {
+        let o = AttributeOption::new("cool")
+            .labelled("Cooling")
+            .icon("snowflake");
+        assert_eq!(o.value, "cool");
+        assert_eq!(o.label.as_deref(), Some("Cooling"));
+        assert_eq!(o.icon.as_deref(), Some("snowflake"));
+    }
+
+    fn schema(names: &[(&str, Option<AttributeCategory>)]) -> DeviceSchema {
+        let mut attributes = HashMap::new();
+        for (name, category) in names {
+            attributes.insert(
+                (*name).to_string(),
+                AttributeSchema {
+                    category: *category,
+                    ..AttributeSchema::read_only(AttributeKind::Float)
+                },
+            );
+        }
+        DeviceSchema {
+            attributes,
+            ..Default::default()
+        }
+    }
+
+    /// The type says what the device is for: a temperature/humidity sensor
+    /// leads with temperature, and the battery does not appear at all.
+    #[test]
+    fn a_temperature_sensor_leads_with_temperature() {
+        let mut s = schema(&[
+            ("humidity", None),
+            ("temperature", None),
+            ("battery", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("temperature_sensor"));
+        assert_eq!(s.primary, ["temperature", "humidity"]);
+    }
+
+    /// A Z-Wave node's type is `zwave` whatever it reports, so the type table
+    /// says nothing and the reading rank decides: a multi-sensor that reports
+    /// motion is a motion sensor.
+    #[test]
+    fn a_multi_sensor_that_reports_motion_leads_with_motion() {
+        let mut s = schema(&[
+            ("temperature", None),
+            ("illuminance", None),
+            ("motion", None),
+            ("humidity", None),
+            ("battery", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("zwave"));
+        assert_eq!(
+            s.primary,
+            ["motion", "temperature", "humidity", "illuminance"]
+        );
+    }
+
+    /// `attributes` is a `HashMap`, so an unsorted tail would reorder itself
+    /// between reads and a client would show a different headline each
+    /// refresh. Everything the tables do not name is sorted.
+    #[test]
+    fn what_no_table_names_is_still_in_a_stable_order() {
+        let mut a = schema(&[("zeta", None), ("alpha", None), ("mu", None)]);
+        let mut b = schema(&[("mu", None), ("zeta", None), ("alpha", None)]);
+        a.fill_primary(Some("something_unknown"));
+        b.fill_primary(None);
+        assert_eq!(a.primary, ["alpha", "mu", "zeta"]);
+        assert_eq!(a.primary, b.primary);
+    }
+
+    /// A plugin that knows better than the tables keeps what it said.
+    #[test]
+    fn a_declared_order_is_never_overwritten() {
+        let mut s = schema(&[("temperature", None), ("humidity", None)]);
+        s.primary = vec!["humidity".to_string()];
+        s.fill_primary(Some("temperature_sensor"));
+        assert_eq!(s.primary, ["humidity"]);
+    }
+
+    /// Housekeeping is not a headline, whatever else the device has.
+    #[test]
+    fn a_device_that_only_reports_housekeeping_has_no_primary() {
+        let mut s = schema(&[
+            ("battery", Some(AttributeCategory::Diagnostic)),
+            ("ip", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("gateway"));
+        assert!(s.primary.is_empty());
+    }
+
+    /// A lock reports whether it is locked; it also reports battery. Only one
+    /// of those is the point of the device, and until this said so every
+    /// client kept the list itself.
+    #[test]
+    fn housekeeping_is_named_and_readings_are_left_alone() {
+        use AttributeCategory as C;
+        for name in [
+            "battery",
+            "rssi",
+            "firmware",
+            "ip",
+            "model",
+            "temperature_unit",
+        ] {
+            assert_eq!(C::for_name(name), Some(C::Diagnostic), "{name}");
+        }
+        for name in [
+            "temperature",
+            "humidity",
+            "on",
+            "locked",
+            "position",
+            "speed",
+        ] {
+            assert_eq!(C::for_name(name), None, "{name} is the reading");
+        }
+    }
     use super::*;
     use serde_json::json;
 

@@ -23,7 +23,7 @@
 //! `every_declared_attribute_is_published` in the tests.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use std::collections::HashMap;
 
@@ -58,6 +58,10 @@ fn battery() -> AttributeSchema {
     let mut a = ro_unit(AttributeKind::Integer, "Battery", "%");
     a.min = Some(0.0);
     a.max = Some(100.0);
+    // Every kind here reports one, beside the reading it exists for. A client
+    // that trusted the declaration used to have no way to tell a leak sensor's
+    // water_detected from its battery.
+    a.category = AttributeCategory::for_name("battery");
     a
 }
 
@@ -194,7 +198,7 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
 
     Some(DeviceSchema {
         attributes: a,
-        actions: Vec::new(),
+        ..Default::default()
     })
 }
 
@@ -221,6 +225,27 @@ mod tests {
     use super::*;
     use crate::config::TemperatureUnit;
     use serde_json::json;
+
+    /// A leak sensor's reading is whether there is water, not how much charge
+    /// is left in it. Both were declared equally primary.
+    #[test]
+    fn a_battery_is_declared_housekeeping_and_the_reading_is_not() {
+        for kind in all_kinds() {
+            let Some(s) = schema_for(&kind) else { continue };
+            if let Some(b) = s.attributes.get("battery") {
+                assert_eq!(
+                    b.category,
+                    Some(AttributeCategory::Diagnostic),
+                    "{kind:?} battery"
+                );
+            }
+            for (name, a) in &s.attributes {
+                if name != "battery" {
+                    assert_eq!(a.category, None, "{kind:?} {name} is the reading");
+                }
+            }
+        }
+    }
 
     fn all_kinds() -> Vec<DeviceKind> {
         vec![

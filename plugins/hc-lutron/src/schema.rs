@@ -10,10 +10,14 @@
 //! commands these devices accept a typed form instead of a raw JSON payload.
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Source};
-use plugin_sdk_rs::types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::types::schema::{
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
+};
 use serde_json::Value;
 
-use crate::config::{DeviceConfig, DeviceKind};
+use crate::config::{DeviceConfig, DeviceKind, SceneConfig};
+use crate::lip::protocol::led_component_for_phantom_button;
 
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     AttributeSchema {
@@ -65,8 +69,87 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
             ),
         ]),
         DeviceKind::Switch => Some(vec![("on".into(), rw(AttributeKind::Bool, "Power", None))]),
+        // The ladder `translate_output_state` reports and `translate_command`
+        // accepts, in both of the forms it accepts it: the named speed a
+        // person picks, and the percentage the zone level really is.
+        DeviceKind::FanControl => Some(vec![
+            ("on".into(), rw(AttributeKind::Bool, "Power", None)),
+            (
+                "speed".into(),
+                AttributeSchema {
+                    options: Some(
+                        FAN_SPEEDS
+                            .iter()
+                            .copied()
+                            .map(AttributeOption::from)
+                            .collect::<Vec<_>>(),
+                    ),
+                    ..rw(AttributeKind::Enum, "Speed", None)
+                },
+            ),
+            (
+                "speed_pct".into(),
+                AttributeSchema {
+                    min: Some(0.0),
+                    max: Some(100.0),
+                    step: Some(1.0),
+                    ..rw(AttributeKind::Integer, "Speed", Some("%"))
+                },
+            ),
+        ]),
+        // A shade reports where it is; raising, lowering and stopping are
+        // verbs, and are declared as actions rather than invented attributes.
+        DeviceKind::Shade => Some(vec![(
+            "position".into(),
+            AttributeSchema {
+                min: Some(0.0),
+                max: Some(100.0),
+                step: Some(1.0),
+                ..rw(AttributeKind::Integer, "Position", Some("%"))
+            },
+        )]),
         _ => None,
     }
+}
+
+/// The speeds a Maestro fan controller has, in the order a person reads them.
+///
+/// One list, used for the declaration and by the tests that check it against
+/// `translate_command` — a speed that is offered but not accepted is a control
+/// that does nothing.
+pub const FAN_SPEEDS: [&str; 5] = ["off", "low", "medium", "medium-high", "high"];
+
+/// The momentary verbs an output accepts that are not attribute writes.
+fn output_actions(kind: &DeviceKind) -> Vec<Action> {
+    match kind {
+        DeviceKind::Shade => vec![
+            Action::new("raise")
+                .label("Raise the shade")
+                .category("Movement")
+                .icon("arrow-up")
+                .sentence("raise {device}"),
+            Action::new("lower")
+                .label("Lower the shade")
+                .category("Movement")
+                .icon("arrow-down")
+                .sentence("lower {device}"),
+            Action::new("stop")
+                .label("Stop the shade")
+                .category("Movement")
+                .icon("stop")
+                .sentence("stop {device}"),
+        ],
+        _ => vec![],
+    }
+}
+
+/// Activating is the whole of what a scene — phantom or contact-closure — does.
+fn activate_action() -> Action {
+    Action::new("activate")
+        .label("Activate the scene")
+        .category("Scenes")
+        .icon("scene")
+        .sentence("activate {device}")
 }
 
 /// The schema for one device, or `None` for kinds with nothing to declare.
@@ -79,7 +162,47 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
             attributes: attrs.into_iter().collect(),
             ..Default::default()
         };
+        let actions = output_actions(&cfg.kind);
+        return if actions.is_empty() {
+            serde_json::to_value(&schema).ok()
+        } else {
+            Some(with_actions(&schema, actions))
+        };
+    }
+
+    // An occupancy group publishes the same reading under two names, and has
+    // since before this schema existed. Both are declared: a client that hides
+    // what a plugin never mentioned would otherwise show one and drop the
+    // other.
+    if cfg.kind == DeviceKind::OccupancyGroup {
+        let occupancy = |display: &str| AttributeSchema {
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("occupied", "detects occupancy"),
+                when_false: StateLabel::verbed("vacant", "becomes vacant"),
+            }),
+            ..ro(AttributeKind::Bool, display)
+        };
+        let schema = DeviceSchema {
+            attributes: [
+                ("occupied".to_string(), occupancy("Occupied")),
+                ("occupancy".to_string(), occupancy("Occupancy")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
         return serde_json::to_value(&schema).ok();
+    }
+
+    // A pulsed CCO is published as a scene because that is how it behaves: it
+    // takes `activate`, never latches, and — the Integration Guide is explicit
+    // that momentary outputs must not be queried — reports nothing at all. An
+    // empty attribute set is the honest declaration, not a missing one.
+    if cfg.kind == DeviceKind::CcoPulsed {
+        return Some(with_actions(
+            &DeviceSchema::default(),
+            vec![activate_action()],
+        ));
     }
 
     match cfg.kind {
@@ -160,6 +283,116 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
                 ),
         ],
     ))
+}
+
+/// **What a phantom scene is, including whether it can be read back.**
+///
+/// Every scene takes `activate`. What differs between them is whether anything
+/// comes back: a scene's state is its phantom button's LED, and RadioRA 2 only
+/// reports one where the programming assigned one — an unassigned button
+/// answers 255, which is not a state at all. So the house has scenes that
+/// genuinely report on/off and scenes whose `on` is only what this plugin
+/// optimistically wrote when it pressed the button, and a client that cannot
+/// tell them apart shows a confident toggle for both.
+///
+/// `reports_state` is learned, not configured: it turns true the first time a
+/// real LED state arrives for the scene, and the schema is republished. Until
+/// then the scene declares the action and nothing to read.
+pub fn scene_schema_json(reports_state: bool) -> Value {
+    let mut attrs = std::collections::HashMap::new();
+    // Which phantom button this scene is, and — when there is one — which LED
+    // reports it. Declared and published so "supports status" is something a
+    // client can *show*, with the plumbing behind it, rather than a fact it
+    // has to infer from an attribute being absent. It is also the first thing
+    // anyone needs when a scene will not report: the button is right, the LED
+    // was never assigned.
+    attrs.insert(
+        "phantom_button".to_string(),
+        AttributeSchema {
+            category: Some(AttributeCategory::Diagnostic),
+            ..ro(AttributeKind::Integer, "Phantom button")
+        },
+    );
+    if reports_state {
+        attrs.insert(
+            "led_component".to_string(),
+            AttributeSchema {
+                category: Some(AttributeCategory::Diagnostic),
+                ..ro(AttributeKind::Integer, "Status LED")
+            },
+        );
+        attrs.insert(
+            "on".to_string(),
+            AttributeSchema {
+                // Written by pressing the button, never by assigning to `on` —
+                // `handle_homecore_command` dispatches a scene on `activate`
+                // alone, so a writable `on` would be a control that does
+                // nothing.
+                states: Some(BoolStates {
+                    when_true: StateLabel::verbed("active", "activates"),
+                    when_false: StateLabel::verbed("inactive", "deactivates"),
+                }),
+                ..ro(AttributeKind::Bool, "Active")
+            },
+        );
+    }
+    let schema = DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    };
+    with_actions(&schema, vec![activate_action()])
+}
+
+/// **What a timeclock event is: a switch that can also be fired by hand.**
+///
+/// `enabled` is writable because enabling one is what an operator does with
+/// it, and it matches what the device publishes — the wire key was `enable`
+/// while the state said `enabled`, so a client echoing back what it read was
+/// ignored. Both spellings are accepted now.
+///
+/// The value is optimistic: RA2 has no query for an individual event's
+/// enabled state, so what is published is what this plugin last sent. There is
+/// no better source, and saying nothing would leave a client unable to show
+/// the switch at all.
+pub fn timeclock_schema_json() -> Value {
+    let mut attrs = std::collections::HashMap::new();
+    attrs.insert(
+        "enabled".to_string(),
+        AttributeSchema {
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("enabled", "is enabled"),
+                when_false: StateLabel::verbed("disabled", "is disabled"),
+            }),
+            ..rw(AttributeKind::Bool, "Enabled", None)
+        },
+    );
+    let schema = DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    };
+    with_actions(
+        &schema,
+        vec![Action::new("execute")
+            .label("Run the event now")
+            .category("Timeclock")
+            .icon("play")
+            .description("Fires the event once, for testing. Does not change its schedule.")
+            .sentence("run {device} now")],
+    )
+}
+
+/// What a scene publishes about its own plumbing, to fill the attributes
+/// [`scene_schema_json`] declares.
+///
+/// `led_component` appears only once the scene is known to report: an
+/// unassigned phantom button has no LED to name.
+pub fn scene_plumbing_state(cfg: &SceneConfig, reports_state: bool) -> Value {
+    let mut state = serde_json::json!({ "phantom_button": cfg.button_component });
+    if reports_state {
+        state["led_component"] =
+            serde_json::json!(led_component_for_phantom_button(cfg.button_component));
+    }
+    state
 }
 
 /// Number and engraving for every button, with a sensible name where Lutron
@@ -315,6 +548,8 @@ mod tests {
 mod output_schema_tests {
     use super::*;
     use crate::config::DeviceConfig;
+    use crate::devices::DeviceEntry;
+    use serde_json::json;
 
     fn cfg(kind: DeviceKind) -> DeviceConfig {
         DeviceConfig {
@@ -360,10 +595,201 @@ mod output_schema_tests {
         assert!(!attrs.contains_key("brightness_pct"));
     }
 
+    /// The mirror of the promise: every speed offered is a speed the command
+    /// path really takes. A picker listing "turbo" would be a control that
+    /// does nothing.
     #[test]
-    fn a_shade_is_left_alone() {
-        // Phase 2, and a control declared before the command path takes it is
-        // exactly the failure this fixes, pointed the other way.
-        assert!(device_schema_json(&cfg(DeviceKind::Shade)).is_none());
+    fn a_fan_declares_every_speed_it_accepts_and_no_others() {
+        let v = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        let offered: Vec<String> = attrs["speed"]["options"]
+            .as_array()
+            .expect("options")
+            .iter()
+            .map(|o| o.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(offered, FAN_SPEEDS);
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::FanControl));
+        for speed in FAN_SPEEDS {
+            assert!(
+                !dev.translate_command(&json!({ "speed": speed }), 0.0)
+                    .is_empty(),
+                "{speed} is offered but not accepted"
+            );
+        }
+        assert!(dev
+            .translate_command(&json!({ "speed": "turbo" }), 0.0)
+            .is_empty());
+    }
+
+    #[test]
+    fn a_fan_declares_the_percentage_and_the_power_it_also_takes() {
+        let v = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert_eq!(attrs["speed_pct"]["max"], 100.0);
+        assert_eq!(attrs["speed_pct"]["unit"], "%");
+        assert_eq!(attrs["on"]["writable"], true);
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::FanControl));
+        assert!(!dev
+            .translate_command(&json!({ "speed_pct": 40 }), 0.0)
+            .is_empty());
+        assert!(!dev
+            .translate_command(&json!({ "on": true }), 0.0)
+            .is_empty());
+    }
+
+    /// A shade's position is an attribute; raising and lowering are verbs.
+    /// Declaring the verbs as attributes would put three checkboxes on a
+    /// client that stay checked.
+    #[test]
+    fn a_shade_declares_its_position_and_its_three_verbs() {
+        let v = device_schema_json(&cfg(DeviceKind::Shade)).expect("a schema");
+        assert_eq!(v["attributes"]["position"]["writable"], true);
+        assert_eq!(v["attributes"]["position"]["unit"], "%");
+
+        let ids: Vec<&str> = v["actions"]
+            .as_array()
+            .expect("actions")
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["raise", "lower", "stop"]);
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::Shade));
+        for verb in ids {
+            assert!(
+                !dev.translate_command(&json!({ verb: true }), 0.0)
+                    .is_empty(),
+                "{verb} is declared but not accepted"
+            );
+        }
+    }
+
+    /// An occupancy group reports the same thing twice, and always has.
+    /// Declaring only one of the two would leave a client hiding a reading the
+    /// device publishes.
+    #[test]
+    fn an_occupancy_group_declares_both_names_it_publishes() {
+        let v = device_schema_json(&cfg(DeviceKind::OccupancyGroup)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        for name in ["occupied", "occupancy"] {
+            assert_eq!(attrs[name]["writable"], false);
+            assert_eq!(attrs[name]["states"]["when_false"]["label"], "vacant");
+        }
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::OccupancyGroup));
+        let state = dev.translate_occupancy_state(true);
+        for name in ["occupied", "occupancy"] {
+            assert!(
+                state.get(name).is_some(),
+                "{name} is declared but not published"
+            );
+        }
+    }
+
+    /// A momentary output has nothing to read — the Integration Guide forbids
+    /// querying it — so it declares an action and an empty attribute set,
+    /// which is a different statement from declaring nothing at all.
+    #[test]
+    fn a_pulsed_cco_offers_activation_and_reads_nothing() {
+        let v = device_schema_json(&cfg(DeviceKind::CcoPulsed)).expect("a schema");
+        assert!(v["attributes"].as_object().expect("attributes").is_empty());
+        assert_eq!(v["actions"][0]["id"], "activate");
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::CcoPulsed));
+        assert!(!dev
+            .translate_command(&json!({ "activate": true }), 0.0)
+            .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod timeclock_schema_tests {
+    use super::*;
+
+    /// The state said `enabled` and the command wanted `enable`, so a client
+    /// echoing back the attribute it read was silently ignored. The schema
+    /// declares `enabled` writable, which is now true.
+    #[test]
+    fn a_timeclock_declares_the_switch_it_publishes() {
+        let v = timeclock_schema_json();
+        let enabled = &v["attributes"]["enabled"];
+        assert_eq!(enabled["writable"], true);
+        assert_eq!(enabled["states"]["when_true"]["label"], "enabled");
+    }
+
+    #[test]
+    fn a_timeclock_can_be_fired_by_hand() {
+        let v = timeclock_schema_json();
+        assert_eq!(v["actions"][0]["id"], "execute");
+    }
+}
+
+#[cfg(test)]
+mod scene_schema_tests {
+    use super::*;
+
+    /// **The distinction the house actually has.** A phantom button with no
+    /// LED assigned answers 255 — no state — and this plugin's `on` for that
+    /// scene is only what it optimistically wrote when it pressed the button.
+    /// Declaring `on` there would give a client a confident toggle reporting a
+    /// value nothing confirms.
+    #[test]
+    fn a_scene_declares_no_state_until_its_led_reports() {
+        let v = scene_schema_json(false);
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert!(
+            !attrs.contains_key("on"),
+            "nothing confirms it, so nothing claims it"
+        );
+        assert_eq!(v["actions"][0]["id"], "activate");
+    }
+
+    fn cfg() -> SceneConfig {
+        SceneConfig {
+            name: "Deck On".into(),
+            main_repeater_id: 1,
+            button_component: 3,
+        }
+    }
+
+    /// "Supports status" is something a client can show, not infer: the scene
+    /// names the button it is and the LED that reports it.
+    #[test]
+    fn a_reporting_scene_names_the_led_behind_its_status() {
+        let v = scene_schema_json(true);
+        assert_eq!(v["attributes"]["led_component"]["category"], "diagnostic");
+
+        let state = scene_plumbing_state(&cfg(), true);
+        assert_eq!(state["phantom_button"], 3);
+        assert_eq!(state["led_component"], 103); // button + 100
+    }
+
+    /// A scene with no LED still says which button it is — that is the first
+    /// thing anyone needs when asking why it never reports.
+    #[test]
+    fn a_scene_without_one_still_names_its_button() {
+        let v = scene_schema_json(false);
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert!(attrs.contains_key("phantom_button"));
+        assert!(!attrs.contains_key("led_component"));
+
+        let state = scene_plumbing_state(&cfg(), false);
+        assert_eq!(state["phantom_button"], 3);
+        assert!(state.get("led_component").is_none());
+    }
+
+    #[test]
+    fn a_scene_with_an_led_declares_what_it_reports() {
+        let v = scene_schema_json(true);
+        let on = &v["attributes"]["on"];
+        // Activation goes through the action; assigning to `on` is not a
+        // command this plugin dispatches.
+        assert_eq!(on["writable"], false);
+        assert_eq!(on["states"]["when_true"]["label"], "active");
+        assert_eq!(on["states"]["when_false"]["label"], "inactive");
+        assert_eq!(v["actions"][0]["id"], "activate");
     }
 }

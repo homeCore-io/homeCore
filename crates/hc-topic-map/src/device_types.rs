@@ -5,7 +5,7 @@
 //! use to register devices without hand-writing schema JSON.
 
 use anyhow::{anyhow, Context, Result};
-use hc_types::{AttributeKind, AttributeSchema, DeviceSchema};
+use hc_types::{AttributeKind, AttributeOption, AttributeSchema, DeviceSchema};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -215,7 +215,7 @@ fn json_schema_to_device_schema(schema: &Value) -> DeviceSchema {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .filter_map(|item| item.as_str().map(AttributeOption::from))
                     .collect()
             });
 

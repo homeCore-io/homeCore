@@ -6670,6 +6670,176 @@ Lutron scene devices are registered with `device_type = "scene"`.
 Scenes have no hardware availability signal so they are always marked online
 when the LIP connection is up.
 
+### What each kind declares
+
+Every Lutron device now publishes a `DeviceSchema`, so a client renders its
+controls from the declaration rather than guessing from the state it happens to
+see.
+
+| Kind | Attributes | Actions |
+| --- | --- | --- |
+| Dimmer | `on`, `brightness_pct` (0–100 %) | — |
+| Switch | `on` | — |
+| Fan control | `on`, `speed` (`off`/`low`/`medium`/`medium-high`/`high`), `speed_pct` | — |
+| Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
+| Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
+| Phantom scene | `phantom_button`, `led_component` and `on` — the last two **only when the scene really reports** | `activate` |
+| Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
+| Occupancy group | `occupied` and `occupancy` — the same reading under both names it has always published | — |
+| Timeclock event | `enabled` (writable) | `execute` |
+
+**A scene's state is its phantom button's LED, and not every phantom button has
+one.** RadioRA 2 answers an LED query for an unassigned button with 255, which
+is not a state — so for those scenes the `on` this plugin publishes is only
+what it optimistically wrote when it pressed the button. A client that cannot
+tell the two apart shows a confident toggle for both.
+
+So `on` is declared only for the scenes that genuinely report it. Which ones
+those are is *learned*, not configured, and the default is "reports": a phantom
+button on the main repeater normally has an LED, and the exception is a scene
+tied to a Pico, which has no LEDs at all. The startup LED query settles it
+within a second of connect — an explicit 255 ("no LED assigned") is the one
+answer that retires a scene's `on` and republishes its schema without it
+(retained, so it stays said).
+
+Assuming the other way round — declaring no status until an LED event proved
+otherwise — meant every scene in the house went schema-less-for-status for the
+second between connecting and the query coming back, on every reconnect.
+
+Every scene also publishes the plumbing behind that, declared `diagnostic`:
+`phantom_button` always, and `led_component` (button + 100) once the scene is
+known to report. So "this scene supports status" is something a client can
+*show* — with the LED it rests on — rather than infer from an absent
+attribute, and a scene that never reports still names the button to check.
+
+A timeclock event's `enabled` is writable, and both spellings now reach it:
+the state said `enabled` while the command wanted `enable`, so a client
+echoing back the attribute it had just read was silently ignored. The value is
+optimistic — RA2 has no query for an individual event's enabled state, so what
+is published is what the plugin last sent.
+
+**The two LED offsets overlap, and the resolution order matters.** Phantom
+LEDs are `button + 100`, keypad LEDs are `button + 80`, and both subtractions
+land on real phantom button numbers: component 106 is button 6's LED, but
+106 − 80 = 26 is a button someone may have a scene on. `scene_for_led` reads
++100 first — that is the offset that applies to a map of main-repeater phantom
+buttons — and falls back to +80 only when +100 matches nothing. Trying +80
+first (as it did) reported button 6's LED against button 26's scene, and once
+the schema is learned from these events it would have declared the wrong scene
+able to report.
+
+Declared actions carry no parameters here, so `{"action":"activate"}` and the
+hand-written `{"activate":true}` are normalised to the same payload before any
+command branch runs — the same for a shade's `raise`/`lower`/`stop`.
+
+---
+
+## Plugin Notes — hc-caseta
+
+### What each kind declares
+
+Caséta declared a Pico's buttons and nothing else — every dimmer, switch, fan,
+shade, occupancy sensor and scene published no schema at all.
+
+| Kind | Attributes | Actions |
+| --- | --- | --- |
+| Dimmer | `on`, `brightness_pct` (0–100 %) | — |
+| Switch | `on` | — |
+| Fan control | `on`, `speed`, `speed_pct` | — |
+| Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
+| Occupancy sensor | `occupied`, `occupancy` | — |
+| Pico | `available_buttons`, one per button | — (read-only over LIP) |
+| Scene | none | `activate` |
+
+**A Caséta scene has nothing to read.** There is no LED reporting anywhere in
+Caséta — unlike a RadioRA 2 phantom button, whose LED is what makes its scene
+readable — so a scene is purely a trigger, and declaring an `on` would give a
+client a toggle over a value nothing will ever confirm.
+
+The fan ladder is the same Maestro table hc-lutron uses, and the same test
+holds it to it: every speed offered is one `translate_command` accepts.
+
+---
+
+## Device schema — which attributes are the point of the device
+
+`AttributeSchema.category` says what a reading is *for* when it is not what the
+device exists to report: `diagnostic` for health and identity (battery, RSSI,
+firmware, ip, model, a `*_unit` sibling), `config` for a setting that shapes
+behaviour. **Absent means primary**, so a client leads with what carries no
+category.
+
+The field has been on the schema and read by both clients for a while —
+hc-web-lit skips diagnostic and config attributes when building controls,
+Flutter demotes them through `isDiagnostic` — but until now **no plugin set
+it**, so a lock's battery was declared exactly as primary as whether it was
+locked, and clients kept a hardcoded list of names to demote instead
+(hc-web-lit's `UNDECLARED_HOUSEKEEPING`, filed as homeCore#28).
+
+### Enum options carry a label and an icon
+
+`AttributeSchema.options` accepts two forms in the same list: a bare value, or
+`{value, label, icon}`. It closes a gap attributes had against action
+parameters — `ParamSpec.options` has carried `value` + `label` since actions
+existed, so a thermostat's `medium-high` reached every client as
+`medium-high` and each one prettified it alone. Booleans were better served
+than enums, since `BoolStates` names both states of a `bool` and enums had no
+equivalent.
+
+`icon` is a semantic name, not a font codepoint — the same convention
+`DeviceAction.icon` uses.
+
+**An option carrying neither extra serialises back as the plain string it came
+in as**, so a schema that declares nothing new puts nothing new on the wire and
+existing clients are unaffected. That guarantee is pinned by a test. It also
+means the *clients must be updated before any plugin declares a label*: today
+Flutter does `(json['options'] as List?)?.cast<String>()` and hc-web-lit types
+it `string[]`, and both would fail on the object form.
+
+Plugin-side authoring:
+
+```rust
+AttributeOption::new("cool").labelled("Cooling").icon("snowflake")
+```
+
+Twelve enum attributes exist to be upgraded when the clients are ready:
+hc-thermostat's mode, hc-isy's fan mode and operating state, hc-roku's source,
+the glue `select` type, and the fan speed ladders in hc-lutron and hc-caseta.
+
+### Which reading leads
+
+`category` demotes what is not the point of the device. `DeviceSchema.primary`
+ranks what is left: an ordered list of attribute names, most important first,
+so a client with one row to fill knows which reading to lead with.
+
+**Derived from the device's own type, not declared per plugin.**
+`DeviceSchema::fill_primary(device_type)` is applied by the API when it serves
+a schema (`GET /devices/{id}/schema` and `?include_schema=true`), so a
+temperature sensor leads with `temperature` then `humidity` without any plugin
+saying so. A plugin that knows better sets `primary` itself and keeps it.
+
+Order: the type's own readings first (`readings_for_type`), then whatever is
+left by `READING_RANK` — presence and safety before measurement, so a Z-Wave
+multi-sensor whose type is only `zwave` still leads with `motion` rather than
+`temperature` — then the remainder alphabetically. That last sort is
+load-bearing: `attributes` is a `HashMap`, so an unsorted tail would reorder
+itself between reads and a client would show a different headline each refresh.
+
+The lexicon lives in `hc_types::AttributeCategory::for_name` — one list, in the
+crate that defines the field, rather than one per plugin. Plugins that build
+attributes from a name call it:
+
+| Plugin | Where |
+| --- | --- |
+| hc-zwave | `describe()` — every node attribute, including `name` and `location` |
+| hc-ecowitt | `describe()` — plus `units.*` / `customserver.*` as `config` |
+| hc-yolink | the shared `battery()` helper, across all six kinds that report one |
+| hc-isy | `unit` on a generic sensor, set locally — the lexicon does not claim a bare `unit`, since a thermostat could have a writable one |
+
+A plugin that knows something the lexicon cannot still sets the category
+itself; the lexicon only holds names whose meaning is fixed across every
+integration.
+
 ---
 
 ## Core — DeviceState device_type field
@@ -6690,6 +6860,30 @@ the Scenes page includes them alongside native HC scenes.
 
 ---
 
+## Plugin Notes — hc-hue (auxiliary devices)
+
+Lights and groups have declared themselves since the schema existed; the
+sensors never did. A Hue motion sensor publishes motion, temperature,
+illuminance and battery and declared none of it.
+
+`aux_schema.rs` derives the schema from what the device actually published,
+the way hc-ecowitt and hc-zwave do — because `compact_motion_facets` merges
+several Hue resources (motion, temperature, light_level, device_power) onto one
+homeCore device, so what a given device reports depends on the bridge's model
+and this plugin's config. A hand-listed schema per resource type would be wrong
+for every compacted device.
+
+Published after the aux loop, once every resource that compacts onto a device
+has been seen, and only when the attribute set changes
+(`HueRegistry::aux_schema_changed`). Devices that already own a declared
+schema — lights, groups, scenes, the bridge — are skipped, so a compacted
+facet never overwrites a light's schema.
+
+Everything is read-only: a sensor's settings go through the accessory command
+path, not an attribute write.
+
+---
+
 ## Plugin Notes — hc-hue (scenes)
 
 ### Unified activate payload
@@ -6697,6 +6891,25 @@ the Scenes page includes them alongside native HC scenes.
 `{"activate": true}` is now accepted by hc-hue as an alternative to
 `{"action": "activate_scene"}` (commit c1b99e4). This allows plugin scenes
 to be activated from hc-web using the same code path as Lutron scenes.
+
+`{"action": "activate"}` is accepted too, and `activate` is the id the scene
+schema *declares* — the same one hc-lutron declares, so a client has one
+action for "run this scene" whatever runs it. `activate_scene` keeps working
+for the rules and clients that send it.
+
+### Scene schema
+
+A Hue scene declares the `activate` action and, when the bridge reports it,
+a read-only `active`.
+
+Hue reports scene `status.active` as a string enum
+(`"inactive" | "static" | "dynamic_palette"`) and this plugin flattens it to a
+bool, so `active` is declared `Bool` — declaring the enum would describe a
+value nothing publishes. Whether a scene reports at all is not a guess:
+`fetch_scenes` either found `status` on the resource or it did not, and
+`RegisteredScene.reports_status` remembers what the published schema claimed,
+so a scene whose answer changes republishes rather than leaving a client with
+a state row that never fills in.
 
 ---
 

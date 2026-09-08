@@ -49,4 +49,4 @@ pub mod widget_descriptor;
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};
 pub use plugin_notice::{NoticeLevel, PluginNotice};
-pub use schema::{AttributeKind, AttributeSchema, DeviceSchema};
+pub use schema::{AttributeKind, AttributeOption, AttributeSchema, DeviceSchema};

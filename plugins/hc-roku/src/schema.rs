@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 
 fn attr(
@@ -28,7 +28,7 @@ fn attr(
         kind,
         writable,
         display_name: Some(display.to_string()),
-        options,
+        options: options.map(|o| o.into_iter().map(AttributeOption::from).collect()),
         ..Default::default()
     }
 }
