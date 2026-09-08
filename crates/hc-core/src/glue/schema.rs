@@ -207,6 +207,19 @@ pub fn mode_schema() -> DeviceSchema {
     }
 }
 
+/// The schema for a core-owned device, chosen by the plugin that owns it.
+///
+/// The two core families are the glue devices (`core.glue`, keyed by
+/// `device_type`) and the modes (`core.mode`). Anything else is a plugin's
+/// device and publishes its own schema over MQTT.
+pub fn for_device(plugin_id: &str, device_type: Option<&str>) -> Option<DeviceSchema> {
+    match plugin_id {
+        super::GLUE_PLUGIN_ID => schema_for(device_type?),
+        "core.mode" => Some(mode_schema()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

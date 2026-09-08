@@ -1117,7 +1117,7 @@ pub async fn create_timer(
     dev.attributes.insert("remaining_secs".into(), json!(0_u64));
     dev.attributes.insert("repeat".into(), json!(false));
 
-    match s.store.upsert_device(&dev).await {
+    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1247,7 +1247,7 @@ pub async fn create_switch(
     dev.available = true;
     dev.attributes.insert("on".into(), json!(false));
 
-    match s.store.upsert_device(&dev).await {
+    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1478,7 +1478,7 @@ pub async fn create_glue(
         _ => {}
     }
 
-    if let Err(e) = s.store.upsert_device(&dev).await {
+    if let Err(e) = hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

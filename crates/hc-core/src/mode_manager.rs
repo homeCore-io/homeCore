@@ -558,7 +558,7 @@ impl ModeManager {
         let change = change.unwrap_or_else(|| DeviceChange::homecore("mode_manager"));
         dev.last_change = Some(change.clone());
 
-        if let Err(e) = self.state.upsert_device(&dev).await {
+        if let Err(e) = crate::glue::upsert_device_with_schema(&self.state, &dev).await {
             warn!(device_id = %mode.id, error = %e, "ModeManager: failed to persist device state");
             return;
         }

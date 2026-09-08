@@ -304,7 +304,7 @@ pub async fn load_glue_config(path: &Path, store: &StateStore) -> Result<()> {
         }
 
         let is_override = matches!(mode, SeedMode::Override);
-        match store.upsert_device(&dev).await {
+        match super::upsert_device_with_schema(store, &dev).await {
             Ok(_) => {
                 if is_override {
                     info!(device_id = %device_id, name = %entry.name, r#type = %entry.glue_type, "Glue device config overridden");
