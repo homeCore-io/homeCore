@@ -6,7 +6,7 @@ mod wled;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
@@ -213,7 +213,10 @@ async fn try_start(
             .register_device_full(
                 &dev.hc_id,
                 &dev.name,
-                None,
+                // A WLED controller is a light, and said so nowhere: it
+                // registered with no `device_type` at all, so every client
+                // filtering or ranking by type skipped it.
+                Some("light"),
                 dev.area.as_deref(),
                 Some(capabilities.clone()),
             )
@@ -293,8 +296,14 @@ fn build_wled_schema() -> DeviceSchema {
             ..Default::default()
         },
     );
+    // **`preset_id`, not `preset`.** The declaration named the wire key the
+    // command path took; the device publishes `preset_id`. So the declared
+    // attribute never appeared in state and the published one was never
+    // declared — a client reading the value and writing it back was ignored.
+    // Both spellings are accepted now, and the published name is what is
+    // declared. Same story for `effect_id` and `palette_id` below.
     attrs.insert(
-        "preset".into(),
+        "preset_id".into(),
         AttributeSchema {
             kind: AttributeKind::Integer,
             writable: true,
@@ -305,6 +314,109 @@ fn build_wled_schema() -> DeviceSchema {
             ..Default::default()
         },
     );
+
+    // What `state_to_json` publishes off the first segment, and what
+    // `execute_command` writes back to it. Declared because a client that
+    // will not offer a control the plugin has not promised had a colour it
+    // could read and no way to set it.
+    attrs.insert(
+        "color".into(),
+        AttributeSchema {
+            kind: AttributeKind::ColorRgb,
+            writable: true,
+            display_name: Some("Colour".into()),
+            ..Default::default()
+        },
+    );
+    for (name, display) in [
+        ("effect_id", "Effect"),
+        ("palette_id", "Palette"),
+        ("effect_speed", "Effect speed"),
+        ("effect_intensity", "Effect intensity"),
+    ] {
+        let ranged = name.starts_with("effect_s") || name.starts_with("effect_i");
+        attrs.insert(
+            name.into(),
+            AttributeSchema {
+                kind: AttributeKind::Integer,
+                writable: true,
+                display_name: Some(display.into()),
+                min: Some(0.0),
+                max: ranged.then_some(255.0),
+                step: Some(1.0),
+                ..Default::default()
+            },
+        );
+    }
+    // The raw 0-255 twin of `brightness_pct`. Writable — `execute_command`
+    // takes it — but the percentage is the one to render.
+    attrs.insert(
+        "brightness".into(),
+        AttributeSchema {
+            kind: AttributeKind::Integer,
+            writable: true,
+            display_name: Some("Brightness (raw)".into()),
+            min: Some(0.0),
+            max: Some(255.0),
+            step: Some(1.0),
+            category: Some(AttributeCategory::Diagnostic),
+            ..Default::default()
+        },
+    );
+
+    // What the controller *is*, refreshed on a slow tick by `bridge_info`.
+    // None of it is a reading: it is the hardware behind the readings, and
+    // declaring it keeps a client from ranking LED count beside brightness.
+    for (name, display, unit) in [
+        ("arch", "Architecture", None),
+        ("mac", "MAC", None),
+        ("ip", "IP address", None),
+        ("led_count", "LEDs", None),
+        ("led_power_mw", "LED power", Some("mW")),
+        ("led_max_power_mw", "LED power limit", Some("mW")),
+        ("led_max_segments", "Maximum segments", None),
+        ("effects_count", "Effects available", None),
+        ("palettes_count", "Palettes available", None),
+        ("presets_count", "Presets stored", None),
+        ("peers_count", "Mesh peers", None),
+        ("wifi_signal_pct", "WiFi signal", Some("%")),
+        ("wifi_rssi", "WiFi RSSI", Some("dBm")),
+        ("wifi_channel", "WiFi channel", None),
+    ] {
+        let text = matches!(name, "arch" | "mac" | "ip");
+        attrs.insert(
+            name.into(),
+            AttributeSchema {
+                kind: if text {
+                    AttributeKind::String
+                } else {
+                    AttributeKind::Integer
+                },
+                writable: false,
+                display_name: Some(display.into()),
+                unit: unit.map(str::to_string),
+                category: Some(AttributeCategory::Diagnostic),
+                ..Default::default()
+            },
+        );
+    }
+    attrs.insert(
+        "led_rgbw".into(),
+        AttributeSchema {
+            kind: AttributeKind::Bool,
+            writable: false,
+            display_name: Some("RGBW strip".into()),
+            // Hardware, so it never transitions — but both states still need
+            // their own word, or a client renders "RGBW, but Not".
+            states: Some(BoolStates {
+                when_true: StateLabel::new("RGBW"),
+                when_false: StateLabel::new("RGB"),
+            }),
+            category: Some(AttributeCategory::Diagnostic),
+            ..Default::default()
+        },
+    );
+
     DeviceSchema {
         attributes: attrs,
         ..Default::default()
@@ -659,6 +771,61 @@ mod schema_tests {
         }
     }
 
+    /// **The declaration must name what the device publishes.** `preset`,
+    /// `effect` and `palette` were declared while `preset_id`, `effect_id`
+    /// and `palette_id` were published, so a client that read a value and
+    /// wrote it back was ignored — three times over.
+    #[test]
+    fn every_published_attribute_is_declared_under_the_name_it_is_published() {
+        use crate::bridge::state_to_json;
+        use crate::wled::WledState;
+
+        let state: WledState = serde_json::from_str(
+            r#"{"on":true,"bri":110,"ps":-1,
+                "seg":[{"col":[[0,128,0]],"fx":52,"sx":120,"ix":230,"pal":5}]}"#,
+        )
+        .expect("a WLED state");
+        let published = state_to_json(&state);
+        let schema = build_wled_schema();
+
+        for name in published.as_object().expect("state").keys() {
+            assert!(
+                schema.attributes.contains_key(name),
+                "{name} is published but not declared"
+            );
+        }
+    }
+
+    /// The info refresher's attributes are declared too, and none of them is
+    /// a reading: LED count beside brightness is the hardware among the
+    /// things the device is doing.
+    #[test]
+    fn the_hardware_facts_are_declared_and_demoted() {
+        let schema = build_wled_schema();
+        for name in [
+            "led_count",
+            "wifi_rssi",
+            "effects_count",
+            "presets_count",
+            "mac",
+            "ip",
+        ] {
+            let a = schema
+                .attributes
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not declared"));
+            assert!(!a.writable, "{name} claims to be writable");
+            assert_eq!(
+                a.category,
+                Some(AttributeCategory::Diagnostic),
+                "{name} ranks as a reading"
+            );
+        }
+        // Dots are not a naming convention anywhere else in homeCore, and a
+        // client humanising `led.count` reads "Led.count".
+        assert!(schema.attributes.keys().all(|k| !k.contains('.')));
+    }
+
     /// Every boolean names both of its states.
     ///
     /// A boolean attribute is two events, not one: a client given only "on"
@@ -676,8 +843,14 @@ mod schema_tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} is a bool with no state names"));
             assert_ne!(s.when_true.label, s.when_false.label, "{name}");
-            assert_eq!(s.when_true.transition(), "turns on");
-            assert_eq!(s.when_false.transition(), "turns off");
+            // Power reads as power. The wording was asserted for every
+            // boolean back when `on` was the only one; `led_rgbw` is a
+            // hardware fact that never turns on or off, and saying it does
+            // would be worse than saying nothing.
+            if name == "on" {
+                assert_eq!(s.when_true.transition(), "turns on");
+                assert_eq!(s.when_false.transition(), "turns off");
+            }
         }
     }
 }
