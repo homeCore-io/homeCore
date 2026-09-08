@@ -6685,6 +6685,7 @@ see.
 | Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
 | Phantom scene | `phantom_button`, `led_component` and `on` — the last two **only when the scene really reports** | `activate` |
 | Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
+| Occupancy group | `occupied` and `occupancy` — the same reading under both names it has always published | — |
 | Timeclock event | `enabled` (writable) | `execute` |
 
 **A scene's state is its phantom button's LED, and not every phantom button has
@@ -6730,6 +6731,33 @@ able to report.
 Declared actions carry no parameters here, so `{"action":"activate"}` and the
 hand-written `{"activate":true}` are normalised to the same payload before any
 command branch runs — the same for a shade's `raise`/`lower`/`stop`.
+
+---
+
+## Plugin Notes — hc-caseta
+
+### What each kind declares
+
+Caséta declared a Pico's buttons and nothing else — every dimmer, switch, fan,
+shade, occupancy sensor and scene published no schema at all.
+
+| Kind | Attributes | Actions |
+| --- | --- | --- |
+| Dimmer | `on`, `brightness_pct` (0–100 %) | — |
+| Switch | `on` | — |
+| Fan control | `on`, `speed`, `speed_pct` | — |
+| Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
+| Occupancy sensor | `occupied`, `occupancy` | — |
+| Pico | `available_buttons`, one per button | — (read-only over LIP) |
+| Scene | none | `activate` |
+
+**A Caséta scene has nothing to read.** There is no LED reporting anywhere in
+Caséta — unlike a RadioRA 2 phantom button, whose LED is what makes its scene
+readable — so a scene is purely a trigger, and declaring an `on` would give a
+client a toggle over a value nothing will ever confirm.
+
+The fan ladder is the same Maestro table hc-lutron uses, and the same test
+holds it to it: every speed offered is one `translate_command` accepts.
 
 ---
 

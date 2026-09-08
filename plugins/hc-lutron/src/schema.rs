@@ -168,6 +168,30 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
         };
     }
 
+    // An occupancy group publishes the same reading under two names, and has
+    // since before this schema existed. Both are declared: a client that hides
+    // what a plugin never mentioned would otherwise show one and drop the
+    // other.
+    if cfg.kind == DeviceKind::OccupancyGroup {
+        let occupancy = |display: &str| AttributeSchema {
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("occupied", "detects occupancy"),
+                when_false: StateLabel::verbed("vacant", "becomes vacant"),
+            }),
+            ..ro(AttributeKind::Bool, display)
+        };
+        let schema = DeviceSchema {
+            attributes: [
+                ("occupied".to_string(), occupancy("Occupied")),
+                ("occupancy".to_string(), occupancy("Occupancy")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        return serde_json::to_value(&schema).ok();
+    }
+
     // A pulsed CCO is published as a scene because that is how it behaves: it
     // takes `activate`, never latches, and — the Integration Guide is explicit
     // that momentary outputs must not be queried — reports nothing at all. An
@@ -637,6 +661,28 @@ mod output_schema_tests {
                 !dev.translate_command(&json!({ verb: true }), 0.0)
                     .is_empty(),
                 "{verb} is declared but not accepted"
+            );
+        }
+    }
+
+    /// An occupancy group reports the same thing twice, and always has.
+    /// Declaring only one of the two would leave a client hiding a reading the
+    /// device publishes.
+    #[test]
+    fn an_occupancy_group_declares_both_names_it_publishes() {
+        let v = device_schema_json(&cfg(DeviceKind::OccupancyGroup)).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        for name in ["occupied", "occupancy"] {
+            assert_eq!(attrs[name]["writable"], false);
+            assert_eq!(attrs[name]["states"]["when_false"]["label"], "vacant");
+        }
+
+        let dev = DeviceEntry::new(cfg(DeviceKind::OccupancyGroup));
+        let state = dev.translate_occupancy_state(true);
+        for name in ["occupied", "occupancy"] {
+            assert!(
+                state.get(name).is_some(),
+                "{name} is declared but not published"
             );
         }
     }
