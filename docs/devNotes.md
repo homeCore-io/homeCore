@@ -6776,6 +6776,25 @@ it**, so a lock's battery was declared exactly as primary as whether it was
 locked, and clients kept a hardcoded list of names to demote instead
 (hc-web-lit's `UNDECLARED_HOUSEKEEPING`, filed as homeCore#28).
 
+### Which reading leads
+
+`category` demotes what is not the point of the device. `DeviceSchema.primary`
+ranks what is left: an ordered list of attribute names, most important first,
+so a client with one row to fill knows which reading to lead with.
+
+**Derived from the device's own type, not declared per plugin.**
+`DeviceSchema::fill_primary(device_type)` is applied by the API when it serves
+a schema (`GET /devices/{id}/schema` and `?include_schema=true`), so a
+temperature sensor leads with `temperature` then `humidity` without any plugin
+saying so. A plugin that knows better sets `primary` itself and keeps it.
+
+Order: the type's own readings first (`readings_for_type`), then whatever is
+left by `READING_RANK` — presence and safety before measurement, so a Z-Wave
+multi-sensor whose type is only `zwave` still leads with `motion` rather than
+`temperature` — then the remainder alphabetically. That last sort is
+load-bearing: `attributes` is a `HashMap`, so an unsorted tail would reorder
+itself between reads and a client would show a different headline each refresh.
+
 The lexicon lives in `hc_types::AttributeCategory::for_name` — one list, in the
 crate that defines the field, rather than one per plugin. Plugins that build
 attributes from a name call it:
@@ -6808,6 +6827,30 @@ JSON. Uses `#[serde(default)]` so old records deserialize as `None`.
 **Usage:** `GET /api/v1/devices` — check the `device_type` field to filter or
 categorize devices. The hc-web Devices page excludes `device_type == "scene"`;
 the Scenes page includes them alongside native HC scenes.
+
+---
+
+## Plugin Notes — hc-hue (auxiliary devices)
+
+Lights and groups have declared themselves since the schema existed; the
+sensors never did. A Hue motion sensor publishes motion, temperature,
+illuminance and battery and declared none of it.
+
+`aux_schema.rs` derives the schema from what the device actually published,
+the way hc-ecowitt and hc-zwave do — because `compact_motion_facets` merges
+several Hue resources (motion, temperature, light_level, device_power) onto one
+homeCore device, so what a given device reports depends on the bridge's model
+and this plugin's config. A hand-listed schema per resource type would be wrong
+for every compacted device.
+
+Published after the aux loop, once every resource that compacts onto a device
+has been seen, and only when the attribute set changes
+(`HueRegistry::aux_schema_changed`). Devices that already own a declared
+schema — lights, groups, scenes, the bridge — are skipped, so a compacted
+facet never overwrites a light's schema.
+
+Everything is read-only: a sensor's settings go through the accessory command
+path, not an attribute write.
 
 ---
 

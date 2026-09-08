@@ -1,3 +1,4 @@
+mod aux_schema;
 mod bridge;
 mod commands;
 mod config;

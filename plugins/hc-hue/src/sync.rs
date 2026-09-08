@@ -216,6 +216,8 @@ pub async fn refresh_bridge_state(
                 cfg.publish_bridge_home,
                 cfg.publish_entertainment_configurations,
             );
+            let mut aux_published_attrs: HashMap<String, serde_json::Map<String, Value>> =
+                HashMap::new();
             let mut registered_publish_ids: HashSet<String> = HashSet::new();
             let mut full_state_published_ids: HashSet<String> = HashSet::new();
             let mut compacted_partial_patches: HashMap<String, serde_json::Map<String, Value>> =
@@ -289,6 +291,18 @@ pub async fn refresh_bridge_state(
                 let mut state = translator::aux_state(&aux);
                 apply_display_preferences(&mut state, &aux.resource_type, &cfg.display);
 
+                // What this device ends up reporting, however many Hue
+                // resources compacted onto it — the schema is derived from it
+                // once the loop has seen them all.
+                if let Some(obj) = state.as_object() {
+                    let entry = aux_published_attrs
+                        .entry(publish_device_id.clone())
+                        .or_default();
+                    for (k, v) in obj {
+                        entry.insert(k.clone(), v.clone());
+                    }
+                }
+
                 let compacted = cfg.compact_motion_facets && publish_device_id != aux.device_id;
                 if compacted {
                     strip_aux_metadata(&mut state);
@@ -313,6 +327,26 @@ pub async fn refresh_bridge_state(
                     publisher
                         .publish_state_partial(&device_id, &Value::Object(patch))
                         .await?;
+                }
+            }
+
+            // Sensors never described themselves. A Hue motion sensor
+            // publishes motion, temperature, illuminance and battery, and a
+            // client had to infer every one of them and demote the battery by
+            // name. Lights, groups and scenes keep their own declared schemas —
+            // this is only for the devices that had none.
+            for (device_id, attrs) in &aux_published_attrs {
+                if registry.is_primary_device_id(device_id) || attrs.is_empty() {
+                    continue;
+                }
+                let mut names: Vec<String> = attrs.keys().cloned().collect();
+                names.sort();
+                if !registry.aux_schema_changed(device_id, &names) {
+                    continue;
+                }
+                let schema = crate::aux_schema::schema_for_state(attrs);
+                if let Err(e) = publisher.register_device_schema(device_id, &schema).await {
+                    warn!(device_id = %device_id, error = %e, "Failed to publish aux schema");
                 }
             }
 

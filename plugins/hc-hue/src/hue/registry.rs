@@ -49,6 +49,8 @@ pub struct HueRegistry {
     groups_by_device_id: HashMap<String, RegisteredGroup>,
     scenes_by_device_id: HashMap<String, RegisteredScene>,
     aux_by_device_id: HashMap<String, RegisteredAux>,
+    /// publish device id → the attribute names its published schema covers.
+    aux_schema_attrs: HashMap<String, Vec<String>>,
 }
 
 impl HueRegistry {
@@ -244,6 +246,21 @@ impl HueRegistry {
                 None
             }
         })
+    }
+
+    /// Whether an auxiliary device's published attribute set has changed since
+    /// its schema was last described, recording the new set.
+    ///
+    /// A sensor's attributes depend on which Hue resources compacted onto it,
+    /// so the schema is derived from what it published rather than declared up
+    /// front — and republished only when that set changes, not on every poll.
+    pub fn aux_schema_changed(&mut self, device_id: &str, names: &[String]) -> bool {
+        if self.aux_schema_attrs.get(device_id).map(Vec::as_slice) == Some(names) {
+            return false;
+        }
+        self.aux_schema_attrs
+            .insert(device_id.to_string(), names.to_vec());
+        true
     }
 
     pub fn is_primary_device_id(&self, device_id: &str) -> bool {

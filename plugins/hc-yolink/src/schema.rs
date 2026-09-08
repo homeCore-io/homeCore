@@ -198,7 +198,7 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
 
     Some(DeviceSchema {
         attributes: a,
-        actions: Vec::new(),
+        ..Default::default()
     })
 }
 

@@ -3709,6 +3709,23 @@ paths:
                 type: object
                 required: [attributes]
                 properties:
+                  primary:
+                    type: array
+                    items:
+                      type: string
+                    description: |
+                      The readings this device is *for*, most important first.
+
+                      `category` demotes what is not the point of the device;
+                      this ranks what is left, so a client with one row to fill
+                      knows which reading to lead with — a temperature/humidity
+                      sensor leads with temperature, a multi-sensor that reports
+                      motion leads with motion.
+
+                      Derived by the server from the device's `device_type`
+                      unless the plugin declared its own order, and always in a
+                      stable order: `attributes` is a map, so "the first one" is
+                      not otherwise repeatable between reads.
                   attributes:
                     type: object
                     description: Map of attribute name → attribute descriptor
@@ -3749,6 +3766,20 @@ paths:
                           description: Fixed option list for the `enum` kind
                           items:
                             type: string
+                        states:
+                          type: object
+                          description: |
+                            What a `bool` attribute's two states are *called*,
+                            in the device's own words. A boolean is two events,
+                            not one: a condition reads `label` ("while the door
+                            is open") and a trigger reads `verb` ("when the door
+                            opens"). Absent on non-boolean attributes and on
+                            every attribute declared before this existed.
+                          properties:
+                            when_true:
+                              $ref: "#/components/schemas/StateLabel"
+                            when_false:
+                              $ref: "#/components/schemas/StateLabel"
                         category:
                           type: string
                           enum: [diagnostic, config]
@@ -8055,6 +8086,26 @@ components:
       enum: [grid, stack, row]
 
     # ---- Devices ----
+
+    StateLabel:
+      type: object
+      required: [label]
+      description: |
+        One state of a boolean attribute: what it *is*, and what it does to get
+        there. Two forms because English will not derive one from the other —
+        `open` → "opens", but `locked` → "locks".
+      properties:
+        label:
+          type: string
+          description: The adjective — `open`, `closed`, `locked`, `unlocked`.
+        verb:
+          type: string
+          description: |
+            The transition verb — `opens`, `closes`, `detects motion`. Optional;
+            `becomes {label}` is the fallback.
+      example:
+        label: open
+        verb: opens
 
     DeviceState:
       type: object

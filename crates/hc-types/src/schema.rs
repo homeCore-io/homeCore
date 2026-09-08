@@ -25,6 +25,120 @@ pub struct DeviceSchema {
     /// omitted from the wire form when it is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<DeviceAction>,
+    /// The readings this device is *for*, most important first.
+    ///
+    /// [`AttributeCategory`] demotes what is not the point of the device; this
+    /// ranks what is left. A temperature/humidity sensor leads with
+    /// temperature, and a multi-sensor that reports motion leads with motion —
+    /// a client that has to pick one row cannot work either out from an
+    /// unordered map, and `attributes` is a `HashMap`, so "the first one" is
+    /// not even stable between reads.
+    ///
+    /// Usually derived rather than declared: [`DeviceSchema::fill_primary`]
+    /// works it out from the device's type, so a plugin says nothing and still
+    /// ranks correctly. A plugin that knows better sets it and keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary: Vec<String>,
+}
+
+/// The readings a device of this type exists to report, in the order a person
+/// reads them.
+///
+/// Keyed on the `device_type` a plugin registers, which is the thing that
+/// already says what a device *is* — so a temperature sensor leads with
+/// temperature without any plugin declaring it.
+fn readings_for_type(device_type: &str) -> &'static [&'static str] {
+    match device_type {
+        "light" => &["on", "brightness_pct", "color_temp", "color_xy"],
+        "switch" | "virtual_switch" => &["on"],
+        "fan" => &["on", "speed", "speed_pct"],
+        "cover" => &["position"],
+        "lock" => &["locked"],
+        "contact_sensor" => &["open", "contact"],
+        "motion_sensor" | "occupancy_sensor" => &["motion", "occupied", "occupancy"],
+        "water_sensor" => &["water_detected"],
+        "temperature_sensor" => &["temperature", "humidity"],
+        "sensor" => &["value"],
+        "binary_sensor" => &["on", "state"],
+        "thermostat" => &["current_temperature", "setpoint", "mode"],
+        "media_player" => &["state"],
+        "scene" => &["active", "on"],
+        "timer" => &["state", "remaining_secs"],
+        "counter" => &["count"],
+        "group" | "schedule" => &["active"],
+        "threshold" => &["above"],
+        _ => &[],
+    }
+}
+
+/// How much a reading matters when its device's type does not say — a Z-Wave
+/// node is `zwave` and nothing more, whatever it reports.
+///
+/// **A multi-sensor that reports motion is a motion sensor.** Presence and
+/// safety come before measurement, and measurement before everything else.
+const READING_RANK: [&str; 22] = [
+    "motion",
+    "occupancy",
+    "occupied",
+    "open",
+    "contact",
+    "water_detected",
+    "smoke",
+    "tampered",
+    "locked",
+    "on",
+    "active",
+    "state",
+    "position",
+    "speed",
+    "brightness_pct",
+    "current_temperature",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "lux",
+    "power_w",
+    "value",
+];
+
+impl DeviceSchema {
+    /// Work out [`primary`](Self::primary) from the device's type, unless the
+    /// plugin already said.
+    ///
+    /// Deterministic by construction: the type's own readings first, then
+    /// anything else that is not housekeeping by [`READING_RANK`], then the
+    /// remainder alphabetically. Sorting the tail matters — `attributes` is a
+    /// `HashMap`, so an unsorted tail would reorder itself between reads and a
+    /// client would show a different headline each refresh.
+    pub fn fill_primary(&mut self, device_type: Option<&str>) {
+        if !self.primary.is_empty() {
+            return;
+        }
+
+        let mut candidates: Vec<String> = self
+            .attributes
+            .iter()
+            .filter(|(_, a)| a.category.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        candidates.sort();
+
+        let mut ordered: Vec<String> = Vec::with_capacity(candidates.len());
+        let take = |name: &str, out: &mut Vec<String>, left: &mut Vec<String>| {
+            if let Some(i) = left.iter().position(|c| c == name) {
+                out.push(left.remove(i));
+            }
+        };
+
+        for name in readings_for_type(device_type.unwrap_or("")) {
+            take(name, &mut ordered, &mut candidates);
+        }
+        for name in READING_RANK {
+            take(name, &mut ordered, &mut candidates);
+        }
+        ordered.append(&mut candidates);
+        self.primary = ordered;
+    }
 }
 
 /// One declared command: what it is called on the wire, how to label it, and
@@ -252,20 +366,9 @@ impl AttributeCategory {
         }
         match name {
             // Health and connectivity.
-            "battery"
-            | "battery_pct"
-            | "battery_low"
-            | "battery_kind"
-            | "battery_state"
-            | "rssi"
-            | "lqi"
-            | "signal_strength"
-            | "link_quality"
-            | "firmware"
-            | "sw_version"
-            | "hw_version"
-            | "uptime"
-            | "last_seen" => Some(Self::Diagnostic),
+            "battery" | "battery_pct" | "battery_low" | "battery_kind" | "battery_state"
+            | "rssi" | "lqi" | "signal_strength" | "link_quality" | "firmware" | "sw_version"
+            | "hw_version" | "uptime" | "last_seen" => Some(Self::Diagnostic),
             // What the thing is and where it lives, as opposed to what it is
             // doing. A device's own record already carries these; republished
             // as attributes they are never the reading anyone came for.
@@ -499,16 +602,112 @@ pub enum AttributeKind {
 #[cfg(test)]
 mod tests {
 
+    fn schema(names: &[(&str, Option<AttributeCategory>)]) -> DeviceSchema {
+        let mut attributes = HashMap::new();
+        for (name, category) in names {
+            attributes.insert(
+                (*name).to_string(),
+                AttributeSchema {
+                    category: *category,
+                    ..AttributeSchema::read_only(AttributeKind::Float)
+                },
+            );
+        }
+        DeviceSchema {
+            attributes,
+            ..Default::default()
+        }
+    }
+
+    /// The type says what the device is for: a temperature/humidity sensor
+    /// leads with temperature, and the battery does not appear at all.
+    #[test]
+    fn a_temperature_sensor_leads_with_temperature() {
+        let mut s = schema(&[
+            ("humidity", None),
+            ("temperature", None),
+            ("battery", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("temperature_sensor"));
+        assert_eq!(s.primary, ["temperature", "humidity"]);
+    }
+
+    /// A Z-Wave node's type is `zwave` whatever it reports, so the type table
+    /// says nothing and the reading rank decides: a multi-sensor that reports
+    /// motion is a motion sensor.
+    #[test]
+    fn a_multi_sensor_that_reports_motion_leads_with_motion() {
+        let mut s = schema(&[
+            ("temperature", None),
+            ("illuminance", None),
+            ("motion", None),
+            ("humidity", None),
+            ("battery", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("zwave"));
+        assert_eq!(
+            s.primary,
+            ["motion", "temperature", "humidity", "illuminance"]
+        );
+    }
+
+    /// `attributes` is a `HashMap`, so an unsorted tail would reorder itself
+    /// between reads and a client would show a different headline each
+    /// refresh. Everything the tables do not name is sorted.
+    #[test]
+    fn what_no_table_names_is_still_in_a_stable_order() {
+        let mut a = schema(&[("zeta", None), ("alpha", None), ("mu", None)]);
+        let mut b = schema(&[("mu", None), ("zeta", None), ("alpha", None)]);
+        a.fill_primary(Some("something_unknown"));
+        b.fill_primary(None);
+        assert_eq!(a.primary, ["alpha", "mu", "zeta"]);
+        assert_eq!(a.primary, b.primary);
+    }
+
+    /// A plugin that knows better than the tables keeps what it said.
+    #[test]
+    fn a_declared_order_is_never_overwritten() {
+        let mut s = schema(&[("temperature", None), ("humidity", None)]);
+        s.primary = vec!["humidity".to_string()];
+        s.fill_primary(Some("temperature_sensor"));
+        assert_eq!(s.primary, ["humidity"]);
+    }
+
+    /// Housekeeping is not a headline, whatever else the device has.
+    #[test]
+    fn a_device_that_only_reports_housekeeping_has_no_primary() {
+        let mut s = schema(&[
+            ("battery", Some(AttributeCategory::Diagnostic)),
+            ("ip", Some(AttributeCategory::Diagnostic)),
+        ]);
+        s.fill_primary(Some("gateway"));
+        assert!(s.primary.is_empty());
+    }
+
     /// A lock reports whether it is locked; it also reports battery. Only one
     /// of those is the point of the device, and until this said so every
     /// client kept the list itself.
     #[test]
     fn housekeeping_is_named_and_readings_are_left_alone() {
         use AttributeCategory as C;
-        for name in ["battery", "rssi", "firmware", "ip", "model", "temperature_unit"] {
+        for name in [
+            "battery",
+            "rssi",
+            "firmware",
+            "ip",
+            "model",
+            "temperature_unit",
+        ] {
             assert_eq!(C::for_name(name), Some(C::Diagnostic), "{name}");
         }
-        for name in ["temperature", "humidity", "on", "locked", "position", "speed"] {
+        for name in [
+            "temperature",
+            "humidity",
+            "on",
+            "locked",
+            "position",
+            "speed",
+        ] {
             assert_eq!(C::for_name(name), None, "{name} is the reading");
         }
     }
