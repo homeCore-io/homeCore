@@ -364,6 +364,20 @@ impl AttributeCategory {
         if name.ends_with("_unit") {
             return Some(Self::Diagnostic);
         }
+        // **A capability advertisement is not a reading.** `supports_dimming`,
+        // `supports_find_remote`, `supports_tv_power_control` — these say what
+        // the integration can do, not what the house is telling you, and they
+        // do not change while you watch. 69 of them across 184 devices read as
+        // ordinary boolean state, so a client listing a light's attributes
+        // offered "Not supports_color_xy" beside whether the light was on.
+        //
+        // Only the `supports_` prefix, which can mean nothing else. `is_tv`
+        // and its neighbours are the same kind of fact, but that prefix is not
+        // reserved — a plugin may one day publish an `is_open` that really is
+        // the reading — so those are marked by the plugin that knows.
+        if name.starts_with("supports_") {
+            return Some(Self::Diagnostic);
+        }
         match name {
             // Health and connectivity.
             "battery" | "battery_pct" | "battery_low" | "battery_kind" | "battery_state"
@@ -858,6 +872,10 @@ mod tests {
             "ip",
             "model",
             "temperature_unit",
+            // A capability advertisement: what the integration can do, not
+            // what the house is telling you.
+            "supports_dimming",
+            "supports_tv_power_control",
         ] {
             assert_eq!(C::for_name(name), Some(C::Diagnostic), "{name}");
         }

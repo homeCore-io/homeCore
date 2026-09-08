@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.63"
+  version: "0.1.64"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -8171,7 +8171,11 @@ components:
           nullable: true
         area:
           type: string
-          nullable: true
+          description: |
+            Area slug, **absent when the device has none** — the same spelling
+            `area_override` uses. It used to serialise as `null` while its own
+            override was omitted, so a client had two spellings of one absence
+            for this field alone.
         available:
           type: boolean
         attributes:
