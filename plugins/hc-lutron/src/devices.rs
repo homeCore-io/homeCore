@@ -284,12 +284,23 @@ impl DeviceEntry {
 pub struct SceneEntry {
     pub config: SceneConfig,
     pub hc_id: String,
+    /// Whether this scene's phantom button has an LED that reports back.
+    ///
+    /// Learned, not configured: RadioRA 2 answers an LED query for an
+    /// unassigned button with 255, so the only way to know is to see a real
+    /// state arrive. Starts false — the scene declares no readable state until
+    /// one does.
+    pub reports_state: bool,
 }
 
 impl SceneEntry {
     pub fn new(config: SceneConfig) -> Self {
         let hc_id = config.hc_id();
-        Self { config, hc_id }
+        Self {
+            config,
+            hc_id,
+            reports_state: false,
+        }
     }
 }
 

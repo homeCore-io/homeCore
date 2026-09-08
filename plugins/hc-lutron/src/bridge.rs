@@ -345,6 +345,22 @@ impl Bridge {
                     if let Err(e) = self.publisher.publish_state(&hc_id, &patch).await {
                         warn!(hc_id, error = %e, "Failed to publish scene LED state");
                     }
+                    // This scene has an LED, so its `on` is reported rather
+                    // than optimistic. Say so — once, and it stays said,
+                    // because the schema topic is retained.
+                    if !self.scenes[scene_idx].reports_state {
+                        self.scenes[scene_idx].reports_state = true;
+                        let schema = crate::schema::scene_schema_json(true);
+                        if let Err(e) = self
+                            .publisher
+                            .register_device_schema_json(&hc_id, &schema)
+                            .await
+                        {
+                            warn!(hc_id, error = %e, "Failed to publish scene schema");
+                        } else {
+                            info!(hc_id, "Scene reports its own state; schema updated");
+                        }
+                    }
                     debug!(
                         hc_id,
                         on,
@@ -495,6 +511,12 @@ impl Bridge {
         cmd: serde_json::Value,
         write_tx: &mpsc::Sender<String>,
     ) {
+        // Action style — `{"action":"activate"}` — is what a declared action
+        // sends. Rewrite it into the attribute form the branches below speak,
+        // before any of them run: a scene and a shade take declared actions
+        // too, and normalising inside the device branch left theirs unhandled.
+        let cmd = normalise_action_style(&cmd);
+
         // Timeclock event commands
         if let Some(&tc_idx) = self.hc_to_tc.get(hc_id) {
             let tc = &self.time_clocks[tc_idx];
@@ -562,11 +584,6 @@ impl Bridge {
         // Regular device command
         if let Some(&integration_id) = self.hc_to_id.get(hc_id) {
             if let Some(dev) = self.devices.get(&integration_id) {
-                // Action style — `{"action":"press_button","button":3}` — is what a
-                // declared action sends. Rewrite it into the attribute form so
-                // there is exactly one implementation of what each command means.
-                let cmd = &normalise_action_style(&cmd);
-
                 // press_button requires an async press+release with a gap — handle before
                 // translate_command (which is synchronous and cannot produce the delay).
                 if matches!(dev.config.kind, DeviceKind::Keypad | DeviceKind::Vcrx) {
@@ -587,7 +604,7 @@ impl Bridge {
                     }
                 }
 
-                let lip_cmds = dev.translate_command(cmd, self.global_fade);
+                let lip_cmds = dev.translate_command(&cmd, self.global_fade);
                 if lip_cmds.is_empty() {
                     warn!(hc_id, ?cmd, "Unrecognised command for device");
                 }
@@ -656,6 +673,16 @@ impl Bridge {
                 .await
             {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene availability");
+            }
+            // Whether this one reports its own state is learned from its LED,
+            // so a reconnect re-states what we know rather than forgetting it.
+            let schema = crate::schema::scene_schema_json(scene.reports_state);
+            if let Err(e) = self
+                .publisher
+                .register_device_schema_json(&scene.hc_id, &schema)
+                .await
+            {
+                warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
             }
         }
         for tc in &self.time_clocks {
@@ -782,6 +809,9 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
                 .unwrap_or(0);
             serde_json::json!({ "set_led": { "button": button, "state": state } })
         }
+        // The verbs that take no parameters: a scene's `activate`, a shade's
+        // raise/lower/stop. Each is a boolean the translator already reads.
+        "activate" | "raise" | "lower" | "stop" => serde_json::json!({ action: true }),
         _ => cmd.clone(),
     }
 }
@@ -815,6 +845,19 @@ mod action_style_tests {
     }
 
     /// Attribute-style callers and existing rules are untouched.
+    /// A scene and a shade take declared actions too, and theirs carry no
+    /// parameters — `{"action":"activate"}` has to reach the same place as the
+    /// hand-written `{"activate":true}`.
+    #[test]
+    fn a_parameterless_verb_becomes_its_boolean() {
+        for verb in ["activate", "raise", "lower", "stop"] {
+            assert_eq!(
+                normalise_action_style(&json!({ "action": verb })),
+                json!({ verb: true }),
+            );
+        }
+    }
+
     #[test]
     fn anything_else_passes_through() {
         let raw = json!({"press_button": 5});

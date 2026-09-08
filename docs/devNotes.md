@@ -6670,6 +6670,39 @@ Lutron scene devices are registered with `device_type = "scene"`.
 Scenes have no hardware availability signal so they are always marked online
 when the LIP connection is up.
 
+### What each kind declares
+
+Every Lutron device now publishes a `DeviceSchema`, so a client renders its
+controls from the declaration rather than guessing from the state it happens to
+see.
+
+| Kind | Attributes | Actions |
+| --- | --- | --- |
+| Dimmer | `on`, `brightness_pct` (0–100 %) | — |
+| Switch | `on` | — |
+| Fan control | `on`, `speed` (`off`/`low`/`medium`/`medium-high`/`high`), `speed_pct` | — |
+| Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
+| Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
+| Phantom scene | `on`, **only when the scene really reports it** | `activate` |
+| Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
+
+**A scene's state is its phantom button's LED, and not every phantom button has
+one.** RadioRA 2 answers an LED query for an unassigned button with 255, which
+is not a state — so for those scenes the `on` this plugin publishes is only
+what it optimistically wrote when it pressed the button. A client that cannot
+tell the two apart shows a confident toggle for both.
+
+So `on` is declared only for the scenes that genuinely report it. Which ones
+those are is *learned*, not configured: the startup LED query answers within a
+second of connect, and the first real state to arrive flips the scene to
+reporting and republishes its schema (retained, so it stays said). A scene
+whose LED never answers keeps a schema with the `activate` action and nothing
+to read.
+
+Declared actions carry no parameters here, so `{"action":"activate"}` and the
+hand-written `{"activate":true}` are normalised to the same payload before any
+command branch runs — the same for a shade's `raise`/`lower`/`stop`.
+
 ---
 
 ## Core — DeviceState device_type field
