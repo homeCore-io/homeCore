@@ -6685,6 +6685,7 @@ see.
 | Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
 | Phantom scene | `phantom_button`, `led_component` and `on` — the last two **only when the scene really reports** | `activate` |
 | Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
+| Timeclock event | `enabled` (writable) | `execute` |
 
 **A scene's state is its phantom button's LED, and not every phantom button has
 one.** RadioRA 2 answers an LED query for an unassigned button with 255, which
@@ -6709,6 +6710,12 @@ Every scene also publishes the plumbing behind that, declared `diagnostic`:
 known to report. So "this scene supports status" is something a client can
 *show* — with the LED it rests on — rather than infer from an absent
 attribute, and a scene that never reports still names the button to check.
+
+A timeclock event's `enabled` is writable, and both spellings now reach it:
+the state said `enabled` while the command wanted `enable`, so a client
+echoing back the attribute it had just read was silently ignored. The value is
+optimistic — RA2 has no query for an individual event's enabled state, so what
+is published is what the plugin last sent.
 
 **The two LED offsets overlap, and the resolution order matters.** Phantom
 LEDs are `button + 100`, keypad LEDs are `button + 80`, and both subtractions

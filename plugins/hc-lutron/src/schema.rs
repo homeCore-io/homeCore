@@ -317,6 +317,44 @@ pub fn scene_schema_json(reports_state: bool) -> Value {
     with_actions(&schema, vec![activate_action()])
 }
 
+/// **What a timeclock event is: a switch that can also be fired by hand.**
+///
+/// `enabled` is writable because enabling one is what an operator does with
+/// it, and it matches what the device publishes — the wire key was `enable`
+/// while the state said `enabled`, so a client echoing back what it read was
+/// ignored. Both spellings are accepted now.
+///
+/// The value is optimistic: RA2 has no query for an individual event's
+/// enabled state, so what is published is what this plugin last sent. There is
+/// no better source, and saying nothing would leave a client unable to show
+/// the switch at all.
+pub fn timeclock_schema_json() -> Value {
+    let mut attrs = std::collections::HashMap::new();
+    attrs.insert(
+        "enabled".to_string(),
+        AttributeSchema {
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("enabled", "is enabled"),
+                when_false: StateLabel::verbed("disabled", "is disabled"),
+            }),
+            ..rw(AttributeKind::Bool, "Enabled", None)
+        },
+    );
+    let schema = DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    };
+    with_actions(
+        &schema,
+        vec![Action::new("execute")
+            .label("Run the event now")
+            .category("Timeclock")
+            .icon("play")
+            .description("Fires the event once, for testing. Does not change its schedule.")
+            .sentence("run {device} now")],
+    )
+}
+
 /// What a scene publishes about its own plumbing, to fill the attributes
 /// [`scene_schema_json`] declares.
 ///
@@ -616,6 +654,28 @@ mod output_schema_tests {
         assert!(!dev
             .translate_command(&json!({ "activate": true }), 0.0)
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod timeclock_schema_tests {
+    use super::*;
+
+    /// The state said `enabled` and the command wanted `enable`, so a client
+    /// echoing back the attribute it read was silently ignored. The schema
+    /// declares `enabled` writable, which is now true.
+    #[test]
+    fn a_timeclock_declares_the_switch_it_publishes() {
+        let v = timeclock_schema_json();
+        let enabled = &v["attributes"]["enabled"];
+        assert_eq!(enabled["writable"], true);
+        assert_eq!(enabled["states"]["when_true"]["label"], "enabled");
+    }
+
+    #[test]
+    fn a_timeclock_can_be_fired_by_hand() {
+        let v = timeclock_schema_json();
+        assert_eq!(v["actions"][0]["id"], "execute");
     }
 }
 

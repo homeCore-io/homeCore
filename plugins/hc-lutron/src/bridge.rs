@@ -502,7 +502,10 @@ impl Bridge {
             let tid = tc.config.timeclock_id;
             let eidx = tc.config.event_index;
 
-            if let Some(enable) = cmd["enable"].as_bool() {
+            // `enabled` is what the device publishes and what its schema
+            // declares writable; `enable` is the original wire key. A client
+            // echoing back what it read used to be ignored.
+            if let Some(enable) = cmd["enable"].as_bool().or_else(|| cmd["enabled"].as_bool()) {
                 let lip_cmd = cmd_timeclock_enable(tid, eidx, enable);
                 if let Err(e) = send_cmd(write_tx, &lip_cmd).await {
                     warn!(hc_id, error = %e, "Failed to send TIMECLOCK enable command");
@@ -728,6 +731,14 @@ impl Bridge {
             if let Err(e) = self.publisher.publish_availability(&tc.hc_id, true).await {
                 warn!(hc_id = %tc.hc_id, error = %e, "Failed to publish timeclock availability");
             }
+            let schema = crate::schema::timeclock_schema_json();
+            if let Err(e) = self
+                .publisher
+                .register_device_schema_json(&tc.hc_id, &schema)
+                .await
+            {
+                warn!(hc_id = %tc.hc_id, error = %e, "Failed to publish timeclock schema");
+            }
         }
         info!(
             "Re-registered {} devices, {} scenes, {} timeclock events with HomeCore",
@@ -868,7 +879,7 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
         }
         // The verbs that take no parameters: a scene's `activate`, a shade's
         // raise/lower/stop. Each is a boolean the translator already reads.
-        "activate" | "raise" | "lower" | "stop" => serde_json::json!({ action: true }),
+        "activate" | "raise" | "lower" | "stop" | "execute" => serde_json::json!({ action: true }),
         _ => cmd.clone(),
     }
 }
@@ -945,7 +956,7 @@ mod action_style_tests {
     /// hand-written `{"activate":true}`.
     #[test]
     fn a_parameterless_verb_becomes_its_boolean() {
-        for verb in ["activate", "raise", "lower", "stop"] {
+        for verb in ["activate", "raise", "lower", "stop", "execute"] {
             assert_eq!(
                 normalise_action_style(&json!({ "action": verb })),
                 json!({ verb: true }),
