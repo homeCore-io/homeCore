@@ -6654,6 +6654,34 @@ names — no need to wait for the next poll tick.
 
 ---
 
+## Ecowitt battery: a percentage, or nothing
+
+Ecowitt reports battery on three unrelated scales and says which in
+`battery_kind`. All three were published as `battery` with `unit: "%"`, so the
+number's meaning depended on hardware the client could not know about: a
+lightning detector reading `2` of `5` rendered as "2%", and a WH31 reading `1`
+— which means *replace me* — rendered as "1%". Two false alarms and one right
+answer for the wrong reason (issue #33).
+
+`battery::emit` converts what it can and refuses to pretend about the rest:
+
+| kind | published |
+| --- | --- |
+| Level 0..=max | `battery`, converted to a real percentage |
+| Voltage | `battery_volts` |
+| Binary | nothing — `battery_low` already says it |
+| Unclassified | `battery_raw`, claiming nothing about the scale |
+
+`battery_low` is unchanged on every scale and is the attribute to trust: the
+device's own verdict needs no threshold and no knowledge of what a WH31 is.
+
+**Wire change:** `battery` disappears for binary and voltage sensors, and
+changes value for level sensors (2 → 40). A rule comparing `battery` numerically
+on those sensors was comparing something that had no defined scale; point it at
+`battery_low`.
+
+---
+
 ## Plugin Notes — hc-wled
 
 ### State is published as a partial, and the info fields survive it

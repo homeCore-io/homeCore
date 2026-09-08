@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 
 fn attr(
@@ -108,6 +109,95 @@ pub fn device_schema() -> DeviceSchema {
         "available_tv_channels".into(),
         attr(AttributeKind::Json, false, "TV channel lineup", None),
     );
+
+    // **What the box *is*, as opposed to what it is doing.** These were
+    // published and declared nowhere, so a client listing a Roku's attributes
+    // rendered them as ordinary booleans — "Not supports_find_remote" beside
+    // whether it was playing. They advertise the integration's reach and do
+    // not change while you watch, which is what `diagnostic` means.
+    //
+    // `supports_*` is claimed by the shared lexicon; `is_*` and
+    // `ecp_control_enabled` are ECP's own spelling and are marked here,
+    // because only this plugin knows they are hardware facts rather than
+    // readings that happen to start with "is".
+    for (name, display, on, off) in [
+        ("is_tv", "Is a TV", "a TV", "not a TV"),
+        ("is_stick", "Is a stick", "a stick", "not a stick"),
+        (
+            "supports_find_remote",
+            "Find remote",
+            "supported",
+            "unsupported",
+        ),
+        (
+            "supports_private_listening",
+            "Private listening",
+            "supported",
+            "unsupported",
+        ),
+        (
+            "supports_wake_on_lan",
+            "Wake on LAN",
+            "supported",
+            "unsupported",
+        ),
+        (
+            "supports_tv_power_control",
+            "TV power control",
+            "supported",
+            "unsupported",
+        ),
+        (
+            "supports_audio_volume_control",
+            "Volume control",
+            "supported",
+            "unsupported",
+        ),
+        (
+            "ecp_control_enabled",
+            "External control",
+            "enabled",
+            "disabled",
+        ),
+    ] {
+        a.insert(
+            name.into(),
+            AttributeSchema {
+                states: Some(BoolStates {
+                    when_true: StateLabel::new(on),
+                    when_false: StateLabel::new(off),
+                }),
+                category: Some(AttributeCategory::Diagnostic),
+                ..attr(AttributeKind::Bool, false, display, None)
+            },
+        );
+    }
+
+    // These four *are* readings — they change while you watch — and were
+    // undeclared for the same reason. Headphones get plugged in, a
+    // screensaver starts, a stream fails or turns out to be live.
+    for (name, display, on, off) in [
+        (
+            "headphones_connected",
+            "Headphones",
+            "connected",
+            "disconnected",
+        ),
+        ("screensaver_active", "Screensaver", "showing", "clear"),
+        ("media_error", "Playback error", "failed", "playing"),
+        ("media_is_live", "Live", "live", "recorded"),
+    ] {
+        a.insert(
+            name.into(),
+            AttributeSchema {
+                states: Some(BoolStates {
+                    when_true: StateLabel::new(on),
+                    when_false: StateLabel::new(off),
+                }),
+                ..attr(AttributeKind::Bool, false, display, None)
+            },
+        );
+    }
 
     DeviceSchema {
         attributes: a,

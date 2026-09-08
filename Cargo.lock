@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "hc-roku"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.63"
+version = "0.1.64"
 dependencies = [
  "anyhow",
  "base64 0.23.0",

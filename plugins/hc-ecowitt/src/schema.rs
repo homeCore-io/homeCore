@@ -41,7 +41,10 @@ fn unit_for(name: &str) -> Option<&'static str> {
         "light" => Some("lux"),
         "uvi" => Some("index"),
         "voltage" => Some("V"),
+        // `battery` is a percentage now or it is not published — see
+        // `battery::emit`. The other two scales carry their own names.
         "battery" => Some("%"),
+        "battery_volts" => Some("V"),
         "wind_direction" | "wind_direction_avg10m" => Some("°"),
         _ => None,
     }

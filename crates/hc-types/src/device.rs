@@ -293,6 +293,15 @@ pub struct DeviceState {
     /// Plugin-delivered where the bridge has a room concept (Hue rooms, Lutron
     /// areas, Z-Wave locations); it keeps syncing, so moving a device to another
     /// room on the bridge moves it here too. Absent delivery leaves it alone.
+    ///
+    /// **Absent, not null, when there is none** — the same spelling
+    /// [`area_override`] uses. The pair used to disagree: a device with no
+    /// area sent `"area": null` beside an omitted `area_override`, so every
+    /// client handled two spellings of one absence, for this field alone. 73
+    /// of 184 devices in a real house carried the null. A bare `Option` field
+    /// still deserialises a missing key as `None`, so a client reading either
+    /// spelling is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub area: Option<String>,
     /// Optional user-set area that wins over the plugin-delivered [`area`].
     /// Same contract as [`name_override`].
@@ -441,6 +450,35 @@ pub struct Area {
 
 #[cfg(test)]
 mod tests {
+
+    /// One absence, spelled one way. `area` used to serialise as `null` while
+    /// `area_override` was omitted — two spellings of the same thing, on the
+    /// same object, for the same logical field.
+    #[test]
+    fn an_area_that_is_not_set_is_absent_like_its_override() {
+        let d = DeviceState::new("dev_1", "Lamp", "plugin.test");
+        let wire = serde_json::to_value(&d).unwrap();
+        let obj = wire.as_object().unwrap();
+        assert!(!obj.contains_key("area"), "area should be absent, not null");
+        assert!(!obj.contains_key("area_override"));
+    }
+
+    /// Both spellings still read back the same, so a client written against
+    /// the old shape is unaffected.
+    #[test]
+    fn a_null_area_still_reads_as_no_area() {
+        let mut wire =
+            serde_json::to_value(DeviceState::new("dev_1", "Lamp", "plugin.test")).unwrap();
+
+        // The shape a client stored or replayed from before this change.
+        wire["area"] = serde_json::Value::Null;
+        let with_null: DeviceState = serde_json::from_value(wire.clone()).expect("null parses");
+        assert_eq!(with_null.area, None);
+
+        wire.as_object_mut().unwrap().remove("area");
+        let without: DeviceState = serde_json::from_value(wire).expect("absent parses");
+        assert_eq!(without.area, None);
+    }
     use super::*;
     use serde_json::json;
 
