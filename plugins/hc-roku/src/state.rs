@@ -272,7 +272,31 @@ fn insert_device_info(out: &mut Map<String, Value>, info: &DeviceInfo) {
         json!(info.ecp_control_enabled()),
     );
 
-    out.insert("device_info".into(), map_to_json(&info.fields));
+    out.insert("device_info".into(), device_info_json(&info.fields));
+}
+
+/// ECP fields that change on their own, and so must not reach the state
+/// document.
+///
+/// **`uptime` counts seconds.** Publishing it means the `device_info` object
+/// differs on every single poll, which makes every poll a
+/// `device_state_changed` event for a device that did nothing. Measured on the
+/// reference house: 111 of the last 200 events in the whole system were two
+/// Rokus reporting that time had passed, and `uptime` was the only field that
+/// differed in 111 of those 111.
+///
+/// The value is not worth the noise. Nothing here reads it, a reboot is
+/// already visible as availability dropping, and homeCore records `last_seen`
+/// for every device. hc-hue skips `zigbee_connectivity` for the same reason.
+const VOLATILE_FIELDS: &[&str] = &["uptime"];
+
+fn device_info_json(fields: &BTreeMap<String, String>) -> Value {
+    let kept: BTreeMap<String, String> = fields
+        .iter()
+        .filter(|(k, _)| !VOLATILE_FIELDS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    map_to_json(&kept)
 }
 
 /// Kebab-case ECP keys → snake_case JSON, with `"true"`/`"false"` and
@@ -508,6 +532,36 @@ mod tests {
         let list = to_json(&snap)["available_tv_channels"].clone();
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["name"], "Shown");
+    }
+
+    /// **A device doing nothing must produce no event.** `uptime` counts
+    /// seconds, so publishing it made every poll a state change: 111 of the
+    /// last 200 events in the reference house were two Rokus reporting that
+    /// time had passed.
+    #[test]
+    fn a_ticking_counter_never_reaches_the_state_document() {
+        let xml = r#"<device-info>
+                <serial-number>1GU48T017973</serial-number>
+                <model-name>Roku 3</model-name>
+                <uptime>962405</uptime>
+            </device-info>"#;
+        let earlier = ecp::parse_device_info(xml).unwrap();
+        let later = ecp::parse_device_info(&xml.replace("962405", "962415")).unwrap();
+
+        let a = to_json(&RokuSnapshot {
+            device_info: Some(earlier),
+            ..Default::default()
+        });
+        let b = to_json(&RokuSnapshot {
+            device_info: Some(later),
+            ..Default::default()
+        });
+
+        assert_eq!(a, b, "ten seconds passing is not a state change");
+        assert!(a["device_info"].get("uptime").is_none());
+        // Everything that is genuinely about the device survives.
+        assert_eq!(a["device_info"]["model_name"], "Roku 3");
+        assert_eq!(a["serial_number"], "1GU48T017973");
     }
 
     /// Capability flags must be present even on firmware that predates
