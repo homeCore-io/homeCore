@@ -267,6 +267,15 @@ async fn try_start(
         if let Err(e) = publisher.subscribe_commands(&bridge_device_id).await {
             error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe bridge commands");
         }
+        // The last device declaring nothing. Its own schema, because the aux
+        // publisher deliberately skips anything that owns one — and a bridge
+        // was in that set without having one.
+        if let Err(e) = publisher
+            .register_device_schema_json(&bridge_device_id, &translator::bridge_schema())
+            .await
+        {
+            warn!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge schema");
+        }
         if let Err(e) = publisher
             .publish_availability(&bridge_device_id, true)
             .await

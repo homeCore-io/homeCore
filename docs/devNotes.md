@@ -6899,6 +6899,26 @@ path, not an attribute write.
 
 ---
 
+## Plugin Notes — hc-hue (the bridge)
+
+The bridge was the last device in the house declaring nothing — the aux
+publisher skips anything that owns a declared schema, and a bridge was in that
+set without having one.
+
+`translator::bridge_schema()` declares `online` (with both state names),
+`pairing_status`, and — as diagnostics — `integration_state`, `host` and the
+`summary` blob. Its two actions are `refresh` and `pair_bridge`, the payloads
+`parse_homecore_command` really dispatches, with a test holding the
+declaration to them.
+
+**It declares its own `primary`**: `["online", "pairing_status"]`. Core's
+`fill_primary` ranks what no table names alphabetically, which would have led
+with `integration_state` — the API's word for what `pairing_status` says in a
+person's. This is the case the "a plugin that knows better sets it" escape
+hatch exists for.
+
+---
+
 ## Plugin Notes — hc-hue (scenes)
 
 ### Unified activate payload
