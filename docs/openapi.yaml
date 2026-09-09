@@ -32,6 +32,15 @@ info:
     scopes — so "which role can call this" is a property of the scope, and each
     operation below names the scope it needs. A few endpoints instead check for
     the admin role directly; those say so.
+
+    Two scopes appear in `GET /auth/roles` and on no operation here:
+    `content:read` and `content:write`. They authorise a *client's* own
+    authored content — widget templates, icon rules, uploaded images — which a
+    client stores and core neither holds nor understands. Core defines the
+    vocabulary because the household has one identity system and this is it: a
+    client presents the caller's bearer, asks core who it belongs to and what
+    that role may do, and enforces the answer itself. A scope with no operation
+    beside it is deliberate, not an omission.
   license:
     name: MIT
 
