@@ -489,7 +489,18 @@ homeCore/                          # container dir (no git)
 ## Cutting a release
 
 Read `hc-scripts/README.md` and the Releasing section of the workspace
-`AGENTS.md` before pushing a tag; the tag ordering there is not optional.
+`AGENTS.md` before pushing a tag.
+
+**Tag last, after CI on the release commit is green.** Push `develop`, merge to
+`main`, push, *watch the run*, and only then tag. `just check` passing here does
+not predict CI: `ci.yml` pins Rust to the version the Dockerfiles ship (1.95)
+and this machine tracks a newer stable, so clippy's lint set differs — v0.1.68
+was tagged off a commit that then failed CI on `clippy::question_mark`, a lint
+1.98 does not emit. It was recoverable only because the release run was
+cancelled before publishing. v0.1.66 was not, and had to be superseded.
+
+`gh workflow run release.yml --ref develop` builds the whole pipeline without
+creating a Release, if you want to prove it before choosing a version.
 
 **The version lives in two files and a test enforces it.** Bump
 `homecore/Cargo.toml` *and* `info.version` in `docs/openapi.yaml`, then refresh

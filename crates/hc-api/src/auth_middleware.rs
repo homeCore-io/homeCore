@@ -214,9 +214,7 @@ pub(crate) async fn validate_query_token(
             // A session a password change killed must not keep a stream open.
             // The header path has always checked this and the events stream
             // never did, so routing both through here closes that too.
-            if let Err(resp) = token_version_current(state, &claims).await {
-                return Err(resp);
-            }
+            token_version_current(state, &claims).await?;
             Ok(claims)
         }
         Err(boxed) => Err(*boxed),
