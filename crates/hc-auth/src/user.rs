@@ -91,6 +91,14 @@ impl Role {
             // see what it looks like — including read-only roles, or the wall
             // panel would fall back to a built-in for want of a permission.
             "skins:read",
+            // A client's own authored content: widget templates, icon rules,
+            // the images somebody uploaded. Core neither stores nor
+            // understands it — a client keeps it and asks here who the caller
+            // is — but the household has one identity system and this is it,
+            // so the vocabulary for authorising that content belongs here.
+            // Read sits with the other reads: content is what the house looks
+            // like, and anyone who can see the house can see that.
+            "content:read",
         ];
         let write_authoring: &[&str] = &[
             "automations:write",
@@ -100,6 +108,11 @@ impl Role {
             // Authoring a skin sits with authoring a dashboard: it is a change
             // to how the house presents itself, not to what it does.
             "skins:write",
+            // And authoring a client's content sits with both, for the same
+            // reason: a template or an icon rule changes how the house
+            // presents itself. Whoever may author a dashboard may author
+            // these; whoever may not, may not.
+            "content:write",
         ];
         let to_strings = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
@@ -177,6 +190,46 @@ mod role_tests {
         assert!(!s.contains(&"plugins:write".into()));
         assert!(!s.contains(&"api_keys:admin".into()));
         assert!(!s.contains(&"audit:read".into()));
+    }
+
+    #[test]
+    fn content_scopes_follow_the_authoring_line() {
+        // A client keeps its own authored content — templates, icon rules,
+        // uploaded images — and asks core who the caller is. Core defines who
+        // may touch it and nothing else about it.
+        //
+        // Reading follows the other reads: every role that can see the house
+        // can see what it looks like. Writing follows authoring: the roles that
+        // may author a dashboard may author these, and the three that may not,
+        // may not.
+        for role in Role::all() {
+            assert!(
+                role.scopes().contains(&"content:read".to_string()),
+                "{} should read content",
+                role.wire()
+            );
+        }
+
+        for role in [
+            Role::Admin,
+            Role::User,
+            Role::RuleEditor,
+            Role::ServiceOperator,
+        ] {
+            assert!(
+                role.scopes().contains(&"content:write".to_string()),
+                "{} should write content",
+                role.wire()
+            );
+        }
+
+        for role in [Role::ReadOnly, Role::Observer, Role::DeviceOperator] {
+            assert!(
+                !role.scopes().contains(&"content:write".to_string()),
+                "{} should not write content",
+                role.wire()
+            );
+        }
     }
 
     #[test]
