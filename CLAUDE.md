@@ -486,6 +486,26 @@ homeCore/                          # container dir (no git)
 
 ---
 
+## Cutting a release
+
+Read `hc-scripts/README.md` and the Releasing section of the workspace
+`AGENTS.md` before pushing a tag; the tag ordering there is not optional.
+
+**Every release gets an entry in `homeCore-io.github.io/docs/release-notes.md`,
+written as part of cutting it — not afterwards and not selectively.** That page
+is the operator-facing history and the only place a person can learn what
+changed without reading commits. A tag with no entry is a release nobody
+outside this workspace can find out about: v0.1.64 and v0.1.65 shipped without
+one, and neither was recoverable afterwards except by reading the log.
+
+Write it for somebody running the house rather than somebody who wrote the
+code — what they can now do that they could not, what they must change on
+upgrade, and what is deliberately unchanged. A round containing nothing an
+operator would notice still gets an entry saying exactly that: "internal only"
+is information, and its absence is not.
+
+---
+
 ## Config file reference (`homecore.toml`)
 
 ```toml
