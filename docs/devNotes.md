@@ -6654,6 +6654,39 @@ names — no need to wait for the next poll tick.
 
 ---
 
+## Writing a plugin: where the contract is written down
+
+The device schema — what makes a device renderable rather than a row of raw
+JSON — is documented in three places, and they are meant to be read in this
+order:
+
+1. **`plugins/hc-plugin-template`** — the skeleton, which now declares a
+   schema for its demo light with the reasoning in comments. It is what gets
+   copied, so it is the highest-leverage place for a convention to live.
+2. **[Declaring a device](https://homecore.io/docs/plugins/developing-plugins#declaring-a-device)**
+   — the guide: attributes and their fields, both names of a boolean,
+   `category`, `primary`, actions, and the three publishing rules (partials
+   when something else merges onto the device, never publish a self-changing
+   value, read and write the same name).
+3. **[Before you release a plugin](https://homecore.io/docs/plugins/developing-plugins#before-you-release-a-plugin)**
+   — the checklist. Every line is traceable to a defect in a shipped plugin.
+
+`hc_types::schema` carries the *why* on every field and is worth reading
+directly, but it is rustdoc on a core type: invisible from the guide and
+invisible to Python, Node and .NET authors, all three of whose SDKs can
+publish a device schema.
+
+**One interaction worth knowing:** registering with a `device_type` resolves a
+built-in schema when the operator has `config/profiles/device-types.toml`, and
+it lands in the same slot as the plugin's own — last write wins
+(`state_bridge.rs`, the `device_types` branch). Publish yours after
+registering. A plugin that re-registers periodically against a core with a type
+registry loaded will overwrite its own schema each time unless it republishes
+alongside; no house in this workspace has that file, so the path is dormant
+here rather than proven.
+
+---
+
 ## Device history: rows in, points out
 
 `GET /devices/{id}/history` had a shape that made a chart pay for everything

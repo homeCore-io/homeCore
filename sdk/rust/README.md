@@ -128,8 +128,14 @@ exist until you make it.
 - **`DevicePublisher`** — a cloneable handle, so spawned tasks can publish
   without holding the client.
 - **Device registration** — `register_device_typed` for a known
-  `device_type`, `register_device_full` for name/area/capabilities, and
-  `register_device_schema` when a device needs its own JSON schema.
+  `device_type`, `register_device_full` for name/area/capabilities.
+- **Device schema** — `register_device_schema` declares what a device reports
+  and accepts: attribute kinds, ranges, units, both names of every boolean,
+  which readings are housekeeping, and the actions it takes that are not
+  attribute writes. **Not optional in practice.** A client will not offer a
+  control the plugin has not promised, so a device without a schema is a row
+  of raw JSON that nobody can operate. See
+  [Declaring a device](https://homecore.io/docs/plugins/developing-plugins#declaring-a-device).
 - **State publishing** — full (retained) and partial (merge-patch), each with
   a `_with_change` variant that attaches provenance, so the UI and the audit
   log can say what caused a change.
