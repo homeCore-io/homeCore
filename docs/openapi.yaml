@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.64"
+  version: "0.1.65"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -673,15 +673,60 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: attribute
+          in: query
+          description: |
+            Restrict to one attribute — `?attribute=temperature`. Without it
+            every attribute of the device comes back interleaved, so a chart of
+            one series pays for all of them.
+          schema:
+            type: string
         - name: limit
           in: query
+          description: |
+            Maximum **rows read**. Note this counts rows, not points: without
+            `max_points`, a window longer than `limit` allows returns a
+            *shorter* series rather than a sparser one.
           schema:
             type: integer
-            default: 100
-            maximum: 1000
+            default: 500
+            maximum: 5000
+        - name: max_points
+          in: query
+          description: |
+            Reduce each attribute's series to at most this many points,
+            server-side, by largest-triangle-three-buckets — which keeps the
+            spikes a chart exists to show, where every-Nth sampling drops them.
+
+            Applied per attribute, so one series comes back with `max_points`
+            points and an unfiltered request with at most that many of each.
+            A series whose values are not numeric has no shape to reduce and
+            is returned whole.
+
+            Setting this also reads to the maximum `limit` unless `limit` is
+            given explicitly: reducing an already-truncated series would thin
+            what was already cut short.
+          schema:
+            type: integer
+            minimum: 3
       responses:
         "200":
-          description: Array of historical state snapshots
+          description: |
+            Array of historical state snapshots, newest first.
+
+            `X-Total-Count` is the number of rows read before any
+            downsampling, and `X-Truncated` (`true`/`false`) says whether that
+            read hit its limit — so a client can tell a quiet device from a
+            capped query.
+          headers:
+            X-Total-Count:
+              description: Rows read before downsampling.
+              schema:
+                type: integer
+            X-Truncated:
+              description: Whether the read hit `limit`.
+              schema:
+                type: boolean
           content:
             application/json:
               schema:

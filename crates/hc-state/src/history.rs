@@ -35,6 +35,77 @@ pub struct HistoryStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Reduce a series to at most `target` points, keeping its shape.
+///
+/// **Largest-Triangle-Three-Buckets.** Every-Nth sampling drops exactly the
+/// points a chart exists to show: this house has a sensor that read 119.5°F
+/// once in a day, and a naive thin makes that afternoon look ordinary. LTTB
+/// walks the series in buckets and keeps, from each, the point forming the
+/// largest triangle with its neighbours — which is the point that most
+/// changes the line's shape, so spikes survive and flat stretches collapse.
+///
+/// The first and last points are always kept, so the window's edges stay put.
+/// Input must be oldest-first; output preserves that order.
+///
+/// Non-numeric values have no shape to preserve — a series of `"playing"` and
+/// `"paused"` is transitions, and every one of them matters — so a series that
+/// is not entirely numeric is returned untouched and the caller decides.
+pub fn downsample(points: Vec<HistoryEntry>, target: usize) -> Vec<HistoryEntry> {
+    if target < 3 || points.len() <= target {
+        return points;
+    }
+    let numeric: Option<Vec<f64>> = points.iter().map(|p| p.value.as_f64()).collect();
+    let Some(ys) = numeric else {
+        return points;
+    };
+    let xs: Vec<f64> = points
+        .iter()
+        .map(|p| p.recorded_at.timestamp_millis() as f64)
+        .collect();
+
+    let mut out = Vec::with_capacity(target);
+    out.push(points[0].clone());
+
+    // Buckets span everything between the fixed first and last points.
+    let bucket = (points.len() - 2) as f64 / (target - 2) as f64;
+    let mut a = 0usize;
+
+    for i in 0..target - 2 {
+        let start = ((i as f64 * bucket).floor() as usize) + 1;
+        let end = (((i + 1) as f64 * bucket).floor() as usize + 1).min(points.len() - 1);
+        let next_start = end;
+        let next_end = ((((i + 2) as f64) * bucket).floor() as usize + 1).min(points.len());
+
+        // The next bucket's average is the third corner of every triangle.
+        let (mut avg_x, mut avg_y, mut n) = (0.0, 0.0, 0.0);
+        for j in next_start..next_end {
+            avg_x += xs[j];
+            avg_y += ys[j];
+            n += 1.0;
+        }
+        if n == 0.0 {
+            continue;
+        }
+        avg_x /= n;
+        avg_y /= n;
+
+        let (mut best, mut best_area) = (start, -1.0);
+        for j in start..end {
+            let area =
+                ((xs[a] - avg_x) * (ys[j] - ys[a]) - (xs[a] - xs[j]) * (avg_y - ys[a])).abs();
+            if area > best_area {
+                best_area = area;
+                best = j;
+            }
+        }
+        out.push(points[best].clone());
+        a = best;
+    }
+
+    out.push(points[points.len() - 1].clone());
+    out
+}
+
 impl HistoryStore {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path).context("failed to open history DB")?;
@@ -209,5 +280,77 @@ impl HistoryStore {
             result.entry(rid).or_default().push(record);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn series(values: &[f64]) -> Vec<HistoryEntry> {
+        let base = DateTime::parse_from_rfc3339("2026-09-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| HistoryEntry {
+                device_id: "dev".into(),
+                attribute: "temperature".into(),
+                value: json!(v),
+                recorded_at: base + chrono::Duration::minutes(i as i64),
+            })
+            .collect()
+    }
+
+    /// **The spike is the reason for the chart.** This house has a sensor
+    /// that read 119.5°F once in a day; every-Nth sampling drops exactly that
+    /// point and the afternoon looks ordinary.
+    #[test]
+    fn the_outlier_survives_the_thinning() {
+        let mut values: Vec<f64> = (0..200).map(|i| 70.0 + (i % 3) as f64 * 0.1).collect();
+        values[137] = 119.5;
+
+        let kept = downsample(series(&values), 20);
+        assert_eq!(kept.len(), 20);
+        assert!(
+            kept.iter().any(|p| p.value.as_f64() == Some(119.5)),
+            "the one reading anybody would look for was dropped"
+        );
+    }
+
+    /// The window's edges are what a chart's axis is drawn from.
+    #[test]
+    fn the_first_and_last_points_are_kept() {
+        let points = series(&(0..100).map(|i| i as f64).collect::<Vec<_>>());
+        let (first, last) = (points[0].clone(), points[99].clone());
+        let kept = downsample(points, 10);
+        assert_eq!(kept.first().unwrap().recorded_at, first.recorded_at);
+        assert_eq!(kept.last().unwrap().recorded_at, last.recorded_at);
+        assert_eq!(kept.len(), 10);
+    }
+
+    /// Asking for more points than exist is not a reason to invent any.
+    #[test]
+    fn a_short_series_is_returned_whole() {
+        let points = series(&[1.0, 2.0, 3.0]);
+        assert_eq!(downsample(points.clone(), 50).len(), 3);
+        assert_eq!(
+            downsample(points, 2).len(),
+            3,
+            "a target below 3 thins nothing"
+        );
+    }
+
+    /// A run of `"playing"` and `"paused"` is transitions, and every one of
+    /// them matters — there is no shape to preserve, so nothing is dropped.
+    #[test]
+    fn a_series_that_is_not_numeric_comes_back_untouched() {
+        let mut points = series(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        for (i, p) in points.iter_mut().enumerate() {
+            p.value = json!(if i % 2 == 0 { "playing" } else { "paused" });
+        }
+        assert_eq!(downsample(points, 3).len(), 6);
     }
 }
