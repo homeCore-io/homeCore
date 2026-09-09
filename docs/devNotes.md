@@ -6654,6 +6654,36 @@ names — no need to wait for the next poll tick.
 
 ---
 
+## Device history: rows in, points out
+
+`GET /devices/{id}/history` had a shape that made a chart pay for everything
+the device reports. Measured on one Ecowitt sensor over 24 hours: 303 rows to
+draw 117 temperature points, 30 of them battery metadata no chart plots
+(issue #31).
+
+Three things now:
+
+- **`attribute=` filters server-side.** It always did — it was simply not in
+  `openapi.yaml`, so the one document a client author reads did not mention
+  it. That was the actual bug behind "there is no filter".
+- **`max_points=` downsamples server-side**, per attribute, by
+  largest-triangle-three-buckets (`hc_state::history::downsample`). LTTB keeps
+  the point that most changes the line's shape in each bucket, which is why a
+  spike survives: this house has a sensor that read 119.5°F once in a day, and
+  every-Nth sampling drops exactly that reading. A non-numeric series has no
+  shape to reduce — `"playing"`/`"paused"` is transitions and each one matters
+  — so it comes back whole.
+- **`X-Total-Count` and `X-Truncated`** say how many rows were read and
+  whether the read hit its limit, so a client can tell a quiet device from a
+  capped query. Silent truncation was the sharper half of the issue: a
+  seven-day chart of a chatty device drew one day and looked fine.
+
+`limit` counts **rows read**, `max_points` counts **points returned**. Setting
+`max_points` without `limit` reads to the cap rather than the 500-row default:
+reducing an already-truncated series would thin what was already cut short.
+
+---
+
 ## Ecowitt battery: a percentage, or nothing
 
 Ecowitt reports battery on three unrelated scales and says which in

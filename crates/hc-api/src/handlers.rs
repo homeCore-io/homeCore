@@ -1058,10 +1058,27 @@ pub struct HistoryQuery {
     pub to: Option<chrono::DateTime<chrono::Utc>>,
     /// Filter to a single attribute name (e.g. `?attribute=on`).
     pub attribute: Option<String>,
-    /// Maximum number of entries returned (default 500, max 5 000).
+    /// Maximum number of rows read (default 500, max 5 000).
     pub limit: Option<u32>,
+    /// Reduce each attribute's series to at most this many points, keeping
+    /// its shape. See [`device_history`].
+    pub max_points: Option<usize>,
 }
 
+/// Historical values for one device.
+///
+/// **`limit` counts rows read; `max_points` counts points returned.** Without
+/// `max_points` a longer window does not give a sparser series, it gives a
+/// *shorter* one — the rows stop wherever the limit fell, and a seven-day
+/// chart of a chatty device draws a day and looks fine. With it, each
+/// attribute's series is reduced to at most `max_points` by
+/// largest-triangle-three-buckets, which keeps the spikes a chart exists to
+/// show; a series that is not numeric has no shape to reduce and comes back
+/// whole.
+///
+/// `X-Total-Count` is the number of rows read before downsampling, and
+/// `X-Truncated` says whether the read hit its limit — so a client can tell
+/// "this device was quiet" from "you asked for more than you got".
 pub async fn device_history(
     State(s): State<AppState>,
     _: DevicesRead,
@@ -1073,29 +1090,88 @@ pub async fn device_history(
         .from
         .unwrap_or_else(|| now - chrono::Duration::hours(24));
     let to = params.to.unwrap_or(now);
-    let limit = params.limit.unwrap_or(500).min(5_000);
+    // Downsampling reads the window and then reduces it, so an unstated limit
+    // means "as much as the cap allows" rather than the row default — asking
+    // for 400 points out of a 500-row default would otherwise thin a series
+    // that had already been cut short.
+    let limit = match (params.limit, params.max_points) {
+        (Some(l), _) => l.min(5_000),
+        (None, Some(_)) => 5_000,
+        (None, None) => 500,
+    };
 
     match s
         .store
         .query_history(&id, from, to, params.attribute.as_deref(), limit)
         .await
     {
-        Ok(entries) => (
-            StatusCode::OK,
-            Json(json!(entries
-                .iter()
-                .map(|e| json!({
-                    "attribute":   e.attribute,
-                    "value":       e.value,
-                    "recorded_at": e.recorded_at,
-                }))
-                .collect::<Vec<_>>())),
-        ),
+        Ok(entries) => {
+            let rows_read = entries.len();
+            let truncated = rows_read as u32 >= limit;
+
+            let entries = match params.max_points {
+                Some(target) => downsample_per_attribute(entries, target),
+                None => entries,
+            };
+
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(&rows_read.to_string()) {
+                headers.insert("X-Total-Count", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(if truncated { "true" } else { "false" }) {
+                headers.insert("X-Truncated", v);
+            }
+
+            (
+                StatusCode::OK,
+                headers,
+                Json(json!(entries
+                    .iter()
+                    .map(|e| json!({
+                        "attribute":   e.attribute,
+                        "value":       e.value,
+                        "recorded_at": e.recorded_at,
+                    }))
+                    .collect::<Vec<_>>())),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
-        ),
+        )
+            .into_response(),
     }
+}
+
+/// Reduce each attribute's series independently, newest-first order preserved.
+///
+/// Per attribute, because a device's series are unrelated: interleaving a
+/// thermometer's temperature with its battery and reducing the mixture would
+/// produce a shape neither of them has. A chart asking for one attribute gets
+/// exactly `target` points; one asking for all of them gets at most `target`
+/// of each.
+fn downsample_per_attribute(
+    entries: Vec<hc_state::history::HistoryEntry>,
+    target: usize,
+) -> Vec<hc_state::history::HistoryEntry> {
+    let mut by_attr: std::collections::BTreeMap<String, Vec<_>> = std::collections::BTreeMap::new();
+    for e in entries {
+        by_attr.entry(e.attribute.clone()).or_default().push(e);
+    }
+
+    let mut out = Vec::new();
+    for (_, mut series) in by_attr {
+        // The store answers newest-first; LTTB reads a series forwards.
+        series.reverse();
+        let mut kept = hc_state::history::downsample(series, target);
+        kept.reverse();
+        out.append(&mut kept);
+    }
+    // One series or many, the caller gets what it has always got: newest
+    // first, across everything returned.
+    out.sort_by_key(|e| std::cmp::Reverse(e.recorded_at));
+    out
 }
 
 // ---------- Timers ----------
@@ -1697,6 +1773,62 @@ pub async fn delete_glue(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod history_downsample_tests {
+    use super::downsample_per_attribute;
+    use hc_state::history::HistoryEntry;
+    use serde_json::json;
+
+    fn entry(attr: &str, minute: i64, value: f64) -> HistoryEntry {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-09-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        HistoryEntry {
+            device_id: "ecowitt_temp_1".into(),
+            attribute: attr.into(),
+            value: json!(value),
+            recorded_at: base + chrono::Duration::minutes(minute),
+        }
+    }
+
+    /// **A device's series are unrelated.** Interleaving a thermometer's
+    /// temperature with its battery and reducing the mixture would produce a
+    /// shape neither of them has, so each is reduced on its own.
+    #[test]
+    fn each_attribute_is_reduced_against_itself() {
+        let mut rows = Vec::new();
+        for i in 0..120 {
+            rows.push(entry("temperature", i, 70.0 + (i % 5) as f64));
+        }
+        for i in 0..40 {
+            rows.push(entry("battery", i * 3, 90.0));
+        }
+        // The store answers newest-first.
+        rows.sort_by_key(|e| std::cmp::Reverse(e.recorded_at));
+
+        let out = downsample_per_attribute(rows, 10);
+        let temps = out.iter().filter(|e| e.attribute == "temperature").count();
+        let batts = out.iter().filter(|e| e.attribute == "battery").count();
+        assert_eq!(temps, 10);
+        assert_eq!(batts, 10);
+    }
+
+    /// Whatever comes back is newest-first, as it has always been — the
+    /// per-series reduction must not reorder what a client reads.
+    #[test]
+    fn the_order_a_client_expects_survives() {
+        let mut rows: Vec<_> = (0..50).map(|i| entry("temperature", i, i as f64)).collect();
+        rows.extend((0..50).map(|i| entry("humidity", i, i as f64)));
+        rows.sort_by_key(|e| std::cmp::Reverse(e.recorded_at));
+
+        let out = downsample_per_attribute(rows, 5);
+        assert!(
+            out.windows(2).all(|w| w[0].recorded_at >= w[1].recorded_at),
+            "results are not newest-first"
+        );
     }
 }
 
