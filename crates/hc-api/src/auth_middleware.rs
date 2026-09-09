@@ -176,6 +176,53 @@ pub async fn require_auth(
         .into_response()
 }
 
+/// Validate a credential that arrived in a query parameter.
+///
+/// **The same dispatch the header path uses**, and it exists because the two
+/// had drifted. A browser cannot set a header on a WebSocket upgrade, so
+/// `/events/stream`, `/logs/stream` and the media routes take `?token=` — and
+/// each validated it as a JWT, which meant an API key opened none of them.
+/// That made a key a credential for half the API: a wall panel authenticated
+/// with one would load its dashboard and then never hear another word from the
+/// house, showing a frozen picture with nothing saying why.
+///
+/// Keys are the credential for exactly that kind of caller, so they work here
+/// on the same terms as anywhere else.
+pub(crate) async fn validate_query_token(
+    state: &AppState,
+    token: &str,
+) -> Result<Claims, Response> {
+    if token.is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing token query parameter" })),
+        )
+            .into_response());
+    }
+
+    if let Some(body) = token.strip_prefix(API_KEY_PREFIX) {
+        return match verify_api_key(state, token, body).await {
+            Ok(claims) => Ok(claims),
+            Err(resp) => Err(resp),
+        };
+    }
+
+    // The JWT branch is ws.rs's, which has the unit tests for every way a
+    // token can be wrong and needs no store to run.
+    match crate::ws::validate_ws_token(Some(token), &state.jwt) {
+        Ok(claims) => {
+            // A session a password change killed must not keep a stream open.
+            // The header path has always checked this and the events stream
+            // never did, so routing both through here closes that too.
+            if let Err(resp) = token_version_current(state, &claims).await {
+                return Err(resp);
+            }
+            Ok(claims)
+        }
+        Err(boxed) => Err(*boxed),
+    }
+}
+
 /// Validate a bearer token with the `hc_sk_` prefix against the api_keys
 /// store. On success, returns synthetic `Claims` carrying the API key's
 /// owner identity and granted scopes.

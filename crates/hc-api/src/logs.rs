@@ -85,32 +85,13 @@ pub async fn log_stream_handler(
         "whitelist".to_string()
     } else {
         let token = params.token.as_deref().unwrap_or("");
-        if token.is_empty() {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "missing token query parameter" })),
-            )
-                .into_response();
-        }
-        match state.jwt.validate(token) {
-            Ok(claims) => {
-                // Validated here rather than by `require_auth`, so the
-                // token-version check has to be repeated — otherwise a session
-                // killed by a password change could still tail the log stream.
-                if let Err(resp) =
-                    crate::auth_middleware::token_version_current(&state, &claims).await
-                {
-                    return resp;
-                }
-                claims.sub
-            }
-            Err(_) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({ "error": "invalid or expired token" })),
-                )
-                    .into_response();
-            }
+        // The same dispatch every other credential path uses: an API key
+        // against the api_keys store, anything else as a JWT. A key that
+        // opened the event stream and not this one would be a credential with
+        // an undocumented hole in it.
+        match crate::auth_middleware::validate_query_token(&state, token).await {
+            Ok(claims) => claims.sub,
+            Err(resp) => return resp,
         }
     };
 

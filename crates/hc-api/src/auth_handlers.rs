@@ -349,14 +349,36 @@ pub async fn refresh(
 // ---------- Me ----------
 
 /// `GET /api/v1/auth/me`
-/// Returns the authenticated user's profile.
+///
+/// The authenticated user's profile, **plus the scopes this credential
+/// actually carries.**
+///
+/// Those are not the same question when the credential is an API key. A key
+/// names its owner in `uid`, so the profile is the owner's — including the
+/// owner's role — while the key's authority is its own `scopes`, a subset
+/// chosen when it was issued. A caller that read the role and looked up what
+/// that role may do would hand a deliberately read-only key the full rights of
+/// the admin who created it. hc-web-lit authorises its own content API this
+/// way, which is how the gap was found.
+///
+/// So the effective scopes come straight off the claims, for both credential
+/// kinds: a password token carries `role.scopes()` and a key carries its own.
+/// A whitelisted caller has no user record and still gets 404 here, which is
+/// correct — the bypass is an address being trusted, not somebody being known.
 pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
     match s
         .store
         .get_user_by_id(Uuid::parse_str(&claims.uid).unwrap_or_default())
         .await
     {
-        Ok(Some(user)) => (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response(),
+        Ok(Some(user)) => {
+            let mut body = json!(UserInfo::from(&user));
+            // Added to the response rather than to `UserInfo`, which several
+            // other endpoints return and where a per-credential field would be
+            // meaningless.
+            body["scopes"] = json!(claims.scopes);
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "user not found" })),
@@ -804,5 +826,110 @@ pub async fn set_user_password(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod me_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use hc_auth::{JwtService, Role};
+    use hc_core::EventBus;
+
+    async fn state_with(user: &User) -> AppState {
+        let base = std::env::temp_dir().join(format!("hc_api_me_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&base);
+        let store = hc_state::StateStore::open(
+            &base.join("state.redb").to_string_lossy(),
+            &base.join("history.sqlite").to_string_lossy(),
+        )
+        .await
+        .expect("state store opens");
+        store.create_user(user).await.expect("user is stored");
+
+        AppState::new(crate::AppStateParams::new(
+            store,
+            EventBus::new(16),
+            JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24),
+        ))
+    }
+
+    fn an_admin() -> User {
+        User {
+            id: Uuid::new_v4(),
+            username: "admin".into(),
+            password_hash: "x".into(),
+            role: Role::Admin,
+            created_at: chrono::Utc::now(),
+            token_version: 0,
+        }
+    }
+
+    async fn body_of(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body reads");
+        serde_json::from_slice(&bytes).expect("body is json")
+    }
+
+    /// An API key names its owner, so the profile is the owner's — including
+    /// the owner's role — while the key's authority is the narrower set of
+    /// scopes it was issued with. A caller that reads `role` and looks up what
+    /// that role may do hands a read-only key the rights of the admin who
+    /// created it. That is not hypothetical: hc-web-lit authorised its own
+    /// content API exactly that way, which is how this was found.
+    #[tokio::test]
+    async fn scopes_are_the_credentials_own_not_the_roles() {
+        let user = an_admin();
+        let state = state_with(&user).await;
+
+        let claims = hc_auth::Claims {
+            sub: "api_key:hallway panel".into(),
+            uid: user.id.to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes: vec!["dashboards:read".into(), "content:read".into()],
+            actor: None,
+            tv: 0,
+        };
+
+        let body = body_of(me(State(state), AuthUser(claims)).await.into_response()).await;
+
+        // The profile is the owner's...
+        assert_eq!(body["role"], "admin");
+        // ...and the authority is the key's.
+        assert_eq!(
+            body["scopes"],
+            serde_json::json!(["dashboards:read", "content:read"])
+        );
+        assert!(!body["scopes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("dashboards:write")));
+    }
+
+    /// A password token carries its role's scopes, so the two agree there —
+    /// which is why reading the role looked correct for as long as keys went
+    /// unused.
+    #[tokio::test]
+    async fn a_password_session_reports_its_roles_scopes() {
+        let user = an_admin();
+        let state = state_with(&user).await;
+
+        let claims = hc_auth::Claims {
+            sub: user.username.clone(),
+            uid: user.id.to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes: Role::Admin.scopes(),
+            actor: None,
+            tv: 0,
+        };
+
+        let body = body_of(me(State(state), AuthUser(claims)).await.into_response()).await;
+        assert!(body["scopes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("content:write")));
     }
 }

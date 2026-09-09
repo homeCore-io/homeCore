@@ -108,17 +108,41 @@ paths:
   /auth/me:
     get:
       operationId: getMe
-      summary: Get the authenticated user's profile
+      summary: The caller's profile, and the scopes this credential carries
+      description: |
+        The profile belongs to the *user*; `scopes` belong to the **credential**
+        presented, and with an API key those differ. A key names its owner, so
+        the profile — including `role` — is the owner's, while the key's
+        authority is the subset of scopes chosen when it was issued.
+
+        Authorize against `scopes`. Reading `role` and looking up what that role
+        may do hands a deliberately restricted key the full rights of whoever
+        created it.
+
+        A whitelisted caller has no user record and receives `404` here. That is
+        correct rather than an omission: the bypass trusts an address, not a
+        person, so there is no profile to return.
       tags: [auth]
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: User profile
+          description: User profile, plus the effective scopes of this credential
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/UserInfo"
+                allOf:
+                  - $ref: "#/components/schemas/UserInfo"
+                  - type: object
+                    required: [scopes]
+                    properties:
+                      scopes:
+                        type: array
+                        description: >
+                          What this credential may do. A password token carries
+                          its role's scopes; an API key carries its own.
+                        items:
+                          type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
 

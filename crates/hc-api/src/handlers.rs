@@ -6488,24 +6488,14 @@ pub async fn get_plugin_stream_sse(
             crate::auth_middleware::whitelist_claims()
         } else {
             let token = bearer.as_deref().or(query.token.as_deref()).unwrap_or("");
-            if token.is_empty() {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(
-                        json!({ "error": "missing token (query ?token= or Authorization header)" }),
-                    ),
-                )
-                    .into_response();
-            }
-            match s.jwt.validate(token) {
+            // The same dispatch as everywhere else: an API key against the
+            // api_keys store, anything else as a JWT. This route accepted a
+            // key in its header fallback and not in its query parameter, which
+            // is the kind of difference nobody documents and everybody trips
+            // over.
+            match crate::auth_middleware::validate_query_token(&s, token).await {
                 Ok(c) => c,
-                Err(_) => {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({ "error": "invalid or expired token" })),
-                    )
-                        .into_response();
-                }
+                Err(resp) => return resp,
             }
         }
     };

@@ -171,7 +171,7 @@ pub async fn ws_events_handler(
     headers: HeaderMap,
 ) -> Response {
     // Validate before accepting the upgrade.
-    let claims = match authenticate_ws(&query, &state, addr.ip()) {
+    let claims = match authenticate_ws(&query, &state, addr.ip()).await {
         Ok(c) => c,
         Err(resp) => return *resp,
     };
@@ -195,8 +195,9 @@ pub async fn ws_events_handler(
 ///
 /// Checks the IP whitelist first (same logic as `require_auth` middleware).
 /// If the source IP is whitelisted the `?token=` parameter is not required.
-/// Otherwise falls back to JWT validation via `?token=`.
-fn authenticate_ws(
+/// Otherwise the `?token=` is validated on the same terms as a header
+/// credential — an API key against the api_keys store, anything else as a JWT.
+async fn authenticate_ws(
     query: &EventStreamQuery,
     state: &AppState,
     remote_ip: IpAddr,
@@ -215,11 +216,13 @@ fn authenticate_ws(
         return Ok(whitelist_claims());
     }
 
-    validate_ws_token(query.token.as_deref(), &state.jwt)
+    crate::auth_middleware::validate_query_token(state, query.token.as_deref().unwrap_or(""))
+        .await
+        .map_err(Box::new)
 }
 
 /// Inner validation logic, separated so it can be unit-tested without a full `AppState`.
-fn validate_ws_token(
+pub(crate) fn validate_ws_token(
     token: Option<&str>,
     jwt: &hc_auth::JwtService,
 ) -> Result<Claims, Box<Response>> {
