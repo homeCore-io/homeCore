@@ -491,6 +491,16 @@ homeCore/                          # container dir (no git)
 Read `hc-scripts/README.md` and the Releasing section of the workspace
 `AGENTS.md` before pushing a tag; the tag ordering there is not optional.
 
+**The version lives in two files and a test enforces it.** Bump
+`homecore/Cargo.toml` *and* `info.version` in `docs/openapi.yaml`, then refresh
+`Cargo.lock`. `the_spec_is_stamped_with_the_crate_version` fails otherwise —
+which is the point: a published spec claiming to describe a version it does not
+is worse than no spec.
+
+**Run `just check` after the bump, not before.** A version bump is a change
+like any other and the stamp test only sees it once it is made. Checking the
+content and then bumping is how v0.1.66 shipped with a tag whose CI was red.
+
 **Every release gets an entry in `homeCore-io.github.io/docs/release-notes.md`,
 written as part of cutting it — not afterwards and not selectively.** That page
 is the operator-facing history and the only place a person can learn what
