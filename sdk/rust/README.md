@@ -151,6 +151,12 @@ exist until you make it.
   reads sensors it does not own.
 - **Log forwarding** — `MqttLogLayer` ships tracing logs to core, so they
   appear in the live log stream alongside core's own.
+- **Conformance** — `conformance::check_all` holds the rules every homeCore
+  plugin follows: both names of every boolean, housekeeping declared as such,
+  no control the command path ignores, no action nobody can phrase, no action
+  inheriting core's 5 s timeout by accident. Call it from a test; nine plugins
+  had hand-written the same checks before it existed. See [Let the build check
+  it for you](https://homecore.io/docs/plugins/developing-plugins#let-the-build-check-it-for-you).
 
 ## Notices
 

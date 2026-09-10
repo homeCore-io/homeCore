@@ -444,7 +444,22 @@ impl StateBridge {
         let previous_name = device.name.clone();
         let change = self.resolve_state_change(device_id, incoming);
         let mut attrs = attrs;
+        // **Provenance is not a reading.** `_hc.change` is the modern
+        // envelope; `origin`, `correlation_id` and `timestamp` are the legacy
+        // spelling that `extract_change_from_state_payload` still recognises.
+        // Reading them and then storing them as attributes gave a WLED
+        // controller a `correlation_id` in its attribute map — a value a
+        // person can read, nothing can label, and no schema will ever declare.
+        //
+        // `timestamp` only goes when `origin` is there: on its own it is a
+        // plausible reading, and a device that publishes one means it.
         attrs.remove("_hc");
+        let had_origin = attrs.contains_key("origin");
+        attrs.remove("origin");
+        attrs.remove("correlation_id");
+        if had_origin {
+            attrs.remove("timestamp");
+        }
 
         // Extract "name" before attrs is potentially consumed by into_iter().
         let incoming_name: Option<String> = attrs
@@ -1074,6 +1089,43 @@ mod tests {
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// **Provenance is not a reading.** A WLED controller carried a
+    /// `correlation_id` in its attribute map: homeCore's own concept, stored
+    /// as if the strip had reported it, and no schema would ever declare it.
+    #[test]
+    fn provenance_keys_never_become_attributes() {
+        let strip = |payload: serde_json::Value| -> Vec<String> {
+            let mut attrs = payload.as_object().unwrap().clone();
+            attrs.remove("_hc");
+            let had_origin = attrs.contains_key("origin");
+            attrs.remove("origin");
+            attrs.remove("correlation_id");
+            if had_origin {
+                attrs.remove("timestamp");
+            }
+            let mut names: Vec<String> = attrs.keys().cloned().collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(
+            strip(json!({
+                "on": true,
+                "_hc": { "change": {} },
+                "origin": "api",
+                "correlation_id": "abc",
+                "timestamp": "2026-09-10T00:00:00Z",
+            })),
+            ["on"]
+        );
+
+        // A `timestamp` with no `origin` beside it is a device's own reading.
+        assert_eq!(
+            strip(json!({ "temperature": 21.5, "timestamp": "2026-09-10T00:00:00Z" })),
+            ["temperature", "timestamp"]
+        );
+    }
 
     /// The event exists so a client can decide whether to refetch. Two events
     /// describing the same schema must therefore look the same — and

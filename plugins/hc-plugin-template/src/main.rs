@@ -403,7 +403,45 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
             item_key: None,
             item_operations: None,
             requires_role: RequiresRole::User,
-            timeout_ms: None,
+            // **Always declare one.** Core's default window is 5 s, which
+            // fails any action that talks to hardware — and inheriting a
+            // default is not a decision anybody can see. This action does
+            // nothing but reply, so it barely needs its own; it declares one
+            // anyway, because the next action copied from it will not be so
+            // cheap.
+            timeout_ms: Some(5_000),
         }],
+    }
+}
+
+#[cfg(test)]
+mod conformance_tests {
+    /// **What this plugin promises, checked by the build.**
+    ///
+    /// Twelve rules that have each been a real bug in a shipped homeCore
+    /// plugin — a boolean that names only one of its states, a battery
+    /// ranked beside the reading it sits next to, a declared control the
+    /// command path ignores, an action nobody can phrase. They used to live
+    /// in a checklist, which is a thing an author can skip without noticing;
+    /// they live in `plugin_sdk_rs::conformance` now, so skipping them fails
+    /// `cargo test`.
+    ///
+    /// Keep this test. Every plugin in this repository has one.
+    #[test]
+    fn the_declaration_follows_the_rules() {
+        plugin_sdk_rs::conformance::check_all(&super::device_schema(), &super::capabilities())
+            .assert_ok();
+    }
+
+    /// The manifest and the handler must agree in both directions: an action
+    /// advertised but not routed is a button that does nothing, and one
+    /// routed but not advertised is a capability nobody can find.
+    ///
+    /// The routed list is written out by hand on purpose — it is the one
+    /// thing the SDK cannot see, because it lives inside your `match`.
+    #[test]
+    fn every_action_is_both_advertised_and_routed() {
+        plugin_sdk_rs::conformance::check_actions_routed(&super::capabilities(), &["say_hello"])
+            .assert_ok();
     }
 }

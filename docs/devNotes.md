@@ -6684,6 +6684,68 @@ deliberate.
 
 ---
 
+## Two ways an attribute goes undeclared
+
+Found by reading the live house back after the September schema work: **82 of
+178 devices published at least one attribute their schema did not declare.**
+Two causes, one per side.
+
+### A hand-written schema covers the controls and stops
+
+47 of the 82 were hc-hue. Its lights declared `on`, `brightness_pct`,
+`color_temp` and `color_xy` while publishing fifteen more — bridge and
+resource ids, the `supports_*` flags, the colour-temperature bounds — and its
+scenes declared `active` while publishing eight.
+
+`aux_schema::with_published(schema, state)` fills a hand-written schema in from
+what the device actually publishes, describing each missing attribute the way
+an auxiliary device's is. **The hand-written entries win**: writability and
+ranges cannot be inferred from a value. Lights and scenes go through it now, so
+it stays correct as Hue adds fields.
+
+### Provenance stored as if the device had reported it
+
+The other kind. `_hc.change` is the modern envelope and core strips it;
+`origin`, `correlation_id` and `timestamp` are the legacy spelling that
+`extract_change_from_state_payload` still recognises — and core read them and
+then stored them as attributes. A WLED controller carried a `correlation_id`
+in its attribute map: homeCore's own concept, presented as something the strip
+had said.
+
+They are stripped now. `timestamp` only when `origin` is beside it: on its own
+it is a plausible reading and a device that publishes one means it.
+
+---
+
+## The rules are a function call now
+
+`plugin_sdk_rs::conformance` holds what used to be a checklist. The evidence
+it was the wrong shape: **nine plugins had each hand-written
+`every_boolean_names_both_of_its_states`**, two had written
+`every_published_attribute_is_declared` under two different names, and two more
+had written the action-timeout check. A fourteenth plugin had to rediscover
+nine tests it could not see from the documentation.
+
+- `check_device_schema` / `check_device_schema_json` — booleans naming both
+  states, enums with options, snake_case names, housekeeping carrying
+  `category`, sane ranges, actions with a sentence that names the device, an
+  action's `writes` naming a declared attribute.
+- `check_manifest` — labels, and `timeout_ms` declared rather than inherited.
+- `check_actions_routed(caps, routed)` — both directions; the routed list is
+  the one thing the SDK cannot see.
+- `check_writables(schema, accepts)` — takes the plugin's dispatcher as a
+  closure.
+- `check_all` — schema + manifest.
+
+`hc-plugin-template` calls it, so a copied plugin starts conformant. The nine
+hand-written copies can retire as each plugin is next touched; there is no
+value in a sweep.
+
+Same arrangement as `config_descriptor::missing_schema_coverage`, which has
+guarded the config half since before this existed.
+
+---
+
 ## Writing a plugin: where the contract is written down
 
 The device schema — what makes a device renderable rather than a row of raw

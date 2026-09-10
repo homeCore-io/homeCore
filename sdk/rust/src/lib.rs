@@ -28,6 +28,7 @@
 /// plugin source changes.
 pub use hc_types::config_descriptor;
 
+pub mod conformance;
 pub mod device_actions;
 pub mod mqtt_log_layer;
 pub mod streaming;

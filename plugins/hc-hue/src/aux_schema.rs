@@ -97,14 +97,49 @@ pub fn describe(name: &str, value: &Value) -> AttributeSchema {
     // sensor is for. One lexicon, in the crate that defines the field.
     a.category = AttributeCategory::for_name(name).or_else(|| {
         // Hue-specific housekeeping the shared list cannot know about: the
-        // `_valid` flag beside a reading, and the v1 API's own id.
-        (name.ends_with("_valid") || name == "id_v1" || name == "raw" || name == "resource_type")
+        // `_valid` flag beside a reading, the v1 API's own id, the room a
+        // scene belongs to, and the bounds of a range rather than a value
+        // within it.
+        (name.ends_with("_valid")
+            || name.ends_with("_min")
+            || name.ends_with("_max")
+            || name.starts_with("group_")
+            || name == "id_v1"
+            || name == "raw"
+            || name == "resource_type")
             .then_some(AttributeCategory::Diagnostic)
     });
     if matches!(value, Value::Bool(_)) {
         a.states = Some(states_for(name));
     }
     a
+}
+
+/// Fill in whatever a device publishes that its hand-written schema does not
+/// declare, described from the value.
+///
+/// **A hand-written schema covers the controls and stops.** hc-hue's lights
+/// declared `on`, `brightness_pct`, `color_temp` and `color_xy` while
+/// publishing fifteen more attributes — the bridge and resource ids, the
+/// capability flags, the colour-temperature bounds — and its scenes declared
+/// `active` while publishing eight. 47 of the 82 devices in the reference
+/// house with an undeclared attribute were Hue's, and an undeclared attribute
+/// is a value a person can read and nothing can label, rank or hide.
+///
+/// The hand-written entries win: they carry writability and ranges that
+/// cannot be inferred from a value. Everything else is described the way an
+/// auxiliary device's is, so this stays correct as Hue adds fields.
+pub fn with_published(mut schema: DeviceSchema, state: &Value) -> DeviceSchema {
+    let Some(obj) = state.as_object() else {
+        return schema;
+    };
+    for (name, value) in obj {
+        schema
+            .attributes
+            .entry(name.clone())
+            .or_insert_with(|| describe(name, value));
+    }
+    schema
 }
 
 /// The schema for an auxiliary device that published [`state`].
@@ -146,6 +181,53 @@ mod tests {
                 s.attributes[name].category,
                 Some(AttributeCategory::Diagnostic),
                 "{name}"
+            );
+        }
+    }
+
+    /// **A hand-written schema covers the controls and stops.** A Hue light
+    /// declared four attributes and published nineteen; 47 of the 82 devices
+    /// in the reference house with an undeclared attribute were Hue's.
+    #[test]
+    fn what_a_device_publishes_fills_in_what_the_schema_forgot() {
+        let mut declared = DeviceSchema::default();
+        declared.attributes.insert(
+            "brightness_pct".into(),
+            AttributeSchema {
+                writable: true,
+                min: Some(1.0),
+                max: Some(100.0),
+                ..AttributeSchema::new(AttributeKind::Integer)
+            },
+        );
+
+        let filled = with_published(
+            declared,
+            &json!({
+                "brightness_pct": 40,
+                "bridge_id": "abc",
+                "supports_dimming": true,
+                "color_temp_min": 2000,
+            }),
+        );
+
+        // The hand-written entry wins: writability and range cannot be
+        // inferred from a value.
+        let bri = &filled.attributes["brightness_pct"];
+        assert!(bri.writable);
+        assert_eq!(bri.min, Some(1.0));
+
+        // The rest arrive described, and demoted.
+        for name in ["bridge_id", "supports_dimming", "color_temp_min"] {
+            let a = filled
+                .attributes
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} was not filled in"));
+            assert!(!a.writable, "{name} claims to be writable");
+            assert_eq!(
+                a.category,
+                Some(AttributeCategory::Diagnostic),
+                "{name} ranks as a reading"
             );
         }
     }

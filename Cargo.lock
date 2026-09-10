@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "hc-hue"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.70"
+version = "0.1.71"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3377,7 +3377,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "chrono",
