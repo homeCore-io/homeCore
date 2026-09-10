@@ -6684,6 +6684,39 @@ deliberate.
 
 ---
 
+## Two ways an attribute goes undeclared
+
+Found by reading the live house back after the September schema work: **82 of
+178 devices published at least one attribute their schema did not declare.**
+Two causes, one per side.
+
+### A hand-written schema covers the controls and stops
+
+47 of the 82 were hc-hue. Its lights declared `on`, `brightness_pct`,
+`color_temp` and `color_xy` while publishing fifteen more — bridge and
+resource ids, the `supports_*` flags, the colour-temperature bounds — and its
+scenes declared `active` while publishing eight.
+
+`aux_schema::with_published(schema, state)` fills a hand-written schema in from
+what the device actually publishes, describing each missing attribute the way
+an auxiliary device's is. **The hand-written entries win**: writability and
+ranges cannot be inferred from a value. Lights and scenes go through it now, so
+it stays correct as Hue adds fields.
+
+### Provenance stored as if the device had reported it
+
+The other kind. `_hc.change` is the modern envelope and core strips it;
+`origin`, `correlation_id` and `timestamp` are the legacy spelling that
+`extract_change_from_state_payload` still recognises — and core read them and
+then stored them as attributes. A WLED controller carried a `correlation_id`
+in its attribute map: homeCore's own concept, presented as something the strip
+had said.
+
+They are stripped now. `timestamp` only when `origin` is beside it: on its own
+it is a plausible reading and a device that publishes one means it.
+
+---
+
 ## The rules are a function call now
 
 `plugin_sdk_rs::conformance` holds what used to be a checklist. The evidence

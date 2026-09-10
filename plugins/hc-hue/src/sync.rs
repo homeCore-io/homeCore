@@ -76,8 +76,13 @@ pub async fn refresh_bridge_state(
                         )
                         .await?;
                     publisher.subscribe_commands(&light.device_id).await?;
-                    // Publish capability schema for the UI.
-                    let light_schema = build_light_schema();
+                    // Publish capability schema for the UI — the declared
+                    // controls, plus everything this light actually publishes
+                    // that the hand-written schema does not mention.
+                    let light_schema = crate::aux_schema::with_published(
+                        build_light_schema(),
+                        &translator::light_state(&light),
+                    );
                     publisher
                         .register_device_schema(&light.device_id, &light_schema)
                         .await
@@ -174,7 +179,7 @@ pub async fn refresh_bridge_state(
                     publisher
                         .register_device_schema_json(
                             &scene.device_id,
-                            &translator::scene_schema(scene.active.is_some()),
+                            &translator::scene_schema_for(&scene),
                         )
                         .await
                         .ok();
@@ -183,7 +188,7 @@ pub async fn refresh_bridge_state(
                     publisher
                         .register_device_schema_json(
                             &scene.device_id,
-                            &translator::scene_schema(scene.active.is_some()),
+                            &translator::scene_schema_for(&scene),
                         )
                         .await
                         .ok();

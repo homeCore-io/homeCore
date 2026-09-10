@@ -553,6 +553,29 @@ pub fn bridge_schema() -> Value {
 /// `reports_status` is not a guess — `fetch_scenes` either found `status` on
 /// the resource or it did not, and a bridge too old to report it would
 /// otherwise leave a client rendering a state row that never fills in.
+/// A scene's schema, including everything [`scene_state`] publishes.
+///
+/// A scene declared `active` and published eight more attributes — the bridge
+/// and resource ids, the room it belongs to — every one of them a value a
+/// person could read and nothing could label or rank.
+pub fn scene_schema_for(scene: &HueScene) -> Value {
+    let declared = scene_schema(scene.active.is_some());
+    let filled = match serde_json::from_value::<DeviceSchema>(declared.clone()) {
+        Ok(parsed) => crate::aux_schema::with_published(parsed, &scene_state(scene)),
+        // Unparseable is not worth losing the actions over; publish what the
+        // hand-written half said.
+        Err(_) => return declared,
+    };
+    with_actions(
+        &filled,
+        vec![Action::new("activate")
+            .label("Activate the scene")
+            .category("Scenes")
+            .icon("scene")
+            .sentence("activate {device}")],
+    )
+}
+
 pub fn scene_schema(reports_status: bool) -> Value {
     let mut attrs = HashMap::new();
     if reports_status {
