@@ -299,9 +299,23 @@ impl RuleEngine {
             Ok(devices) => {
                 let count = devices.len();
                 for d in devices {
+                    // **What the device record remembers beats what this
+                    // process just started.** Seeding every attribute with
+                    // `last_seen` made a `TimeElapsed` condition read as if
+                    // the whole house had changed at boot, so "no motion for
+                    // 20 minutes" could not be true until 20 minutes after a
+                    // restart. `attributes_changed_at` is persisted for
+                    // exactly this; `last_seen` remains the fallback for an
+                    // attribute that has not moved since the field existed.
                     let baseline = d.last_seen;
-                    let ts_map: HashMap<String, DateTime<Utc>> =
-                        d.attributes.keys().map(|k| (k.clone(), baseline)).collect();
+                    let ts_map: HashMap<String, DateTime<Utc>> = d
+                        .attributes
+                        .keys()
+                        .map(|k| {
+                            let at = d.attributes_changed_at.get(k).copied().unwrap_or(baseline);
+                            (k.clone(), at)
+                        })
+                        .collect();
                     self.attr_changed_at.insert(d.device_id.clone(), ts_map);
                     self.device_cache
                         .insert(d.device_id, d.attributes.into_iter().collect());

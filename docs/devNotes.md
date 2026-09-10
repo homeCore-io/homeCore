@@ -6684,6 +6684,36 @@ deliberate.
 
 ---
 
+## "How long has it been clear?" has an answer now
+
+`DeviceState.attributes_changed_at` records when each attribute last held a
+**different** value.
+
+`last_change.changed_at` never could. It is provenance — `kind`, `source`,
+`actor_id`, `correlation_id` answer "what turned that light on?", which is the
+most common question in the system and one nothing else answers — so it
+advances on every report. Measured: all 178 devices carrying the field had
+`changed_at` equal to `last_seen` to the microsecond, so an occupancy sensor
+clear since breakfast read as having just changed (#39).
+
+**Per attribute, not per device**, because the question is always about one: a
+presence widget asking "clear for how long?" is undone by the same sensor's
+battery ticking over.
+
+**Persisted**, so a wall panel that rebooted at 3 am does not report every
+sensor in the house as having just changed — the flaw in any client-side
+workaround, which can only measure from page load.
+
+Written in `state_bridge` where the diff already exists, before the single
+device write, so a report that changed nothing costs nothing extra. The rule
+engine seeds its own `attr_changed_at` cache from it now instead of from
+`last_seen`, which fixes the same bug for `TimeElapsed`: "no motion for 20
+minutes" could not be true until 20 minutes after a restart.
+
+`last_change` is unchanged and still the right field for provenance.
+
+---
+
 ## Two ways an attribute goes undeclared
 
 Found by reading the live house back after the September schema work: **82 of
@@ -6725,6 +6755,14 @@ up:
   one to lead with; and the catalogues (`available_*_items`, `group_members`,
   `supported_actions`, `ui_enrichments`, `sonos`) as diagnostic, since a
   favourites list is not what a speaker is for.
+
+### A unit is what the device says it is, not what a table guesses
+
+hc-hue declared `temperature` as `°C` unconditionally while publishing
+whichever scale the operator configured — a sensor reporting 71.33 °F was
+declared as 71.33 °C (#40). `aux_schema::describe_in` reads the attribute's own
+`*_unit` sibling first and falls back to the table, so the declaration follows
+the device. The same rule covers anything else that publishes one.
 
 ### The last seven
 

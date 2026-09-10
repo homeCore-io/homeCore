@@ -318,6 +318,25 @@ pub struct DeviceState {
     /// `"window"`, `"garage"`, or `"gate"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_hint: Option<String>,
+    /// When each attribute last held a *different* value, by attribute name.
+    ///
+    /// **`last_change.changed_at` cannot answer this and never could.** That
+    /// field is provenance — what caused an update, and when homeCore saw it —
+    /// so it advances on every report whether or not anything moved. An
+    /// occupancy sensor clear since breakfast, reporting every few seconds,
+    /// looked through that field like it had just changed. Every device in one
+    /// real house carried a `changed_at` equal to its `last_seen` to the
+    /// microsecond.
+    ///
+    /// Per attribute rather than per device, because the question is always
+    /// about one: a presence widget asking "clear for how long?" is undone by
+    /// the same sensor's battery reading ticking over.
+    ///
+    /// Persisted, so it survives a restart — a wall panel that rebooted at
+    /// 3am must not report every sensor in the house as having just changed.
+    /// Absent for a device that has not reported since this field existed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attributes_changed_at: HashMap<String, DateTime<Utc>>,
     /// Optional user-set names for this device's buttons, by button number.
     ///
     /// **The same contract as [`name_override`], for the same reason.** A
@@ -385,6 +404,7 @@ impl DeviceState {
         Self {
             device_id: device_id.into(),
             canonical_name: None,
+            attributes_changed_at: HashMap::new(),
             status_icon: None,
             name: name.into(),
             name_override: None,
@@ -450,6 +470,35 @@ pub struct Area {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The question `last_change` invites and cannot answer.** Provenance
+    /// advances on every report, so an occupancy sensor clear since breakfast
+    /// looked through it like it had just changed.
+    #[test]
+    fn attribute_change_times_survive_the_wire() {
+        let mut d = DeviceState::new("sensor_1", "Hall", "plugin.test");
+        let when = Utc::now();
+        d.attributes_changed_at.insert("motion".into(), when);
+
+        let wire = serde_json::to_value(&d).unwrap();
+        let back: DeviceState = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.attributes_changed_at.get("motion"), Some(&when));
+    }
+
+    /// A device that has never reported carries nothing rather than an empty
+    /// object, and a record written before the field existed still loads.
+    #[test]
+    fn nothing_recorded_is_absent_rather_than_empty() {
+        let d = DeviceState::new("sensor_1", "Hall", "plugin.test");
+        let wire = serde_json::to_value(&d).unwrap();
+        assert!(!wire
+            .as_object()
+            .unwrap()
+            .contains_key("attributes_changed_at"));
+
+        let older: DeviceState = serde_json::from_value(wire).expect("older record loads");
+        assert!(older.attributes_changed_at.is_empty());
+    }
 
     /// One absence, spelled one way. `area` used to serialise as `null` while
     /// `area_override` was omitted — two spellings of the same thing, on the
