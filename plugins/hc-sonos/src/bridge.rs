@@ -134,6 +134,31 @@ impl Bridge {
         };
 
         if already_known {
+            // **Say the declaration again, not only the handle.** A known
+            // speaker used to get a refreshed handle and a re-subscribe, and
+            // nothing else — so `rediscover_speakers`, the button somebody
+            // presses when a speaker looks wrong in homeCore, could not
+            // restore a schema core had lost. An unregister deletes the
+            // device *and* its schema, and a restore from an older backup
+            // predates it; only restarting the plugin helped.
+            //
+            // Both publishes are upserts against retained topics, and Sonos's
+            // schema is static, so a rediscovery of a healthy speaker costs
+            // two publishes and changes nothing.
+            let hc_id = {
+                let st = self.state.read().await;
+                st.speakers.get(&uuid).map(|e| e.hc_id.clone())
+            };
+            if let Some(hc_id) = hc_id {
+                if let Err(e) = self
+                    .publisher
+                    .register_device_schema_json(&hc_id, &crate::actions::device_schema_json())
+                    .await
+                {
+                    warn!(hc_id, error = %e, "Failed to republish device schema");
+                }
+            }
+
             let old_handles = {
                 let mut st = self.state.write().await;
                 if let Some(entry) = st.speakers.get_mut(&uuid) {

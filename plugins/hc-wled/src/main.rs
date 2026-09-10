@@ -114,6 +114,8 @@ async fn try_start(
     // can hit any of them on demand for discovery / refresh / reboot
     // calls without going through the bridge runtime's command path.
     let devices_for_mgmt = cfg.devices.clone();
+    // `republish_devices` says everything again, so it needs a publisher.
+    let publisher_for_mgmt = publisher.clone();
     let discovery_hosts_for_mgmt = cfg.wled.discovery_hosts.clone();
 
     // Enable management protocol (heartbeat + remote config/log commands +
@@ -131,6 +133,7 @@ async fn try_start(
             let action = cmd["action"].as_str()?.to_string();
             let devices = devices_for_mgmt.clone();
             let discovery_hosts = discovery_hosts_for_mgmt.clone();
+            let publisher = publisher_for_mgmt.clone();
             // Route each manifest action through a one-shot tokio
             // runtime — the SDK's custom_handler is a sync fn returning
             // Option<Value>, but the WLED HTTP client is async. The
@@ -141,7 +144,9 @@ async fn try_start(
                     .enable_all()
                     .build()
                     .ok()?;
-                rt.block_on(async move { run_action(&action, &devices, &discovery_hosts).await })
+                rt.block_on(async move {
+                    run_action(&action, &devices, &discovery_hosts, &publisher).await
+                })
             })
             .join()
             .ok()
@@ -445,6 +450,31 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
         plugin_id: String::new(),
         actions: vec![
             Action {
+                id: "republish_devices".into(),
+                label: "Republish devices".into(),
+                description: Some(
+                    "Re-send every configured device's registration and \
+                     capability schema. Use when a device has lost its \
+                     controls in homeCore — schemas are published once at \
+                     startup, so anything that dropped one could otherwise \
+                     only be restored by restarting the plugin."
+                        .into(),
+                ),
+                params: None,
+                result: Some(json!({ "republished": { "type": "integer" } })),
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::User,
+                // Two MQTT publishes per configured device and no network
+                // round-trip to the hardware, so this is fast — but core's
+                // 5s default is a budget for the whole action, and a house
+                // with many strips should not be racing it.
+                timeout_ms: Some(15_000),
+            },
+            Action {
                 id: "discover_devices".into(),
                 label: "Discover devices".into(),
                 description: Some(
@@ -558,9 +588,44 @@ async fn run_action(
     action: &str,
     devices: &[config::DeviceConfig],
     discovery_hosts: &[String],
+    publisher: &plugin_sdk_rs::DevicePublisher,
 ) -> Option<serde_json::Value> {
     use crate::wled::WledClient;
     match action {
+        // **Say everything again.**
+        //
+        // Registration and schema publication happen once, in the startup
+        // loop. Core can lose a schema while this plugin is still running —
+        // an unregister deletes the device *and* its schema, and a restore
+        // from an older backup predates it — and until this action existed
+        // the only repair was restarting the plugin.
+        //
+        // Everything here is an upsert against a retained topic, so running
+        // it when nothing is wrong costs one publish per device and changes
+        // nothing.
+        "republish_devices" => {
+            let schema = build_wled_schema();
+            let mut republished = 0usize;
+            for dev in devices {
+                if publisher
+                    .register_device_full(
+                        &dev.hc_id,
+                        &dev.name,
+                        Some("light"),
+                        dev.area.as_deref(),
+                        Some(wled_capabilities()),
+                    )
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                let _ = publisher.register_device_schema(&dev.hc_id, &schema).await;
+                republished += 1;
+            }
+            info!(republished, "Republished device registrations and schemas");
+            Some(json!({ "status": "ok", "republished": republished }))
+        }
         "discover_devices" => {
             // PRIMARY: mDNS browse for `_wled._tcp.local.` — finds every WLED
             // on the local subnet with zero configuration. This is what makes
