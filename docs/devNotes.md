@@ -6676,14 +6676,42 @@ directly, but it is rustdoc on a core type: invisible from the guide and
 invisible to Python, Node and .NET authors, all three of whose SDKs can
 publish a device schema.
 
-**One interaction worth knowing:** registering with a `device_type` resolves a
-built-in schema when the operator has `config/profiles/device-types.toml`, and
-it lands in the same slot as the plugin's own — last write wins
-(`state_bridge.rs`, the `device_types` branch). Publish yours after
-registering. A plugin that re-registers periodically against a core with a type
-registry loaded will overwrite its own schema each time unless it republishes
-alongside; no house in this workspace has that file, so the path is dormant
-here rather than proven.
+**One interaction worth knowing:** `DeviceTypeRegistry` exists for the
+*topic-mapper* — so a Tasmota or Shelly device with no plugin behind it can
+reference a type by name instead of hand-writing JSON Schema
+(`config/profiles/examples/device-types.toml`, opt-in by copying it to
+`config/profiles/device-types.toml`). But the resolution runs on **every**
+registration carrying a `device_type`, plugins included, and writes the same
+slot as the plugin's own schema — last write wins (`state_bridge.rs`, the
+`device_types` branch). So publish yours after registering, and know that a
+plugin re-registering periodically against a core with that file installed
+overwrites its own schema each time unless it republishes alongside. No house
+in this workspace has the file, so the path is dormant here rather than proven.
+
+### Device types are normalised, not settled
+
+Worth knowing before treating `device_type` as a closed set, because it is not
+one:
+
+- **Normalisation** lives in `hc_topic_map::canonical_device_type_name` — five
+  alias mappings (`vswitch` → `virtual_switch`, `motion` → `motion_sensor`,
+  `shade` → `cover`, …), applied at registration and in hc-api. Everything else
+  passes through unchanged.
+- **hc-types enumerates nothing.** `readings_for_type` keys off type names to
+  rank a device's readings, and an unknown type falls through to `&[]`. Nothing
+  anywhere rejects a type name.
+- The **catalog** in `device-types.toml` is the closest thing to a definition,
+  and it is an opt-in config file aimed at ecosystem profiles.
+
+The live house reports **22 distinct values** across 184 devices, against the
+10 the public docs list. `zwave` (9 devices) is a protocol rather than a type —
+which is exactly why `READING_RANK` has to exist. `lightning_sensor`,
+`rain_sensor`, `weather_station` and `vibration_sensor` are real but unknown to
+every table. `vcrx` is a Lutron product name. `keypad` and `pico_remote` are
+two names for a button device. Two devices report no type at all.
+
+[[project_device_type_canonical]] identified a canonical taxonomy as the
+long-term fix; it has not been built.
 
 ---
 
