@@ -58,6 +58,20 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
     match kind {
         DeviceKind::Dimmer => Some(vec![
             ("on".into(), rw(AttributeKind::Bool, "Power", None)),
+            // `translate_output_state` publishes the 0-255 twin beside the
+            // percentage and always has. Declared diagnostic: it is the same
+            // fact in the units the protocol happens to use, and a client
+            // offering two brightness rows is offering one too many.
+            (
+                "brightness".into(),
+                AttributeSchema {
+                    min: Some(0.0),
+                    max: Some(255.0),
+                    step: Some(1.0),
+                    category: Some(AttributeCategory::Diagnostic),
+                    ..ro(AttributeKind::Integer, "Brightness (raw)")
+                },
+            ),
             (
                 "brightness_pct".into(),
                 AttributeSchema {
@@ -225,6 +239,34 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
         attrs.insert(format!("button_{b}"), ro(AttributeKind::String, &label));
     }
 
+    // **A keypad's news is which button was pressed.** `button_N` accumulates
+    // the last action per button, so the state says which buttons have ever
+    // fired and in no order; `last_button` is the one fact that answers "what
+    // just happened here", and a client summarising a Pico reads it.
+    attrs.insert(
+        "last_button".to_string(),
+        ro(AttributeKind::Integer, "Last button"),
+    );
+    attrs.insert(
+        "last_button_name".to_string(),
+        ro(AttributeKind::String, "Last button pressed"),
+    );
+
+    // One per button that has an LED — 0 off, 1 on, 2 slow flash, 3 rapid.
+    // Only the buttons this device reports an LED for: `cfg.buttons` is the
+    // list discovery kept precisely because it holds the ones with LEDs.
+    for b in &cfg.buttons {
+        attrs.insert(
+            format!("led_{b}"),
+            AttributeSchema {
+                min: Some(0.0),
+                max: Some(3.0),
+                category: Some(AttributeCategory::Diagnostic),
+                ..ro(AttributeKind::Integer, &format!("Button {b} LED"))
+            },
+        );
+    }
+
     let schema = DeviceSchema {
         attributes: attrs,
         ..Default::default()
@@ -313,6 +355,26 @@ pub fn scene_schema_json(reports_state: bool) -> Value {
             ..ro(AttributeKind::Integer, "Phantom button")
         },
     );
+    if !reports_state {
+        // **The scene still publishes an `on`, and it is not a reading.**
+        // `publish_scene_initial_states` writes `on: false` and an activation
+        // optimistically writes `on: true`; for a scene with no LED nothing
+        // ever confirms either. Declaring it primary would hand a client a
+        // confident toggle over a value nothing checks — but leaving it
+        // undeclared leaves a value on the device that nothing can label at
+        // all. Diagnostic says both: it is there, and it is not the answer.
+        attrs.insert(
+            "on".to_string(),
+            AttributeSchema {
+                category: Some(AttributeCategory::Diagnostic),
+                states: Some(BoolStates {
+                    when_true: StateLabel::verbed("last activated", "was activated"),
+                    when_false: StateLabel::new("not activated since restart"),
+                }),
+                ..ro(AttributeKind::Bool, "Last activation (unconfirmed)")
+            },
+        );
+    }
     if reports_state {
         attrs.insert(
             "led_component".to_string(),
@@ -489,7 +551,12 @@ mod tests {
         let press = &v["actions"][0];
         assert_eq!(press["params"][0]["kind"], "int");
         assert!(press["params"][0].get("options_from").is_none());
-        assert!(v["attributes"].as_object().unwrap().is_empty());
+        // No catalogue means no per-button attributes — but a keypad still
+        // reports which button was pressed, and that is the news.
+        let attrs = v["attributes"].as_object().unwrap();
+        assert_eq!(attrs.len(), 2);
+        assert!(attrs.contains_key("last_button"));
+        assert!(attrs.contains_key("last_button_name"));
     }
 
     #[test]
@@ -739,14 +806,21 @@ mod scene_schema_tests {
     /// Declaring `on` there would give a client a confident toggle reporting a
     /// value nothing confirms.
     #[test]
-    fn a_scene_declares_no_state_until_its_led_reports() {
+    fn a_scene_that_cannot_report_says_so_rather_than_claiming_to() {
         let v = scene_schema_json(false);
-        let attrs = v["attributes"].as_object().expect("attributes");
-        assert!(
-            !attrs.contains_key("on"),
-            "nothing confirms it, so nothing claims it"
-        );
+        let on = &v["attributes"]["on"];
+        // The scene publishes one — optimistically, on activation — so
+        // leaving it undeclared would leave a value nothing can label. What
+        // it must not be is a reading: `diagnostic` keeps it off the headline
+        // and out of any list of what the device is telling you.
+        assert_eq!(on["category"], "diagnostic");
+        assert_eq!(on["writable"], false);
+        assert!(on["display_name"].as_str().unwrap().contains("unconfirmed"));
         assert_eq!(v["actions"][0]["id"], "activate");
+
+        // The scene that really reports declares it as a reading.
+        let reporting = scene_schema_json(true);
+        assert!(reporting["attributes"]["on"]["category"].is_null());
     }
 
     fn cfg() -> SceneConfig {

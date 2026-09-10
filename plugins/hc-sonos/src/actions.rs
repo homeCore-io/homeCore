@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Source};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use serde_json::Value;
 
@@ -51,6 +51,13 @@ fn ro_bool(display: &str, on: (&str, &str), off: (&str, &str)) -> AttributeSchem
         when_true: StateLabel::verbed(on.0, on.1),
         when_false: StateLabel::verbed(off.0, off.1),
     })
+}
+
+/// Not what the speaker is for — a catalogue, a grouping, or a legacy twin of
+/// a generic key.
+fn diagnostic(mut a: AttributeSchema) -> AttributeSchema {
+    a.category = Some(AttributeCategory::Diagnostic);
+    a
 }
 
 fn ro_unit(kind: AttributeKind, display: &str, unit: &str) -> AttributeSchema {
@@ -97,6 +104,55 @@ fn attributes() -> DeviceSchema {
         "available_playlists".into(),
         ro(AttributeKind::Json, "Playlists"),
     );
+
+    // **What is playing.** The generic media-player keys are the contract
+    // every client reads — `title`, `artist`, `album`, `position_secs`,
+    // `duration_secs` — and this plugin publishes each of them beside a
+    // `media_`-prefixed twin kept for the clients written before that was
+    // settled. Both are published, so both are declared; the twin is
+    // diagnostic, because two rows for one fact is one row too many and the
+    // generic name is the one to lead with.
+    for (name, display) in [("title", "Title"), ("artist", "Artist"), ("album", "Album")] {
+        a.insert(name.into(), ro(AttributeKind::String, display));
+        a.insert(
+            format!("media_{name}"),
+            diagnostic(ro(AttributeKind::String, display)),
+        );
+    }
+    a.insert(
+        "position_secs".into(),
+        ro_unit(AttributeKind::Integer, "Position", "s"),
+    );
+    a.insert(
+        "media_position".into(),
+        diagnostic(ro_unit(AttributeKind::Integer, "Position", "s")),
+    );
+    a.insert(
+        "duration_secs".into(),
+        ro_unit(AttributeKind::Integer, "Duration", "s"),
+    );
+    a.insert(
+        "media_duration".into(),
+        diagnostic(ro_unit(AttributeKind::Integer, "Duration", "s")),
+    );
+    a.insert(
+        "media_image_url".into(),
+        ro(AttributeKind::String, "Artwork"),
+    );
+
+    // Catalogues and grouping: real, and not what a speaker is *for*. A
+    // client listing a speaker's readings should not put its favourites list
+    // beside what is playing.
+    for (name, display) in [
+        ("available_favorite_items", "Favourite items"),
+        ("available_playlist_items", "Playlist items"),
+        ("group_members", "Group members"),
+        ("supported_actions", "Supported actions"),
+        ("ui_enrichments", "UI enrichments"),
+        ("sonos", "Sonos detail"),
+    ] {
+        a.insert(name.into(), diagnostic(ro(AttributeKind::Json, display)));
+    }
     DeviceSchema {
         attributes: a,
         ..Default::default()
