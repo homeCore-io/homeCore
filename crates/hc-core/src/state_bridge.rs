@@ -472,6 +472,13 @@ impl StateBridge {
         } else {
             device.attributes = attrs.into_iter().collect();
         }
+        // Also from what is already stored. Stripping the inbound payload
+        // stops new provenance arriving, but a partial publish never removes
+        // a key — so a device that picked one up before this existed and
+        // publishes partials, as hc-wled does, would carry it forever.
+        for key in ["_hc", "origin", "correlation_id"] {
+            device.attributes.remove(key);
+        }
         device.last_seen = Utc::now();
         device.available = true;
         device.last_change = Some(change.clone());
@@ -1125,6 +1132,28 @@ mod tests {
             strip(json!({ "temperature": 21.5, "timestamp": "2026-09-10T00:00:00Z" })),
             ["temperature", "timestamp"]
         );
+    }
+
+    /// **Stripping the inbound payload is not enough.** A partial publish
+    /// never removes a key, so a device that picked up a `correlation_id`
+    /// before the strip existed — and publishes partials, as hc-wled does —
+    /// carried it forever. One WLED controller still had it after the fix.
+    #[test]
+    fn provenance_already_stored_is_cleaned_out_too() {
+        let mut stored: HashMap<String, serde_json::Value> = HashMap::new();
+        stored.insert("on".into(), json!(true));
+        stored.insert("correlation_id".into(), json!("92223c02"));
+
+        let incoming: HashMap<String, serde_json::Value> =
+            [("on".to_string(), json!(false))].into_iter().collect();
+        apply_partial_merge_patch(&mut stored, &incoming.clone().into_iter().collect());
+        for key in ["_hc", "origin", "correlation_id"] {
+            stored.remove(key);
+        }
+
+        let mut names: Vec<&String> = stored.keys().collect();
+        names.sort();
+        assert_eq!(names, ["on"]);
     }
 
     /// The event exists so a client can decide whether to refetch. Two events

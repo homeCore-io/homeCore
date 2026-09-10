@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "hc-hue"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.71"
+version = "0.1.72"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
