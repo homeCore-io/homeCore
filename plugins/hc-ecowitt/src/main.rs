@@ -149,6 +149,11 @@ async fn try_start(
         .filter(|s| !s.is_empty());
     let gateway_ip: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(initial_cache));
+    // Set by `republish_devices`, read once by the registry on the gateway's
+    // next report. A flag rather than a direct call because the management
+    // handler is built before the shared state it would otherwise reach into.
+    let force_republish = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let force_for_mgmt = Arc::clone(&force_republish);
     let gateway_for_mgmt = std::sync::Arc::clone(&gateway_ip);
     let cache_path_for_handler = cache_path.clone();
     // Static manual_hosts list, captured once at startup. The
@@ -172,6 +177,13 @@ async fn try_start(
         .with_capabilities(capabilities_manifest(cfg.ecowitt.listen_port))
         .with_custom_handler(move |cmd| {
             let action = cmd["action"].as_str()?.to_string();
+            if action == "republish_devices" {
+                force_for_mgmt.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Some(serde_json::json!({
+                    "status": "ok",
+                    "note": "Every device is described again on the gateway's next report.",
+                }));
+            }
             let cmd_owned = cmd.clone();
             let gateway = std::sync::Arc::clone(&gateway_for_mgmt);
             let manual = manual_hosts.clone();
@@ -252,7 +264,8 @@ async fn try_start(
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // --- Create shared state with dynamic device registry ---
-    let registry = DeviceRegistry::new(publisher, cfg.homecore.plugin_id.clone(), config_path);
+    let mut registry = DeviceRegistry::new(publisher, cfg.homecore.plugin_id.clone(), config_path);
+    registry.with_force_republish(Arc::clone(&force_republish));
 
     // Parse allowed_source_ips into a typed set. Bad entries are
     // logged and dropped — a typo shouldn't take the plugin down, but
@@ -470,6 +483,29 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // 3s UDP broadcast, then an HTTP probe per manual_host
                 // (8s client timeout each, now concurrent).
                 timeout_ms: Some(30_000),
+            },
+            Action {
+                id: "republish_devices".into(),
+                label: "Republish devices".into(),
+                description: Some(
+                    "Describe every sensor to homeCore again on the next \
+                     report from the gateway. Use when a device has lost its \
+                     readings or controls: schemas are published only when a \
+                     sensor's reported set changes, so one dropped by homeCore \
+                     would otherwise stay missing."
+                        .into(),
+                ),
+                params: None,
+                result: Some(json!({ "note": { "type": "string" } })),
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::User,
+                // Sets a flag and returns; it makes no request to the
+                // gateway. The window is core's, not this action's.
+                timeout_ms: Some(10_000),
             },
             Action {
                 id: "refresh_sensors".into(),

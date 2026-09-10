@@ -198,10 +198,47 @@ impl Bridge {
                 // Leptos admin UI via the `rescan_devices` management cmd).
                 _ = rescan.notified() => {
                     info!("Manual rescan requested");
-                    self.sync_inventory().await;
+                    // A person asked, so say everything again — see
+                    // `sync_inventory`. The action's own description has
+                    // always promised "republish registration for each"; only
+                    // newly discovered devices actually got one.
+                    self.sync_inventory_republishing().await;
                 }
             }
         }
+    }
+
+    /// Sync, and re-assert every known device's registration and schema on
+    /// the way through.
+    ///
+    /// **What *Rescan devices* is for.** Publication is gated on first
+    /// sighting, so a rescan of a house whose devices are all known
+    /// republished nothing — and core can lose a schema while this plugin
+    /// still believes it published one: an unregister deletes the device
+    /// *and* its schema, and a restore from an older backup predates it. Only
+    /// restarting the plugin helped.
+    ///
+    /// Everything published here is an upsert against a retained topic, so
+    /// running it when nothing is wrong changes nothing.
+    async fn sync_inventory_republishing(&mut self) {
+        self.sync_inventory().await;
+
+        let known: Vec<(String, crate::devices::DeviceKind)> = self
+            .devices
+            .iter()
+            .filter(|d| !d.retired && d.kind.is_supported())
+            .map(|d| (d.hc_id.clone(), d.kind.clone()))
+            .collect();
+
+        let mut republished = 0usize;
+        for (hc_id, kind) in known {
+            if let Err(e) = crate::schema::publish(&self.publisher, &hc_id, &kind).await {
+                warn!(hc_id = %hc_id, error = %e, "Rescan: republish schema failed");
+                continue;
+            }
+            republished += 1;
+        }
+        info!(republished, "Rescan: republished device schemas");
     }
 
     async fn sync_inventory(&mut self) {

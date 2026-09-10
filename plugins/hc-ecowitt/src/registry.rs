@@ -19,6 +19,8 @@ pub struct DeviceRegistry {
     /// retained topic several times a minute for no change, so it is published
     /// only when the set of names differs from last time.
     published_attrs: std::collections::HashMap<String, Vec<String>>,
+    /// Set by the `republish_devices` action; read once on the next report.
+    force_republish: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     publisher: DevicePublisher,
     #[allow(dead_code)]
     plugin_id: String,
@@ -35,14 +37,47 @@ impl DeviceRegistry {
         Self {
             registered: HashSet::new(),
             published_attrs: std::collections::HashMap::new(),
+            force_republish: None,
             publisher,
             plugin_id,
             cache_path,
         }
     }
 
+    /// Wire the flag `republish_devices` sets.
+    pub fn with_force_republish(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.force_republish = Some(flag);
+    }
+
+    /// Forget what has been described, so the next report describes it again.
+    ///
+    /// **What `republish_devices` sets.** Schema publication is gated on the
+    /// reported attribute set having changed, which is right for a station
+    /// posting every minute and wrong when core has lost a schema — an
+    /// unregister deletes the device *and* its schema, a restore from an older
+    /// backup predates it — because the set has not changed and nothing
+    /// republishes. Only restarting the plugin helped.
+    ///
+    /// Takes effect on the gateway's next report rather than immediately:
+    /// this plugin is a receiver, and there is nothing to describe until the
+    /// hardware says something.
+    pub fn forget_published_schemas(&mut self) {
+        self.published_attrs.clear();
+    }
+
     /// Process a batch of device updates: register new devices, publish state for all.
     pub async fn process_updates(&mut self, updates: Vec<DeviceUpdate>) {
+        // A person asked for everything to be described again, and this is the
+        // first report since. Exactly once: the flag clears as it is read.
+        if self
+            .force_republish
+            .as_ref()
+            .is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed))
+        {
+            info!("Republish requested — describing every device again");
+            self.forget_published_schemas();
+        }
+
         for update in &updates {
             if !self.registered.contains(&update.device_id) {
                 self.register_device(update).await;

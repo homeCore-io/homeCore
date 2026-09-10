@@ -6748,9 +6748,23 @@ pruning still works because it runs on what the pass just saw. The periodic
 loop is untouched: republishing on every tick would be churn, and an event per
 device per tick now that `device_schema_changed` exists.
 
-The other three want the same shape — an operator-initiated pass that forgets
-what it published — rather than unconditional republication, for the same
-reason.
+**All four are done now**, each in the shape its plugin allows:
+
+| Plugin | How |
+| --- | --- |
+| hc-hue | `forget_publications()` on a `force_republish` refresh — both manifest actions set it |
+| hc-yolink | *Rescan devices* runs `sync_inventory_republishing`, which re-asserts every known device's schema. Its description had always promised this |
+| hc-sonos | Rediscovering a known speaker republishes its schema, not only the handle. Sonos's schema is static, so a healthy rediscovery costs one publish |
+| hc-wled | New `republish_devices` action — schemas were published once, in the startup loop, and no existing action touched devices |
+| hc-ecowitt | New `republish_devices` action sets a flag the registry reads once on the gateway's next report. It is a receiver, so there is nothing to describe until the hardware says something |
+
+None of them republishes on the periodic path. Everything published is an
+upsert against a retained topic, so running any of these when nothing is wrong
+costs a publish per device and changes nothing.
+
+If a fifth plugin needs this, the shape is worth promoting to the SDK's
+management protocol — a standard "republish declarations" command every plugin
+answers — rather than a sixth bespoke action.
 
 ### Every plugin's device_type, audited 2026-09-09
 
