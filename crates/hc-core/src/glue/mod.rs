@@ -383,6 +383,9 @@ pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
 /// Cheap enough to call on any path that writes a device: a device that has
 /// its schema costs one read, and a device whose type we do not model costs
 /// nothing at all.
+/// No `device_schema_changed` event: this runs at device *creation*, which a
+/// client learns about by the device appearing. The event exists for a device
+/// that already exists changing its declaration, which is the plugin path.
 pub async fn ensure_device_schema(store: &StateStore, dev: &DeviceState) {
     if matches!(store.get_device_schema(&dev.device_id).await, Ok(Some(_))) {
         return;

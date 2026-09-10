@@ -146,6 +146,35 @@ operator can clear zombies with `DELETE /api/v1/plugins/{id}/devices`.
 Try it: run the template, remove a `[[template.devices]]` entry, restart, and
 the device disappears from homeCore.
 
+## Declaring what a device is
+
+Registering a device tells homeCore it exists. The **schema** tells every
+client what it can show and what it can change — `device_schema()` in
+`main.rs`, published beside the registration.
+
+Skip it and the device still works: state flows, commands arrive. What a
+person gets is a row of raw JSON with no controls, because a client will not
+offer a control the plugin has not promised. 77 of the 184 devices in the
+reference house were in exactly that state, and every one of them was a plugin
+that registered and stopped.
+
+Declare what you publish, under the name you publish it. The four rules the
+template's own schema demonstrates, each of them a real bug in a shipped
+plugin:
+
+| Rule | What goes wrong without it |
+|---|---|
+| Every boolean names both `states` | A trigger for "turns off" is synthesised as "on, but Not" |
+| A `unit` must be true | `%` on a 0-5 level renders a healthy sensor as "2%" |
+| Housekeeping carries `category: diagnostic` | A lock's battery ranks beside whether it is locked |
+| The command handler and the schema agree on every name | Reading a value and writing it back is silently ignored |
+
+There is more than the template shows — **actions** for things a device *does*
+that are not attribute writes, `primary` for which reading leads, `options`
+with labels for enums. The [plugin development
+guide](https://homecore.io/docs/plugins/developing-plugins#declaring-a-device)
+covers all of it, and ends with a checklist worth running before you release.
+
 ## The state contract
 
 homeCore never writes device state. A command arrives on

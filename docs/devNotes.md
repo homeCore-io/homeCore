@@ -3803,6 +3803,7 @@ carries no actionable information for API consumers.  Request it explicitly with
 | `plugin_registered` | A plugin registered with the broker | `plugin_id` |
 | `plugin_offline` | A plugin stopped responding | `plugin_id` |
 | `device_name_changed` | Device display name was updated | `device_id`, `previous_name`, `current_name` |
+| `device_schema_changed` | Device's *declaration* changed — what it says it reports and accepts, not what it is reporting | `device_id`, `attributes`, `actions` |
 | `custom` | A rule fired a `FireEvent` action | `event_type`, `payload` |
 | `system_alert` | System-level warning or error | `severity` (info/warning/error/critical), `message` |
 
@@ -4156,7 +4157,8 @@ Counters accumulate since process start and reset on restart.
 
 `device_state_changed`, `device_availability_changed`, `rule_fired`,
 `scene_activated`, `plugin_registered`, `plugin_offline`,
-`device_name_changed`, `mqtt_message`, `custom`, `system_alert`
+`device_name_changed`, `device_schema_changed`, `mqtt_message`, `custom`,
+`system_alert`
 
 ### Prometheus scrape config
 
@@ -6651,6 +6653,95 @@ are logged as warnings and retried on the next tick.
 **Startup sync:** `try_start()` calls `get_device_list()` and re-registers ALL
 devices with current YoLink API names. A plugin restart immediately syncs all
 names — no need to wait for the next poll tick.
+
+---
+
+## A schema changing is an event now
+
+`device_schema_changed` fires when a device's *declaration* changes — the
+attribute names and action ids it now carries, not its values. Carrying the
+names rather than the whole schema lets a client decide whether it cares
+before refetching `GET /devices/{id}/schema`.
+
+**Why it had to exist.** Schemas stopped being static the moment plugins
+started publishing real ones: a Lutron phantom scene upgrades its own a second
+after the bridge connects, once the LED query answers; hc-ecowitt republishes
+when a sensor's attribute set changes; hc-hue when an auxiliary device gains a
+facet; hc-zwave on rescan. A client that renders controls from the schema —
+which is the point of publishing one, and the direction facets are heading —
+otherwise shows a scene with no status until somebody reloads the page.
+
+Emitted from both paths that write the schema slot in `state_bridge`: the
+`homecore/devices/{id}/schema` topic, and the built-in resolved from a
+`device_type` when a type registry is loaded.
+
+**Not emitted for core-owned devices** — glue devices and modes write their
+schemas at creation through `glue::upsert_device_with_schema`, which has no
+bus, and a device that has just been created is one a client learns about by
+the device appearing rather than by its declaration changing. Threading a bus
+through three crates to cover that case was not worth it; the boundary is
+deliberate.
+
+---
+
+## Writing a plugin: where the contract is written down
+
+The device schema — what makes a device renderable rather than a row of raw
+JSON — is documented in three places, and they are meant to be read in this
+order:
+
+1. **`plugins/hc-plugin-template`** — the skeleton, which now declares a
+   schema for its demo light with the reasoning in comments. It is what gets
+   copied, so it is the highest-leverage place for a convention to live.
+2. **[Declaring a device](https://homecore.io/docs/plugins/developing-plugins#declaring-a-device)**
+   — the guide: attributes and their fields, both names of a boolean,
+   `category`, `primary`, actions, and the three publishing rules (partials
+   when something else merges onto the device, never publish a self-changing
+   value, read and write the same name).
+3. **[Before you release a plugin](https://homecore.io/docs/plugins/developing-plugins#before-you-release-a-plugin)**
+   — the checklist. Every line is traceable to a defect in a shipped plugin.
+
+`hc_types::schema` carries the *why* on every field and is worth reading
+directly, but it is rustdoc on a core type: invisible from the guide and
+invisible to Python, Node and .NET authors, all three of whose SDKs can
+publish a device schema.
+
+**One interaction worth knowing:** `DeviceTypeRegistry` exists for the
+*topic-mapper* — so a Tasmota or Shelly device with no plugin behind it can
+reference a type by name instead of hand-writing JSON Schema
+(`config/profiles/examples/device-types.toml`, opt-in by copying it to
+`config/profiles/device-types.toml`). But the resolution runs on **every**
+registration carrying a `device_type`, plugins included, and writes the same
+slot as the plugin's own schema — last write wins (`state_bridge.rs`, the
+`device_types` branch). So publish yours after registering, and know that a
+plugin re-registering periodically against a core with that file installed
+overwrites its own schema each time unless it republishes alongside. No house
+in this workspace has the file, so the path is dormant here rather than proven.
+
+### Device types are normalised, not settled
+
+Worth knowing before treating `device_type` as a closed set, because it is not
+one:
+
+- **Normalisation** lives in `hc_topic_map::canonical_device_type_name` — five
+  alias mappings (`vswitch` → `virtual_switch`, `motion` → `motion_sensor`,
+  `shade` → `cover`, …), applied at registration and in hc-api. Everything else
+  passes through unchanged.
+- **hc-types enumerates nothing.** `readings_for_type` keys off type names to
+  rank a device's readings, and an unknown type falls through to `&[]`. Nothing
+  anywhere rejects a type name.
+- The **catalog** in `device-types.toml` is the closest thing to a definition,
+  and it is an opt-in config file aimed at ecosystem profiles.
+
+The live house reports **22 distinct values** across 184 devices, against the
+10 the public docs list. `zwave` (9 devices) is a protocol rather than a type —
+which is exactly why `READING_RANK` has to exist. `lightning_sensor`,
+`rain_sensor`, `weather_station` and `vibration_sensor` are real but unknown to
+every table. `vcrx` is a Lutron product name. `keypad` and `pico_remote` are
+two names for a button device. Two devices report no type at all.
+
+[[project_device_type_canonical]] identified a canonical taxonomy as the
+long-term fix; it has not been built.
 
 ---
 

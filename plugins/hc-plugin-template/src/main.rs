@@ -33,6 +33,9 @@ mod config;
 
 use anyhow::Result;
 use plugin_sdk_rs::mqtt_log_layer::{MqttLogHandle, MqttLogLayer};
+use plugin_sdk_rs::types::schema::{
+    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+};
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::{json, Value};
@@ -211,9 +214,21 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
     // it. A real plugin would read it back from the device instead.
     let state: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    let schema = device_schema();
+
     for device in &cfg.template.devices {
         publisher
             .register_device_full(&device.id, &device.name, Some("light"), None, None)
+            .await?;
+
+        // **Say what the device is, not just that it exists.** Registration
+        // puts a name in homeCore; the schema is what lets a client render
+        // controls for hardware it has never heard of. A device without one
+        // shows up as a row of raw JSON — 77 of the 184 devices in the
+        // reference house were in that state, and every one of them was a
+        // plugin that stopped at the line above.
+        publisher
+            .register_device_schema(&device.id, &schema)
             .await?;
 
         // Registration and command subscription are SEPARATE, and forgetting
@@ -307,6 +322,69 @@ async fn apply(
 
 /// The action manifest. Every entry becomes a button on the plugin's page in
 /// the web UI, and is callable from hc-mcp — with no UI code at either end.
+/// **What this device reports and accepts, declared once.**
+///
+/// A client will not offer a control the plugin has not promised, so an
+/// undeclared attribute is a value a person can read and not change. Declare
+/// exactly what you publish, under the name you publish it — an attribute that
+/// is readable as `brightness` and writable as `level` is a control that
+/// silently does nothing, which is worse than no control at all.
+///
+/// Four rules this covers, each a real bug in a shipped plugin:
+///
+/// 1. **Every boolean names both of its states.** A boolean is two events, not
+///    one: without `states`, a client offering "when the light turns off" has
+///    to synthesise it as "on, but Not".
+/// 2. **A unit must be true.** `%` on a value that is really a 0-5 level tells
+///    a client to render "2%" for a healthy sensor.
+/// 3. **Housekeeping says so.** Battery, signal and firmware are not what a
+///    device is *for*; `category: diagnostic` keeps them off the headline.
+///    `AttributeCategory::for_name` already knows the common names — ask it
+///    rather than repeating the list.
+/// 4. **Write what you publish.** The command handler and the schema must
+///    agree on every name.
+///
+/// The plugin development guide covers the rest: actions (things a device
+/// *does* that are not attribute writes), `primary` (which reading leads), and
+/// the checklist to run before releasing.
+fn device_schema() -> DeviceSchema {
+    let mut attributes = HashMap::new();
+
+    attributes.insert(
+        "on".to_string(),
+        AttributeSchema {
+            kind: AttributeKind::Bool,
+            writable: true,
+            display_name: Some("Power".to_string()),
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            }),
+            ..Default::default()
+        },
+    );
+
+    attributes.insert(
+        "brightness".to_string(),
+        AttributeSchema {
+            kind: AttributeKind::Integer,
+            writable: true,
+            display_name: Some("Brightness".to_string()),
+            // The range `apply` actually clamps to. A slider drawn from a
+            // wrong range is a control that lies at one end.
+            min: Some(0.0),
+            max: Some(255.0),
+            step: Some(1.0),
+            ..Default::default()
+        },
+    );
+
+    DeviceSchema {
+        attributes,
+        ..Default::default()
+    }
+}
+
 fn capabilities() -> plugin_sdk_rs::types::Capabilities {
     use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
     Capabilities {
