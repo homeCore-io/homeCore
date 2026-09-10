@@ -28,6 +28,16 @@ const HUE_DEVICE_ID_PREFIX: &str = "hue_";
 /// to the operator while the refresh is in flight.
 pub struct RefreshRequest {
     pub progress: Option<mpsc::Sender<RefreshEvent>>,
+    /// Republish every device's registration and schema, not only the ones
+    /// this process has not seen before.
+    ///
+    /// True when a person asked. *Refresh devices* is what somebody presses
+    /// when a device looks wrong, and until this existed it could not restore
+    /// a schema core had lost — only restarting the plugin could, because that
+    /// is what emptied the in-memory registry. False for the periodic loop,
+    /// where republishing everything on every tick would be pure churn and,
+    /// since `device_schema_changed` exists, an event per device per tick.
+    pub force_republish: bool,
 }
 
 /// Request sent by the management `unpair_bridge` action to forget one bridge:
@@ -348,6 +358,11 @@ impl Bridge {
                         Some(req) => {
                             info!("Manual refresh requested via manifest action");
                             let progress = req.progress;
+                            if req.force_republish {
+                                // A person asked, so say everything again —
+                                // see `forget_publications`.
+                                self.registry.forget_publications();
+                            }
                             let mut ok_count = 0usize;
                             let mut failed_count = 0usize;
                             let total = self.apis.len();
