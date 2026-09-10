@@ -45,6 +45,12 @@ fn boolean(a: AttributeSchema, on: (&str, &str), off: (&str, &str)) -> Attribute
     })
 }
 
+/// Not what the device is for: how it got here, or what somebody called it.
+fn diagnostic(mut a: AttributeSchema) -> AttributeSchema {
+    a.category = Some(hc_types::schema::AttributeCategory::Diagnostic);
+    a
+}
+
 fn on_off(a: AttributeSchema) -> AttributeSchema {
     boolean(a, ("on", "turns on"), ("off", "turns off"))
 }
@@ -82,6 +88,19 @@ pub fn schema_for(device_type: &str) -> Option<DeviceSchema> {
                     ("repeating", "starts repeating"),
                     ("one-shot", "stops repeating"),
                 ),
+            );
+            // Both published and neither declared until now: `started_at` by
+            // the timer manager when a countdown begins, `label` when one is
+            // started with a name. Diagnostic — the timer's reading is its
+            // state and what is left of it, not when it began or what the
+            // caller called it.
+            a.insert(
+                "started_at".into(),
+                diagnostic(ro(AttributeKind::String, "Started at")),
+            );
+            a.insert(
+                "label".into(),
+                diagnostic(ro(AttributeKind::String, "Label")),
             );
         }
 
