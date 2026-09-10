@@ -6703,6 +6703,29 @@ an auxiliary device's is. **The hand-written entries win**: writability and
 ranges cannot be inferred from a value. Lights and scenes go through it now, so
 it stays correct as Hue adds fields.
 
+### The last two: Lutron and Sonos
+
+Same cause as Hue's, closed the same way but by hand, because for both the
+right answer was a considered contract rather than describing whatever turned
+up:
+
+- **hc-lutron** — a dimmer's raw `brightness` (the 0-255 twin of
+  `brightness_pct`, diagnostic: same fact, protocol units); a keypad's
+  `last_button` / `last_button_name`, which is the news a Pico has; `led_N`
+  per button that has one, diagnostic.
+- **hc-lutron scenes** — a scene with no LED publishes an optimistic `on`
+  that nothing confirms. It was deliberately undeclared, which left a value on
+  the device nothing could label. It is declared `diagnostic` now, named
+  "Last activation (unconfirmed)": present, and plainly not the answer. A
+  scene that really reports still declares `on` as a reading.
+- **hc-sonos** — the generic media keys (`title`, `artist`, `album`,
+  `position_secs`, `duration_secs`) as readings, per
+  [[project_media_player_contract]]; their `media_*` twins as diagnostic,
+  because two rows for one fact is one too many and the generic name is the
+  one to lead with; and the catalogues (`available_*_items`, `group_members`,
+  `supported_actions`, `ui_enrichments`, `sonos`) as diagnostic, since a
+  favourites list is not what a speaker is for.
+
 ### Provenance stored as if the device had reported it
 
 The other kind. `_hc.change` is the modern envelope and core strips it;
