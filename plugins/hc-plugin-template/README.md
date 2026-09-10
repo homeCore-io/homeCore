@@ -175,6 +175,21 @@ with labels for enums. The [plugin development
 guide](https://homecore.io/docs/plugins/developing-plugins#declaring-a-device)
 covers all of it, and ends with a checklist worth running before you release.
 
+## The build checks the rules
+
+`main.rs` ends with two tests calling `plugin_sdk_rs::conformance`. **Keep
+them.** They hold twelve rules that have each been a real bug in a shipped
+plugin — a boolean naming one of its two states, a battery ranked beside the
+reading it sits next to, a declared control the command path ignores, an
+action nobody can phrase, an action inheriting core's 5-second timeout by
+accident.
+
+They used to be a checklist, which is a thing an author skips without
+noticing. Now `cargo test` fails.
+
+The one list you maintain by hand is the routed action ids, because that is
+the only thing the SDK cannot see — it lives inside your `match`.
+
 ## The state contract
 
 homeCore never writes device state. A command arrives on
