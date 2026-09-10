@@ -6726,6 +6726,21 @@ up:
   `supported_actions`, `ui_enrichments`, `sonos`) as diagnostic, since a
   favourites list is not what a speaker is for.
 
+### The last seven
+
+Once the bigger offenders were declared, two small ones were left standing:
+
+- **core.glue timers** — `started_at` (written when a countdown begins) and
+  `label` (when one is started with a name). Both diagnostic: a timer's
+  reading is its state and what is left of it, not when it began.
+- **hc-roku** — the eleven identity fields `insert_device_info` promotes out
+  of the nested blob so a rule can ask "is this a TV?" without digging.
+  Declared diagnostic, plus the running channel's `app_id`/`app_type`/
+  `app_version`, `player_state` and `screensaver_name` as readings.
+
+**Every device in the reference house now declares exactly what it
+publishes.**
+
 ### Provenance stored as if the device had reported it
 
 The other kind. `_hc.change` is the modern envelope and core strips it;

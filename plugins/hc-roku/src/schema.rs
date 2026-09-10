@@ -122,6 +122,7 @@ pub fn device_schema() -> DeviceSchema {
     // readings that happen to start with "is".
     for (name, display, on, off) in [
         ("is_tv", "Is a TV", "a TV", "not a TV"),
+        ("is_tv_input", "Is a TV input", "an input", "not an input"),
         ("is_stick", "Is a stick", "a stick", "not a stick"),
         (
             "supports_find_remote",
@@ -170,6 +171,49 @@ pub fn device_schema() -> DeviceSchema {
                 category: Some(AttributeCategory::Diagnostic),
                 ..attr(AttributeKind::Bool, false, display, None)
             },
+        );
+    }
+
+    // **What the box is, promoted out of `device_info` and declared nowhere.**
+    // `insert_device_info` lifts these so a rule can ask "is this a TV?"
+    // without digging through the nested blob — and then the schema stopped
+    // at the controls, so a client had eleven strings it could show and not
+    // name. All identity, none of it a reading.
+    for (name, display) in [
+        ("friendly_name", "Name on the device"),
+        ("model_name", "Model"),
+        ("model_number", "Model number"),
+        ("serial_number", "Serial number"),
+        ("software_version", "Firmware"),
+        ("network_type", "Network"),
+        ("device_info", "Device info"),
+    ] {
+        let kind = if name == "device_info" {
+            AttributeKind::Json
+        } else {
+            AttributeKind::String
+        };
+        a.insert(
+            name.into(),
+            AttributeSchema {
+                category: Some(AttributeCategory::Diagnostic),
+                ..attr(kind, false, display, None)
+            },
+        );
+    }
+
+    // What is on screen, beside the app it belongs to. `app_id` is the id the
+    // `launch_app` action takes; the rest describe the running channel.
+    for (name, display) in [
+        ("app_id", "Channel id"),
+        ("app_type", "Channel type"),
+        ("app_version", "Channel version"),
+        ("player_state", "Player state"),
+        ("screensaver_name", "Screensaver"),
+    ] {
+        a.insert(
+            name.into(),
+            attr(AttributeKind::String, false, display, None),
         );
     }
 
