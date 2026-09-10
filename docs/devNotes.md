@@ -6718,6 +6718,54 @@ plugin re-registering periodically against a core with that file installed
 overwrites its own schema each time unless it republishes alongside. No house
 in this workspace has the file, so the path is dormant here rather than proven.
 
+### Every plugin's device_type, audited 2026-09-09
+
+Read off the live house, 184 devices:
+
+| Plugin | Types published | Verdict |
+| --- | --- | --- |
+| plugin.zwave | ~~`zwave`×9~~ | **Was the protocol, not the device.** Fixed — see below |
+| core.mode | ~~none×2~~ | **Registered with no type at all.** Now `mode` |
+| plugin.lutron | `light`, `switch`, `fan`, `scene`, `occupancy_sensor`, `keypad`, `pico_remote`, `vcrx` | `vcrx` is a product name; it is a keypad with contact inputs. Left alone — renaming it moves devices in every client that filters by type, and that is John's call |
+| plugin.ecowitt | `temperature_sensor`, `weather_station`, `rain_sensor`, `lightning_sensor`, `gateway` | Descriptive and honest, but three of them are known to no table — they rank alphabetically |
+| plugin.caseta | `switch`, `scene`, `pico_remote` | Correct |
+| plugin.hue | `light`, `scene`, `motion_sensor`, `bridge` | Correct |
+| plugin.yolink | `contact_sensor`, `lock`, `switch`, `temperature_sensor`, `water_sensor`, `vibration_sensor` | Correct |
+| plugin.roku, plugin.sonos | `media_player` | Correct |
+| plugin.wled | `light` | Correct (it had none until 0.1.13) |
+| core.glue | `timer`, `switch` | Correct |
+
+### hc-zwave publishes what the node is, not what the protocol is
+
+Every Z-Wave node registered as `device_type: "zwave"`. A lock, four outlets,
+a door sensor and a motion sensor arrived indistinguishable, and it is why
+`READING_RANK` had to exist at all.
+
+zwave-js has been sending the answer on every node: `deviceClass.generic` and
+`.specific`, filled in once the interview completes. `device_type_for` reads
+it, and where the class is not decisive, reads what the node reports instead:
+
+```
+node 23  Entry Control / Secure Keypad Door Lock  → lock
+node 38  Binary Switch / Binary Power Switch      → switch
+node 45  Notification Sensor / Notification Sensor + contact_open → contact_sensor
+node 46  Notification Sensor / Notification Sensor + motion       → motion_sensor
+node  1  Static Controller / PC Controller        → gateway
+```
+
+**Both of those sensors have identical class labels** on the reference
+network. Only what they publish separates them — the same principle
+presentation is moving to generally: the declaration is richer than the label.
+
+An uninterviewed node has no class, and `device_type_for` returns `None`
+rather than guessing. Omitting the field leaves what core already stored
+alone, so the registration after the interview fills it in with no special
+path. The rename handler stops re-asserting a type for the same reason — it
+knows the new name and nothing else, and re-asserting `"zwave"` there is what
+used to undo the real type after every rename.
+
+---
+
 ### Device types are normalised, not settled
 
 Worth knowing before treating `device_type` as a closed set, because it is not

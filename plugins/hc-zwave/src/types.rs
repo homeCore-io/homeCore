@@ -135,9 +135,41 @@ pub struct NodeState {
     pub label: Option<String>,
     #[serde(rename = "firmwareVersion", default)]
     pub firmware_version: Option<String>,
+    /// What Z-Wave says the node *is*, from its interview.
+    ///
+    /// `generic` and `specific` are the device class pair every node carries —
+    /// "Binary Switch"/"Binary Power Switch", "Entry Control"/"Secure Keypad
+    /// Door Lock". Absent until the interview completes, like the fields above.
+    #[serde(rename = "deviceClass", default)]
+    pub device_class: Option<DeviceClass>,
     /// Values may be absent on freshly-included nodes or those still interviewing.
     #[serde(default)]
     pub values: Vec<NodeValue>,
+}
+
+/// The Z-Wave device class pair, as zwave-js reports it.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeviceClass {
+    #[serde(default)]
+    pub generic: Option<DeviceClassEntry>,
+    #[serde(default)]
+    pub specific: Option<DeviceClassEntry>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeviceClassEntry {
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl DeviceClass {
+    pub fn generic_label(&self) -> Option<&str> {
+        self.generic.as_ref()?.label.as_deref()
+    }
+
+    pub fn specific_label(&self) -> Option<&str> {
+        self.specific.as_ref()?.label.as_deref()
+    }
 }
 
 /// One value entry from a node's value list.

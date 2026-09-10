@@ -38,6 +38,79 @@ fn node_device_id(node_id: u32) -> String {
 }
 
 /// Build a full state map from a NodeState, translating each value via the alias table.
+/// What kind of thing this node is, in homeCore's words.
+///
+/// **Every Z-Wave node used to register as `device_type: "zwave"`**, which is
+/// the protocol rather than the device — a lock, four outlets, a door sensor
+/// and a motion sensor all arrived indistinguishable, and every client that
+/// filters or ranks by type had nothing to work with. It is also why the
+/// reading-rank fallback in core had to exist.
+///
+/// zwave-js has known the answer all along and sends it on every node:
+/// `deviceClass.generic` / `.specific`, filled in once the interview
+/// completes.
+///
+/// **Where the class is decisive, it decides.** Where it is not, what the node
+/// *reports* does — "Notification Sensor" is the generic and the specific class
+/// of both a door sensor and a motion sensor on this network, and the only
+/// thing telling them apart is that one publishes `contact_open` and the other
+/// publishes `motion`. That is the same principle homeCore is moving to for
+/// presentation generally: the declaration is richer than the label.
+///
+/// `None` means "say nothing" rather than "unknown": an uninterviewed node has
+/// no class yet, and a registration that omits `device_type` leaves whatever
+/// core already stored alone — so a second registration after the interview
+/// fills it in without a special path.
+fn device_type_for(node: &NodeState, state: &Value) -> Option<&'static str> {
+    let has = |name: &str| state.get(name).is_some();
+
+    // What the node reports, where that is the more specific answer.
+    let by_reading = || -> Option<&'static str> {
+        if has("motion") {
+            Some("motion_sensor")
+        } else if has("contact_open") || has("door_open") {
+            Some("contact_sensor")
+        } else if has("water_detected") || has("leak") {
+            Some("water_sensor")
+        } else if has("smoke") {
+            Some("smoke_sensor")
+        } else if has("locked") {
+            Some("lock")
+        } else if has("temperature") {
+            Some("temperature_sensor")
+        } else {
+            None
+        }
+    };
+
+    let class = node.device_class.as_ref();
+    let generic = class.and_then(|c| c.generic_label()).unwrap_or_default();
+    let specific = class.and_then(|c| c.specific_label()).unwrap_or_default();
+
+    match generic {
+        "Binary Switch" => Some("switch"),
+        "Multilevel Switch" => match specific {
+            // The one place the specific class earns its keep on a dimmer's
+            // generic class: a motorised window covering is not a light.
+            s if s.contains("Motor Control") || s.contains("Class B") || s.contains("Class C") => {
+                Some("cover")
+            }
+            _ => Some("light"),
+        },
+        "Entry Control" => Some("lock"),
+        "Thermostat" => Some("thermostat"),
+        "Binary Sensor" | "Notification Sensor" | "Multilevel Sensor" | "Alarm Sensor" => {
+            // Ambiguous by design — a door sensor and a motion sensor share
+            // both class labels. What it publishes is the answer.
+            by_reading().or(Some("sensor"))
+        }
+        // The controller is not a device anybody operates.
+        "Static Controller" => Some("gateway"),
+        // An unknown or absent class still yields to what the node reports.
+        _ => by_reading(),
+    }
+}
+
 fn build_state(node: &NodeState, translator: &Translator) -> Value {
     let mut map = serde_json::Map::new();
 
@@ -119,11 +192,13 @@ async fn publish_node(
         hardware = hardware.sw_version(v);
     }
 
+    let state = build_state(node, translator);
+
     publisher
         .register_device_detailed(
             &device_id,
             &display_name,
-            Some("zwave"),
+            device_type_for(node, &state),
             area,
             None,
             Some(&hardware),
@@ -154,7 +229,6 @@ async fn publish_node(
         info!(node_id = node.node_id, values = ?cc98_values, "Door Lock CC 98 value IDs on this node");
     }
 
-    let state = build_state(node, translator);
     // Retained, so a client connecting later knows what this node's attributes
     // mean and which of them can actually be written.
     if let Some(schema) = crate::schema::schema_json(&state, translator) {
@@ -938,8 +1012,12 @@ async fn handle_event(
         "node name updated" => {
             if let Some(name) = ev.name {
                 let display_name = if name.is_empty() { &device_id } else { &name };
+                // A rename knows the new name and nothing else about the node.
+                // Omitting `device_type` leaves what core already stored alone,
+                // which is right — re-asserting "zwave" here is what used to
+                // undo the real type after every rename.
                 publisher
-                    .register_device_full(&device_id, display_name, Some("zwave"), None, None)
+                    .register_device_full(&device_id, display_name, None, None, None)
                     .await?;
                 let patch = json!({ "name": name });
                 publisher.publish_state_partial(&device_id, &patch).await?;
@@ -1086,11 +1164,80 @@ async fn handle_cmd(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use serde_json::json;
 
     fn node(j: serde_json::Value) -> NodeState {
         serde_json::from_value(j).expect("test fixture must parse")
+    }
+
+    /// A node as zwave-js really sends it, trimmed to what matters here.
+    fn classed(generic: &str, specific: &str) -> NodeState {
+        node(json!({
+            "nodeId": 1,
+            "deviceClass": {
+                "generic":  { "key": 0, "label": generic },
+                "specific": { "key": 0, "label": specific },
+            },
+        }))
+    }
+
+    /// **Every node used to register as `zwave`** — the protocol, not the
+    /// device. A lock, four outlets, a door sensor and a motion sensor all
+    /// arrived indistinguishable, while zwave-js had been sending the answer
+    /// on every one of them.
+    #[test]
+    fn the_class_decides_where_it_is_decisive() {
+        assert_eq!(
+            device_type_for(&classed("Binary Switch", "Binary Power Switch"), &json!({})),
+            Some("switch")
+        );
+        assert_eq!(
+            device_type_for(
+                &classed("Entry Control", "Secure Keypad Door Lock"),
+                &json!({})
+            ),
+            Some("lock")
+        );
+        assert_eq!(
+            device_type_for(&classed("Static Controller", "PC Controller"), &json!({})),
+            Some("gateway")
+        );
+    }
+
+    /// **A door sensor and a motion sensor share both class labels** on the
+    /// reference network — both are "Notification Sensor"/"Notification
+    /// Sensor". Only what they publish tells them apart.
+    #[test]
+    fn what_the_node_reports_breaks_the_tie_the_class_cannot() {
+        let sensor = classed("Notification Sensor", "Notification Sensor");
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "contact_open": true })),
+            Some("contact_sensor")
+        );
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "motion": false, "tamper": false })),
+            Some("motion_sensor")
+        );
+        // Reporting neither is still a sensor, which is more than "zwave" said.
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "illuminance": 40 })),
+            Some("sensor")
+        );
+    }
+
+    /// An uninterviewed node has no class yet. Saying nothing leaves what core
+    /// already stored alone, so the registration after the interview fills it
+    /// in with no special path.
+    #[test]
+    fn a_node_that_has_not_been_interviewed_claims_nothing() {
+        let bare = node(json!({ "nodeId": 7 }));
+        assert_eq!(device_type_for(&bare, &json!({})), None);
+        assert_eq!(
+            device_type_for(&bare, &json!({ "locked": true })),
+            Some("lock")
+        );
     }
 
     fn val(cc: u32, ep: u32, prop: &str) -> serde_json::Value {
