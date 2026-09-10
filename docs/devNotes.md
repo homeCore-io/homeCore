@@ -6712,8 +6712,14 @@ then stored them as attributes. A WLED controller carried a `correlation_id`
 in its attribute map: homeCore's own concept, presented as something the strip
 had said.
 
-They are stripped now. `timestamp` only when `origin` is beside it: on its own
-it is a plausible reading and a device that publishes one means it.
+They are stripped now — from the inbound payload **and from what is already
+stored**. Stripping only the inbound half was not enough: a partial publish
+never removes a key, so a device that picked one up before the fix and
+publishes partials, as hc-wled does since 0.1.13, would have carried it
+forever. That is exactly what the first deploy showed.
+
+`timestamp` only goes when `origin` is beside it: on its own it is a plausible
+reading and a device that publishes one means it.
 
 ---
 

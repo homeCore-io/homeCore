@@ -270,8 +270,20 @@ async fn try_start(
         // The last device declaring nothing. Its own schema, because the aux
         // publisher deliberately skips anything that owns one — and a bridge
         // was in that set without having one.
+        // Including whatever `bridge_state` publishes beyond the declared
+        // half — its own id, its kind, its name.
+        let bridge_schema = match serde_json::from_value::<plugin_sdk_rs::types::DeviceSchema>(
+            translator::bridge_schema(),
+        ) {
+            Ok(parsed) => serde_json::to_value(crate::aux_schema::with_published(
+                parsed,
+                &translator::bridge_state(bridge, true, serde_json::json!({})),
+            ))
+            .unwrap_or_else(|_| translator::bridge_schema()),
+            Err(_) => translator::bridge_schema(),
+        };
         if let Err(e) = publisher
-            .register_device_schema_json(&bridge_device_id, &translator::bridge_schema())
+            .register_device_schema_json(&bridge_device_id, &bridge_schema)
             .await
         {
             warn!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge schema");
