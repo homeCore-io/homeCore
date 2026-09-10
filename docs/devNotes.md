@@ -6718,6 +6718,40 @@ plugin re-registering periodically against a core with that file installed
 overwrites its own schema each time unless it republishes alongside. No house
 in this workspace has the file, so the path is dormant here rather than proven.
 
+### Does the repair action repair the declaration? (audited 2026-09-10)
+
+An operator's *Refresh devices* / *Rescan* is what somebody presses when a
+device looks wrong. If schema publication is gated on first sighting, that
+button cannot restore a schema core has lost — and core can lose one: an
+unregister deletes the device **and** its schema (`state_bridge.rs`), a
+restore from an older backup predates it, and a typed registration can
+overwrite it. Only restarting the plugin helped, because that is what emptied
+the in-memory registry.
+
+| Plugin | Action | Republishes schemas? |
+| --- | --- | --- |
+| hc-hue | `refresh_devices`, `cleanup_stale_devices` | **Was no** — fixed, see below |
+| hc-roku | `discover_devices` | **Yes** — `register()` publishes unconditionally and rediscovery calls it |
+| hc-zwave | `rescan_nodes` | **Yes** — `publish_node` always publishes |
+| hc-lutron, hc-caseta | (none) | Effectively yes — `register_all_devices` runs on every LIP reconnect |
+| hc-sonos | `rediscover_speakers` | **No** — early-returns for a known speaker, refreshing the handle only |
+| hc-yolink | `rescan_devices` | **No** — `schema::publish` runs only in the "new device discovered" branch |
+| hc-wled | `discover_devices` | **No** — schemas are published once, in the startup registration loop |
+| hc-ecowitt | `refresh_sensors` | **Partly** — republishes whenever the reported attribute set changes, so it self-heals on the next reading, but the action does not force it |
+
+hc-hue's fix is `HueRegistry::forget_publications()`, called when a
+`RefreshRequest` carries `force_republish` — which both manifest actions set,
+because both are things a person pressed. Clearing the seen-sets makes the
+next pass re-register and republish everything exactly once; the bindings live
+in the same maps and are rebuilt by that pass before anything reads them, and
+pruning still works because it runs on what the pass just saw. The periodic
+loop is untouched: republishing on every tick would be churn, and an event per
+device per tick now that `device_schema_changed` exists.
+
+The other three want the same shape — an operator-initiated pass that forgets
+what it published — rather than unconditional republication, for the same
+reason.
+
 ### Every plugin's device_type, audited 2026-09-09
 
 Read off the live house, 184 devices:

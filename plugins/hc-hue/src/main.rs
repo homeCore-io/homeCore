@@ -460,6 +460,10 @@ async fn refresh_devices_streaming(
     if refresh_tx
         .send(RefreshRequest {
             progress: Some(progress_tx),
+            // Both manifest actions that reach here are things a person
+            // pressed, so both say everything again rather than only what
+            // this process has not seen before.
+            force_republish: true,
         })
         .await
         .is_err()

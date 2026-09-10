@@ -263,6 +263,29 @@ impl HueRegistry {
         true
     }
 
+    /// Forget what has already been published, without forgetting the
+    /// bindings that make commands work.
+    ///
+    /// **Publication is gated on first sighting** — `ensure_light` and friends
+    /// return false for a device already in the registry, so a refresh
+    /// re-reads the bridge and republishes nothing. That is right for the
+    /// periodic loop and wrong for the operator pressing *Refresh devices*,
+    /// which is the button somebody reaches for when a device looks wrong: a
+    /// schema lost from core (an unregister deletes it, and so does a restore
+    /// from an older backup) could only be restored by restarting the plugin.
+    ///
+    /// Clearing the *seen* sets makes the next pass re-register and republish
+    /// everything exactly once. The `rid`/`publish_device_id` bindings live in
+    /// the same maps, so they are rebuilt by that pass before anything reads
+    /// them, and pruning still works: it runs on what the pass just saw.
+    pub fn forget_publications(&mut self) {
+        self.lights_by_device_id.clear();
+        self.groups_by_device_id.clear();
+        self.scenes_by_device_id.clear();
+        self.aux_by_device_id.clear();
+        self.aux_schema_attrs.clear();
+    }
+
     pub fn is_primary_device_id(&self, device_id: &str) -> bool {
         self.lights_by_device_id.contains_key(device_id)
             || self.groups_by_device_id.contains_key(device_id)
@@ -456,6 +479,24 @@ mod tests {
             group_rid: None,
             group_name: None,
         }
+    }
+
+    /// **The button somebody presses when a device looks wrong.** Publication
+    /// is gated on first sighting, so a refresh republished nothing and a
+    /// schema core had lost could only be restored by restarting the plugin.
+    #[test]
+    fn forgetting_publications_makes_the_next_pass_say_everything_again() {
+        let mut registry = HueRegistry::default();
+        let s = scene("hue_scene_1", Some(true));
+        assert!(registry.ensure_scene(&s));
+        assert!(!registry.ensure_scene(&s), "already published");
+
+        registry.forget_publications();
+
+        assert!(
+            registry.ensure_scene(&s),
+            "after forgetting, the next pass republishes"
+        );
     }
 
     /// A freshly registered scene publishes its schema with its registration,
