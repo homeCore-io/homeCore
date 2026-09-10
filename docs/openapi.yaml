@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.73"
+  version: "0.1.74"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -8267,6 +8267,23 @@ components:
             for this field alone.
         available:
           type: boolean
+        attributes_changed_at:
+          type: object
+          additionalProperties:
+            type: string
+            format: date-time
+          description: |
+            When each attribute last held a **different** value, by attribute
+            name.
+
+            `last_change.changed_at` cannot answer this: it is provenance —
+            what caused an update and when homeCore saw it — so it advances on
+            every report whether or not anything moved. Use this for "clear for
+            40 minutes"; use `last_change` for "who turned that on".
+
+            Per attribute, because the question is always about one: a presence
+            reading is undone by the same sensor's battery ticking over. Absent
+            for a device that has not reported since this field existed.
         attributes:
           type: object
           additionalProperties: true

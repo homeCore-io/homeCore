@@ -495,6 +495,35 @@ impl StateBridge {
             device.canonical_name = Some(ensure_unique_canonical_name(&device, &devices));
         }
 
+        // Which attribute keys actually moved — added, updated, or removed.
+        let mut changed: Vec<String> = device
+            .attributes
+            .keys()
+            .filter(|k| previous.get(*k) != device.attributes.get(*k))
+            .cloned()
+            .collect();
+        for k in previous.keys() {
+            if !device.attributes.contains_key(k) && !changed.contains(k) {
+                changed.push(k.clone());
+            }
+        }
+
+        // When each attribute last held a different value — the question
+        // `last_change.changed_at` invites and cannot answer, because that is
+        // provenance and advances on every report. Recorded here, before the
+        // single write, so a report that changed nothing costs nothing extra;
+        // persisted, so a client that restarted does not report the whole
+        // house as having just changed.
+        if !changed.is_empty() {
+            let now = Utc::now();
+            for key in &changed {
+                device.attributes_changed_at.insert(key.clone(), now);
+            }
+            device
+                .attributes_changed_at
+                .retain(|k, _| device.attributes.contains_key(k));
+        }
+
         self.store.upsert_device(&device).await?;
 
         // Fire DeviceNameChanged if the name attribute caused a rename.
@@ -515,18 +544,6 @@ impl StateBridge {
 
         let current = device.attributes.clone();
         debug!(device_id, "Device state updated");
-
-        // Compute which attribute keys actually changed (added, updated, or removed).
-        let mut changed: Vec<String> = current
-            .keys()
-            .filter(|k| previous.get(*k) != current.get(*k))
-            .cloned()
-            .collect();
-        for k in previous.keys() {
-            if !current.contains_key(k) && !changed.contains(k) {
-                changed.push(k.clone());
-            }
-        }
 
         let history_entries: Vec<(String, Value)> = current
             .iter()
