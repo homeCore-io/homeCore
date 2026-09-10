@@ -65,6 +65,8 @@ fn readings_for_type(device_type: &str) -> &'static [&'static str] {
         "scene" => &["active", "on"],
         "timer" => &["state", "remaining_secs"],
         "counter" => &["count"],
+        // A mode is on or off, and reports what drove it.
+        "mode" => &["on"],
         "group" | "schedule" => &["active"],
         "threshold" => &["above"],
         _ => &[],

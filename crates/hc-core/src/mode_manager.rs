@@ -510,6 +510,13 @@ impl ModeManager {
             Ok(Some(d)) => d,
             _ => hc_types::device::DeviceState::new(&mode.id, &mode.name, MODE_PLUGIN_ID),
         };
+        // A mode is the only device family in the house that registered with
+        // no `device_type` at all, so every client filtering or ranking by
+        // type skipped it — the two devices reporting nothing in the reference
+        // house were both modes.
+        if dev.device_type.is_none() {
+            dev.device_type = Some("mode".to_string());
+        }
 
         let previous = dev.attributes.clone();
         dev.attributes.insert("on".into(), json!(on));
