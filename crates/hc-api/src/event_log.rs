@@ -144,6 +144,7 @@ pub fn event_device_id(event: &Event) -> Option<&str> {
         Event::DeviceStateChanged { device_id, .. }
         | Event::DeviceAvailabilityChanged { device_id, .. }
         | Event::DeviceNameChanged { device_id, .. }
+        | Event::DeviceSchemaChanged { device_id, .. }
         | Event::DeviceCommandSent { device_id, .. }
         | Event::DeviceBatteryLow { device_id, .. }
         | Event::DeviceBatteryRecovered { device_id, .. } => Some(device_id),
@@ -165,6 +166,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::PluginHeartbeat { .. } => "plugin_heartbeat",
         Event::PluginStatusChanged { .. } => "plugin_status_changed",
         Event::DeviceNameChanged { .. } => "device_name_changed",
+        Event::DeviceSchemaChanged { .. } => "device_schema_changed",
         Event::Custom { .. } => "custom",
         Event::SystemAlert { .. } => "system_alert",
         Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
@@ -180,6 +182,25 @@ pub fn event_type_name(event: &Event) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The name a client filters the event stream on. Renaming it silently
+    /// would leave every subscriber with a filter that matches nothing.
+    #[test]
+    fn a_schema_change_is_named_on_the_wire() {
+        let event = Event::DeviceSchemaChanged {
+            timestamp: chrono::Utc::now(),
+            device_id: "lutron_scene_deck_on".into(),
+            attributes: vec!["on".into(), "phantom_button".into()],
+            actions: vec!["activate".into()],
+        };
+        assert_eq!(super::event_type_name(&event), "device_schema_changed");
+        assert_eq!(super::event_device_id(&event), Some("lutron_scene_deck_on"));
+
+        // And the same name on the JSON a WebSocket subscriber parses.
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "device_schema_changed");
+        assert_eq!(wire["attributes"][1], "phantom_button");
+    }
     use super::*;
     use chrono::Utc;
     use hc_types::device::DeviceChange;

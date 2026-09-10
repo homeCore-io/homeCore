@@ -3803,6 +3803,7 @@ carries no actionable information for API consumers.  Request it explicitly with
 | `plugin_registered` | A plugin registered with the broker | `plugin_id` |
 | `plugin_offline` | A plugin stopped responding | `plugin_id` |
 | `device_name_changed` | Device display name was updated | `device_id`, `previous_name`, `current_name` |
+| `device_schema_changed` | Device's *declaration* changed — what it says it reports and accepts, not what it is reporting | `device_id`, `attributes`, `actions` |
 | `custom` | A rule fired a `FireEvent` action | `event_type`, `payload` |
 | `system_alert` | System-level warning or error | `severity` (info/warning/error/critical), `message` |
 
@@ -4156,7 +4157,8 @@ Counters accumulate since process start and reset on restart.
 
 `device_state_changed`, `device_availability_changed`, `rule_fired`,
 `scene_activated`, `plugin_registered`, `plugin_offline`,
-`device_name_changed`, `mqtt_message`, `custom`, `system_alert`
+`device_name_changed`, `device_schema_changed`, `mqtt_message`, `custom`,
+`system_alert`
 
 ### Prometheus scrape config
 
@@ -6651,6 +6653,34 @@ are logged as warnings and retried on the next tick.
 **Startup sync:** `try_start()` calls `get_device_list()` and re-registers ALL
 devices with current YoLink API names. A plugin restart immediately syncs all
 names — no need to wait for the next poll tick.
+
+---
+
+## A schema changing is an event now
+
+`device_schema_changed` fires when a device's *declaration* changes — the
+attribute names and action ids it now carries, not its values. Carrying the
+names rather than the whole schema lets a client decide whether it cares
+before refetching `GET /devices/{id}/schema`.
+
+**Why it had to exist.** Schemas stopped being static the moment plugins
+started publishing real ones: a Lutron phantom scene upgrades its own a second
+after the bridge connects, once the LED query answers; hc-ecowitt republishes
+when a sensor's attribute set changes; hc-hue when an auxiliary device gains a
+facet; hc-zwave on rescan. A client that renders controls from the schema —
+which is the point of publishing one, and the direction facets are heading —
+otherwise shows a scene with no status until somebody reloads the page.
+
+Emitted from both paths that write the schema slot in `state_bridge`: the
+`homecore/devices/{id}/schema` topic, and the built-in resolved from a
+`device_type` when a type registry is loaded.
+
+**Not emitted for core-owned devices** — glue devices and modes write their
+schemas at creation through `glue::upsert_device_with_schema`, which has no
+bus, and a device that has just been created is one a client learns about by
+the device appearing rather than by its declaration changing. Threading a bus
+through three crates to cover that case was not worth it; the boundary is
+deliberate.
 
 ---
 

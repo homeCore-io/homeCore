@@ -140,6 +140,29 @@ pub enum Event {
         previous_name: String,
         current_name: String,
     },
+    /// A device's capability schema changed — what it declares it reports and
+    /// accepts, not what it is currently reporting.
+    ///
+    /// **Schemas are not static, which is the reason this exists.** A Lutron
+    /// phantom scene upgrades its schema a second after the bridge connects,
+    /// once its LED query is answered; hc-ecowitt republishes whenever a
+    /// sensor's attribute set changes; hc-hue republishes when an auxiliary
+    /// device gains a facet; hc-zwave republishes on rescan. A client that
+    /// renders controls from the schema — which is the point of publishing
+    /// one — would otherwise show a scene with no status until somebody
+    /// reloaded the page.
+    ///
+    /// Carries the declared attribute names rather than the whole schema, so a
+    /// client can tell whether it cares before refetching. The schema itself
+    /// is at `GET /devices/{id}/schema`.
+    DeviceSchemaChanged {
+        timestamp: DateTime<Utc>,
+        device_id: String,
+        /// Every attribute the new schema declares, sorted.
+        attributes: Vec<String>,
+        /// Ids of every action it declares, sorted.
+        actions: Vec<String>,
+    },
     /// A battery-powered device's level dropped to or below the configured
     /// alert threshold. Synthesized by the battery watcher with hysteresis,
     /// so this fires once per crossing — not on every battery report.
@@ -258,6 +281,7 @@ impl Event {
             | Event::PluginRegistered { timestamp, .. }
             | Event::PluginOffline { timestamp, .. }
             | Event::DeviceNameChanged { timestamp, .. }
+            | Event::DeviceSchemaChanged { timestamp, .. }
             | Event::MqttMessage { timestamp, .. }
             | Event::Custom { timestamp, .. }
             | Event::SystemAlert { timestamp, .. }

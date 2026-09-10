@@ -680,6 +680,10 @@ impl StateBridge {
                     Some(schema) => {
                         self.store.upsert_device_schema(device_id, &schema).await?;
                         debug!(device_id, device_type, "Typed device schema stored");
+                        // The type registry writes the same slot a plugin's
+                        // own schema does, so this is a schema change like any
+                        // other from a client's point of view.
+                        self.announce_schema(device_id, &schema);
                     }
                     None => {
                         warn!(
@@ -698,7 +702,33 @@ impl StateBridge {
         let schema: hc_types::DeviceSchema = serde_json::from_slice(payload)?;
         self.store.upsert_device_schema(device_id, &schema).await?;
         debug!(device_id, "Device schema stored");
+        self.announce_schema(device_id, &schema);
         Ok(())
+    }
+
+    /// Tell the bus a device's declaration changed.
+    ///
+    /// A schema is not static: a Lutron phantom scene upgrades its own a
+    /// second after the bridge connects when its LED answers, hc-ecowitt
+    /// republishes when a sensor's attribute set changes, hc-hue when an
+    /// auxiliary device gains a facet. A client that renders controls from the
+    /// schema — which is what publishing one is for — otherwise shows a scene
+    /// with no status until somebody reloads.
+    ///
+    /// Not deduplicated here. A plugin republishing an identical schema is
+    /// already the exception rather than the rule — every plugin that
+    /// republishes gates on its own attribute set having changed — and
+    /// comparing stored bytes on every registration to save an event nobody
+    /// is required to act on is the wrong trade.
+    fn announce_schema(&self, device_id: &str, schema: &hc_types::DeviceSchema) {
+        let (attributes, actions) = schema_change_payload(schema);
+
+        let _ = self.pub_bus.publish(Event::DeviceSchemaChanged {
+            timestamp: Utc::now(),
+            device_id: device_id.to_string(),
+            attributes,
+            actions,
+        });
     }
 
     async fn handle_device_unregistration(&self, plugin_id: &str, payload: &[u8]) -> Result<()> {
@@ -964,6 +994,19 @@ fn check_protocol(plugin: Option<&str>, core: &str) -> ProtocolCheck {
 /// Returns `true` if the two versions can talk to each other safely.
 /// Unparseable versions return `true` (don't refuse on garbage — the
 /// caller already treats this as warn-only). Component versioning Phase B.
+/// What a schema-changed event carries: the names, sorted.
+///
+/// Sorted because `attributes` is a `HashMap` — an unsorted list would differ
+/// between two events describing an identical schema, and a client diffing
+/// them to decide whether to refetch would refetch every time.
+fn schema_change_payload(schema: &hc_types::DeviceSchema) -> (Vec<String>, Vec<String>) {
+    let mut attributes: Vec<String> = schema.attributes.keys().cloned().collect();
+    attributes.sort();
+    let mut actions: Vec<String> = schema.actions.iter().map(|a| a.id.clone()).collect();
+    actions.sort();
+    (attributes, actions)
+}
+
 fn sdk_versions_compatible(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Option<(u64, u64)> {
         let mut parts = s.split('.');
@@ -1025,11 +1068,40 @@ fn hardware_field(json: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::{
         apply_partial_merge_patch, check_protocol, is_generic_plugin_external_change,
-        parse_plugin_notices, parse_plugin_widgets, sdk_versions_compatible, ProtocolCheck,
+        parse_plugin_notices, parse_plugin_widgets, schema_change_payload, sdk_versions_compatible,
+        ProtocolCheck,
     };
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// The event exists so a client can decide whether to refetch. Two events
+    /// describing the same schema must therefore look the same — and
+    /// `attributes` is a `HashMap`, so an unsorted list would differ between
+    /// reads and a client diffing them would refetch every time.
+    #[test]
+    fn the_payload_is_the_same_for_the_same_schema() {
+        use hc_types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+
+        let build = |order: &[&str]| {
+            let mut attributes = std::collections::HashMap::new();
+            for name in order {
+                attributes.insert(
+                    (*name).to_string(),
+                    AttributeSchema::read_only(AttributeKind::Bool),
+                );
+            }
+            DeviceSchema {
+                attributes,
+                ..Default::default()
+            }
+        };
+
+        let a = schema_change_payload(&build(&["on", "battery", "motion"]));
+        let b = schema_change_payload(&build(&["motion", "on", "battery"]));
+        assert_eq!(a, b);
+        assert_eq!(a.0, ["battery", "motion", "on"]);
+    }
 
     #[test]
     fn notices_absent_or_wrong_shape_yields_empty() {

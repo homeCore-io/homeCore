@@ -319,6 +319,7 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
                         Event::PluginHeartbeat { .. } => "plugin_heartbeat",
                         Event::PluginStatusChanged { .. } => "plugin_status_changed",
                         Event::DeviceNameChanged { .. } => "device_name_changed",
+                        Event::DeviceSchemaChanged { .. } => "device_schema_changed",
                         Event::MqttMessage { .. } => "mqtt_message",
                         Event::Custom { .. } => "custom",
                         Event::SystemAlert { .. } => "system_alert",
