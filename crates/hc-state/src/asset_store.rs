@@ -64,11 +64,7 @@ impl AssetStore {
     pub fn new(db: Arc<Database>, dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating asset directory {}", dir.display()))?;
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(ASSETS)?;
-        }
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[ASSETS])?;
         Ok(Self { db, dir })
     }
 

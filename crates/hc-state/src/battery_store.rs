@@ -40,11 +40,7 @@ pub struct BatteryStore {
 
 impl BatteryStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(BATTERY_STATE)?;
-        }
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[BATTERY_STATE])?;
         Ok(Self { db })
     }
 

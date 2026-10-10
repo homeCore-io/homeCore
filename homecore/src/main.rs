@@ -736,48 +736,9 @@ async fn main() -> Result<()> {
 
     // ── 15. Launch plugins (after MQTT is subscribed) ─────────────────────
     //
-    // Wait for the internal MQTT client to confirm its homecore/# subscription
-    // before spawning plugins.  This ensures that registration messages
-    // published by plugins on startup are not missed due to a race condition.
+    // Seed the registry now, then launch plugins after MQTT acknowledges its
+    // subscription in the background. The API does not wait for plugin I/O.
     {
-        let _ = ready_rx.await;
-
-        // Publish the configured TZ as a retained MQTT message so plugin
-        // SDKs can pick it up on connect and apply it to their tracing
-        // subscriber. Plugin tracing init runs before broker connect, so
-        // the very first log lines render in UTC; the SDK's subscription
-        // to this topic delivers the retained payload within a few ms of
-        // connect and `hc_time::init` swaps the formatter zone in place.
-        // No catch-up logic needed — `RwLock<Tz>` updates are seen by the
-        // next log event automatically.
-        let tz_name = hc_time::configured_tz().to_string();
-        if let Err(e) = publish_handle
-            .publish_retained("homecore/system/tz", tz_name.clone().into_bytes())
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to publish retained homecore/system/tz");
-        } else {
-            tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
-        }
-
-        // Restore each plugin's durable learned-state as a retained MQTT message
-        // so a (re)connecting plugin loads it on subscribe. The broker's retained
-        // store is in-memory (lost on restart); redb is the durable source.
-        match store.plugin_state_list_ids().await {
-            Ok(ids) => {
-                for id in ids {
-                    if let Ok(Some(doc)) = store.plugin_state_get(&id).await {
-                        let bytes = serde_json::to_vec(&doc).unwrap_or_default();
-                        let topic = format!("homecore/plugins/{id}/state");
-                        if let Err(e) = publish_handle.publish_retained(&topic, bytes).await {
-                            tracing::warn!(plugin_id = %id, error = %e, "Failed to restore retained plugin state");
-                        }
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "Could not list plugin learned-state at boot"),
-        }
-
         // ── Plugin config centralization (Phase 0) ──────────────────────────
         // Move each plugin's config to a core-owned central location
         // (`{base}/config/plugins/<id>.toml`) so a fetch+uncompress upgrade of a
@@ -847,31 +808,87 @@ async fn main() -> Result<()> {
             }
         }
 
-        if config.plugins.is_empty() {
-            info!("No plugins configured");
-        } else {
-            let total = config.plugins.len();
-            let enabled = config.plugins.iter().filter(|p| p.enabled).count();
-            info!(total, enabled, "Launching plugins via PluginManager");
-            let processes: Vec<_> = config
-                .plugins
-                .iter()
-                .map(|p| plugin_manager::PluginProcess {
-                    id: p.id.clone(),
-                    binary: PathBuf::from(&p.binary),
-                    config: PathBuf::from(effective_config(p)),
-                    enabled: p.enabled,
-                })
-                .collect();
-            plugin_manager::spawn_all(
-                processes,
-                plugin_registry.clone(),
-                plugin_commands.clone(),
-                pub_bus.clone(),
-                shutdown_rx.clone(),
-            )
-            .await;
-        }
+        let processes: Vec<_> = config
+            .plugins
+            .iter()
+            .map(|p| plugin_manager::PluginProcess {
+                id: p.id.clone(),
+                binary: PathBuf::from(&p.binary),
+                config: PathBuf::from(effective_config(p)),
+                enabled: p.enabled,
+            })
+            .collect();
+        let plugin_registry = plugin_registry.clone();
+        let plugin_commands = plugin_commands.clone();
+        let pub_bus = pub_bus.clone();
+        let shutdown_rx = shutdown_rx.clone();
+        let store = store.clone();
+        let publish_handle = publish_handle.clone();
+        // MQTT and plugin recovery must never hold up HTTP access to the house.
+        // Keep the registration barrier, but wait for it in a background task.
+        tokio::spawn(async move {
+            tokio::select! {
+                ready = ready_rx => {
+                    if ready.is_err() {
+                        tracing::error!("MQTT readiness channel closed; plugins were not started");
+                        return;
+                    }
+                }
+                _ = wait_for_shutdown_watch(shutdown_rx.clone()) => return,
+            }
+            // Publish the configured TZ as a retained MQTT message so plugin
+            // SDKs can pick it up on connect and apply it to their tracing
+            // subscriber. Plugin tracing init runs before broker connect, so
+            // the very first log lines render in UTC; the SDK's subscription
+            // to this topic delivers the retained payload within a few ms of
+            // connect and `hc_time::init` swaps the formatter zone in place.
+            // No catch-up logic needed — `RwLock<Tz>` updates are seen by the
+            // next log event automatically.
+            let tz_name = hc_time::configured_tz().to_string();
+            if let Err(e) = publish_handle
+                .publish_retained("homecore/system/tz", tz_name.clone().into_bytes())
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to publish retained homecore/system/tz");
+            } else {
+                tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
+            }
+
+            // Restore each plugin's durable learned-state as a retained MQTT message
+            // so a (re)connecting plugin loads it on subscribe. The broker's retained
+            // store is in-memory (lost on restart); redb is the durable source.
+            match store.plugin_state_list_ids().await {
+                Ok(ids) => {
+                    for id in ids {
+                        if let Ok(Some(doc)) = store.plugin_state_get(&id).await {
+                            let bytes = serde_json::to_vec(&doc).unwrap_or_default();
+                            let topic = format!("homecore/plugins/{id}/state");
+                            if let Err(e) = publish_handle.publish_retained(&topic, bytes).await {
+                                tracing::warn!(plugin_id = %id, error = %e, "Failed to restore retained plugin state");
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "Could not list plugin learned-state at boot"),
+            }
+
+            if processes.is_empty() {
+                info!("No plugins configured");
+            } else {
+                info!(
+                    total = processes.len(),
+                    "Launching plugins via PluginManager"
+                );
+                plugin_manager::spawn_all(
+                    processes,
+                    plugin_registry,
+                    plugin_commands,
+                    pub_bus,
+                    shutdown_rx,
+                )
+                .await;
+            }
+        });
     };
 
     // Activate freshly-installed plugins without a restart: convert each install

@@ -1,0 +1,542 @@
+{
+  "date": "2026-10-10",
+  "scope": "Service restart; timings in seconds from Docker State.StartedAt unless noted",
+  "hardware": "Intel Core i5-8600K; WSL2 Ubuntu; each Docker service limited to 2 CPUs and 2 GiB",
+  "baseline": "ghcr.io/homecore-io/hc-core:0.1.74",
+  "candidate": "Same image with optimized musl release binary",
+  "method": "One excluded warmup per service, then 20 alternating trials each. Authenticated access includes Docker inspect overhead. Physical dimmers read only; virtual automation checked each trial.",
+  "summary": {
+    "baseline": {
+      "runs": 20,
+      "successes": 20,
+      "api_s": {
+        "median": 0.4914085865020752,
+        "p95": 0.5460145473480225,
+        "max": 0.5817246437072754,
+        "min": 0.4742615222930908
+      },
+      "authenticated_access_s": {
+        "median": 0.509110689163208,
+        "p95": 0.5616495609283447,
+        "max": 0.6068623065948486,
+        "min": 0.4913463592529297
+      },
+      "shelly_fresh_state_s": {
+        "median": 0.6298999786376953,
+        "p95": 0.738070011138916,
+        "max": 1.7478673458099365,
+        "min": 0.6060445308685303
+      },
+      "api_from_launch_s": {
+        "median": 0.522780179977417,
+        "p95": 0.5784938335418701,
+        "max": 0.640270471572876,
+        "min": 0.504209041595459
+      },
+      "automation_roundtrip_s": {
+        "median": 0.09355324949996202,
+        "p95": 0.09765890300002411,
+        "max": 0.1011060970000699,
+        "min": 0.0812132029999475
+      }
+    },
+    "optimized": {
+      "runs": 20,
+      "successes": 20,
+      "api_s": {
+        "median": 0.2604641914367676,
+        "p95": 0.292966365814209,
+        "max": 0.3076488971710205,
+        "min": 0.24964451789855957
+      },
+      "authenticated_access_s": {
+        "median": 0.2780113220214844,
+        "p95": 0.3198130130767822,
+        "max": 0.33760714530944824,
+        "min": 0.26618409156799316
+      },
+      "shelly_fresh_state_s": {
+        "median": 0.321533203125,
+        "p95": 0.48279285430908203,
+        "max": 1.3261127471923828,
+        "min": 0.29169416427612305
+      },
+      "api_from_launch_s": {
+        "median": 0.2918442487716675,
+        "p95": 0.336414098739624,
+        "max": 0.359424352645874,
+        "min": 0.2824366092681885
+      },
+      "automation_roundtrip_s": {
+        "median": 0.09012829499999953,
+        "p95": 0.09551329500004613,
+        "max": 0.099648301000002,
+        "min": 0.08168991000002279
+      }
+    }
+  },
+  "observations": [
+    {
+      "service": "baseline",
+      "index": 0,
+      "warmup": true,
+      "api_s": 0.5090677738189697,
+      "api_from_launch_s": 0.5513763427734375,
+      "authenticated_access_s": 0.5297346115112305,
+      "shelly_fresh_state_s": 0.6546130180358887,
+      "automation_roundtrip_s": 0.08188109699995039,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 0,
+      "warmup": true,
+      "api_s": 0.2493300437927246,
+      "api_from_launch_s": 0.28341150283813477,
+      "authenticated_access_s": 0.26480841636657715,
+      "shelly_fresh_state_s": 0.29312658309936523,
+      "automation_roundtrip_s": 0.08696199700000307,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 1,
+      "warmup": false,
+      "api_s": 0.4977836608886719,
+      "api_from_launch_s": 0.5312139987945557,
+      "authenticated_access_s": 0.5166864395141602,
+      "shelly_fresh_state_s": 0.6954894065856934,
+      "automation_roundtrip_s": 0.1011060970000699,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 1,
+      "warmup": false,
+      "api_s": 0.26609110832214355,
+      "api_from_launch_s": 0.29717016220092773,
+      "authenticated_access_s": 0.28215694427490234,
+      "shelly_fresh_state_s": 0.3110313415527344,
+      "automation_roundtrip_s": 0.09287359699999342,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 2,
+      "warmup": false,
+      "api_s": 0.2666354179382324,
+      "api_from_launch_s": 0.2971203327178955,
+      "authenticated_access_s": 0.28348422050476074,
+      "shelly_fresh_state_s": 0.3054025173187256,
+      "automation_roundtrip_s": 0.08810550299995157,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 2,
+      "warmup": false,
+      "api_s": 0.4784362316131592,
+      "api_from_launch_s": 0.5098233222961426,
+      "authenticated_access_s": 0.4948384761810303,
+      "shelly_fresh_state_s": 0.6264145374298096,
+      "automation_roundtrip_s": 0.08598150300008456,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 3,
+      "warmup": false,
+      "api_s": 0.47785496711730957,
+      "api_from_launch_s": 0.5089075565338135,
+      "authenticated_access_s": 0.49379801750183105,
+      "shelly_fresh_state_s": 0.6060445308685303,
+      "automation_roundtrip_s": 0.0812132029999475,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 3,
+      "warmup": false,
+      "api_s": 0.25891876220703125,
+      "api_from_launch_s": 0.29030823707580566,
+      "authenticated_access_s": 0.2761409282684326,
+      "shelly_fresh_state_s": 0.32619237899780273,
+      "automation_roundtrip_s": 0.08927960300002269,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 4,
+      "warmup": false,
+      "api_s": 0.25215697288513184,
+      "api_from_launch_s": 0.2853991985321045,
+      "authenticated_access_s": 0.26904845237731934,
+      "shelly_fresh_state_s": 0.29169416427612305,
+      "automation_roundtrip_s": 0.08756110300009823,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 4,
+      "warmup": false,
+      "api_s": 0.48743629455566406,
+      "api_from_launch_s": 0.5199790000915527,
+      "authenticated_access_s": 0.5037925243377686,
+      "shelly_fresh_state_s": 0.6285614967346191,
+      "automation_roundtrip_s": 0.0944435029999795,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 5,
+      "warmup": false,
+      "api_s": 0.48283815383911133,
+      "api_from_launch_s": 0.5177187919616699,
+      "authenticated_access_s": 0.4985811710357666,
+      "shelly_fresh_state_s": 0.6145210266113281,
+      "automation_roundtrip_s": 0.09376000300005671,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 5,
+      "warmup": false,
+      "api_s": 0.25225257873535156,
+      "api_from_launch_s": 0.2847111225128174,
+      "authenticated_access_s": 0.26906251907348633,
+      "shelly_fresh_state_s": 1.3261127471923828,
+      "automation_roundtrip_s": 0.09223241100005453,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 6,
+      "warmup": false,
+      "api_s": 0.2544994354248047,
+      "api_from_launch_s": 0.28719162940979004,
+      "authenticated_access_s": 0.2712697982788086,
+      "shelly_fresh_state_s": 0.32859230041503906,
+      "automation_roundtrip_s": 0.0947457109999732,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 6,
+      "warmup": false,
+      "api_s": 0.49053406715393066,
+      "api_from_launch_s": 0.5211458206176758,
+      "authenticated_access_s": 0.5082366466522217,
+      "shelly_fresh_state_s": 0.6332118511199951,
+      "automation_roundtrip_s": 0.08667370900002425,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 7,
+      "warmup": false,
+      "api_s": 0.4754641056060791,
+      "api_from_launch_s": 0.507392406463623,
+      "authenticated_access_s": 0.49193429946899414,
+      "shelly_fresh_state_s": 0.6088905334472656,
+      "automation_roundtrip_s": 0.09471140999994532,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 7,
+      "warmup": false,
+      "api_s": 0.2712066173553467,
+      "api_from_launch_s": 0.3037412166595459,
+      "authenticated_access_s": 0.28820300102233887,
+      "shelly_fresh_state_s": 0.3106250762939453,
+      "automation_roundtrip_s": 0.08168991000002279,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 8,
+      "warmup": false,
+      "api_s": 0.2627246379852295,
+      "api_from_launch_s": 0.2923896312713623,
+      "authenticated_access_s": 0.2779996395111084,
+      "shelly_fresh_state_s": 0.29968690872192383,
+      "automation_roundtrip_s": 0.08838071000002401,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 8,
+      "warmup": false,
+      "api_s": 0.4807925224304199,
+      "api_from_launch_s": 0.512709379196167,
+      "authenticated_access_s": 0.4973621368408203,
+      "shelly_fresh_state_s": 0.613919734954834,
+      "automation_roundtrip_s": 0.08844461000001047,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 9,
+      "warmup": false,
+      "api_s": 0.4922831058502197,
+      "api_from_launch_s": 0.5244145393371582,
+      "authenticated_access_s": 0.5099847316741943,
+      "shelly_fresh_state_s": 0.614417552947998,
+      "automation_roundtrip_s": 0.08832370999994055,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 9,
+      "warmup": false,
+      "api_s": 0.2598252296447754,
+      "api_from_launch_s": 0.2913529872894287,
+      "authenticated_access_s": 0.2765231132507324,
+      "shelly_fresh_state_s": 0.33320069313049316,
+      "automation_roundtrip_s": 0.09164830300005633,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 10,
+      "warmup": false,
+      "api_s": 0.2569894790649414,
+      "api_from_launch_s": 0.29039502143859863,
+      "authenticated_access_s": 0.2733769416809082,
+      "shelly_fresh_state_s": 0.32221174240112305,
+      "automation_roundtrip_s": 0.09247160300003543,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 10,
+      "warmup": false,
+      "api_s": 0.4742615222930908,
+      "api_from_launch_s": 0.504209041595459,
+      "authenticated_access_s": 0.4913463592529297,
+      "shelly_fresh_state_s": 0.6099369525909424,
+      "automation_roundtrip_s": 0.09765890300002411,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 11,
+      "warmup": false,
+      "api_s": 0.5132780075073242,
+      "api_from_launch_s": 0.5453164577484131,
+      "authenticated_access_s": 0.5307180881500244,
+      "shelly_fresh_state_s": 0.738070011138916,
+      "automation_roundtrip_s": 0.09256760300002043,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 11,
+      "warmup": false,
+      "api_s": 0.28617215156555176,
+      "api_from_launch_s": 0.3260915279388428,
+      "authenticated_access_s": 0.31953978538513184,
+      "shelly_fresh_state_s": 0.37330198287963867,
+      "automation_roundtrip_s": 0.09189080299995567,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 12,
+      "warmup": false,
+      "api_s": 0.24964451789855957,
+      "api_from_launch_s": 0.2824397087097168,
+      "authenticated_access_s": 0.26618409156799316,
+      "shelly_fresh_state_s": 0.30240845680236816,
+      "automation_roundtrip_s": 0.0886102030000302,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 12,
+      "warmup": false,
+      "api_s": 0.4901432991027832,
+      "api_from_launch_s": 0.5195848941802979,
+      "authenticated_access_s": 0.5070598125457764,
+      "shelly_fresh_state_s": 0.6185729503631592,
+      "automation_roundtrip_s": 0.09564220400000067,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 13,
+      "warmup": false,
+      "api_s": 0.4808683395385742,
+      "api_from_launch_s": 0.5151059627532959,
+      "authenticated_access_s": 0.4980967044830322,
+      "shelly_fresh_state_s": 0.6185450553894043,
+      "automation_roundtrip_s": 0.09347400399997241,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 13,
+      "warmup": false,
+      "api_s": 0.25284695625305176,
+      "api_from_launch_s": 0.2824366092681885,
+      "authenticated_access_s": 0.27088332176208496,
+      "shelly_fresh_state_s": 0.3142397403717041,
+      "automation_roundtrip_s": 0.08873030199993082,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 14,
+      "warmup": false,
+      "api_s": 0.26110315322875977,
+      "api_from_launch_s": 0.29146647453308105,
+      "authenticated_access_s": 0.27802300453186035,
+      "shelly_fresh_state_s": 0.32085466384887695,
+      "automation_roundtrip_s": 0.08225130100004208,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 14,
+      "warmup": false,
+      "api_s": 0.5108432769775391,
+      "api_from_launch_s": 0.5459637641906738,
+      "authenticated_access_s": 0.5300707817077637,
+      "shelly_fresh_state_s": 0.6558380126953125,
+      "automation_roundtrip_s": 0.08966280099991764,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 15,
+      "warmup": false,
+      "api_s": 0.5460145473480225,
+      "api_from_launch_s": 0.5784938335418701,
+      "authenticated_access_s": 0.5616495609283447,
+      "shelly_fresh_state_s": 0.693073034286499,
+      "automation_roundtrip_s": 0.08962690200007728,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 15,
+      "warmup": false,
+      "api_s": 0.2576785087585449,
+      "api_from_launch_s": 0.28798341751098633,
+      "authenticated_access_s": 0.28612685203552246,
+      "shelly_fresh_state_s": 0.3196752071380615,
+      "automation_roundtrip_s": 0.099648301000002,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 16,
+      "warmup": false,
+      "api_s": 0.3076488971710205,
+      "api_from_launch_s": 0.359424352645874,
+      "authenticated_access_s": 0.33760714530944824,
+      "shelly_fresh_state_s": 0.48279285430908203,
+      "automation_roundtrip_s": 0.09267990099999679,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 16,
+      "warmup": false,
+      "api_s": 0.4936788082122803,
+      "api_from_launch_s": 0.525740385055542,
+      "authenticated_access_s": 0.513474702835083,
+      "shelly_fresh_state_s": 0.6318237781524658,
+      "automation_roundtrip_s": 0.09625950099996317,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 17,
+      "warmup": false,
+      "api_s": 0.49477171897888184,
+      "api_from_launch_s": 0.5374503135681152,
+      "authenticated_access_s": 0.5115094184875488,
+      "shelly_fresh_state_s": 0.6312384605407715,
+      "automation_roundtrip_s": 0.0951360950000435,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 17,
+      "warmup": false,
+      "api_s": 0.26976752281188965,
+      "api_from_launch_s": 0.30199241638183594,
+      "authenticated_access_s": 0.2872765064239502,
+      "shelly_fresh_state_s": 0.3106701374053955,
+      "automation_roundtrip_s": 0.09551329500004613,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 18,
+      "warmup": false,
+      "api_s": 0.25977063179016113,
+      "api_from_launch_s": 0.2922220230102539,
+      "authenticated_access_s": 0.27709317207336426,
+      "shelly_fresh_state_s": 0.3334314823150635,
+      "automation_roundtrip_s": 0.09006559499994182,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 18,
+      "warmup": false,
+      "api_s": 0.49579668045043945,
+      "api_from_launch_s": 0.5297167301177979,
+      "authenticated_access_s": 0.5121586322784424,
+      "shelly_fresh_state_s": 0.6331601142883301,
+      "automation_roundtrip_s": 0.09363249499995163,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 19,
+      "warmup": false,
+      "api_s": 0.5817246437072754,
+      "api_from_launch_s": 0.640270471572876,
+      "authenticated_access_s": 0.6068623065948486,
+      "shelly_fresh_state_s": 1.7478673458099365,
+      "automation_roundtrip_s": 0.09709489500005475,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 19,
+      "warmup": false,
+      "api_s": 0.292966365814209,
+      "api_from_launch_s": 0.336414098739624,
+      "authenticated_access_s": 0.3198130130767822,
+      "shelly_fresh_state_s": 0.4091508388519287,
+      "automation_roundtrip_s": 0.09019099500005723,
+      "success": true
+    },
+    {
+      "service": "optimized",
+      "index": 20,
+      "warmup": false,
+      "api_s": 0.2747366428375244,
+      "api_from_launch_s": 0.3106093406677246,
+      "authenticated_access_s": 0.2956099510192871,
+      "shelly_fresh_state_s": 0.36234211921691895,
+      "automation_roundtrip_s": 0.09002009900007124,
+      "success": true
+    },
+    {
+      "service": "baseline",
+      "index": 20,
+      "warmup": false,
+      "api_s": 0.5141153335571289,
+      "api_from_launch_s": 0.5537505149841309,
+      "authenticated_access_s": 0.5325512886047363,
+      "shelly_fresh_state_s": 0.6665332317352295,
+      "automation_roundtrip_s": 0.09032289799995397,
+      "success": true
+    }
+  ]
+}

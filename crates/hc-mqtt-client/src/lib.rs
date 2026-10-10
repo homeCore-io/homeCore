@@ -21,6 +21,128 @@ pub struct MqttClientConfig {
     pub password: Option<String>,
 }
 
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_packet(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+        let header = stream.read_u8().await.unwrap();
+        let mut length = 0usize;
+        let mut multiplier = 1usize;
+        loop {
+            let byte = stream.read_u8().await.unwrap();
+            length += (byte as usize & 127) * multiplier;
+            if byte & 128 == 0 {
+                break;
+            }
+            multiplier *= 128;
+            assert!(multiplier <= 128 * 128 * 128);
+        }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        (header, body)
+    }
+
+    async fn check_readiness(accepted: bool, delayed_broker: bool, extra_ack: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener = if delayed_broker {
+            drop(listener);
+            None
+        } else {
+            Some(listener)
+        };
+        let (subscribed_tx, subscribed_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let listener = match listener {
+                Some(listener) => listener,
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    tokio::net::TcpListener::bind(("127.0.0.1", port))
+                        .await
+                        .unwrap()
+                }
+            };
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(read_packet(&mut stream).await.0 >> 4, 1);
+            stream.write_all(&[0x20, 2, 0, 0]).await.unwrap();
+            let (header, body) = read_packet(&mut stream).await;
+            assert_eq!(header >> 4, 8);
+            assert!(body.windows(10).any(|part| part == b"homecore/#"));
+            if extra_ack {
+                let (_, extra) = read_packet(&mut stream).await;
+                // Another subscription's rejection must not resolve readiness.
+                stream
+                    .write_all(&[0x90, 3, extra[0], extra[1], 0x80])
+                    .await
+                    .unwrap();
+            }
+            subscribed_tx.send(()).unwrap();
+            ack_rx.await.unwrap();
+            stream
+                .write_all(&[0x90, 3, body[0], body[1], if accepted { 1 } else { 0x80 }])
+                .await
+                .unwrap();
+            // Keep the connection alive while the client processes SUBACK.
+            let _ = read_packet(&mut stream).await;
+        });
+        let (mut client, _) = MqttClient::new(MqttClientConfig {
+            broker_port: port,
+            ..Default::default()
+        });
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        client.set_ready_notify(ready_tx);
+        if extra_ack {
+            client.add_subscription("other/#");
+        }
+        let task = tokio::spawn(client.run());
+        tokio::time::timeout(std::time::Duration::from_secs(1), subscribed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if extra_ack {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut ready_rx)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            matches!(
+                ready_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "CONNACK/SUBSCRIBE enqueue must not declare readiness"
+        );
+        ack_tx.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx)
+            .await
+            .unwrap();
+        assert_eq!(result.is_ok(), accepted);
+        task.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn waits_for_broker_to_accept_subscription() {
+        check_readiness(true, false, false).await;
+    }
+    #[tokio::test]
+    async fn rejected_subscription_does_not_start_plugins() {
+        check_readiness(false, false, false).await;
+    }
+    #[tokio::test]
+    async fn retries_promptly_when_broker_binds_after_client_starts() {
+        check_readiness(true, true, false).await;
+    }
+    #[tokio::test]
+    async fn another_subscriptions_acknowledgement_does_not_resolve_readiness() {
+        check_readiness(true, false, true).await;
+    }
+}
+
 impl Default for MqttClientConfig {
     fn default() -> Self {
         Self {
@@ -79,7 +201,7 @@ pub struct MqttClient {
     eventloop: EventLoop,
     /// Additional topic filters to subscribe to on connect (beyond `homecore/#`).
     extra_subscriptions: Vec<String>,
-    /// Optional one-shot sender that fires once subscriptions are confirmed on
+    /// Optional one-shot sender that fires once homecore/# is acknowledged on
     /// the first connect.  Lets the caller know it is safe to launch plugins.
     ready_tx: Option<oneshot::Sender<()>>,
 }
@@ -145,14 +267,22 @@ impl MqttClient {
             "MQTT client connecting"
         );
 
+        let mut awaiting_subscription = false;
+        let mut subscription_id = None;
+        // The embedded broker binds in parallel with startup. Retry that initial
+        // race promptly, backing off to the normal reconnect interval if needed.
+        let mut retry_delay = std::time::Duration::from_millis(10);
         loop {
             match self.eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => {
+                    retry_delay = std::time::Duration::from_secs(2);
                     info!("MQTT connected; subscribing to homecore/#");
                     self.client
                         .subscribe("homecore/#", QoS::AtLeastOnce)
                         .await
                         .context("subscribe failed")?;
+                    awaiting_subscription = true;
+                    subscription_id = None;
                     for filter in &self.extra_subscriptions {
                         info!(%filter, "Subscribing to ecosystem topic filter");
                         self.client
@@ -160,9 +290,30 @@ impl MqttClient {
                             .await
                             .with_context(|| format!("subscribe to {filter} failed"))?;
                     }
-                    // Signal that the client is subscribed and ready.
-                    // Only fires on the first connect; ignored on reconnects.
-                    if let Some(tx) = self.ready_tx.take() {
+                }
+
+                Ok(rumqttc::Event::Outgoing(rumqttc::Outgoing::Subscribe(id)))
+                    if awaiting_subscription && subscription_id.is_none() =>
+                {
+                    // homecore/# is first in the outgoing subscription queue.
+                    subscription_id = Some(id);
+                }
+                Ok(rumqttc::Event::Incoming(Packet::SubAck(ack)))
+                    if awaiting_subscription && subscription_id == Some(ack.pkid) =>
+                {
+                    // Match the actual packet id, even if other SUBACKs arrive first.
+                    awaiting_subscription = false;
+                    if ack.return_codes.len() != 1
+                        || ack
+                            .return_codes
+                            .iter()
+                            .any(|code| matches!(code, rumqttc::SubscribeReasonCode::Failure))
+                    {
+                        error!(
+                            "Broker rejected homecore/# subscription; plugins cannot safely start"
+                        );
+                        self.ready_tx.take();
+                    } else if let Some(tx) = self.ready_tx.take() {
                         let _ = tx.send(());
                     }
                 }
@@ -185,8 +336,9 @@ impl MqttClient {
                 Ok(_) => {}
 
                 Err(e) => {
-                    error!(error = %e, "MQTT poll error; retrying in 2 s");
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    warn!(error = %e, retry_ms = retry_delay.as_millis(), "MQTT poll error; reconnecting");
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(2));
                 }
             }
         }

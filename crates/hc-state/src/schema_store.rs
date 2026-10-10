@@ -13,9 +13,7 @@ pub struct SchemaStore {
 
 impl SchemaStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        write_txn.open_table(DEVICE_SCHEMAS)?;
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[DEVICE_SCHEMAS])?;
         Ok(Self { db })
     }
 

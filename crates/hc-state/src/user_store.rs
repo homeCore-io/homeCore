@@ -15,12 +15,7 @@ pub struct UserStore {
 
 impl UserStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(USERS_BY_ID)?;
-            write_txn.open_table(USERS_BY_NAME)?;
-        }
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[USERS_BY_ID, USERS_BY_NAME])?;
         Ok(Self { db })
     }
 

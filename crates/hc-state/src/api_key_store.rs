@@ -57,12 +57,7 @@ pub struct ApiKeyStore {
 
 impl ApiKeyStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(API_KEYS_BY_PREFIX)?;
-            write_txn.open_table(API_KEYS_BY_ID)?;
-        }
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[API_KEYS_BY_PREFIX, API_KEYS_BY_ID])?;
         Ok(Self { db })
     }
 

@@ -13,9 +13,7 @@ pub struct DeviceStore {
 
 impl DeviceStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        write_txn.open_table(DEVICES)?;
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[DEVICES])?;
         Ok(Self { db })
     }
 
