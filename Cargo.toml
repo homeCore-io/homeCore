@@ -10,6 +10,7 @@
 
 [workspace]
 resolver = "2"
+exclude = ["plugins/hc-shelly"]
 members = [
     "homecore",
     "sdk/rust",

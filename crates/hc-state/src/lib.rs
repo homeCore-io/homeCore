@@ -10,10 +10,37 @@ use anyhow::{Context, Result};
 use hc_auth::User;
 use hc_types::device::{Area, DeviceState};
 use hc_types::rule::{Rule, Scene};
-use redb::Database;
+use redb::{Database, Key, ReadableDatabase, TableDefinition, TableError, Value};
 use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
+
+/// Create missing tables durably, without a write transaction on ordinary reopen.
+/// Opening each existing store used to commit an unchanged transaction and fsync
+/// the database again. Check types as well as existence; do not mask corruption.
+pub(crate) fn ensure_tables<K: Key + 'static, V: Value + 'static>(
+    db: &Database,
+    tables: &[TableDefinition<'_, K, V>],
+) -> Result<()> {
+    let read = db.begin_read()?;
+    let mut missing = false;
+    for &table in tables {
+        match read.open_table(table) {
+            Ok(_) => {}
+            Err(TableError::TableDoesNotExist(_)) => missing = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    drop(read);
+    if missing {
+        let write = db.begin_write()?;
+        for &table in tables {
+            write.open_table(table)?;
+        }
+        write.commit()?;
+    }
+    Ok(())
+}
 
 pub mod api_key_store;
 pub mod asset_store;
@@ -656,6 +683,66 @@ fn explain_open_failure(err: redb::DatabaseError, path: &str) -> anyhow::Error {
              and rules."
         ),
         other => anyhow::Error::new(other).context(format!("failed to open state DB at {path}")),
+    }
+}
+
+#[cfg(test)]
+mod table_initialization_tests {
+    use super::*;
+
+    const FIRST: TableDefinition<&str, &str> = TableDefinition::new("startup_first");
+    const SECOND: TableDefinition<&str, &str> = TableDefinition::new("startup_second");
+
+    #[test]
+    fn existing_tables_can_reopen_while_another_writer_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        ensure_tables(&db, &[FIRST]).unwrap();
+        let write = db.begin_write().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = db.clone();
+        let thread = std::thread::spawn(move || {
+            tx.send(ensure_tables(&shared, &[FIRST])).unwrap();
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(3));
+        // Release the writer even on failure, so a regression cannot hang the suite.
+        drop(write);
+        thread.join().unwrap();
+        result
+            .expect("opening existing tables must not acquire a write lock")
+            .unwrap();
+    }
+
+    #[test]
+    fn missing_tables_are_added_without_losing_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            ensure_tables(&db, &[FIRST]).unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(FIRST)
+                .unwrap()
+                .insert("key", "retained")
+                .unwrap();
+            write.commit().unwrap();
+            ensure_tables(&db, &[FIRST, SECOND]).unwrap();
+        }
+        let db = Database::open(path).unwrap();
+        let read = db.begin_read().unwrap();
+        assert_eq!(
+            read.open_table(FIRST)
+                .unwrap()
+                .get("key")
+                .unwrap()
+                .unwrap()
+                .value(),
+            "retained"
+        );
+        read.open_table(SECOND).unwrap();
+        let wrong_type: TableDefinition<&str, &[u8]> = TableDefinition::new("startup_first");
+        assert!(ensure_tables(&db, &[wrong_type]).is_err());
     }
 }
 

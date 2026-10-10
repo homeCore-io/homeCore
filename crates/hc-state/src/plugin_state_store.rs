@@ -25,9 +25,7 @@ pub struct PluginStateStore {
 
 impl PluginStateStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        write_txn.open_table(PLUGIN_STATE)?;
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[PLUGIN_STATE])?;
         Ok(Self { db })
     }
 

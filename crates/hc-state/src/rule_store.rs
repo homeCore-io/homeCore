@@ -17,11 +17,7 @@ pub struct RuleStore {
 
 impl RuleStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        write_txn.open_table(RULES)?;
-        write_txn.open_table(SCENES)?;
-        write_txn.open_table(AREAS)?;
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[RULES, SCENES, AREAS])?;
         Ok(Self { db })
     }
 

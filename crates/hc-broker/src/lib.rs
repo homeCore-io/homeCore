@@ -260,8 +260,8 @@ impl Broker {
         Ok(())
     }
 
-    /// Spawn the broker on a dedicated OS thread.  Returns after the broker
-    /// has had a brief moment to bind its port.
+    /// Spawn the broker on a dedicated OS thread without blocking startup.
+    /// MQTT clients must await their connection and subscription acknowledgements.
     pub fn spawn(self) -> Result<()> {
         // Run the safety check on the calling thread so a misconfigured broker
         // aborts startup rather than logging an error in a background thread
@@ -276,9 +276,7 @@ impl Broker {
                 }
             })
             .context("failed to spawn broker thread")?;
-        // Brief sleep so the broker is ready before callers try to connect.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        info!(port, "Embedded MQTT broker ready");
+        info!(port, "Embedded MQTT broker thread started");
         Ok(())
     }
 }

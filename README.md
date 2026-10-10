@@ -116,6 +116,7 @@ Plugins are separate processes that bridge device protocols to homeCore via MQTT
 
 | Plugin | Protocol |
 |---|---|
+| [hc-shelly](https://github.com/jashcroft123/hc-shelly) | Shelly Dimmer Gen3 local HTTP RPC (standalone plugin) |
 | [hc-hue](https://github.com/homeCore-io/hc-hue) | Philips Hue bridge |
 | [hc-lutron](https://github.com/homeCore-io/hc-lutron) | Lutron RadioRA2 / HomeWorks main repeater |
 | [hc-caseta](https://github.com/homeCore-io/hc-caseta) | Lutron Caséta Smart Bridge Pro |
@@ -127,6 +128,13 @@ Plugins are separate processes that bridge device protocols to homeCore via MQTT
 | [hc-roku](https://github.com/homeCore-io/hc-roku) | Roku TVs and players (ECP) |
 | [hc-ecowitt](https://github.com/homeCore-io/hc-ecowitt) | Ecowitt weather gateways |
 | [hc-thermostat](https://github.com/homeCore-io/hc-thermostat) | Virtual thermostat — sensors + actuator with hysteresis |
+
+Shelly is maintained separately and linked at `plugins/hc-shelly` as a Git
+submodule. Initialise it with `git submodule update --init plugins/hc-shelly`,
+then build with `cargo build --release --locked` from that directory. It uses a
+pinned SDK from the original homeCore source and is excluded from this Cargo
+workspace. See its [setup instructions](https://github.com/jashcroft123/hc-shelly#build-and-configure)
+to enable it in a running homeCore installation.
 
 Plugin SDKs: [Rust](https://github.com/homeCore-io/hc-plugin-sdk-rs) (primary), [Python](https://github.com/homeCore-io/hc-plugin-sdk-py), [Node.js](https://github.com/homeCore-io/hc-plugin-sdk-js), and [.NET](https://github.com/homeCore-io/hc-plugin-sdk-dotnet). Start from [hc-plugin-template](https://github.com/homeCore-io/hc-plugin-template) — a working virtual-light plugin — then read [hc-wled](https://github.com/homeCore-io/hc-wled) for the smallest real one.
 

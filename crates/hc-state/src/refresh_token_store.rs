@@ -58,12 +58,7 @@ pub struct RefreshTokenStore {
 
 impl RefreshTokenStore {
     pub fn new(db: Arc<Database>) -> Result<Self> {
-        let write_txn = db.begin_write()?;
-        {
-            write_txn.open_table(REFRESH_BY_PREFIX)?;
-            write_txn.open_table(REFRESH_BY_ID)?;
-        }
-        write_txn.commit()?;
+        crate::ensure_tables(&db, &[REFRESH_BY_PREFIX, REFRESH_BY_ID])?;
         Ok(Self { db })
     }
 
