@@ -1,0 +1,3 @@
+[submodule "plugins/hc-shelly"]
+	path = plugins/hc-shelly
+	url = https://github.com/jashcroft123/hc-shelly.git
