@@ -37,6 +37,11 @@ pub struct ApiKeyRecord {
     pub allowed_cidrs: Vec<String>,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+    /// A display's key (H3): a wall tablet's identity, not a person's. It is
+    /// listed and managed under `/displays`, and `/auth/me` answers for it as
+    /// the display rather than as the admin who made it.
+    #[serde(default)]
+    pub display: bool,
 }
 
 impl ApiKeyRecord {
@@ -235,6 +240,7 @@ mod tests {
             expires_at: None,
             allowed_cidrs: vec![],
             revoked_at: None,
+            display: false,
         }
     }
 

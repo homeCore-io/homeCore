@@ -37,6 +37,7 @@ pub mod auth_middleware;
 pub mod backup;
 pub mod config_writer;
 pub mod dashboard_store;
+pub mod display_handlers;
 pub mod event_log;
 pub mod group_store;
 pub mod handlers;
@@ -1216,6 +1217,17 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/areas/{id}/devices", put(handlers::set_area_devices))
         .route("/areas/{id}/merge", post(handlers::merge_area))
+        // Displays and PINs (H3, H5)
+        .route(
+            "/displays",
+            get(display_handlers::list_displays).post(display_handlers::create_display),
+        )
+        .route("/displays/{id}", delete(display_handlers::delete_display))
+        .route("/auth/pin-session", post(display_handlers::pin_session))
+        .route(
+            "/auth/pin",
+            put(display_handlers::set_pin).delete(display_handlers::clear_pin),
+        )
         // Alerts (H4)
         .route("/alerts", get(alert_handlers::list_alerts))
         .route(

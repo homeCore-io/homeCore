@@ -36,6 +36,25 @@ pub fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| anyhow!("Argon2 hash error: {e}"))
 }
 
+/// Hash a display PIN (H5) — Argon2id with light parameters.
+///
+/// A PIN is 4 to 8 digits, so no hash makes an offline search of every PIN
+/// slow; what protects it is that only a display may try one, a few times in
+/// fifteen minutes. And checking a PIN means checking it against every
+/// person's, so the password parameters would make a tap at a display take
+/// seconds. Verify with [`verify_password`], which reads the parameters from
+/// the hash.
+pub fn hash_pin(pin: &str) -> Result<String> {
+    let salt = random_salt()?;
+    let params =
+        Params::new(19_456, 2, 1, None).map_err(|e| anyhow!("Argon2 params error: {e}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    argon2
+        .hash_password(pin.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| anyhow!("Argon2 hash error: {e}"))
+}
+
 /// Verify a plaintext password against a stored Argon2id hash.
 /// Returns `true` if the password matches.
 /// This is CPU-intensive and should be called from `spawn_blocking`.

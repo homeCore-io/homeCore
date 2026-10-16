@@ -11,5 +11,5 @@ pub mod user;
 pub use actor::Actor;
 pub use jwt::{Claims, JwtService};
 pub use mqtt_creds::{MqttCredStore, MqttCredential};
-pub use password::{hash_password, verify_password};
+pub use password::{hash_password, hash_pin, verify_password};
 pub use user::{Role, User, UserInfo};

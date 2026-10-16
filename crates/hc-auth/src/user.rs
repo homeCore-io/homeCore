@@ -349,6 +349,21 @@ pub struct User {
     /// log everyone out, only a subsequent password change should.
     #[serde(default)]
     pub token_version: u64,
+    /// Argon2id hash of the person's PIN, if they set one — how they unlock
+    /// the full app at a display for a few minutes (H5). Unique in the house:
+    /// the PIN alone says who is at the display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_hash: Option<String>,
+}
+
+/// What a display key may do (H3, D7): see the house and use it — read
+/// everything a person can read, command devices, run scenes — and nothing
+/// else. Never an admin, never an author; no users, plugins or keys.
+pub fn display_scopes() -> Vec<String> {
+    let mut v: Vec<String> = Role::ReadOnly.scopes();
+    v.push("devices:write".into());
+    v.push("scenes:run".into());
+    v
 }
 
 /// Public-facing user record (no password hash).

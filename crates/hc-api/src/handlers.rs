@@ -4819,7 +4819,7 @@ pub async fn delete_scene(
 
 pub async fn activate_scene(
     State(s): State<AppState>,
-    ScenesWrite(_claims): ScenesWrite,
+    crate::auth_middleware::ScenesRun(_claims): crate::auth_middleware::ScenesRun,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let scene = match s.store.get_scene(id).await {
@@ -11694,6 +11694,7 @@ mod event_stream_tests {
             role: Role::User,
             created_at: chrono::Utc::now(),
             token_version: 0,
+            pin_hash: None,
         };
         state.store.create_user(&user).await.unwrap();
         let token = state
