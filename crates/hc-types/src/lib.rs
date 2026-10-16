@@ -13,6 +13,7 @@
 /// for 1.0+, matching `state_bridge::sdk_versions_compatible`.
 pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod alert;
 /// The config-descriptor vocabulary, shared by plugins (through the SDK, which
 /// re-exports this module) and by core, which describes `homecore.toml` with
 /// it. Behind a feature because a wasm client never needs the builders.

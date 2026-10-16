@@ -16,6 +16,7 @@ use std::sync::{Arc, OnceLock};
 use tracing::info;
 use uuid::Uuid;
 
+pub mod alert_rule_store;
 pub mod api_key_store;
 pub mod asset_store;
 pub mod audit_store;
@@ -29,6 +30,7 @@ pub mod rule_store;
 pub mod schema_store;
 pub mod user_store;
 
+use alert_rule_store::AlertRuleStore;
 use api_key_store::ApiKeyStore;
 use asset_store::AssetStore;
 use audit_store::AuditStore;
@@ -62,6 +64,7 @@ pub struct StateStore {
     refresh_tokens: Arc<RefreshTokenStore>,
     audit: Arc<AuditStore>,
     battery: Arc<BatteryStore>,
+    alert_rules: Arc<AlertRuleStore>,
     plugin_state: Arc<PluginStateStore>,
     plugin_runtimes: Arc<PluginRuntimeStore>,
     assets: Arc<AssetStore>,
@@ -131,6 +134,7 @@ impl StateStore {
             refresh_tokens,
             audit,
             battery,
+            alert_rules,
             plugin_state,
             plugin_runtimes,
             assets,
@@ -168,6 +172,7 @@ impl StateStore {
             let refresh_tokens = RefreshTokenStore::new(Arc::clone(&db))?;
             let audit = AuditStore::open(std::path::Path::new(&audit_path))?;
             let battery = BatteryStore::new(Arc::clone(&db))?;
+            let alert_rules = AlertRuleStore::new(Arc::clone(&db))?;
             let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
             let plugin_runtimes = PluginRuntimeStore::new(Arc::clone(&db))?;
             // Blobs live beside the state DB rather than inside it, and the
@@ -188,6 +193,7 @@ impl StateStore {
                 refresh_tokens,
                 audit,
                 battery,
+                alert_rules,
                 plugin_state,
                 plugin_runtimes,
                 assets,
@@ -205,6 +211,7 @@ impl StateStore {
             refresh_tokens: Arc::new(refresh_tokens),
             audit: Arc::new(audit),
             battery: Arc::new(battery),
+            alert_rules: Arc::new(alert_rules),
             plugin_state: Arc::new(plugin_state),
             plugin_runtimes: Arc::new(plugin_runtimes),
             assets: Arc::new(assets),
@@ -288,6 +295,31 @@ impl StateStore {
         let id = device_id.to_string();
         tokio::task::spawn_blocking(move || store.evaluate(&id, pct, threshold, recover_band))
             .await?
+    }
+
+    // --- Alert time rules (H4) ---
+
+    pub async fn list_alert_rules(&self) -> Result<Vec<hc_types::alert::AlertRule>> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.list()).await?
+    }
+
+    pub async fn get_alert_rule(&self, id: &str) -> Result<Option<hc_types::alert::AlertRule>> {
+        let store = Arc::clone(&self.alert_rules);
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || store.get(&id)).await?
+    }
+
+    pub async fn upsert_alert_rule(&self, rule: hc_types::alert::AlertRule) -> Result<()> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.upsert(&rule)).await?
+    }
+
+    /// Whether there was such a rule.
+    pub async fn delete_alert_rule(&self, id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.alert_rules);
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || store.delete(&id)).await?
     }
 
     /// Drop the battery latch entry for a device (called when the device
