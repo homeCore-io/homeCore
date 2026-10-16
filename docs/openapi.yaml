@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.76"
+  version: "0.1.77"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -55,6 +55,8 @@ tags:
     description: Device registry and state control
   - name: areas
     description: Room and zone management
+  - name: displays
+    description: Wall tablets and panels, each its own identity
   - name: alerts
     description: What the house's state says needs attention, and the time rules behind some of it
   - name: automations
@@ -124,6 +126,10 @@ paths:
         A whitelisted caller has no user record and receives `404` here. That is
         correct rather than an omission: the bypass trusts an address, not a
         person, so there is no profile to return.
+
+        A **display's** key answers as the display, not as the admin who made
+        it: `id` is the display's, `username` its name, `role` and `kind` are
+        `display`. A person's profile says `has_pin`.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -145,6 +151,13 @@ paths:
                           its role's scopes; an API key carries its own.
                         items:
                           type: string
+                      has_pin:
+                        type: boolean
+                        description: Whether this person can unlock a display with a PIN.
+                      kind:
+                        type: string
+                        enum: [display]
+                        description: Present, as `display`, for a display's key.
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -1958,6 +1971,9 @@ paths:
     post:
       operationId: activateScene
       summary: Activate a scene (applies all stored device states via MQTT)
+      description: |
+        Needs `scenes:write`, or `scenes:run` — which a display holds, so it
+        can run scenes without being able to change them.
       tags: [scenes]
       security:
         - bearerAuth: []
@@ -2052,6 +2068,175 @@ paths:
           description: An area cannot be merged into itself
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /displays:
+    get:
+      operationId: listDisplays
+      summary: The house's displays
+      description: |
+        A display — a kitchen panel, a hall tablet — is its own identity, not a
+        person's: an API key marked as a display, which may read the house,
+        command devices and run scenes (`scenes:run`), and nothing else. It is
+        never an admin. Admins only.
+      tags: [displays]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every display, by name — never their keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Display"
+        "403":
+          description: Not an admin
+    post:
+      operationId: createDisplay
+      summary: Make a display, and its key
+      description: The answer carries the key in `token`. It is never shown again. Admins only.
+      tags: [displays]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: Kitchen
+      responses:
+        "201":
+          description: The display, with its key
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Display"
+                  - type: object
+                    required: [token]
+                    properties:
+                      token:
+                        type: string
+                        description: The display's key (`hc_sk_…`), shown once.
+        "400":
+          description: No name
+        "403":
+          description: Not an admin
+
+  /displays/{id}:
+    delete:
+      operationId: deleteDisplay
+      summary: Remove a display
+      description: Its key stops working at once. Admins only.
+      tags: [displays]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Removed
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/pin:
+    put:
+      operationId: setPin
+      summary: Set your own PIN
+      description: |
+        4 to 8 digits, unique in the house — the PIN alone says who is at a
+        display. Needs your password. `409` if someone else uses it.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin, password]
+              properties:
+                pin:
+                  type: string
+                  example: "2468"
+                password:
+                  type: string
+      responses:
+        "204":
+          description: Set
+        "400":
+          description: Not 4 to 8 digits
+        "401":
+          description: Wrong password
+        "409":
+          description: Someone else uses that PIN
+    delete:
+      operationId: clearPin
+      summary: Remove your PIN
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Removed
+
+  /auth/pin-session:
+    post:
+      operationId: pinSession
+      summary: Unlock a display as the person whose PIN this is
+      description: |
+        From a display's key only. Answers a token for the person, lasting five
+        minutes, with no refresh token: the display goes back to being itself
+        when it runs out. Five wrong PINs in fifteen minutes make that display
+        wait (`429`, `Retry-After`).
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin:
+                  type: string
+      responses:
+        "200":
+          description: The person's short session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  token_type:
+                    type: string
+                  expires_in:
+                    type: integer
+                    example: 300
+                  user:
+                    $ref: "#/components/schemas/UserInfo"
+        "401":
+          description: Nobody's PIN
+        "403":
+          description: Not a display
+        "429":
+          description: Too many wrong PINs on this display; wait
 
   /alerts:
     get:
@@ -8528,6 +8713,25 @@ components:
           format: date-time
 
     # ---- Areas ----
+
+    Display:
+      type: object
+      required: [id, name, created_at, revoked]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked:
+          type: boolean
 
     Alert:
       type: object

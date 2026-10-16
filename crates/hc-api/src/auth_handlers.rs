@@ -366,6 +366,10 @@ pub async fn refresh(
 /// A whitelisted caller has no user record and still gets 404 here, which is
 /// correct — the bypass is an address being trusted, not somebody being known.
 pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
+    // A display's key answers as the display (H3), not as whoever made it.
+    if let Some(display) = crate::display_handlers::me_as_display(&s, &claims).await {
+        return (StatusCode::OK, Json(display)).into_response();
+    }
     match s
         .store
         .get_user_by_id(Uuid::parse_str(&claims.uid).unwrap_or_default())
@@ -377,6 +381,7 @@ pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl I
             // other endpoints return and where a per-credential field would be
             // meaningless.
             body["scopes"] = json!(claims.scopes);
+            body["has_pin"] = json!(user.pin_hash.is_some());
             (StatusCode::OK, Json(body)).into_response()
         }
         Ok(None) => (
@@ -585,6 +590,7 @@ pub async fn create_user(
         role: body.role,
         created_at: chrono::Utc::now(),
         token_version: 0,
+        pin_hash: None,
     };
     match s.store.create_user(&user).await {
         Ok(_) => {
@@ -862,6 +868,7 @@ mod me_tests {
             role: Role::Admin,
             created_at: chrono::Utc::now(),
             token_version: 0,
+            pin_hash: None,
         }
     }
 

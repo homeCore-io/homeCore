@@ -41,8 +41,19 @@ pub struct Claims {
 }
 
 impl Claims {
+    /// Whether this caller may do what only an admin may — manage users,
+    /// back up and restore, change the system's config.
+    ///
+    /// **An API key is admin only if it was granted an admin-only scope.** A
+    /// key's `role` is a decorative `Admin` (see `has_scope`), so judging keys
+    /// by role made every key an admin here — a read-only key could create
+    /// users, and a display key on a wall tablet would have been a full admin
+    /// (D7). A key made with an admin's full scopes still is one.
     pub fn is_admin(&self) -> bool {
-        self.role == Role::Admin
+        match self.actor {
+            Some(Actor::ApiKey { .. }) => self.scopes.iter().any(|s| s == "users:write"),
+            _ => self.role == Role::Admin,
+        }
     }
 
     /// Whether this caller may do `scope`.
@@ -119,11 +130,24 @@ impl JwtService {
         role: Role,
         token_version: u64,
     ) -> Result<String> {
+        self.issue_for(uid, username, role, token_version, self.expiry_hours * 3600)
+    }
+
+    /// As [`issue`](Self::issue), lasting `ttl_secs` — a person's few minutes
+    /// at a display after their PIN (H5).
+    pub fn issue_for(
+        &self,
+        uid: &str,
+        username: &str,
+        role: Role,
+        token_version: u64,
+        ttl_secs: u64,
+    ) -> Result<String> {
         let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            + self.expiry_hours * 3600;
+            + ttl_secs;
         let actor_uid = Uuid::parse_str(uid).unwrap_or(Uuid::nil());
         let claims = Claims {
             sub: username.to_string(),
@@ -349,5 +373,39 @@ mod tests {
         )
         .unwrap();
         assert!(svc.validate(&token).is_err());
+    }
+
+    #[test]
+    fn a_key_is_admin_only_with_an_admin_only_scope() {
+        let key = |scopes: Vec<String>| Claims {
+            sub: "api_key:k".into(),
+            uid: Uuid::nil().to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes,
+            actor: Some(Actor::ApiKey {
+                id: Uuid::new_v4(),
+                owner_uid: Uuid::nil(),
+                label: "k".into(),
+            }),
+            tv: 0,
+        };
+        assert!(!key(vec!["devices:read".into()]).is_admin());
+        assert!(!key(crate::user::display_scopes()).is_admin());
+        assert!(key(Role::Admin.scopes()).is_admin());
+    }
+
+    #[test]
+    fn a_short_session_expires_when_asked() {
+        let jwt = JwtService::new_hs256(b"ttl-test-secret-32-bytes-minimum!", 24);
+        let t = jwt
+            .issue_for(&Uuid::new_v4().to_string(), "bo", Role::User, 0, 300)
+            .unwrap();
+        let c = jwt.validate(&t).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(c.exp <= now + 300 && c.exp >= now + 295);
     }
 }

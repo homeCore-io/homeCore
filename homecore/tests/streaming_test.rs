@@ -563,6 +563,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 role,
                 created_at: chrono::Utc::now(),
                 token_version: 0,
+                pin_hash: None,
             })
             .await?;
     }

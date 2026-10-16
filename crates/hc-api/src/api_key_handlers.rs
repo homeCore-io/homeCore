@@ -148,6 +148,7 @@ pub async fn create_api_key(
                     .map(|d| Utc::now() + Duration::days(d as i64)),
                 allowed_cidrs: body.allowed_cidrs.clone(),
                 revoked_at: None,
+                display: false,
             };
             break (candidate, rec);
         }

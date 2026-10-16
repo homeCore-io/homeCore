@@ -268,6 +268,7 @@ mod tests {
             role: Role::Admin,
             created_at: chrono::Utc::now(),
             token_version: 0,
+            pin_hash: None,
         };
         store.create_user(&user).await.unwrap();
 
