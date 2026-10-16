@@ -148,7 +148,9 @@ pub fn event_device_id(event: &Event) -> Option<&str> {
         | Event::DeviceCommandSent { device_id, .. }
         | Event::DeviceBatteryLow { device_id, .. }
         | Event::DeviceBatteryRecovered { device_id, .. }
-        | Event::DeviceRemoved { device_id, .. } => Some(device_id),
+        | Event::DeviceRemoved { device_id, .. }
+        | Event::AlertCleared { device_id, .. } => Some(device_id),
+        Event::AlertRaised { alert, .. } => Some(&alert.device_id),
         Event::DeviceAdded { device, .. } | Event::DeviceMetadataChanged { device, .. } => {
             Some(&device.device_id)
         }
@@ -188,6 +190,8 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::RoomRemoved { .. } => "room_removed",
         Event::SceneChanged { .. } => "scene_changed",
         Event::SceneRemoved { .. } => "scene_removed",
+        Event::AlertRaised { .. } => "alert_raised",
+        Event::AlertCleared { .. } => "alert_cleared",
     }
 }
 

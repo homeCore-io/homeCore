@@ -27,6 +27,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 pub mod admin_uds;
+pub mod alert_handlers;
 pub mod api_key_handlers;
 pub mod asset_handlers;
 pub mod audit;
@@ -411,6 +412,8 @@ pub struct AppState {
     /// open the option of a future `PATCH` updating thresholds at runtime.
     pub battery_config:
         Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
+    /// The alert engine's active alerts (H4) — `None` when it isn't running.
+    pub alerts: Option<hc_core::alerts::AlertsHandle>,
     /// Path to homecore.toml — used by handlers that need to write
     /// runtime changes back to disk (currently the plugin
     /// enable/disable toggle persists via this). `None` if hc-core
@@ -835,6 +838,7 @@ impl AppState {
             streaming_registry: streaming::StreamingRegistry::new(),
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
+            alerts: None,
             homecore_config_path: None,
             shutdown_tx: None,
         };
@@ -890,6 +894,12 @@ impl AppState {
         sender: Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>,
     ) -> Self {
         self.battery_config = Some(sender);
+        self
+    }
+
+    /// Serve the alert engine's alerts, and wake it when rules change (H4).
+    pub fn with_alerts(mut self, handle: hc_core::alerts::AlertsHandle) -> Self {
+        self.alerts = Some(handle);
         self
     }
 
@@ -1206,6 +1216,16 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/areas/{id}/devices", put(handlers::set_area_devices))
         .route("/areas/{id}/merge", post(handlers::merge_area))
+        // Alerts (H4)
+        .route("/alerts", get(alert_handlers::list_alerts))
+        .route(
+            "/alert-rules",
+            get(alert_handlers::list_alert_rules).post(alert_handlers::create_alert_rule),
+        )
+        .route(
+            "/alert-rules/{id}",
+            put(alert_handlers::put_alert_rule).delete(alert_handlers::delete_alert_rule),
+        )
         // Automations
         .route(
             "/automations",

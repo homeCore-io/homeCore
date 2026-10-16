@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.75"
+  version: "0.1.76"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -55,6 +55,8 @@ tags:
     description: Device registry and state control
   - name: areas
     description: Room and zone management
+  - name: alerts
+    description: What the house's state says needs attention, and the time rules behind some of it
   - name: automations
     description: Automation rule CRUD, dry-run, import/export
   - name: scenes
@@ -2051,6 +2053,121 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /alerts:
+    get:
+      operationId: listAlerts
+      summary: What needs attention now
+      description: |
+        Active alerts, most serious first, then newest. homeCore raises and
+        clears them itself — whether or not any client is open — from:
+
+        - **built-in states:** something wet (`water_detected`, `leak`,
+          `wet`), smoke (`smoke`, `smoke_detected`), a lock jammed (`jammed`,
+          or a `last_alert` mentioning a jam), a battery low (`battery_low`,
+          or a level at or under `[battery].threshold_pct`, clearing once it
+          is back above the recover band), and a device offline for five
+          minutes;
+        - **time rules** (`/alert-rules`).
+
+        Needs `devices:read`. Changes are announced as `alert_raised` and
+        `alert_cleared` on the event stream.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active alerts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Alert"
+
+  /alert-rules:
+    get:
+      operationId: listAlertRules
+      summary: List alert time rules
+      description: Needs `automations:read`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every rule, by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlertRule"
+    post:
+      operationId: createAlertRule
+      summary: Add an alert time rule
+      description: |
+        homeCore assigns the `id`. The alerts are worked out again at once.
+        Needs `automations:write`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertRule"
+      responses:
+        "201":
+          description: The rule as saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertRule"
+        "400":
+          description: The rule isn't valid; `error` says why
+
+  /alert-rules/{id}:
+    put:
+      operationId: putAlertRule
+      summary: Replace an alert time rule
+      description: Needs `automations:write`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AlertRuleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertRule"
+      responses:
+        "200":
+          description: The rule as saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertRule"
+        "400":
+          description: The rule isn't valid; `error` says why
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteAlertRule
+      summary: Delete an alert time rule
+      description: Its alerts clear. Needs `automations:write`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AlertRuleId"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /events/stream:
     get:
       operationId: streamEvents
@@ -2073,7 +2190,7 @@ paths:
 
         **Snapshot (optional):** with `snapshot=true` the first frame is the
         house as it stands — `{"type": "snapshot", "timestamp", "devices",
-        "rooms", "scenes"}`, each device with `schema` inline as
+        "rooms", "scenes", "alerts"}`, each device with `schema` inline as
         `GET /devices?include_schema=true` gives it. A section the caller may
         not read is left out. The stream is subscribed before the snapshot is
         read, so a change made meanwhile follows it as an event; applying
@@ -2097,7 +2214,13 @@ paths:
         `scene_activated`, `plugin_registered`, `plugin_offline`,
         `plugin_heartbeat`, `plugin_status_changed`, `plugin_capabilities`,
         `timer_state_changed`, `mode_changed`, `rule_evaluation_failed`,
-        `action_failed`, `mqtt_message`, `system_alert`, `custom`
+        `action_failed`, `mqtt_message`, `system_alert`, `custom`,
+        `alert_raised`, `alert_cleared`
+
+        `alert_raised` carries the whole `Alert` — sent when one is raised and
+        again whenever what it says changes; `alert_cleared` names the
+        `alert_id` and `device_id` of one whose condition ended. Applied over
+        the snapshot's `alerts`, they keep a client's list exact.
 
         `device_schema_changed` reports that a device's *declaration* changed —
         the attribute names and action ids it now carries, not its values. A
@@ -7562,6 +7685,13 @@ components:
         type: string
       description: Device identifier (e.g. `light.living_room_main`)
 
+    AlertRuleId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Alert rule id
     AreaId:
       name: id
       in: path
@@ -8399,6 +8529,81 @@ components:
 
     # ---- Areas ----
 
+    Alert:
+      type: object
+      required: [id, kind, device_id, message, reason, severity, raised_at]
+      properties:
+        id:
+          type: string
+          description: Stable while the condition lasts — `wet:{device}`, `rule:{rule}:{device}`.
+        kind:
+          type: string
+          enum: [wet, smoke, offline, jammed, low_battery, rule]
+        device_id:
+          type: string
+        rule_id:
+          type: string
+          description: The time rule, when `kind` is `rule`.
+        message:
+          type: string
+          example: Garage Door open after 22:00
+        reason:
+          type: string
+          description: The message without the device's name, for its card.
+          example: Open after 22:00
+        severity:
+          type: string
+          enum: [warning, critical]
+        raised_at:
+          type: string
+          format: date-time
+          description: When the condition began, as near as homeCore knows.
+
+    AlertRule:
+      type: object
+      required: [name, device_ids, attribute, value]
+      properties:
+        id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+        enabled:
+          type: boolean
+          default: true
+        device_ids:
+          type: array
+          items:
+            type: string
+        attribute:
+          type: string
+          example: open
+        value:
+          description: The value that counts — `true`, say.
+        state_label:
+          type: string
+          description: The state in the device's words, for the alert's message.
+          example: Open
+        after:
+          type: string
+          nullable: true
+          description: From this time of day, `HH:MM` local.
+          example: "22:00"
+        until:
+          type: string
+          nullable: true
+          description: Until this time of day, `HH:MM` local; earlier than `after` spans midnight.
+          example: "06:00"
+        for_minutes:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: Only once the state has lasted this long.
+        severity:
+          type: string
+          enum: [warning, critical]
+          default: warning
+
     Area:
       type: object
       required: [id, name, slug, named_by, device_ids]
@@ -8748,6 +8953,8 @@ components:
         | `plugin_registered` | `plugin_id` |
         | `plugin_offline` | `plugin_id` |
         | `system_alert` | `severity`, `message` |
+        | `alert_raised` | `alert` (an `Alert`) |
+        | `alert_cleared` | `alert_id`, `device_id` |
         | `custom` | `event_type`, `payload` |
       properties:
         type:

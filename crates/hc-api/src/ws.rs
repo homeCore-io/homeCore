@@ -23,7 +23,7 @@
 //!
 //! ## Snapshot (optional)
 //! - `snapshot=true` — the first frame is the house as it stands:
-//!   `{"type":"snapshot","timestamp":…,"devices":[…],"rooms":[…],"scenes":[…]}`,
+//!   `{"type":"snapshot","timestamp":…,"devices":[…],"rooms":[…],"scenes":[…],"alerts":[…]}`,
 //!   each device with its `schema` inline as `GET /devices?include_schema=true`
 //!   gives it. Each section is present only if the caller may read it.
 //!
@@ -295,6 +295,11 @@ pub(crate) async fn snapshot(
     }
     if claims.has_scope("scenes:read") {
         out.insert("scenes".into(), json!(state.store.list_scenes().await?));
+    }
+    if claims.has_scope("devices:read") {
+        if let Some(alerts) = &state.alerts {
+            out.insert("alerts".into(), json!(alerts.list()));
+        }
     }
     Ok(serde_json::Value::Object(out))
 }

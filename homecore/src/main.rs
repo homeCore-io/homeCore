@@ -625,6 +625,9 @@ async fn main() -> Result<()> {
     let (battery_tx, battery_rx) = tokio::sync::watch::channel(battery_initial);
     let battery_tx = Arc::new(battery_tx);
 
+    // Alerts (H4): the engine runs inside core; the API serves what it keeps.
+    let alerts = hc_core::alerts::AlertsHandle::new();
+
     let mut core = Core::new(
         internal_bus.clone(),
         pub_bus.clone(),
@@ -642,7 +645,8 @@ async fn main() -> Result<()> {
     .with_calendar_expansion_days(calendar_expansion_days)
     .with_shutdown(shutdown_rx.clone())
     .with_log_stream(log_tx.clone(), log_ring.clone())
-    .with_battery_config(battery_rx);
+    .with_battery_config(battery_rx)
+    .with_alerts(alerts.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
     match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
@@ -1126,6 +1130,7 @@ async fn main() -> Result<()> {
     .with_dashboard_store(dashboard_store, dashboard_data)
     .with_skin_store(skin_store, skin_data)
     .with_battery_config(battery_tx)
+    .with_alerts(alerts)
     .with_homecore_config_path(config_path.clone())
     // Inject the binary crate's CARGO_PKG_VERSION so /health,
     // /system/status, and /system/versions all report the homecore

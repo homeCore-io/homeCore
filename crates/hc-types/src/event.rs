@@ -241,6 +241,17 @@ pub enum Event {
         /// Battery percentage at the time the latch cleared (0–100).
         battery_pct: f64,
     },
+    /// homeCore raised an alert (H4), or changed what an active one says.
+    AlertRaised {
+        timestamp: DateTime<Utc>,
+        alert: crate::alert::Alert,
+    },
+    /// An alert's condition ended.
+    AlertCleared {
+        timestamp: DateTime<Utc>,
+        alert_id: String,
+        device_id: String,
+    },
     /// A raw MQTT message arrived (used before topic routing is applied).
     MqttMessage {
         timestamp: DateTime<Utc>,
@@ -356,7 +367,9 @@ impl Event {
             | Event::PluginStatusChanged { timestamp, .. }
             | Event::PluginCapabilities { timestamp, .. }
             | Event::DeviceBatteryLow { timestamp, .. }
-            | Event::DeviceBatteryRecovered { timestamp, .. } => *timestamp,
+            | Event::DeviceBatteryRecovered { timestamp, .. }
+            | Event::AlertRaised { timestamp, .. }
+            | Event::AlertCleared { timestamp, .. } => *timestamp,
         }
     }
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
+pub mod alerts;
 pub mod battery_watcher;
 pub mod calendar_store;
 pub mod device_naming;
@@ -105,6 +106,8 @@ pub struct Core {
     /// watcher entirely. The receiver is read on each event so REST patches
     /// take effect without restart.
     battery_config: Option<watch::Receiver<battery_watcher::BatteryConfig>>,
+    /// Where the alert engine keeps its active alerts (H4). None runs none.
+    alerts: Option<alerts::AlertsHandle>,
 }
 
 impl Core {
@@ -135,7 +138,15 @@ impl Core {
             log_tx: None,
             log_ring: None,
             battery_config: None,
+            alerts: None,
         }
+    }
+
+    /// Run the alert engine (H4), keeping its alerts in `handle` — shared
+    /// with the API, which lists them and tells the engine when rules change.
+    pub fn with_alerts(mut self, handle: alerts::AlertsHandle) -> Self {
+        self.alerts = Some(handle);
+        self
     }
 
     /// Provide the live battery-watcher config receiver. When set, the
@@ -373,6 +384,16 @@ impl Core {
 
         // Battery watcher: synthesizes DeviceBatteryLow/Recovered events from
         // DeviceStateChanged with hysteresis, latched in the BatteryStore.
+        // Alert engine: works out what needs attention from the stored
+        // devices and the time rules, and announces the difference (H4).
+        if let Some(handle) = self.alerts.clone() {
+            alerts::spawn(
+                self.pub_bus.clone(),
+                self.state.clone(),
+                handle,
+                self.battery_config.clone(),
+            );
+        }
         if let Some(cfg) = self.battery_config.clone() {
             battery_watcher::spawn(
                 self.pub_bus.clone(),
