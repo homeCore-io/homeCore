@@ -147,7 +147,11 @@ pub fn event_device_id(event: &Event) -> Option<&str> {
         | Event::DeviceSchemaChanged { device_id, .. }
         | Event::DeviceCommandSent { device_id, .. }
         | Event::DeviceBatteryLow { device_id, .. }
-        | Event::DeviceBatteryRecovered { device_id, .. } => Some(device_id),
+        | Event::DeviceBatteryRecovered { device_id, .. }
+        | Event::DeviceRemoved { device_id, .. } => Some(device_id),
+        Event::DeviceAdded { device, .. } | Event::DeviceMetadataChanged { device, .. } => {
+            Some(&device.device_id)
+        }
         Event::TimerStateChanged { timer_id, .. } => Some(timer_id),
         _ => None,
     }
@@ -177,6 +181,13 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::PluginCapabilities { .. } => "plugin_capabilities",
         Event::DeviceBatteryLow { .. } => "device_battery_low",
         Event::DeviceBatteryRecovered { .. } => "device_battery_recovered",
+        Event::DeviceAdded { .. } => "device_added",
+        Event::DeviceRemoved { .. } => "device_removed",
+        Event::DeviceMetadataChanged { .. } => "device_metadata_changed",
+        Event::RoomChanged { .. } => "room_changed",
+        Event::RoomRemoved { .. } => "room_removed",
+        Event::SceneChanged { .. } => "scene_changed",
+        Event::SceneRemoved { .. } => "scene_removed",
     }
 }
 

@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.74"
+  version: "0.1.75"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -789,6 +789,10 @@ paths:
     post:
       operationId: createArea
       summary: Create a new area
+      description: |
+        Makes a room with the name as typed. If the house already has a room
+        by that name — its slug or any alias — that room is returned with
+        200 instead.
       tags: [areas]
       security:
         - bearerAuth: []
@@ -805,11 +809,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Area"
+        "200":
+          description: The existing area by that name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "400":
+          description: The name has nothing in it to make a slug from
 
   /areas/{id}:
     patch:
       operationId: patchArea
       summary: Rename an area
+      description: |
+        The id stays the same and the room's devices stay in it. The old slug
+        becomes an alias, so a bridge that still reports the old name keeps
+        putting its devices here. 409 if another room already has the name —
+        merge into it instead.
       tags: [areas]
       security:
         - bearerAuth: []
@@ -830,9 +847,14 @@ paths:
                 $ref: "#/components/schemas/Area"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: Another area already has that name; `existing` is that area
     delete:
       operationId: deleteArea
       summary: Delete an area and clear it from member devices
+      description: |
+        A bridge that still reports the room makes it again on its next
+        registration. To fold a bridge's room into another for good, merge it.
       tags: [areas]
       security:
         - bearerAuth: []
@@ -1992,6 +2014,43 @@ paths:
                 items:
                   $ref: "#/components/schemas/LogEntry"
 
+  /areas/{id}/merge:
+    post:
+      operationId: mergeArea
+      summary: Fold an area into another
+      description: |
+        The area's devices move into `into`, and every slug it answered to
+        becomes an alias of `into` — so the bridge that reported it puts its
+        devices there from now on rather than making it again. The area is
+        deleted; a `room_removed` event names where it went.
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [into]
+              properties:
+                into:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: The area merged into
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "400":
+          description: An area cannot be merged into itself
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /events/stream:
     get:
       operationId: streamEvents
@@ -2005,11 +2064,34 @@ paths:
         validates the token before accepting the upgrade and returns HTTP 401
         if it is missing or invalid.
 
+        A token is judged as its own even from a whitelisted address; only a
+        request with no token falls back to the whitelist — as for REST.
+
         **Filtering (optional):**
         - `type` — comma-separated event type names (e.g. `device_state_changed,rule_fired`)
         - `device_id` — only forward events for this device
 
+        **Snapshot (optional):** with `snapshot=true` the first frame is the
+        house as it stands — `{"type": "snapshot", "timestamp", "devices",
+        "rooms", "scenes"}`, each device with `schema` inline as
+        `GET /devices?include_schema=true` gives it. A section the caller may
+        not read is left out. The stream is subscribed before the snapshot is
+        read, so a change made meanwhile follows it as an event; applying
+        events in order over the snapshot ends at the current state.
+
+        **Keeping a copy of the house current:** `device_added` and
+        `device_metadata_changed` (name, room, type, `ui_hint`, icon, button
+        names — anything but what the device reports) carry the whole device
+        record;
+        `device_removed` its id. `room_changed` carries the room;
+        `room_removed` its id, and `merged_into` when it was merged.
+        `scene_changed` / `scene_removed` cover homeCore's own scenes; plugin
+        scenes are devices. A device's room is the area whose `slug` or
+        `aliases` contain its `area_override`, else its `area`.
+
         **Event types:** `device_state_changed`, `device_availability_changed`,
+        `device_added`, `device_removed`, `device_metadata_changed`,
+        `room_changed`, `room_removed`, `scene_changed`, `scene_removed`,
         `device_name_changed`, `device_schema_changed`, `device_command_sent`,
         `device_battery_low`, `device_battery_recovered`, `rule_fired`,
         `scene_activated`, `plugin_registered`, `plugin_offline`,
@@ -2040,6 +2122,12 @@ paths:
           description: Only forward events for this device ID
           schema:
             type: string
+        - name: snapshot
+          in: query
+          description: Send the house as it stands as the first frame
+          schema:
+            type: boolean
+            default: false
       responses:
         "101":
           description: Switching Protocols — WebSocket upgrade accepted
@@ -8313,14 +8401,34 @@ components:
 
     Area:
       type: object
-      required: [id, name, device_ids]
+      required: [id, name, slug, named_by, device_ids]
+      description: |
+        A room. The id is assigned once and survives renames. Devices name
+        their room by slug (`area`, `area_override`); a device is in the room
+        whose `slug` or `aliases` contain it.
       properties:
         id:
           type: string
           format: uuid
         name:
           type: string
-          description: Normalized internal area name in snake_case, e.g. `living_room`.
+          description: The name as typed, e.g. `TV Room`.
+        slug:
+          type: string
+          description: Derived from the name, e.g. `tv_room` — what devices in the room carry.
+        aliases:
+          type: array
+          items:
+            type: string
+          description: |
+            Other slugs that mean this room — earlier names, and rooms merged
+            into it. Omitted when empty.
+        named_by:
+          type: string
+          enum: [person, bridge, guessed]
+          description: |
+            Where the name came from. A `guessed` name (given to rooms that had
+            only a slug) is replaced by the first bridge to spell the room.
         device_ids:
           type: array
           items:

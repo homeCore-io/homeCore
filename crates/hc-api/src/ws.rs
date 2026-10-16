@@ -20,6 +20,21 @@
 //!   All events on the public bus are forwarded by default; `MqttMessage` events
 //!   never reach the public bus and are not available here.
 //! - `device_id` — only forward events for this device
+//!
+//! ## Snapshot (optional)
+//! - `snapshot=true` — the first frame is the house as it stands:
+//!   `{"type":"snapshot","timestamp":…,"devices":[…],"rooms":[…],"scenes":[…]}`,
+//!   each device with its `schema` inline as `GET /devices?include_schema=true`
+//!   gives it. Each section is present only if the caller may read it.
+//!
+//!   The stream is subscribed *before* the snapshot is read, so nothing that
+//!   happens in between is lost: it arrives as an event after the snapshot,
+//!   possibly repeating what the snapshot already shows. Applying events in
+//!   order over the snapshot ends at the current state either way. With the
+//!   device, room and scene events, a client that holds the snapshot never
+//!   needs to reload to stay right.
+//!
+//!   Opt-in, because a client written before it would not know the frame.
 
 use crate::auth_middleware::whitelist_claims;
 use crate::event_log::{event_device_id, event_type_name};
@@ -161,6 +176,9 @@ pub struct EventStreamQuery {
     pub device_id: Option<String>,
     /// Optional client fingerprint to correlate reconnect storms.
     pub client_id: Option<String>,
+    /// Send the house as it stands as the first frame. See the module docs.
+    #[serde(default)]
+    pub snapshot: bool,
 }
 
 pub async fn ws_events_handler(
@@ -193,11 +211,16 @@ pub async fn ws_events_handler(
 
 /// Authenticate a WebSocket upgrade request.
 ///
-/// Checks the IP whitelist first (same logic as `require_auth` middleware).
-/// If the source IP is whitelisted the `?token=` parameter is not required.
-/// Otherwise the `?token=` is validated on the same terms as a header
-/// credential — an API key against the api_keys store, anything else as a JWT.
-async fn authenticate_ws(
+/// A `?token=` is validated on the same terms as a header credential — an
+/// API key against the api_keys store, anything else as a JWT. Only a request
+/// with no token at all falls back to the IP whitelist.
+///
+/// **A token wins over the whitelist, as it does for REST.** This used to
+/// check the whitelist first, so anybody connecting through a whitelisted
+/// address — a UI server passing the stream through for its signed-in people
+/// is exactly that — was streamed as admin whoever they were, while the same
+/// person's REST calls were judged as themselves.
+pub(crate) async fn authenticate_ws(
     query: &EventStreamQuery,
     state: &AppState,
     remote_ip: IpAddr,
@@ -211,14 +234,84 @@ async fn authenticate_ws(
         v4 => v4,
     };
 
-    if !state.whitelist.is_empty() && state.whitelist.iter().any(|net| net.contains(&ip)) {
+    let token = query.token.as_deref().unwrap_or("");
+    if token.is_empty()
+        && !state.whitelist.is_empty()
+        && state.whitelist.iter().any(|net| net.contains(&ip))
+    {
         tracing::debug!(%ip, "IP whitelist bypass — granting Admin access (WS)");
         return Ok(whitelist_claims());
     }
 
-    crate::auth_middleware::validate_query_token(state, query.token.as_deref().unwrap_or(""))
+    crate::auth_middleware::validate_query_token(state, token)
         .await
         .map_err(Box::new)
+}
+
+/// The house as it stands, for a client that asked for it on connect.
+///
+/// Built from the same reads the REST endpoints make, so a snapshot and a
+/// `GET` never disagree about what a device or a room looks like. A section
+/// the caller may not read is left out rather than sent empty, so an empty
+/// list always means "there are none".
+pub(crate) async fn snapshot(
+    state: &AppState,
+    claims: &Claims,
+) -> anyhow::Result<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    out.insert("type".into(), json!("snapshot"));
+    out.insert("timestamp".into(), json!(chrono::Utc::now()));
+
+    if claims.has_scope("devices:read") {
+        let schemas: HashMap<String, hc_types::DeviceSchema> = state
+            .store
+            .list_device_schemas()
+            .await?
+            .into_iter()
+            .collect();
+        let devices: Vec<serde_json::Value> = state
+            .store
+            .list_devices()
+            .await?
+            .into_iter()
+            .map(crate::handlers::normalize_native_device_type)
+            .map(|device| {
+                let schema = schemas.get(&device.device_id).cloned().map(|mut schema| {
+                    schema.fill_primary(device.device_type.as_deref());
+                    schema
+                });
+                let mut entry = serde_json::to_value(&device).unwrap_or(json!({}));
+                entry["schema"] = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
+                entry
+            })
+            .collect();
+        out.insert("devices".into(), json!(devices));
+    }
+    if claims.has_scope("areas:read") {
+        out.insert(
+            "rooms".into(),
+            json!(hc_core::rooms::list(&state.store).await?),
+        );
+    }
+    if claims.has_scope("scenes:read") {
+        out.insert("scenes".into(), json!(state.store.list_scenes().await?));
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// A device inside an event, shaped as `GET /devices` shapes it.
+fn normalize_event(event: Event) -> Event {
+    match event {
+        Event::DeviceAdded { timestamp, device } => Event::DeviceAdded {
+            timestamp,
+            device: Box::new(crate::handlers::normalize_native_device_type(*device)),
+        },
+        Event::DeviceMetadataChanged { timestamp, device } => Event::DeviceMetadataChanged {
+            timestamp,
+            device: Box::new(crate::handlers::normalize_native_device_type(*device)),
+        },
+        other => other,
+    }
 }
 
 /// Inner validation logic, separated so it can be unit-tested without a full `AppState`.
@@ -296,6 +389,23 @@ async fn handle_socket(
         .with_label_values(&["events_stream"])
         .inc();
 
+    // After subscribing, so nothing that happens while it is read is lost.
+    let opening: Option<&'static str> = if query.snapshot {
+        match snapshot(&state, &claims).await {
+            Ok(frame) => socket
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .err()
+                .map(|_| "event_send_failed"),
+            Err(e) => {
+                warn!(error = %e, "Could not read the snapshot for an event stream");
+                Some("snapshot_failed")
+            }
+        }
+    } else {
+        None
+    };
+
     // Ping/pong liveness. The interval's first tick fires immediately —
     // consume it before the loop so the first ping goes out one full
     // PING_INTERVAL after connect, not at t=0.
@@ -318,77 +428,83 @@ async fn handle_socket(
     //   ping_send_failed  — couldn't send the periodic ping (write err)
     //   event_send_failed — couldn't push an event payload (write err)
     //   bus_closed        — broadcast channel closed (server shutdown)
-    let reason: &'static str = loop {
-        tokio::select! {
-            // Drain client->server frames first so a busy event bus can't
-            // starve a pending Close.
-            biased;
+    //   snapshot_failed   — the requested snapshot could not be read
+    let reason: &'static str = 'stream: {
+        if let Some(reason) = opening {
+            break 'stream reason;
+        }
+        loop {
+            tokio::select! {
+                // Drain client->server frames first so a busy event bus can't
+                // starve a pending Close.
+                biased;
 
-            recv = socket.recv() => {
-                match recv {
-                    None => break "socket_closed",
-                    Some(Err(_)) => break "recv_error",
-                    Some(Ok(Message::Close(_))) => break "client_close",
-                    Some(Ok(Message::Pong(_))) => {
-                        outstanding_ping = false;
-                    }
-                    // Text/Binary/Ping from the client are ignored — this
-                    // endpoint is a one-way push. axum auto-pongs incoming Ping.
-                    Some(Ok(_)) => {}
-                }
-            }
-
-            _ = ping_ticker.tick() => {
-                if outstanding_ping {
-                    // Previous ping never got a pong — assume the socket is dead.
-                    break "pong_timeout";
-                }
-                if socket.send(Message::Ping(Default::default())).await.is_err() {
-                    break "ping_send_failed";
-                }
-                outstanding_ping = true;
-            }
-
-            event = rx.recv() => {
-                match event {
-                    Ok(event) => {
-                        // Skip noisy heartbeats unless the client explicitly asked for them.
-                        if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
-                            continue;
+                recv = socket.recv() => {
+                    match recv {
+                        None => break "socket_closed",
+                        Some(Err(_)) => break "recv_error",
+                        Some(Ok(Message::Close(_))) => break "client_close",
+                        Some(Ok(Message::Pong(_))) => {
+                            outstanding_ping = false;
                         }
+                        // Text/Binary/Ping from the client are ignored — this
+                        // endpoint is a one-way push. axum auto-pongs incoming Ping.
+                        Some(Ok(_)) => {}
+                    }
+                }
 
-                        // Apply device_id filter.
-                        if let Some(ref wanted_device) = device_filter {
-                            if !event_device_id(&event)
-                                .map(|d| d == wanted_device)
-                                .unwrap_or(false)
-                            {
+                _ = ping_ticker.tick() => {
+                    if outstanding_ping {
+                        // Previous ping never got a pong — assume the socket is dead.
+                        break "pong_timeout";
+                    }
+                    if socket.send(Message::Ping(Default::default())).await.is_err() {
+                        break "ping_send_failed";
+                    }
+                    outstanding_ping = true;
+                }
+
+                event = rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            // Skip noisy heartbeats unless the client explicitly asked for them.
+                            if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
                                 continue;
                             }
-                        }
 
-                        // Apply event type filter.
-                        if let Some(ref types) = type_filter {
-                            if !types.iter().any(|t| t == event_type_name(&event)) {
-                                continue;
+                            // Apply device_id filter.
+                            if let Some(ref wanted_device) = device_filter {
+                                if !event_device_id(&event)
+                                    .map(|d| d == wanted_device)
+                                    .unwrap_or(false)
+                                {
+                                    continue;
+                                }
+                            }
+
+                            // Apply event type filter.
+                            if let Some(ref types) = type_filter {
+                                if !types.iter().any(|t| t == event_type_name(&event)) {
+                                    continue;
+                                }
+                            }
+
+                            let json = match serde_json::to_string(&normalize_event(event)) {
+                                Ok(j) => j,
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to serialize event");
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                break "event_send_failed";
                             }
                         }
-
-                        let json = match serde_json::to_string(&event) {
-                            Ok(j) => j,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to serialize event");
-                                continue;
-                            }
-                        };
-                        if socket.send(Message::Text(json.into())).await.is_err() {
-                            break "event_send_failed";
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("WS event stream lagged by {n} events");
                         }
+                        Err(broadcast::error::RecvError::Closed) => break "bus_closed",
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WS event stream lagged by {n} events");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break "bus_closed",
                 }
             }
         }

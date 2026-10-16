@@ -309,29 +309,7 @@ pub fn spawn_metrics_listener(bus: &crate::AppState, metrics: Arc<MetricsCollect
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let label = match &event {
-                        Event::DeviceStateChanged { .. } => "device_state_changed",
-                        Event::DeviceAvailabilityChanged { .. } => "device_availability_changed",
-                        Event::RuleFired { .. } => "rule_fired",
-                        Event::SceneActivated { .. } => "scene_activated",
-                        Event::PluginRegistered { .. } => "plugin_registered",
-                        Event::PluginOffline { .. } => "plugin_offline",
-                        Event::PluginHeartbeat { .. } => "plugin_heartbeat",
-                        Event::PluginStatusChanged { .. } => "plugin_status_changed",
-                        Event::DeviceNameChanged { .. } => "device_name_changed",
-                        Event::DeviceSchemaChanged { .. } => "device_schema_changed",
-                        Event::MqttMessage { .. } => "mqtt_message",
-                        Event::Custom { .. } => "custom",
-                        Event::SystemAlert { .. } => "system_alert",
-                        Event::RuleEvaluationFailed { .. } => "rule_evaluation_failed",
-                        Event::ActionFailed { .. } => "action_failed",
-                        Event::DeviceCommandSent { .. } => "device_command_sent",
-                        Event::ModeChanged { .. } => "mode_changed",
-                        Event::TimerStateChanged { .. } => "timer_state_changed",
-                        Event::PluginCapabilities { .. } => "plugin_capabilities",
-                        Event::DeviceBatteryLow { .. } => "device_battery_low",
-                        Event::DeviceBatteryRecovered { .. } => "device_battery_recovered",
-                    };
+                    let label = crate::event_log::event_type_name(&event);
                     metrics.events_total.with_label_values(&[label]).inc();
 
                     match &event {

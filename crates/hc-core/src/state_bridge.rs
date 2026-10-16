@@ -619,6 +619,22 @@ impl StateBridge {
                 }
             }
         }
+        // Then to the room the house knows it as. A room renamed since the
+        // bridge named it answers to the bridge's slug as an alias, so the
+        // device lands in the renamed room rather than bringing the old one
+        // back; a room nobody has made is made, spelled as the bridge spells it.
+        let area = match (json["area"].as_str(), area) {
+            (Some(raw), Some(normalized)) => {
+                match crate::rooms::place_reported(&self.store, Some(&self.pub_bus), raw).await {
+                    Ok(placed) => placed,
+                    Err(e) => {
+                        warn!(device_id, area = raw, error = %e, "Could not place device in a room");
+                        Some(normalized)
+                    }
+                }
+            }
+            (_, area) => area,
+        };
         // Hardware identity, when the upstream system knows it. Absent leaves
         // whatever is already stored alone: a plugin that has not been taught
         // to report these yet must not blank out what an earlier version, or

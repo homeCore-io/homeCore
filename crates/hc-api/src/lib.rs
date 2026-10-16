@@ -1205,6 +1205,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             patch(handlers::patch_area).delete(handlers::delete_area),
         )
         .route("/areas/{id}/devices", put(handlers::set_area_devices))
+        .route("/areas/{id}/merge", post(handlers::merge_area))
         // Automations
         .route(
             "/automations",
