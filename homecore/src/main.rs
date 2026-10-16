@@ -491,6 +491,19 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "Failed to backfill device canonical names"),
     }
 
+    // Rooms get a record, a name and a stable id — once, and before any plugin
+    // registers: a registration that found no record first would make the
+    // room afresh. See `hc_core::rooms`.
+    match hc_core::rooms::migrate(&store).await {
+        Ok(done) if done == hc_core::rooms::Migrated::default() => {}
+        Ok(done) => info!(
+            named = done.named,
+            recorded = done.recorded,
+            "Gave rooms names and stable ids"
+        ),
+        Err(e) => tracing::warn!(error = %e, "Room migration failed"),
+    }
+
     // ── 11. Event buses ─────────────────────────────────────────────────────
     // internal_bus: carries only Event::MqttMessage (raw MQTT traffic).
     //   Subscribers: state_bridge, timer_manager, switch_manager, mode_manager, engine.
@@ -498,6 +511,15 @@ async fn main() -> Result<()> {
     //   Subscribers: engine, hc-api (event log, WS stream, plugin registry).
     let internal_bus = EventBus::new(1024);
     let pub_bus = EventBus::new(1024);
+
+    // Devices and scenes added, edited or removed — by anything — are
+    // announced from the store, so no edit path can forget to.
+    {
+        let bus = pub_bus.clone();
+        store.on_change(move |event| {
+            let _ = bus.publish(event);
+        });
+    }
 
     // Shared plugin registry — populated by config seeding and PluginManager,
     // consumed by AppState and API handlers.

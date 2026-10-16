@@ -4,7 +4,8 @@
 //! bridge converts incoming MQTT messages into `Event::MqttMessage` variants;
 //! the rule engine and state store consume and produce further event variants.
 
-use crate::device::DeviceChange;
+use crate::device::{Area, DeviceChange, DeviceState};
+use crate::rule::Scene;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -139,6 +140,60 @@ pub enum Event {
         device_id: String,
         previous_name: String,
         current_name: String,
+    },
+    /// A device appeared in the registry — first registered, or created by
+    /// a manager (a timer, a switch, a mode). Carries the whole record, so a
+    /// client holding the house can add it without a second request.
+    DeviceAdded {
+        timestamp: DateTime<Utc>,
+        device: Box<DeviceState>,
+    },
+    /// A device left the registry.
+    DeviceRemoved {
+        timestamp: DateTime<Utc>,
+        device_id: String,
+    },
+    /// Something about a device other than what it reports changed: its name
+    /// or name override, its room, its type, `ui_hint`, icon, button names,
+    /// hardware identity. Carries the whole record as it now stands.
+    ///
+    /// **This is what lets two open screens agree.** Metadata edits used to
+    /// be saved without telling anybody, so a wall panel went on showing a
+    /// device under its old name, in its old room, until it was reloaded.
+    /// Raised by the state store on any write that changes these fields,
+    /// whoever made it, so no edit path can forget to.
+    ///
+    /// [`Event::DeviceNameChanged`] still fires for a rename at the source,
+    /// for the rules and logs that watch for it.
+    DeviceMetadataChanged {
+        timestamp: DateTime<Utc>,
+        device: Box<DeviceState>,
+    },
+    /// A room was created, renamed, or gained an alias. Carries the room as
+    /// it now stands, with its devices as of the change. A device moving
+    /// between rooms is a [`Event::DeviceMetadataChanged`] on the device.
+    RoomChanged {
+        timestamp: DateTime<Utc>,
+        room: Area,
+    },
+    /// A room was deleted — or merged into another, in which case its devices
+    /// are now in `merged_into` and its slugs answer to that room.
+    RoomRemoved {
+        timestamp: DateTime<Utc>,
+        room_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_into: Option<uuid::Uuid>,
+    },
+    /// A homeCore scene was created or edited. Plugin scenes (Hue, Lutron,
+    /// ISY) are devices, and change through the device events.
+    SceneChanged {
+        timestamp: DateTime<Utc>,
+        scene: Scene,
+    },
+    /// A homeCore scene was deleted.
+    SceneRemoved {
+        timestamp: DateTime<Utc>,
+        scene_id: uuid::Uuid,
     },
     /// A device's capability schema changed — what it declares it reports and
     /// accepts, not what it is currently reporting.
@@ -281,6 +336,13 @@ impl Event {
             | Event::PluginRegistered { timestamp, .. }
             | Event::PluginOffline { timestamp, .. }
             | Event::DeviceNameChanged { timestamp, .. }
+            | Event::DeviceAdded { timestamp, .. }
+            | Event::DeviceRemoved { timestamp, .. }
+            | Event::DeviceMetadataChanged { timestamp, .. }
+            | Event::RoomChanged { timestamp, .. }
+            | Event::RoomRemoved { timestamp, .. }
+            | Event::SceneChanged { timestamp, .. }
+            | Event::SceneRemoved { timestamp, .. }
             | Event::DeviceSchemaChanged { timestamp, .. }
             | Event::MqttMessage { timestamp, .. }
             | Event::Custom { timestamp, .. }

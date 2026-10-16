@@ -9,9 +9,10 @@
 use anyhow::{Context, Result};
 use hc_auth::User;
 use hc_types::device::{Area, DeviceState};
+use hc_types::event::Event;
 use hc_types::rule::{Rule, Scene};
 use redb::Database;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -32,7 +33,7 @@ use api_key_store::ApiKeyStore;
 use asset_store::AssetStore;
 use audit_store::AuditStore;
 use battery_store::BatteryStore;
-use device_store::DeviceStore;
+use device_store::{DeviceStore, DeviceWrite};
 use history::HistoryStore;
 use plugin_state_store::PluginStateStore;
 use refresh_token_store::RefreshTokenStore;
@@ -64,9 +65,40 @@ pub struct StateStore {
     plugin_state: Arc<PluginStateStore>,
     plugin_runtimes: Arc<PluginRuntimeStore>,
     assets: Arc<AssetStore>,
+    /// Where changes to the house's catalogue are announced. See [`on_change`].
+    ///
+    /// [`on_change`]: StateStore::on_change
+    changes: Arc<OnceLock<ChangeSink>>,
 }
 
+/// Receives the events the store raises. See [`StateStore::on_change`].
+type ChangeSink = Arc<dyn Fn(Event) + Send + Sync>;
+
 impl StateStore {
+    /// Announce changes to devices and scenes through `sink` from now on.
+    ///
+    /// **The store raises these, rather than each edit path, because the edit
+    /// paths are many.** Devices are written by registration, by every state
+    /// report, by a dozen API handlers, by the timer, switch and mode
+    /// managers and by room edits; they are deleted from eight places. An
+    /// event raised at each of those would be missing from whichever one was
+    /// written next. Here, every write is seen once.
+    ///
+    /// Raises [`Event::DeviceAdded`], [`Event::DeviceMetadataChanged`] (not
+    /// for a write that only moved state — that has its own event),
+    /// [`Event::DeviceRemoved`], [`Event::SceneChanged`] and
+    /// [`Event::SceneRemoved`]. Set once, at startup; later calls are ignored.
+    /// A store with no sink — a test, a tool — raises nothing.
+    pub fn on_change(&self, sink: impl Fn(Event) + Send + Sync + 'static) {
+        let _ = self.changes.set(Arc::new(sink));
+    }
+
+    fn announce(&self, event: impl FnOnce() -> Event) {
+        if let Some(sink) = self.changes.get() {
+            sink(event());
+        }
+    }
+
     /// Open (or create) the databases at the given paths. The audit log
     /// defaults to `<parent-of-history_db_path>/audit.db` — use
     /// [`open_with_audit`] to override.
@@ -176,6 +208,7 @@ impl StateStore {
             plugin_state: Arc::new(plugin_state),
             plugin_runtimes: Arc::new(plugin_runtimes),
             assets: Arc::new(assets),
+            changes: Arc::new(OnceLock::new()),
         })
     }
 
@@ -422,13 +455,33 @@ impl StateStore {
     pub async fn upsert_device(&self, state: &DeviceState) -> Result<()> {
         let store = Arc::clone(&self.devices);
         let s = state.clone();
-        tokio::task::spawn_blocking(move || store.upsert(&s)).await?
+        let kind = tokio::task::spawn_blocking(move || store.upsert(&s)).await??;
+        let timestamp = chrono::Utc::now();
+        match kind {
+            DeviceWrite::Added => self.announce(|| Event::DeviceAdded {
+                timestamp,
+                device: Box::new(state.clone()),
+            }),
+            DeviceWrite::MetadataChanged => self.announce(|| Event::DeviceMetadataChanged {
+                timestamp,
+                device: Box::new(state.clone()),
+            }),
+            DeviceWrite::StateOnly => {}
+        }
+        Ok(())
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<bool> {
         let store = Arc::clone(&self.devices);
         let id = device_id.to_string();
-        tokio::task::spawn_blocking(move || store.delete(&id)).await?
+        let removed = tokio::task::spawn_blocking(move || store.delete(&id)).await??;
+        if removed {
+            self.announce(|| Event::DeviceRemoved {
+                timestamp: chrono::Utc::now(),
+                device_id: device_id.to_string(),
+            });
+        }
+        Ok(removed)
     }
 
     pub async fn list_devices(&self) -> Result<Vec<DeviceState>> {
@@ -502,12 +555,24 @@ impl StateStore {
     pub async fn upsert_scene(&self, scene: &Scene) -> Result<()> {
         let store = Arc::clone(&self.rules);
         let s = scene.clone();
-        tokio::task::spawn_blocking(move || store.upsert_scene(&s)).await?
+        tokio::task::spawn_blocking(move || store.upsert_scene(&s)).await??;
+        self.announce(|| Event::SceneChanged {
+            timestamp: chrono::Utc::now(),
+            scene: scene.clone(),
+        });
+        Ok(())
     }
 
     pub async fn delete_scene(&self, id: Uuid) -> Result<bool> {
         let store = Arc::clone(&self.rules);
-        tokio::task::spawn_blocking(move || store.delete_scene(id)).await?
+        let removed = tokio::task::spawn_blocking(move || store.delete_scene(id)).await??;
+        if removed {
+            self.announce(|| Event::SceneRemoved {
+                timestamp: chrono::Utc::now(),
+                scene_id: id,
+            });
+        }
+        Ok(removed)
     }
 
     pub async fn list_scenes(&self) -> Result<Vec<Scene>> {
@@ -702,5 +767,79 @@ mod open_failure_tests {
             !msg.contains("0.1.23"),
             "must not claim a migration is needed: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    async fn store_with_sink() -> (tempfile::TempDir, StateStore, Arc<Mutex<Vec<Event>>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        store.on_change(move |e| sink.lock().unwrap().push(e));
+        (dir, store, seen)
+    }
+
+    fn names(seen: &Mutex<Vec<Event>>) -> Vec<&'static str> {
+        seen.lock()
+            .unwrap()
+            .drain(..)
+            .map(|e| match e {
+                Event::DeviceAdded { .. } => "added",
+                Event::DeviceMetadataChanged { .. } => "metadata",
+                Event::DeviceRemoved { .. } => "removed",
+                Event::SceneChanged { .. } => "scene",
+                Event::SceneRemoved { .. } => "scene_removed",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    /// Every write is seen, whoever made it; a state report — by far the
+    /// commonest write — announces nothing here, since it has its own event.
+    #[tokio::test]
+    async fn device_writes_are_announced_by_what_they_changed() {
+        let (_dir, store, seen) = store_with_sink().await;
+        let mut lamp = DeviceState::new("lamp", "Lamp", "plugin.test");
+        store.upsert_device(&lamp).await.unwrap();
+        assert_eq!(names(&seen), ["added"]);
+
+        lamp.attributes.insert("on".into(), serde_json::json!(true));
+        lamp.last_seen = chrono::Utc::now();
+        lamp.available = false;
+        store.upsert_device(&lamp).await.unwrap();
+        assert!(names(&seen).is_empty(), "a state report is not metadata");
+
+        lamp.area_override = Some("den".into());
+        store.upsert_device(&lamp).await.unwrap();
+        lamp.ui_hint = Some("light".into());
+        store.upsert_device(&lamp).await.unwrap();
+        assert_eq!(names(&seen), ["metadata", "metadata"]);
+
+        assert!(store.delete_device("lamp").await.unwrap());
+        assert!(!store.delete_device("lamp").await.unwrap());
+        assert_eq!(names(&seen), ["removed"], "only what was there is removed");
+    }
+
+    #[tokio::test]
+    async fn scene_writes_are_announced() {
+        let (_dir, store, seen) = store_with_sink().await;
+        let scene = Scene {
+            id: Uuid::new_v4(),
+            name: "Movie".into(),
+            states: Default::default(),
+        };
+        store.upsert_scene(&scene).await.unwrap();
+        store.delete_scene(scene.id).await.unwrap();
+        assert_eq!(names(&seen), ["scene", "scene_removed"]);
     }
 }

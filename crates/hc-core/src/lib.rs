@@ -17,6 +17,7 @@ pub mod engine;
 pub mod executor;
 pub mod glue;
 pub mod mode_manager;
+pub mod rooms;
 pub mod rule_loader;
 pub mod rule_resolver;
 pub mod scheduler;

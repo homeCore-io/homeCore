@@ -436,7 +436,38 @@ impl DeviceState {
     pub fn effective_area(&self) -> Option<&str> {
         self.area_override.as_deref().or(self.area.as_deref())
     }
+
+    /// Whether two records describe the same device apart from what it is
+    /// reporting — its name, room, type, icon and the rest that a person or
+    /// a registration sets, as opposed to the attributes, availability and
+    /// timestamps that every state report moves.
+    ///
+    /// Compared field by field through serde so that a metadata field added
+    /// later is counted without anybody remembering to list it here; only
+    /// the fields that change with state are named, and they are few.
+    pub fn same_metadata(&self, other: &DeviceState) -> bool {
+        fn metadata(device: &DeviceState) -> serde_json::Value {
+            let mut value = serde_json::to_value(device).unwrap_or_default();
+            if let Some(fields) = value.as_object_mut() {
+                for key in STATE_FIELDS {
+                    fields.remove(*key);
+                }
+            }
+            value
+        }
+        metadata(self) == metadata(other)
+    }
 }
+
+/// The [`DeviceState`] fields a state report moves. Everything else is
+/// metadata — see [`DeviceState::same_metadata`].
+const STATE_FIELDS: &[&str] = &[
+    "available",
+    "attributes",
+    "attributes_changed_at",
+    "last_seen",
+    "last_change",
+];
 
 /// Registration payload a plugin sends on first connect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,16 +491,90 @@ pub struct DeviceRegistration {
     pub parent_device_id: Option<String>,
 }
 
-/// A logical grouping of devices (room, zone, floor, etc.).
+/// A room.
+///
+/// **The id is the room; the name and slug are only what it is called.** A
+/// room used to be nothing but its slug, with an id derived from it, so a
+/// rename made a different room: anything that remembered the old id — a
+/// pinned room, a personal order, a display scoped to the kitchen — lost it.
+/// Now the id is assigned once and never recomputed.
+///
+/// Devices still name their room by slug (`area`, `area_override`), because
+/// plugins do and rules' canonical names were built from it. A device's slug
+/// belongs to the room whose `slug` or `aliases` contain it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Area {
     pub id: Uuid,
+    /// The name as typed — "TV Room", "Kid's Room".
     pub name: String,
+    /// Derived from the name (`tv_room`): what devices in this room carry.
+    /// Empty only in a record written before rooms had one, which the
+    /// startup migration fills in.
+    #[serde(default)]
+    pub slug: String,
+    /// Other slugs that mean this room: what it was called before a rename,
+    /// rooms merged into it, and so what a plugin still calls it. A bridge
+    /// goes on reporting "Tv room" after the room is renamed "Den", and its
+    /// devices must land in the Den rather than bring the old room back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Where the name came from, which decides whether a bridge's spelling
+    /// may replace it.
+    #[serde(default)]
+    pub named_by: RoomNamedBy,
+    /// The devices in the room, worked out when the room is read — never
+    /// stored, since a device's own `area` is what places it.
+    #[serde(default)]
     pub device_ids: Vec<String>,
+}
+
+impl Area {
+    /// Whether a device's (normalized) room slug places it in this room.
+    pub fn answers_to(&self, slug: &str) -> bool {
+        !slug.is_empty() && (self.slug == slug || self.aliases.iter().any(|a| a == slug))
+    }
+}
+
+/// Where a room's name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomNamedBy {
+    /// Typed by a person. Nothing else ever replaces it.
+    #[default]
+    Person,
+    /// Spelled by a bridge when it reported a room nobody had made.
+    Bridge,
+    /// Guessed from the slug when rooms were first given names ("Tv Room").
+    /// The first bridge to spell the room its own way replaces the guess.
+    Guessed,
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// What a state report moves is not metadata; anything a person or a
+    /// registration sets is — including a field added after this was written.
+    #[test]
+    fn metadata_is_everything_a_state_report_does_not_move() {
+        let before = DeviceState::new("lamp", "Lamp", "plugin.test");
+        let mut reported = before.clone();
+        reported
+            .attributes
+            .insert("on".into(), serde_json::json!(true));
+        reported.available = !before.available;
+        reported.last_seen = Utc::now();
+        reported
+            .attributes_changed_at
+            .insert("on".into(), Utc::now());
+        assert!(before.same_metadata(&reported));
+
+        let mut moved = before.clone();
+        moved.area_override = Some("den".into());
+        assert!(!before.same_metadata(&moved));
+        let mut hinted = before.clone();
+        hinted.status_icon = Some("lamp".into());
+        assert!(!before.same_metadata(&hinted));
+    }
 
     /// **The question `last_change` invites and cannot answer.** Provenance
     /// advances on every report, so an occupancy sensor clear since breakfast

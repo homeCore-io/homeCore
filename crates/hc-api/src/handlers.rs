@@ -6,15 +6,15 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use hc_core::{device_naming, rule_resolver};
+use hc_core::{device_naming, rooms, rule_resolver};
 use hc_state::StateStore;
 use hc_topic_map::canonical_device_type_name;
 use hc_types::dashboard::{DashboardDefinition, DashboardResponse};
-use hc_types::device::{with_command_change_metadata, Area, DeviceChange, DeviceState};
+use hc_types::device::{with_command_change_metadata, DeviceChange, DeviceState};
 use hc_types::rule::{Action, Condition, Rule, Scene, Trigger};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::audit;
@@ -82,7 +82,7 @@ fn load_mode_definitions_response(
     })
 }
 
-fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
+pub(crate) fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
     if device.device_type.is_none() {
         // Legacy devices that haven't been migrated yet.
         if device.plugin_id == "core.switch" {
@@ -694,12 +694,22 @@ pub async fn update_device(
                 }
             }
             if let Some(area) = body.get("area") {
-                let requested = if area.is_null() {
-                    None
-                } else {
-                    area.as_str()
-                        .map(normalize_area_name)
-                        .filter(|value| !value.is_empty())
+                // A room typed that the house does not have is made, with the
+                // person's spelling — "TV Room", not `tv_room`.
+                let requested = match area.as_str() {
+                    Some(typed) => {
+                        match rooms::place_typed(&s.store, Some(&s.event_bus), typed).await {
+                            Ok(slug) => slug,
+                            Err(e) => {
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({ "error": e.to_string() })),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+                    None => None,
                 };
                 // Same contract as `name`: setting the area the plugin already
                 // reports is not an override, it is agreement — so don't pin it.
@@ -899,9 +909,22 @@ pub async fn bulk_patch_devices(
         }
     };
 
+    // Same contract as `PATCH /devices/{id}`: a person's choice is an
+    // override, made in a room the house has (or makes, as typed). This used
+    // to write the raw string into the plugin's own `area`, un-normalized,
+    // where the next registration overwrote it.
     let new_area: Option<Option<String>> = if body.get("area").is_some() {
         Some(match body["area"].as_str() {
-            Some(a) => Some(a.to_string()),
+            Some(typed) => match rooms::place_typed(&s.store, Some(&s.event_bus), typed).await {
+                Ok(slug) => slug,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            },
             None if body["area"].is_null() => None,
             _ => {
                 return (
@@ -922,7 +945,10 @@ pub async fn bulk_patch_devices(
         match s.store.get_device(id).await {
             Ok(Some(mut device)) => {
                 if let Some(ref area) = new_area {
-                    device.area = area.clone();
+                    device.area_override = match area {
+                        Some(a) if Some(a.as_str()) == device.area.as_deref() => None,
+                        other => other.clone(),
+                    };
                 }
                 if let Err(e) = s.store.upsert_device(&device).await {
                     return (
@@ -2386,105 +2412,44 @@ pub async fn delete_mode(
 }
 
 // ---------- Areas ----------
+//
+// Rooms. Every rule about them — stable ids, names as typed, the slugs
+// devices carry and the aliases a rename leaves behind — is in
+// `hc_core::rooms`; these handlers only translate.
 
-fn normalize_area_name(name: &str) -> String {
-    device_naming::normalize_name_segment(name)
-}
-
-fn area_id_from_name(name: &str) -> Uuid {
-    let normalized = normalize_area_name(name);
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("homecore:area:{}", normalized).as_bytes(),
-    )
-}
-
-/// Does this (raw, possibly un-normalized) area value name the given area?
-/// Area names are normalized on the way in, but device-side values arrive from
-/// plugins in whatever shape the bridge uses ("Living Room"), so every
-/// comparison has to normalize.
-fn area_matches(value: Option<&str>, area_name: &str) -> bool {
-    value.map(normalize_area_name).as_deref() == Some(area_name)
-}
-
-fn derive_areas_from_devices(devices: &[DeviceState]) -> Vec<Area> {
-    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    for device in devices {
-        // Effective, not raw: a device the user has assigned to a room carries
-        // that room in `area_override` with `area` left as whatever the plugin
-        // said (often nothing). Reading `area` alone made every user
-        // assignment invisible here — the room existed and the device pointed
-        // at it, but the area listed no devices, so "add to room" looked like
-        // it had done nothing.
-        let Some(area) = device.effective_area() else {
-            continue;
-        };
-        let normalized = normalize_area_name(area);
-        if normalized.is_empty() {
-            continue;
-        }
-        grouped
-            .entry(normalized)
-            .or_default()
-            .push(device.device_id.clone());
-    }
-
-    grouped
-        .into_iter()
-        .map(|(name, device_ids)| Area {
-            id: area_id_from_name(&name),
-            name,
-            device_ids,
-        })
-        .collect()
-}
-
-fn merge_declared_and_derived_areas(declared: Vec<Area>, devices: &[DeviceState]) -> Vec<Area> {
-    let mut merged: HashMap<Uuid, Area> = derive_areas_from_devices(devices)
-        .into_iter()
-        .map(|area| (area.id, area))
-        .collect();
-
-    for mut area in declared {
-        let name = normalize_area_name(&area.name);
-        if name.is_empty() {
-            continue;
-        }
-
-        area.id = area_id_from_name(&name);
-        area.name = name;
-        area.device_ids = merged
-            .remove(&area.id)
-            .map(|existing| existing.device_ids)
-            .unwrap_or_default();
-        merged.insert(area.id, area);
-    }
-
-    let mut areas: Vec<Area> = merged.into_values().collect();
-    areas.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    areas
-}
-
-async fn list_area_state(store: &StateStore) -> Result<Vec<Area>, String> {
-    let devices = store.list_devices().await.map_err(|e| e.to_string())?;
-    let declared = store.list_areas().await.map_err(|e| e.to_string())?;
-    Ok(merge_declared_and_derived_areas(declared, &devices))
-}
-
-async fn find_area_by_id(store: &StateStore, id: Uuid) -> Result<Option<Area>, String> {
-    Ok(list_area_state(store)
-        .await?
-        .into_iter()
-        .find(|a| a.id == id))
+fn room_error(e: rooms::RoomError) -> axum::response::Response {
+    use rooms::RoomError;
+    let (status, body) = match e {
+        RoomError::NotFound => (StatusCode::NOT_FOUND, json!({ "error": "area not found" })),
+        RoomError::EmptyName => (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "area name cannot be empty" }),
+        ),
+        RoomError::Taken(other) => (
+            StatusCode::CONFLICT,
+            json!({
+                "error": "area name already exists",
+                "existing": *other,
+            }),
+        ),
+        RoomError::SameRoom => (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "an area cannot be merged into itself" }),
+        ),
+        RoomError::Store(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": e.to_string() }),
+        ),
+    };
+    (status, Json(body)).into_response()
 }
 
 pub async fn list_areas(State(s): State<AppState>, _: AreasRead) -> impl IntoResponse {
-    match list_area_state(&s.store).await {
+    match rooms::list(&s.store).await {
         Ok(areas) => (StatusCode::OK, Json(json!(areas))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
+            Json(json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -2494,31 +2459,17 @@ pub struct CreateAreaBody {
     pub name: String,
 }
 
+/// `POST /areas` — 201 with the new room, or 200 with the room the house
+/// already has by that name.
 pub async fn create_area(
     State(s): State<AppState>,
     _: AreasWrite,
     Json(body): Json<CreateAreaBody>,
 ) -> impl IntoResponse {
-    let name = normalize_area_name(&body.name);
-    if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "area name cannot be empty" })),
-        );
-    }
-
-    let area = Area {
-        id: area_id_from_name(&name),
-        name,
-        device_ids: vec![],
-    };
-
-    match s.store.upsert_area(&area).await {
-        Ok(()) => (StatusCode::CREATED, Json(json!(area))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
+    match rooms::create(&s.store, Some(&s.event_bus), &body.name).await {
+        Ok((area, true)) => (StatusCode::CREATED, Json(json!(area))).into_response(),
+        Ok((area, false)) => (StatusCode::OK, Json(json!(area))).into_response(),
+        Err(e) => room_error(e),
     }
 }
 
@@ -2527,118 +2478,18 @@ pub struct PatchAreaBody {
     pub name: String,
 }
 
+/// `PATCH /areas/{id}` — rename. The id stays the same and the devices stay
+/// in the room; 409 if another room already has the name (merge instead).
 pub async fn patch_area(
     State(s): State<AppState>,
     _: AreasWrite,
     Path(id): Path<Uuid>,
     Json(body): Json<PatchAreaBody>,
 ) -> impl IntoResponse {
-    let new_name = normalize_area_name(&body.name);
-    if new_name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "area name cannot be empty" })),
-        )
-            .into_response();
+    match rooms::rename(&s.store, Some(&s.event_bus), id, &body.name).await {
+        Ok(area) => (StatusCode::OK, Json(json!(area))).into_response(),
+        Err(e) => room_error(e),
     }
-
-    let area = match find_area_by_id(&s.store, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "area not found" })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e })),
-            )
-                .into_response();
-        }
-    };
-
-    let new_id = area_id_from_name(&new_name);
-    if new_id != id {
-        match find_area_by_id(&s.store, new_id).await {
-            Ok(Some(_)) => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "error": "area name already exists" })),
-                )
-                    .into_response();
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    let mut devices = match s.store.list_devices().await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    for device in &mut devices {
-        // Rename whichever field points at this area. A device assigned by the
-        // user carries the room in `area_override`; matching only `area` left
-        // those devices pointing at a room name that no longer exists.
-        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
-        let in_override = area_matches(device.area_override.as_deref(), &area.name);
-        if in_plugin_area || in_override {
-            if in_plugin_area {
-                device.area = Some(new_name.clone());
-            }
-            if in_override {
-                device.area_override = Some(new_name.clone());
-            }
-            if let Err(e) = s.store.upsert_device(device).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    let updated_area = Area {
-        id: new_id,
-        name: new_name.clone(),
-        device_ids: vec![],
-    };
-    if let Err(e) = s.store.upsert_area(&updated_area).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-    if id != new_id {
-        let _ = s.store.delete_area(id).await;
-    }
-
-    (
-        StatusCode::OK,
-        Json(json!(match find_area_by_id(&s.store, new_id).await {
-            Ok(Some(area)) => area,
-            _ => updated_area,
-        })),
-    )
-        .into_response()
 }
 
 pub async fn delete_area(
@@ -2646,60 +2497,30 @@ pub async fn delete_area(
     _: AreasWrite,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let area = match find_area_by_id(&s.store, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "area not found" })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut devices = match s.store.list_devices().await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    for device in &mut devices {
-        // Same reasoning as rename: clear whichever field pointed at the
-        // deleted area, or user-assigned devices keep a dangling room.
-        let in_plugin_area = area_matches(device.area.as_deref(), &area.name);
-        let in_override = area_matches(device.area_override.as_deref(), &area.name);
-        if in_plugin_area || in_override {
-            if in_plugin_area {
-                device.area = None;
-            }
-            if in_override {
-                device.area_override = None;
-            }
-            if let Err(e) = s.store.upsert_device(device).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        }
+    match rooms::delete(&s.store, Some(&s.event_bus), id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => room_error(e),
     }
+}
 
-    let _ = s.store.delete_area(id).await;
+#[derive(Deserialize)]
+pub struct MergeAreaBody {
+    pub into: Uuid,
+}
 
-    StatusCode::NO_CONTENT.into_response()
+/// `POST /areas/{id}/merge` — fold this room into `into`. Its devices move,
+/// and every name it answered to answers to `into` from then on, so the bridge
+/// that reported it does not make it again. Returns the room merged into.
+pub async fn merge_area(
+    State(s): State<AppState>,
+    _: AreasWrite,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MergeAreaBody>,
+) -> impl IntoResponse {
+    match rooms::merge(&s.store, Some(&s.event_bus), id, body.into).await {
+        Ok(area) => (StatusCode::OK, Json(json!(area))).into_response(),
+        Err(e) => room_error(e),
+    }
 }
 
 // ---------- Automations (Rules) ----------
@@ -7543,109 +7364,10 @@ pub async fn set_area_devices(
     Path(id): Path<Uuid>,
     Json(device_ids): Json<Vec<String>>,
 ) -> impl IntoResponse {
-    let area = match find_area_by_id(&s.store, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "area not found" })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e })),
-            )
-                .into_response();
-        }
-    };
-
-    let desired: HashSet<String> = device_ids.into_iter().collect();
-    let mut devices = match s.store.list_devices().await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    for device in &mut devices {
-        let in_desired = desired.contains(&device.device_id);
-        // Membership is by *effective* area — a user-assigned device is in the
-        // room even though the plugin never said so.
-        let in_area = area_matches(device.effective_area(), &area.name);
-
-        if in_desired {
-            if !in_area {
-                // This is a user assigning a device to a room, so it writes the
-                // override — the same contract as PATCH /devices. Writing the
-                // plugin-owned `area` here meant the next registration silently
-                // reverted the assignment.
-                device.area_override = Some(area.name.clone());
-                if let Err(e) = s.store.upsert_device(device).await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": e.to_string() })),
-                    )
-                        .into_response();
-                }
-            }
-        } else if in_area {
-            // Dropping a device from the room clears the user's assignment. If
-            // the plugin itself still reports this room the device stays in it
-            // — the bridge owns that, per the bridge-wins rule.
-            device.area_override = None;
-            if area_matches(device.area.as_deref(), &area.name) {
-                device.area = None;
-            }
-            if let Err(e) = s.store.upsert_device(device).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        }
+    match rooms::set_devices(&s.store, Some(&s.event_bus), id, &device_ids).await {
+        Ok(area) => (StatusCode::OK, Json(json!(area))).into_response(),
+        Err(e) => room_error(e),
     }
-
-    if let Err(e) = s
-        .store
-        .upsert_area(&Area {
-            id: area.id,
-            name: area.name.clone(),
-            device_ids: vec![],
-        })
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-
-    // Return the updated derived area membership.
-    let refreshed = match find_area_by_id(&s.store, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => Area {
-            id,
-            name: area.name,
-            device_ids: vec![],
-        },
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e })),
-            )
-                .into_response();
-        }
-    };
-
-    (StatusCode::OK, Json(json!(refreshed))).into_response()
 }
 
 // ---------- Automation PATCH (enable/disable/priority) ----------
@@ -9495,7 +9217,7 @@ mod tests {
         DashboardBreakpoint, DashboardDefinition, DashboardLayout, DashboardResponse,
         DashboardWidget, DashboardWidgetPlacement,
     };
-    use hc_types::device::DeviceState;
+    use hc_types::device::{Area, DeviceState};
     use http_body_util::BodyExt;
     use serde::de::DeserializeOwned;
     use serde_json::json;
@@ -9976,6 +9698,19 @@ token = "TOKEN-TWO"
         assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// The id of the room a slug belongs to, after the startup migration has
+    /// recorded the rooms the seeded devices are in — as it does at boot.
+    async fn room_id(state: &AppState, slug: &str) -> Uuid {
+        rooms::migrate(&state.store).await.expect("migrate");
+        rooms::list(&state.store)
+            .await
+            .expect("list rooms")
+            .into_iter()
+            .find(|r| r.answers_to(slug))
+            .unwrap_or_else(|| panic!("no room for {slug}"))
+            .id
+    }
+
     /// A device the user assigned to a room carries it in `area_override`,
     /// with `area` left as whatever the plugin said (often nothing). Deriving
     /// membership from `area` alone made every user assignment invisible: the
@@ -9989,6 +9724,7 @@ token = "TOKEN-TWO"
         d.area = None; // the plugin reports no room
         d.area_override = Some("studio_b".into()); // the user assigned one
         state.store.upsert_device(&d).await.expect("seed");
+        rooms::migrate(&state.store).await.expect("migrate");
 
         let resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
             .await
@@ -9997,7 +9733,7 @@ token = "TOKEN-TWO"
 
         let studio = areas
             .iter()
-            .find(|a| a.name == "studio_b")
+            .find(|a| a.slug == "studio_b")
             .expect("user-assigned room should exist");
         assert_eq!(studio.device_ids, vec!["sonos_bathroom".to_string()]);
     }
@@ -10012,7 +9748,7 @@ token = "TOKEN-TWO"
         d.area_override = Some("studio_b".into());
         state.store.upsert_device(&d).await.expect("seed");
 
-        let area_id = area_id_from_name("studio_b");
+        let area_id = room_id(&state, "studio_b").await;
         let resp = patch_area(
             State(state.clone()),
             AreasWrite(whitelist_claims()),
@@ -10069,11 +9805,14 @@ token = "TOKEN-TWO"
     }
 
     #[tokio::test]
-    async fn list_areas_is_derived_from_device_assignments() {
+    async fn rooms_devices_were_in_are_recorded_with_their_devices() {
         let state = mk_state().await;
         seed_device(&state, "d1", Some("Kitchen")).await;
         seed_device(&state, "d2", Some("Kitchen")).await;
         seed_device(&state, "d3", Some("Office")).await;
+        // Rooms that existed only because devices were in them are recorded
+        // once, at startup.
+        rooms::migrate(&state.store).await.expect("migrate");
 
         let resp = list_areas(State(state.clone()), AreasRead(whitelist_claims()))
             .await
@@ -10086,14 +9825,15 @@ token = "TOKEN-TWO"
         assert_eq!(areas.len(), 2);
         let kitchen = areas
             .iter()
-            .find(|a| a.name == "kitchen")
+            .find(|a| a.name == "Kitchen")
             .expect("kitchen exists");
         assert_eq!(kitchen.device_ids.len(), 2);
         let office = areas
             .iter()
-            .find(|a| a.name == "office")
+            .find(|a| a.name == "Office")
             .expect("office exists");
         assert_eq!(office.device_ids, vec!["d3".to_string()]);
+        assert_eq!(office.slug, "office");
     }
 
     #[tokio::test]
@@ -10120,8 +9860,9 @@ token = "TOKEN-TWO"
         let areas: Vec<Area> = parse_json(list_resp).await;
         let library = areas
             .iter()
-            .find(|area| area.name == "library")
-            .expect("library exists");
+            .find(|area| area.name == "Library")
+            .expect("library exists, named as typed");
+        assert_eq!(library.slug, "library");
         assert!(library.device_ids.is_empty());
     }
 
@@ -10130,7 +9871,7 @@ token = "TOKEN-TWO"
         let state = mk_state().await;
         seed_device(&state, "d1", Some("Kitchen")).await;
         seed_device(&state, "d2", Some("Kitchen")).await;
-        let kitchen_id = area_id_from_name("Kitchen");
+        let kitchen_id = room_id(&state, "kitchen").await;
 
         let resp = patch_area(
             State(state.clone()),
@@ -10158,12 +9899,15 @@ token = "TOKEN-TWO"
             .expect("d2 exists");
         assert_eq!(d1.area.as_deref(), Some("great_room"));
         assert_eq!(d2.area.as_deref(), Some("great_room"));
+        // The same room, by the same id, under its new name.
         let renamed = state
             .store
-            .get_area(area_id_from_name("Great Room"))
+            .get_area(kitchen_id)
             .await
-            .expect("load renamed area");
-        assert!(renamed.is_some());
+            .expect("load renamed area")
+            .expect("still there");
+        assert_eq!(renamed.name, "Great Room");
+        assert_eq!(renamed.aliases, vec!["kitchen".to_string()]);
     }
 
     #[tokio::test]
@@ -10171,7 +9915,7 @@ token = "TOKEN-TWO"
         let state = mk_state().await;
         seed_device(&state, "d1", Some("Kitchen")).await;
         seed_device(&state, "d2", Some("Kitchen")).await;
-        let kitchen_id = area_id_from_name("Kitchen");
+        let kitchen_id = room_id(&state, "kitchen").await;
 
         let resp = delete_area(
             State(state.clone()),
@@ -10325,7 +10069,7 @@ token = "TOKEN-TWO"
         seed_device(&state, "d1", Some("Kitchen")).await;
         seed_device(&state, "d2", Some("Kitchen")).await;
         seed_device(&state, "d3", Some("Office")).await;
-        let kitchen_id = area_id_from_name("Kitchen");
+        let kitchen_id = room_id(&state, "kitchen").await;
 
         let resp = set_area_devices(
             State(state.clone()),
@@ -10374,8 +10118,11 @@ token = "TOKEN-TWO"
         seed_device(&state, "d1", None).await;
 
         let office = Area {
-            id: area_id_from_name("Office"),
+            id: Uuid::new_v4(),
             name: "office".to_string(),
+            slug: "office".to_string(),
+            aliases: vec![],
+            named_by: hc_types::device::RoomNamedBy::Person,
             device_ids: vec![],
         };
         state
@@ -11903,5 +11650,117 @@ token = "TOKEN-TWO"
         // loosen the neighbouring one.
         let widget = selection_widget(serde_json::json!({"selection_mode": "area"}));
         assert!(super::validate_widget_config(&widget).is_err());
+    }
+}
+
+#[cfg(test)]
+mod event_stream_tests {
+    use super::*;
+    use crate::ws::{authenticate_ws, snapshot, EventStreamQuery};
+    use hc_auth::{Actor, Claims, JwtService, Role};
+    use hc_types::device::DeviceState;
+    use std::net::IpAddr;
+
+    async fn state_with_whitelist() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = hc_state::StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let jwt = JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24);
+        let mut state = AppState::new(crate::AppStateParams::new(
+            store,
+            hc_core::EventBus::new(16),
+            jwt,
+        ));
+        state.whitelist = std::sync::Arc::new(vec!["10.0.10.200/32".parse().unwrap()]);
+        (dir, state)
+    }
+
+    const UI_SERVER: &str = "10.0.10.200";
+
+    /// A UI server on a whitelisted address passes the stream through for
+    /// its signed-in people. Each must be streamed as who they are — as their
+    /// REST calls already are — not as the address's admin.
+    #[tokio::test]
+    async fn a_token_wins_over_the_whitelist() {
+        let (_dir, state) = state_with_whitelist().await;
+        let user = hc_auth::user::User {
+            id: Uuid::new_v4(),
+            username: "kid".into(),
+            password_hash: String::new(),
+            role: Role::User,
+            created_at: chrono::Utc::now(),
+            token_version: 0,
+        };
+        state.store.create_user(&user).await.unwrap();
+        let token = state
+            .jwt
+            .issue(&user.id.to_string(), &user.username, Role::User, 0)
+            .unwrap();
+        let ip: IpAddr = UI_SERVER.parse().unwrap();
+
+        let query = EventStreamQuery {
+            token: Some(token),
+            ..Default::default()
+        };
+        let claims = authenticate_ws(&query, &state, ip).await.unwrap();
+        assert_eq!(claims.sub, "kid");
+        assert_eq!(claims.role, Role::User);
+
+        // No token at all is still the whitelist's, as before.
+        let anonymous = authenticate_ws(&EventStreamQuery::default(), &state, ip)
+            .await
+            .unwrap();
+        assert_eq!(anonymous.sub, "whitelist");
+
+        // And a bad token is refused, not quietly upgraded to admin.
+        let forged = EventStreamQuery {
+            token: Some("not.a.jwt".into()),
+            ..Default::default()
+        };
+        assert!(authenticate_ws(&forged, &state, ip).await.is_err());
+    }
+
+    /// The house on connect: devices with their schemas, rooms with their
+    /// devices, scenes — each only for a caller who may read it.
+    #[tokio::test]
+    async fn a_snapshot_holds_what_the_caller_may_read() {
+        let (_dir, state) = state_with_whitelist().await;
+        let mut lamp = DeviceState::new("lamp", "Lamp", "plugin.test");
+        lamp.area = Some("den".into());
+        state.store.upsert_device(&lamp).await.unwrap();
+        rooms::migrate(&state.store).await.unwrap();
+
+        let frame = snapshot(&state, &crate::auth_middleware::whitelist_claims())
+            .await
+            .unwrap();
+        assert_eq!(frame["type"], "snapshot");
+        assert_eq!(frame["devices"][0]["device_id"], "lamp");
+        assert!(frame["devices"][0].get("schema").is_some());
+        assert_eq!(frame["rooms"][0]["name"], "Den");
+        assert_eq!(frame["rooms"][0]["device_ids"][0], "lamp");
+        assert_eq!(frame["scenes"], json!([]));
+
+        // A key that may read devices and nothing else.
+        let key = Claims {
+            sub: "panel".into(),
+            uid: Uuid::new_v4().to_string(),
+            exp: u64::MAX,
+            role: Role::Admin,
+            scopes: vec!["devices:read".into()],
+            actor: Some(Actor::ApiKey {
+                id: Uuid::new_v4(),
+                owner_uid: Uuid::new_v4(),
+                label: "panel".into(),
+            }),
+            tv: 0,
+        };
+        let frame = snapshot(&state, &key).await.unwrap();
+        assert!(frame.get("devices").is_some());
+        assert!(frame.get("rooms").is_none(), "left out, not sent empty");
+        assert!(frame.get("scenes").is_none());
     }
 }

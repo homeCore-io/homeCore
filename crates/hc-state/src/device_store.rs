@@ -7,6 +7,17 @@ use std::sync::Arc;
 
 const DEVICES: TableDefinition<&str, &str> = TableDefinition::new("devices");
 
+/// What a [`DeviceStore::upsert`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceWrite {
+    /// The device was not there before.
+    Added,
+    /// Its name, room, type or other metadata changed.
+    MetadataChanged,
+    /// Only what it reports changed — attributes, availability, timestamps.
+    StateOnly,
+}
+
 pub struct DeviceStore {
     db: Arc<Database>,
 }
@@ -32,15 +43,31 @@ impl DeviceStore {
         }
     }
 
-    pub fn upsert(&self, state: &DeviceState) -> Result<()> {
+    /// Write a device, and say what kind of write it was — so the caller can
+    /// announce a new device or changed metadata without a second read.
+    ///
+    /// The previous record is read in the same transaction as the write, so
+    /// two writers racing on one device each compare against what the other
+    /// actually left.
+    pub fn upsert(&self, state: &DeviceState) -> Result<DeviceWrite> {
         let json = serde_json::to_string(state).context("device state serialisation failed")?;
         let write_txn = self.db.begin_write()?;
-        {
+        let kind = {
             let mut table = write_txn.open_table(DEVICES)?;
+            let kind = match table.get(state.device_id.as_str())? {
+                None => DeviceWrite::Added,
+                Some(previous) => match serde_json::from_str::<DeviceState>(previous.value()) {
+                    Ok(previous) if previous.same_metadata(state) => DeviceWrite::StateOnly,
+                    // A record that no longer parses is being replaced by one
+                    // that does: that is a change worth telling clients about.
+                    _ => DeviceWrite::MetadataChanged,
+                },
+            };
             table.insert(state.device_id.as_str(), json.as_str())?;
-        }
+            kind
+        };
         write_txn.commit()?;
-        Ok(())
+        Ok(kind)
     }
 
     pub fn list(&self) -> Result<Vec<DeviceState>> {
