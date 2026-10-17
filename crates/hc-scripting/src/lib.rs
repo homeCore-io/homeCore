@@ -593,6 +593,7 @@ mod tests {
             prev_value: Some(json!(false)),
             event_type: Some("device_state_changed".into()),
             trigger_label: None,
+            trigger_index: None,
             change_kind: None,
             change_source: None,
             change_actor_id: None,

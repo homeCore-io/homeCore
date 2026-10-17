@@ -1274,6 +1274,39 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+
+  /automations/test:
+    post:
+      operationId: testDraftAutomation
+      summary: Dry-run a rule that isn't saved — an editor's draft
+      description: |
+        The same dry run as `POST /automations/{id}/test`, for a rule sent in
+        the body. Device references are resolved as saving would resolve
+        them; `id` may be omitted. Nothing is saved and nothing runs.
+        Listed in `GET /automations/vocabulary` `features` as `test_draft`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleCreate"
+      responses:
+        "200":
+          description: Dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTestResult"
+        "422":
+          description: Not a rule, or it names a device the house doesn't have
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   # ---------------------------------------------------------------------------
   # Dashboards
   # ---------------------------------------------------------------------------
@@ -2388,13 +2421,15 @@ paths:
         `device_removed` its id. `room_changed` carries the room;
         `room_removed` its id, and `merged_into` when it was merged.
         `scene_changed` / `scene_removed` cover homeCore's own scenes; plugin
-        scenes are devices. A device's room is the area whose `slug` or
+        scenes are devices. `rule_changed` carries a rule as written (as
+        `GET /automations/{id}` returns it) after any change through the API;
+        `rule_removed` its `rule_id`. A device's room is the area whose `slug` or
         `aliases` contain its `area_override`, else its `area`.
 
         **Event types:** `device_state_changed`, `device_availability_changed`,
         `device_added`, `device_removed`, `device_metadata_changed`,
         `room_changed`, `room_removed`, `scene_changed`, `scene_removed`,
-        `device_name_changed`, `device_schema_changed`, `device_command_sent`,
+        `rule_changed`, `rule_removed`, `device_name_changed`, `device_schema_changed`, `device_command_sent`,
         `device_battery_low`, `device_battery_recovered`, `rule_fired`,
         `scene_activated`, `plugin_registered`, `plugin_offline`,
         `plugin_heartbeat`, `plugin_status_changed`, `plugin_capabilities`,
@@ -4027,6 +4062,9 @@ paths:
                         trigger_label:
                           type: string
                           description: User-defined label from the rule's `trigger_label`
+                        trigger_index:
+                          type: integer
+                          description: Which of the rule's moments matched when it has several — 0 is `trigger`, 1 the first of `triggers`. Omitted for a rule with one.
                     outcome:
                       type: object
                       description: Tagged union keyed on `type`
@@ -8869,6 +8907,14 @@ components:
           description: Higher values are evaluated first
         trigger:
           $ref: "#/components/schemas/Trigger"
+        triggers:
+          type: array
+          description: |
+            More moments that start the rule: it runs when `trigger` or any of
+            these matches, once per event. Omitted for a rule with one. Listed
+            in `GET /automations/vocabulary` `features` as `triggers`.
+          items:
+            $ref: "#/components/schemas/Trigger"
         conditions:
           type: array
           items:
@@ -8892,6 +8938,14 @@ components:
           default: 0
         trigger:
           $ref: "#/components/schemas/Trigger"
+        triggers:
+          type: array
+          description: |
+            More moments that start the rule: it runs when `trigger` or any of
+            these matches, once per event. Omitted for a rule with one. Listed
+            in `GET /automations/vocabulary` `features` as `triggers`.
+          items:
+            $ref: "#/components/schemas/Trigger"
         conditions:
           type: array
           items:
@@ -9026,6 +9080,7 @@ components:
         | `Delay` | `duration_ms` (integer) |
         | `Parallel` | `actions` (array — run concurrently) |
         | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
+        | `Conditional` | `condition` — a Rhai bool expression (string) or a `Condition` (object, `if_checks`), `then_actions`, `else_if` (`[{condition, actions}]`), `else_actions` |
 
         For device-targeting actions, prefer `device` in authored rules so the
         automation remains readable and stable across plugin-specific ID
@@ -9082,17 +9137,39 @@ components:
 
     AutomationTestResult:
       type: object
-      required: [rule_id, conditions_passed, would_fire_actions]
+      required: [rule_id, rule_name, conditions_pass, conditions, would_fire, actions]
       properties:
         rule_id:
           type: string
           format: uuid
-        conditions_passed:
+        rule_name:
+          type: string
+        conditions_pass:
           type: boolean
-        would_fire_actions:
+        conditions:
+          type: array
+          description: Each condition evaluated against the house now, in order
+          items:
+            type: object
+            required: [condition, passed]
+            properties:
+              condition:
+                $ref: "#/components/schemas/Condition"
+              passed:
+                type: boolean
+              actual:
+                description: What was found (any JSON value)
+              expected:
+                description: What the condition wants (any JSON value)
+              reason:
+                type: string
+        would_fire:
+          type: boolean
+        actions:
           type: array
           items:
-            $ref: "#/components/schemas/Action"
+            type: object
+            description: The rule's actions as written (`{enabled, action}`)
 
     # ---- Scenes ----
 

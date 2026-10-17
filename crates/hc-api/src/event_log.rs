@@ -190,6 +190,8 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::RoomRemoved { .. } => "room_removed",
         Event::SceneChanged { .. } => "scene_changed",
         Event::SceneRemoved { .. } => "scene_removed",
+        Event::RuleChanged { .. } => "rule_changed",
+        Event::RuleRemoved { .. } => "rule_removed",
         Event::AlertRaised { .. } => "alert_raised",
         Event::AlertCleared { .. } => "alert_cleared",
     }

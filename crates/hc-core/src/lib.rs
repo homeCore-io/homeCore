@@ -325,16 +325,20 @@ impl Core {
         // set rule.error and disable the rule, then persist to disk.
         let mut validated_rules = rules.clone();
         for rule in &mut validated_rules {
-            if let Trigger::Cron { expression } = &rule.trigger {
-                if cron::Schedule::from_str(expression).is_err() {
-                    let msg = format!("invalid cron expression: {expression}");
-                    warn!(rule_id = %rule.id, rule_name = %rule.name, error = %msg, "cron validation failed — disabling rule");
-                    rule.error = Some(msg);
-                    rule.enabled = false;
-                    if let Some(ref dir) = self.rules_dir {
-                        if let Err(e) = rule_loader::write_rule(dir, rule) {
-                            warn!(rule_id = %rule.id, error = %e, "cron validation: failed to persist disabled rule");
-                        }
+            let bad_cron = rule.all_triggers().find_map(|t| match t {
+                Trigger::Cron { expression } if cron::Schedule::from_str(expression).is_err() => {
+                    Some(expression.clone())
+                }
+                _ => None,
+            });
+            if let Some(expression) = bad_cron {
+                let msg = format!("invalid cron expression: {expression}");
+                warn!(rule_id = %rule.id, rule_name = %rule.name, error = %msg, "cron validation failed — disabling rule");
+                rule.error = Some(msg);
+                rule.enabled = false;
+                if let Some(ref dir) = self.rules_dir {
+                    if let Err(e) = rule_loader::write_rule(dir, rule) {
+                        warn!(rule_id = %rule.id, error = %e, "cron validation: failed to persist disabled rule");
                     }
                 }
             }

@@ -63,7 +63,18 @@ pub struct Vocabulary {
     pub triggers: Vec<VariantSpec>,
     pub conditions: Vec<VariantSpec>,
     pub actions: Vec<VariantSpec>,
+    /// What this core's rules can do beyond the variants, by name, so an
+    /// editor offers it only where it works:
+    /// - `triggers` — a rule has more moments than `trigger` (E2)
+    /// - `if_checks` — `Conditional.condition` takes a `Condition` (E3)
+    /// - `rule_events` — `rule_changed` / `rule_removed` are announced
+    /// - `test_draft` — `POST /automations/test` dry-runs a rule not saved
+    #[serde(default)]
+    pub features: Vec<String>,
 }
+
+/// See [`Vocabulary::features`].
+pub const RULE_FEATURES: &[&str] = &["triggers", "if_checks", "rule_events", "test_draft"];
 
 impl Vocabulary {
     /// Reads it straight out of the types. This is the whole point: no list.
@@ -72,6 +83,7 @@ impl Vocabulary {
             triggers: variants_of(&schema_json::<crate::rule::Trigger>()),
             conditions: variants_of(&schema_json::<crate::rule::Condition>()),
             actions: variants_of(&schema_json::<crate::rule::Action>()),
+            features: RULE_FEATURES.iter().map(|f| f.to_string()).collect(),
         }
     }
 
@@ -248,16 +260,24 @@ fn type_of(schema: &Value, doc: &Doc<'_>) -> String {
         _ => {}
     }
 
-    // `Option<SomeEnum>` becomes an anyOf of [ref, null].
+    // `Option<SomeEnum>` becomes an anyOf of [ref, null]. A field that takes
+    // more than one kind of value (`IfCheck`: a script or a check) is `any`.
     for key in ["anyOf", "oneOf", "allOf"] {
         let Some(items) = resolved.get(key).and_then(Value::as_array) else {
             continue;
         };
+        let mut named: Vec<String> = Vec::new();
         for item in items {
-            let named = type_of_object(item, doc);
-            if named != "null" && named != "any" {
-                return named;
+            let one = type_of_object(item, doc);
+            if one != "null" && !named.contains(&one) {
+                named.push(one);
             }
+        }
+        if named.len() == 1 && named[0] != "any" {
+            return named.remove(0);
+        }
+        if named.len() > 1 {
+            return "any".into();
         }
     }
 

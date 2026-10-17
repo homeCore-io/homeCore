@@ -1253,6 +1253,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .delete(handlers::delete_automation),
         )
         .route("/automations/{id}/test", post(handlers::test_automation))
+        .route("/automations/test", post(handlers::test_draft_automation))
         .route(
             "/automations/vocabulary",
             get(handlers::get_rule_vocabulary),

@@ -101,7 +101,7 @@ impl Scheduler {
                     if !rule.enabled {
                         continue;
                     }
-                    let fires = match &rule.trigger {
+                    let fires = rule.all_triggers().any(|trigger| match trigger {
                         Trigger::TimeOfDay { time, days } => {
                             let time_match = times_match(*time, current_time);
                             let day_match = days.is_empty() || days.contains(&current_day);
@@ -143,10 +143,13 @@ impl Scheduler {
                             }
                         }
                         _ => false,
-                    };
+                    });
 
                     if fires {
-                        if matches!(&rule.trigger, Trigger::Periodic { .. }) {
+                        if rule
+                            .all_triggers()
+                            .any(|t| matches!(t, Trigger::Periodic { .. }))
+                        {
                             self.last_periodic_fire.insert(rule.id, Instant::now());
                         }
                         debug!(rule_id = %rule.id, "Scheduler firing time trigger");
@@ -169,11 +172,14 @@ impl Scheduler {
                         if !rule.enabled {
                             continue;
                         }
-                        let Trigger::CalendarEvent {
+                        // A rule's first calendar moment (a rule needs no two).
+                        let Some(Trigger::CalendarEvent {
                             calendar_id,
                             title_contains,
                             offset_minutes,
-                        } = &rule.trigger
+                        }) = rule
+                            .all_triggers()
+                            .find(|t| matches!(t, Trigger::CalendarEvent { .. }))
                         else {
                             continue;
                         };
@@ -317,47 +323,53 @@ impl Scheduler {
                 continue;
             }
 
-            let fires = match &rule.trigger {
-                Trigger::SunEvent {
-                    event,
-                    offset_minutes,
-                } => {
-                    match solar_event_time(
-                        self.latitude,
-                        self.longitude,
-                        today,
-                        *event,
-                        *offset_minutes,
-                    ) {
-                        Some(sun_time) => in_catchup_window(sun_time, window_start_naive, now_time),
-                        None => false,
+            // Every moment is looked at, so each periodic one is seeded.
+            let mut fires = false;
+            for trigger in rule.all_triggers() {
+                fires |= match trigger {
+                    Trigger::SunEvent {
+                        event,
+                        offset_minutes,
+                    } => {
+                        match solar_event_time(
+                            self.latitude,
+                            self.longitude,
+                            today,
+                            *event,
+                            *offset_minutes,
+                        ) {
+                            Some(sun_time) => {
+                                in_catchup_window(sun_time, window_start_naive, now_time)
+                            }
+                            None => false,
+                        }
                     }
-                }
-                Trigger::TimeOfDay { time, days } => {
-                    let day_ok = days.is_empty() || days.contains(&weekday);
-                    day_ok && in_catchup_window(*time, window_start_naive, now_time)
-                }
-                Trigger::Cron { expression } => {
-                    cron_fired_in_window(expression, &window_start_dt_full, &now_dt, &rule.name)
-                }
-                // Periodic triggers always fire on startup — they have no "missed" window
-                // to check because their period is relative to the last fire time (which
-                // is unknown after a restart).  Seeding last_periodic_fire to now prevents
-                // an immediate double-fire once the main loop starts.
-                Trigger::Periodic { every_n, unit } => {
-                    let period_secs = periodic_to_secs(*every_n, unit);
-                    if self.catchup_window_minutes as u64 * 60 >= period_secs {
-                        self.last_periodic_fire.insert(rule.id, Instant::now());
-                        true
-                    } else {
-                        // Period longer than catchup window — seed to now so the main
-                        // loop doesn't fire immediately; it will fire after one period.
-                        self.last_periodic_fire.insert(rule.id, Instant::now());
-                        false
+                    Trigger::TimeOfDay { time, days } => {
+                        let day_ok = days.is_empty() || days.contains(&weekday);
+                        day_ok && in_catchup_window(*time, window_start_naive, now_time)
                     }
-                }
-                _ => false,
-            };
+                    Trigger::Cron { expression } => {
+                        cron_fired_in_window(expression, &window_start_dt_full, &now_dt, &rule.name)
+                    }
+                    // Periodic triggers always fire on startup — they have no "missed" window
+                    // to check because their period is relative to the last fire time (which
+                    // is unknown after a restart).  Seeding last_periodic_fire to now prevents
+                    // an immediate double-fire once the main loop starts.
+                    Trigger::Periodic { every_n, unit } => {
+                        let period_secs = periodic_to_secs(*every_n, unit);
+                        if self.catchup_window_minutes as u64 * 60 >= period_secs {
+                            self.last_periodic_fire.insert(rule.id, Instant::now());
+                            true
+                        } else {
+                            // Period longer than catchup window — seed to now so the main
+                            // loop doesn't fire immediately; it will fire after one period.
+                            self.last_periodic_fire.insert(rule.id, Instant::now());
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+            }
 
             if fires {
                 fired += 1;

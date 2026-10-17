@@ -54,6 +54,11 @@ pub struct Rule {
     #[serde(default)]
     pub tags: Vec<String>,
     pub trigger: Trigger,
+    /// More moments that start the rule: it runs when `trigger` or any of
+    /// these matches. Empty for a rule with one — which is how every rule
+    /// written before this field reads, and how it is written back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<Trigger>,
     /// All conditions must pass (short-circuit AND logic).
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -130,6 +135,18 @@ pub struct Rule {
 
 fn is_parallel(m: &RunMode) -> bool {
     *m == RunMode::Parallel
+}
+
+impl Rule {
+    /// Every moment that starts the rule: `trigger`, then `triggers`.
+    pub fn all_triggers(&self) -> impl Iterator<Item = &Trigger> {
+        std::iter::once(&self.trigger).chain(self.triggers.iter())
+    }
+
+    /// Every moment that starts the rule, to change in place.
+    pub fn all_triggers_mut(&mut self) -> impl Iterator<Item = &mut Trigger> {
+        std::iter::once(&mut self.trigger).chain(self.triggers.iter_mut())
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -507,11 +524,38 @@ pub enum CompareOp {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// What an if/otherwise asks. A Rhai expression is a JSON string; a check is
+/// a `Condition`, an object — so every rule written before checks were
+/// allowed reads, and writes back, exactly as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IfCheck {
+    Script(String),
+    Check(Box<Condition>),
+}
+
+impl IfCheck {
+    /// For logs: the script, or the check as JSON.
+    pub fn describe(&self) -> String {
+        match self {
+            IfCheck::Script(s) => s.clone(),
+            IfCheck::Check(c) => serde_json::to_string(c).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&str> for IfCheck {
+    fn from(s: &str) -> Self {
+        IfCheck::Script(s.to_string())
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A branch in a multi-arm `Conditional` action (`ELSE-IF`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConditionalBranch {
-    /// Rhai boolean expression for this branch.
-    pub condition: String,
+    /// What this branch asks: a check, or a Rhai boolean expression.
+    pub condition: IfCheck,
     pub actions: Vec<Action>,
 }
 
@@ -656,7 +700,9 @@ pub enum Action {
     ///
     /// Supports full `IF / ELSE-IF / ELSE / END-IF` chaining via `else_if`.
     Conditional {
-        condition: String,
+        /// What it asks: a check written as rule conditions are, or a Rhai
+        /// boolean expression (a string, as rules before checks have it).
+        condition: IfCheck,
         then_actions: Vec<Action>,
         /// Ordered list of `ELSE-IF` branches.  First matching branch wins.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -986,6 +1032,10 @@ pub struct TriggerContext {
     /// User-defined label from `rule.trigger_label` (accessible as `trigger_label()` in Rhai).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_label: Option<String>,
+    /// Which of a rule's moments matched, when it has more than one: 0 is
+    /// `trigger`, 1 the first of `triggers`, and so on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_index: Option<usize>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1108,6 +1158,7 @@ mod tests {
                 change_kind: None,
                 change_source: None,
             },
+            triggers: Vec::new(),
             conditions: vec![Condition::ModeIs {
                 mode_id: "mode_night".to_string(),
                 on: true,

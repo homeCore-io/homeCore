@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result};
 use hc_types::device::DeviceState;
-use hc_types::rule::{Action, Condition, Rule, Trigger};
+use hc_types::rule::{Action, Condition, IfCheck, Rule, Trigger};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -306,7 +306,8 @@ pub fn nullify_device_refs(
 /// Returns `true` if any trigger, condition, or action in `rule` directly
 /// references `device_id` (does not search inside Rhai script strings).
 fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
-    trigger_references_device(&rule.trigger, device_id, devices)
+    rule.all_triggers()
+        .any(|t| trigger_references_device(t, device_id, devices))
         || rule
             .conditions
             .iter()
@@ -336,6 +337,10 @@ fn trigger_references_device(trigger: &Trigger, device_id: &str, devices: &[Devi
         }
         _ => false,
     }
+}
+
+fn if_check_references_device(check: &IfCheck, device_id: &str, devices: &[DeviceState]) -> bool {
+    matches!(check, IfCheck::Check(c) if condition_references_device(c, device_id, devices))
 }
 
 fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
@@ -382,14 +387,18 @@ fn action_references_device(action: &Action, device_id: &str, devices: &[DeviceS
             .iter()
             .any(|a| action_references_device(a, device_id, devices)),
         Action::Conditional {
+            condition,
             then_actions,
             else_if,
             else_actions,
-            ..
         } => {
-            then_actions
-                .iter()
-                .any(|a| action_references_device(a, device_id, devices))
+            if_check_references_device(condition, device_id, devices)
+                || else_if
+                    .iter()
+                    .any(|b| if_check_references_device(&b.condition, device_id, devices))
+                || then_actions
+                    .iter()
+                    .any(|a| action_references_device(a, device_id, devices))
                 || else_if.iter().any(|branch| {
                     branch
                         .actions
@@ -423,7 +432,9 @@ fn replace_device_refs(
     placeholder: &str,
     devices: &[DeviceState],
 ) {
-    replace_in_trigger(&mut rule.trigger, device_id, placeholder, devices);
+    for trigger in rule.all_triggers_mut() {
+        replace_in_trigger(trigger, device_id, placeholder, devices);
+    }
     for cond in &mut rule.conditions {
         replace_in_condition(cond, device_id, placeholder, devices);
     }
@@ -531,15 +542,21 @@ fn replace_in_action(
             }
         }
         Action::Conditional {
+            condition,
             then_actions,
             else_if,
             else_actions,
-            ..
         } => {
+            if let IfCheck::Check(check) = condition {
+                replace_in_condition(check, device_id, placeholder, devices);
+            }
             for a in then_actions {
                 replace_in_action(a, device_id, placeholder, devices);
             }
             for branch in else_if {
+                if let IfCheck::Check(check) = &mut branch.condition {
+                    replace_in_condition(check, device_id, placeholder, devices);
+                }
                 for a in &mut branch.actions {
                     replace_in_action(a, device_id, placeholder, devices);
                 }
@@ -598,6 +615,7 @@ mod tests {
                 priority: 0,
                 tags: vec![],
                 trigger: Trigger::ManualTrigger,
+                triggers: Vec::new(),
                 conditions: vec![],
                 actions: vec![],
                 error: None,
