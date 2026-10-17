@@ -427,6 +427,22 @@ pub struct AppState {
     pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
+/// A plugin is back: `plugin_status_changed` to `active`, so a screen showing
+/// it offline or starting needn't poll to see it return.
+fn announce_back(
+    bus: &EventBus,
+    plugin_id: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    previous_status: String,
+) {
+    let _ = bus.publish(hc_types::event::Event::PluginStatusChanged {
+        timestamp,
+        plugin_id: plugin_id.to_string(),
+        status: "active".into(),
+        previous_status,
+    });
+}
+
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
 /// `PluginHeartbeat`, `PluginOffline`, and `PluginCapabilities` events
 /// into the shared `plugins` map.
@@ -476,8 +492,11 @@ pub fn spawn_plugin_registry_listener(
                             notices: Vec::new(),
                             installed_version: None,
                         });
-                    rec.status = "active".into();
+                    let prev = std::mem::replace(&mut rec.status, "active".into());
                     rec.registered_at = timestamp;
+                    if prev != "active" {
+                        announce_back(&event_bus, &plugin_id, timestamp, prev);
+                    }
                 }
                 Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
                     let mut map = plugins.write().await;
@@ -536,7 +555,8 @@ pub fn spawn_plugin_registry_listener(
                         rec.device_count = d;
                     }
                     if rec.status == "offline" || rec.status == "starting" {
-                        rec.status = "active".into();
+                        let prev = std::mem::replace(&mut rec.status, "active".into());
+                        announce_back(&event_bus, &plugin_id, timestamp, prev);
                     }
                 }
                 Ok(hc_types::event::Event::PluginCapabilities {

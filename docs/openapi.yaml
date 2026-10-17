@@ -2423,7 +2423,9 @@ paths:
         `scene_changed` / `scene_removed` cover homeCore's own scenes; plugin
         scenes are devices. `rule_changed` carries a rule as written (as
         `GET /automations/{id}` returns it) after any change through the API;
-        `rule_removed` its `rule_id`. A device's room is the area whose `slug` or
+        `rule_removed` its `rule_id`. `plugin_status_changed`
+        (`plugin_id`, `status`, `previous_status`) covers a plugin starting,
+        stopping, going offline and coming back to `active`. A device's room is the area whose `slug` or
         `aliases` contain its `area_override`, else its `area`.
 
         **Event types:** `device_state_changed`, `device_availability_changed`,
@@ -2535,6 +2537,10 @@ paths:
         Fetches, verifies and unpacks the artifact, writes a seed config, and
         starts supervising the process. The plugin appears in `GET /plugins`
         immediately, before it has registered.
+
+        Updating is installing again with a newer `version`. A reinstall keeps
+        the operator's config and leaves a plugin that was turned off, off.
+        `{path}` (a local `.tar.zst`) installs without the registry.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -2544,10 +2550,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [plugin_id]
               properties:
-                plugin_id:
+                id:
                   type: string
+                  description: The registry id, e.g. `plugin.hue`. This or `path`.
+                path:
+                  type: string
+                  description: A local artifact to install instead of a registry one.
                 version:
                   type: string
                   description: Defaults to the newest version in the registry.
@@ -2568,19 +2577,36 @@ paths:
             Nowhere to run it — no artifact for this machine, or the plugin needs
             a runtime kind that is not enrolled. The message names the next
             action.
-        "501":
-          description: |
-            The plugin belongs on a runtime, and delivery to runtimes is not
-            wired up yet. The body reports which runtime it would have used.
+        "202":
+          description: Placed on a plugin runtime — `{placed_on, plugin_id, version, note}`
         "200":
           description: Plugin installed and starting
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
-        "422":
-          description: Unknown plugin, bad signature, or unpack failure
+                properties:
+                  installed:
+                    type: string
+                  name:
+                    type: string
+                  version:
+                    type: string
+                  binary:
+                    type: string
+                  config:
+                    type: string
+                  reinstall:
+                    type: boolean
+                  activated:
+                    type: boolean
+                    description: Started (or restarted) now; false for a plugin that is turned off
+                  note:
+                    type: string
+        "400":
+          description: Registry lookup, download, signature or unpack failed
+        "503":
+          description: No registry, or install isn't configured
 
   /plugins/{id}/config/schema:
     get:
@@ -2596,12 +2622,18 @@ paths:
         - $ref: "#/components/parameters/PluginId"
       responses:
         "200":
-          description: JSON Schema document
+          description: "`{plugin_id, schema}` — the JSON Schema document under `schema`"
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [plugin_id, schema]
+                properties:
+                  plugin_id:
+                    type: string
+                  schema:
+                    type: object
+                    additionalProperties: true
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2620,12 +2652,18 @@ paths:
         - $ref: "#/components/parameters/PluginId"
       responses:
         "200":
-          description: Descriptor document
+          description: "`{plugin_id, descriptor}` — the same vocabulary as `GET /system/config/descriptor`"
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [plugin_id, descriptor]
+                properties:
+                  plugin_id:
+                    type: string
+                  descriptor:
+                    type: object
+                    additionalProperties: true
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2645,10 +2683,19 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  additionalProperties: true
+                type: object
+                required: [plugins]
+                properties:
+                  plugins:
+                    type: array
+                    items:
+                      type: object
+                      description: "`{id, name, description, category, versions: [{version, min_core, artifacts: [{os, arch, runtime, abi, url, sha256, size, key_id}]}]}`"
+                      additionalProperties: true
+        "502":
+          description: The registry couldn't be fetched or verified
+        "503":
+          description: No registry is configured
 
   /registry/plugins/{id}:
     get:
@@ -2673,15 +2720,27 @@ paths:
   /plugins/{id}:
     delete:
       operationId: deregisterPlugin
-      summary: Deregister a plugin (removes from in-memory registry)
+      summary: Uninstall a plugin — stop it, and remove its devices, binaries and (by default) config
+      description: |
+        Stops the plugin, deletes every device it reported (rules naming them
+        are turned off), forgets its state, withdraws any runtime placement,
+        and tombstones it so a static `[[plugins]]` entry doesn't respawn it.
+        Its binaries are always removed; its config too unless
+        `keep_config=true`.
       tags: [plugins]
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/PluginId"
+        - name: keep_config
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
       responses:
-        "204":
-          description: Plugin deregistered
+        "200":
+          description: "Uninstalled — `{uninstalled, stopped, devices_removed, device_ids, affected_rules, config_removed, binaries_removed, unplaced}`"
         "404":
           $ref: "#/components/responses/NotFound"
     get:
@@ -4737,9 +4796,9 @@ paths:
         non-streaming, no timeout).
 
         **Non-streaming actions** (`stream: false`, the default): the handler
-        blocks up to 5 s for the plugin's RPC reply and returns it verbatim with
-        `200`. A reply whose `status` is `"error"` is surfaced as `504` with the
-        reply's `error` string. No response is returned as `504` as well.
+        waits up to the manifest `timeout_ms` (5 s without one) for the
+        plugin's reply and returns it verbatim with `200` — **including** a
+        reply whose `status` is `"error"`, so check `status`. No reply is `504`.
 
         **Streaming actions** (`stream: true`): core reserves a streaming slot
         keyed by the minted `request_id` before publishing, arms the manifest
@@ -4749,6 +4808,12 @@ paths:
         `request_id` echoed in this response. If the action declares
         `concurrency: single` and one is already in flight, this call is
         rejected with `409` and the active `request_id`.
+
+        **Cancel and answer** go through this same endpoint, to the action in
+        flight: `{"action": "cancel", "target_request_id": …}` for a
+        `cancelable` action, and `{"action": "respond", "target_request_id":
+        …, "response": {…}}` after an `awaiting_user` event. The plugin
+        replies `{request_id, status: "ok" | "error", error?}`.
 
         Requires the `plugins:write` scope (`PluginsWrite` guard). Actions whose
         manifest entry declares `requires_role: admin` additionally require the
@@ -5035,10 +5100,12 @@ paths:
       description: |
         Overwrites the plugin's configuration.
 
-        For locally managed plugins with a known `config_path`, the config file
-        is **fully replaced** (not merged). Supply either `raw` — a TOML string
-        written to the file byte-for-byte — or `config` — a JSON object
-        serialized to pretty TOML. `raw` takes precedence when both are given.
+        For locally managed plugins with a known `config_path`, four shapes:
+        `patch` and `array_of_tables` — the same as `PUT /system/config` —
+        change only what they name, in place, keeping comments and layout;
+        `raw` — a TOML string written to the file byte-for-byte — and
+        `config` — a JSON object serialized to pretty TOML — **fully replace**
+        the file. Precedence: `patch`, `array_of_tables`, `raw`, `config`.
         Writing the file does not itself restart the plugin; use
         `POST /plugins/{id}/restart` to apply it.
 
@@ -5071,6 +5138,24 @@ paths:
                 is sent if present, otherwise the whole body is sent as the
                 config.
               properties:
+                patch:
+                  type: object
+                  description: |
+                    `{ "section": { "field": value } }`, `""` for top-level
+                    fields. A value left as `__redacted__` is left unchanged.
+                    Local plugins only.
+                  additionalProperties: true
+                array_of_tables:
+                  type: object
+                  description: "`{ section, items }` — replaces every `[[section]]` table. Local plugins only."
+                  properties:
+                    section:
+                      type: string
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        additionalProperties: true
                 raw:
                   type: string
                   description: |

@@ -6064,6 +6064,10 @@ pub async fn install_plugin(
 
     let mut record = outcome.record;
     record.installed_at = chrono::Utc::now().to_rfc3339();
+    // Reinstalling or updating a plugin someone turned off leaves it off.
+    if let Some(was) = mp.enabled_of(&record.id) {
+        record.enabled = was;
+    }
     if let Err(e) = mp.install(record.clone()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6607,7 +6611,19 @@ pub async fn patch_plugin(
         //    [[plugins]] (e.g. it registered via MQTT only), we log
         //    and continue. The runtime change in `s.plugins` already
         //    landed above; we just don't survive a restart.
-        if let Some(ref path) = s.homecore_config_path {
+        // An installed plugin's on/off lives in its managed record; a static
+        // one's in homecore.toml.
+        let managed = match &s.managed_plugins {
+            Some(mp) => match mp.set_enabled(&id, new_enabled) {
+                Ok(found) => found,
+                Err(e) => {
+                    tracing::warn!(plugin = %id, error = %e, "Failed to persist plugin enabled to managed.toml");
+                    true
+                }
+            },
+            None => false,
+        };
+        if let (false, Some(path)) = (managed, &s.homecore_config_path) {
             match crate::config_writer::persist_plugin_enabled(path.as_path(), &id, new_enabled) {
                 Ok(()) => {
                     tracing::info!(
@@ -6897,6 +6913,20 @@ fn array_identity_match<'a>(incoming: &Value, current: &'a [Value]) -> Option<&'
 }
 
 /// Does this tree still carry a redaction placeholder anywhere?
+/// Take out every value a client echoed back masked — in a patch, a value
+/// not being changed.
+fn drop_redacted(value: &mut Value) {
+    if let Value::Object(map) = value {
+        for v in map.values_mut() {
+            drop_redacted(v);
+        }
+        // A section left with nothing to change isn't written at all.
+        map.retain(|_, v| {
+            v.as_str() != Some(REDACTED_SECRET) && !v.as_object().is_some_and(|o| o.is_empty())
+        });
+    }
+}
+
 fn has_redaction(value: &Value) -> bool {
     match value {
         Value::String(s) => s == REDACTED_SECRET,
@@ -7019,8 +7049,59 @@ pub async fn put_plugin_config(
         // overwrite every credential in it with "__redacted__".
         let current = std::fs::read_to_string(path).unwrap_or_default();
 
-        // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
-        let toml_str = if let Some(raw) = body["raw"].as_str() {
+        // Accept { "patch": {...} } or { "array_of_tables": {...} } — the
+        // shapes `PUT /system/config` takes, written in place so comments and
+        // everything else stay — or { "config": {...} } (JSON→TOML, whole
+        // file) or { "raw": "..." } (raw TOML string).
+        let toml_str = if let Some(patch) = body.get("patch") {
+            // A secret echoed back masked is a secret not being changed.
+            let mut patch = patch.clone();
+            drop_redacted(&mut patch);
+            match crate::config_writer::apply_section_patch(&current, &patch) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": format!("patch failed: {e}") })),
+                    )
+                        .into_response()
+                }
+            }
+        } else if let Some(aot) = body.get("array_of_tables") {
+            let section = aot.get("section").and_then(|v| v.as_str());
+            let items = aot.get("items").and_then(|v| v.as_array());
+            let (Some(section), Some(items)) = (section, items) else {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": "`array_of_tables` requires `section` (string) and `items` (array)"
+                    })),
+                )
+                    .into_response();
+            };
+            let mut items = Value::Array(items.clone());
+            if has_redaction(&items) {
+                if let Ok(parsed) = toml::from_str::<toml::Value>(&current) {
+                    let current_json = serde_json::to_value(parsed).unwrap_or_default();
+                    let mut at = &current_json;
+                    for part in section.split('.') {
+                        at = at.get(part).unwrap_or(&Value::Null);
+                    }
+                    restore_json_secrets(&mut items, at);
+                }
+            }
+            let items = items.as_array().cloned().unwrap_or_default();
+            match crate::config_writer::replace_array_of_tables(&current, section, &items) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": format!("array_of_tables write failed: {e}") })),
+                    )
+                        .into_response()
+                }
+            }
+        } else if let Some(raw) = body["raw"].as_str() {
             restore_toml_secrets(raw, &current)
         } else if let Some(config) = body.get("config") {
             let mut config = config.clone();
@@ -9248,6 +9329,16 @@ mod tests {
         assert!(cfg.is_object());
     }
     use super::*;
+
+    #[test]
+    fn a_patch_leaves_masked_secrets_alone() {
+        let mut patch = json!({
+            "homecore": { "password": "__redacted__", "broker_port": 1883 },
+            "api": { "token": "__redacted__" }
+        });
+        drop_redacted(&mut patch);
+        assert_eq!(patch, json!({ "homecore": { "broker_port": 1883 } }));
+    }
 
     #[test]
     fn restore_json_secrets_realigns_after_array_element_removed() {
