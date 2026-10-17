@@ -612,7 +612,7 @@
       "fields": [
         {
           "name": "condition",
-          "type": "string",
+          "type": "any",
           "required": true
         },
         {
@@ -1095,5 +1095,11 @@
         }
       ]
     }
+  ],
+  "features": [
+    "triggers",
+    "if_checks",
+    "rule_events",
+    "test_draft"
   ]
 }

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use hc_state::StateStore;
 use hc_types::{
     device::DeviceState,
-    rule::{Action, Condition, Rule, RuleAction, Trigger},
+    rule::{Action, Condition, IfCheck, Rule, RuleAction, Trigger},
 };
 
 use crate::device_naming::{canonical_name_base, normalize_name_segment};
@@ -145,15 +145,21 @@ fn resolve_action(action: &mut Action, devices: &[DeviceState]) -> Result<()> {
             }
         }
         Action::Conditional {
+            condition,
             then_actions,
             else_if,
             else_actions,
-            ..
         } => {
+            if let IfCheck::Check(check) = condition {
+                resolve_condition(check, devices)?;
+            }
             for action in then_actions {
                 resolve_action(action, devices)?;
             }
             for branch in else_if {
+                if let IfCheck::Check(check) = &mut branch.condition {
+                    resolve_condition(check, devices)?;
+                }
                 for action in &mut branch.actions {
                     resolve_action(action, devices)?;
                 }
@@ -183,7 +189,9 @@ pub fn compile_rule(rule: &Rule, devices: &[DeviceState]) -> Result<Rule> {
     let mut compiled = rule.clone();
     compiled.error = None;
 
-    resolve_trigger(&mut compiled.trigger, devices)?;
+    for trigger in compiled.all_triggers_mut() {
+        resolve_trigger(trigger, devices)?;
+    }
     for condition in &mut compiled.conditions {
         resolve_condition(condition, devices)?;
     }
@@ -259,6 +267,7 @@ mod tests {
                 change_kind: None,
                 change_source: None,
             },
+            triggers: Vec::new(),
             conditions: vec![Condition::DeviceState {
                 device_id: device_ref.into(),
                 attribute: "on".into(),

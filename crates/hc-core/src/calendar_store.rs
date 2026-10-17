@@ -572,6 +572,9 @@ pub fn watch(
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if !changes_content(&event.kind) {
+                return;
+            }
             let relevant = event.paths.iter().any(|p| {
                 matches!(
                     p.extension().and_then(|e| e.to_str()),
@@ -606,6 +609,23 @@ pub fn watch(
     });
 
     Ok(watcher)
+}
+
+/// Whether a file event means a calendar may have changed. Reading the files
+/// is itself an event (inotify reports opens, reads and closes), so reacting
+/// to every event made each reload set off the next, five times a second, for
+/// as long as homeCore ran.
+fn changes_content(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode, ModifyKind};
+    use notify::EventKind;
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        // Closing a file that was open for writing is the end of a write.
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) | EventKind::Any | EventKind::Other => false,
+    }
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
@@ -662,5 +682,35 @@ async fn refresh_stale_calendars(dir: &Path, handle: &CalendarHandle, expansion_
             }
             Err(e) => warn!(id, error = %e, "Calendar auto-refresh failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::changes_content;
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+    };
+    use notify::EventKind;
+
+    #[test]
+    fn reading_the_calendars_is_not_a_change_to_them() {
+        assert!(!changes_content(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!changes_content(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!changes_content(&EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::AccessTime
+        ))));
+        assert!(changes_content(&EventKind::Create(CreateKind::File)));
+        assert!(changes_content(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(changes_content(&EventKind::Remove(RemoveKind::File)));
+        assert!(changes_content(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
     }
 }

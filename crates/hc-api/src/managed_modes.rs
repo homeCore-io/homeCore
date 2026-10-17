@@ -140,6 +140,7 @@ fn build_rule(
             format!("mode:{}", mode.id),
         ],
         trigger: build_trigger(source),
+        triggers: Vec::new(),
         conditions: vec![
             Condition::ModeIs {
                 mode_id: mode.id.clone(),

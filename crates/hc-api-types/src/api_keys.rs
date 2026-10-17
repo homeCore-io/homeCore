@@ -53,6 +53,10 @@ pub struct ApiKeySummary {
     pub expires_at: Option<DateTime<Utc>>,
     pub allowed_cidrs: Vec<String>,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// A display's key (H3) — a wall tablet, managed under `/displays` — not
+    /// one a person made for a program.
+    #[serde(default)]
+    pub display: bool,
 }
 
 /// Request body for `PATCH /api/v1/auth/api-keys/{id}`. Any field may be

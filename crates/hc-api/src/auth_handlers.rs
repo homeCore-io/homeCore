@@ -55,6 +55,58 @@ async fn revoke_all_sessions(s: &AppState, user_id: Uuid) -> usize {
     revoked
 }
 
+/// Whether the house would still have an admin if `id` became `role` (or, with
+/// `None`, were removed). Someone has to be able to manage people, plugins and
+/// keys; an install with no admin can only be recovered from the command line.
+async fn keeps_an_admin(
+    s: &AppState,
+    id: Uuid,
+    role: Option<hc_auth::Role>,
+) -> Result<bool, String> {
+    let users = s.store.list_users().await.map_err(|e| e.to_string())?;
+    Ok(users.iter().any(|u| {
+        let r = if u.id == id { role } else { Some(u.role) };
+        r == Some(hc_auth::Role::Admin)
+    }))
+}
+
+/// A person's own API keys, brought within what they may now do. A key takes a
+/// subset of its owner's scopes when it is made; without this a demoted
+/// person's keys — or a removed person's — would go on doing what they no
+/// longer may. With `None` (the person is gone) every key of theirs is revoked.
+/// Display keys are the house's, not their maker's (H3), and are left alone.
+///
+/// Returns how many keys were narrowed or revoked, for the audit record.
+async fn bring_keys_within(s: &AppState, owner: Uuid, role: Option<hc_auth::Role>) -> usize {
+    let keys = match s.store.list_api_keys_by_owner(owner).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!(%owner, error = %e, "could not list keys to bring within the owner's role");
+            return 0;
+        }
+    };
+    let mut changed = 0usize;
+    for mut key in keys.into_iter().filter(|k| !k.display && !k.is_revoked()) {
+        let result = match role {
+            None => s.store.revoke_api_key(key.id).await.map(|_| true),
+            Some(role) => {
+                let allowed = role.scopes();
+                let before = key.scopes.len();
+                key.scopes.retain(|x| allowed.contains(x));
+                if key.scopes.len() == before {
+                    continue;
+                }
+                s.store.update_api_key(&key).await.map(|_| true)
+            }
+        };
+        match result {
+            Ok(_) => changed += 1,
+            Err(e) => tracing::error!(%owner, key = %key.id, error = %e, "could not narrow key"),
+        }
+    }
+    changed
+}
+
 // ---------- Login ----------
 
 /// `POST /api/v1/auth/login`
@@ -654,10 +706,32 @@ pub async fn delete_user(
         )
             .into_response();
     }
+    // The caller is usually an admin who stays one, but a whitelisted local
+    // admin or an admin key is not a person, and could remove the last.
+    match keeps_an_admin(&s, id, None).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "cannot remove the house's only admin" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
+    }
     match s.store.delete_user(id).await {
         Ok(true) => {
-            let e = audit::entry_from_claims(&claims, "user.deleted")
+            let sessions = revoke_all_sessions(&s, id).await;
+            let keys = bring_keys_within(&s, id, None).await;
+            let mut e = audit::entry_from_claims(&claims, "user.deleted")
                 .with_target("user", id.to_string());
+            e.detail = json!({ "refresh_tokens_revoked": sessions, "api_keys_revoked": keys });
             audit::emit(&s, e).await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -706,12 +780,45 @@ pub async fn set_user_role(
         }
     };
     let old_role = user.role;
+    if old_role == body.role {
+        return (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response();
+    }
+    if old_role == hc_auth::Role::Admin {
+        match keeps_an_admin(&s, id, Some(body.role)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "the house's only admin must stay an admin" })),
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    }
     user.role = body.role;
+    // A token carries the scopes of the role it was minted under, so a new
+    // role only applies once the old tokens stop working: end every session,
+    // exactly as a password reset does. They sign in again under the new role.
+    user.token_version += 1;
     match s.store.update_user(&user).await {
         Ok(_) => {
+            let sessions = revoke_all_sessions(&s, id).await;
+            let keys = bring_keys_within(&s, id, Some(user.role)).await;
             let mut e = audit::entry_from_claims(&claims, "user.role_changed")
                 .with_target("user", id.to_string());
-            e.detail = json!({ "from": old_role, "to": user.role });
+            e.detail = json!({
+                "from": old_role,
+                "to": user.role,
+                "refresh_tokens_revoked": sessions,
+                "api_keys_narrowed": keys,
+            });
             audit::emit(&s, e).await;
             (StatusCode::OK, Json(json!(UserInfo::from(&user)))).into_response()
         }
@@ -938,5 +1045,288 @@ mod me_tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("content:write")));
+    }
+}
+
+#[cfg(test)]
+mod people_tests {
+    //! People and access (A5), through the real router.
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use chrono::Utc;
+    use hc_auth::Role;
+    use tower::ServiceExt;
+
+    struct House {
+        app: axum::Router,
+        store: hc_state::StateStore,
+        jwt: hc_auth::JwtService,
+        people: Vec<User>,
+    }
+
+    impl House {
+        fn token(&self, u: &User) -> String {
+            self.jwt
+                .issue(&u.id.to_string(), &u.username, u.role, u.token_version)
+                .unwrap()
+        }
+    }
+
+    async fn house(roles: &[(&str, Role)]) -> House {
+        let base = std::env::temp_dir().join(format!("hc_api_people_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let store = hc_state::StateStore::open(
+            &base.join("state.redb").to_string_lossy(),
+            &base.join("history.sqlite").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let mut people = Vec::new();
+        for (name, role) in roles {
+            let u = User {
+                id: Uuid::new_v4(),
+                username: (*name).into(),
+                password_hash: hc_auth::hash_pin("correct horse").unwrap(),
+                role: *role,
+                created_at: Utc::now(),
+                token_version: 0,
+                pin_hash: None,
+            };
+            store.create_user(&u).await.unwrap();
+            people.push(u);
+        }
+        const SECRET: &[u8] = b"people-test-secret-32-bytes-min!!";
+        let jwt = hc_auth::JwtService::new_hs256(SECRET, 24);
+        let state = crate::AppState::new(crate::AppStateParams::new(
+            store.clone(),
+            hc_core::EventBus::new(16),
+            hc_auth::JwtService::new_hs256(SECRET, 24),
+        ));
+        House {
+            app: crate::router(state, None),
+            store,
+            jwt,
+            people,
+        }
+    }
+
+    async fn call(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(format!("/api/v1{path}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        // Not a whitelisted address: every request here stands on its token.
+        req.extensions_mut()
+            .insert(ConnectInfo(std::net::SocketAddr::from((
+                [10, 9, 8, 7],
+                1234,
+            ))));
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_household_member_uses_devices_and_changes_none() {
+        let h = house(&[("ada", Role::Admin), ("kid", Role::HouseholdMember)]).await;
+        let kid = h.token(&h.people[1]);
+
+        let (st, _) = call(
+            &h.app,
+            "PATCH",
+            "/devices/lamp/state",
+            &kid,
+            json!({"on": true}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "a member commands a device");
+
+        let (st, _) = call(&h.app, "PATCH", "/devices/lamp", &kid, json!({"name": "x"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "but doesn't rename one");
+        let (st, _) = call(&h.app, "DELETE", "/devices/lamp", &kid, json!({})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "or delete one");
+        let (st, _) = call(&h.app, "GET", "/auth/users", &kid, json!({})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_new_role_ends_the_old_sessions() {
+        let h = house(&[("ada", Role::Admin), ("bo", Role::User)]).await;
+        let admin = h.token(&h.people[0]);
+        let bo = h.token(&h.people[1]);
+        let id = h.people[1].id;
+
+        let (st, _) = call(&h.app, "GET", "/auth/me", &bo, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = call(
+            &h.app,
+            "PATCH",
+            &format!("/auth/users/{id}/role"),
+            &admin,
+            json!({"role": "household_member"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["role"], "household_member");
+
+        let (st, _) = call(&h.app, "GET", "/auth/me", &bo, json!({})).await;
+        assert_eq!(
+            st,
+            StatusCode::UNAUTHORIZED,
+            "a token minted under the old role stops working"
+        );
+        let bo_now = h.store.get_user_by_id(id).await.unwrap().unwrap();
+        let (st, me) = call(&h.app, "GET", "/auth/me", &h.token(&bo_now), json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!me["scopes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("automations:write")));
+    }
+
+    #[tokio::test]
+    async fn the_house_keeps_an_admin() {
+        let h = house(&[("ada", Role::Admin), ("bo", Role::User)]).await;
+        let ada = h.people[0].clone();
+        let admin = h.token(&ada);
+
+        let (st, _) = call(
+            &h.app,
+            "PATCH",
+            &format!("/auth/users/{}/role", ada.id),
+            &admin,
+            json!({"role": "user"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "the only admin stays one");
+
+        // With a second admin, the first may step down.
+        let bo = h.people[1].id;
+        let (st, _) = call(
+            &h.app,
+            "PATCH",
+            &format!("/auth/users/{bo}/role"),
+            &admin,
+            json!({"role": "admin"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &h.app,
+            "PATCH",
+            &format!("/auth/users/{}/role", ada.id),
+            &admin,
+            json!({"role": "user"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_demoted_persons_keys_do_no_more_than_they_may() {
+        let h = house(&[("ada", Role::Admin), ("bo", Role::User)]).await;
+        let admin = h.token(&h.people[0]);
+        let bo = h.people[1].clone();
+        let (st, made) = call(
+            &h.app,
+            "POST",
+            "/auth/api-keys",
+            &h.token(&bo),
+            json!({"label": "script", "scopes": ["devices:read", "devices:command", "automations:write"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{made}");
+
+        let (st, _) = call(
+            &h.app,
+            "PATCH",
+            &format!("/auth/users/{}/role", bo.id),
+            &admin,
+            json!({"role": "household_member"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let keys = h.store.list_api_keys_by_owner(bo.id).await.unwrap();
+        assert_eq!(keys[0].scopes, vec!["devices:read", "devices:command"]);
+
+        // And a removed person's keys stop working.
+        let (st, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/auth/users/{}", bo.id),
+            &admin,
+            json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let keys = h.store.list_api_keys_by_owner(bo.id).await.unwrap();
+        assert!(keys[0].is_revoked());
+    }
+
+    #[tokio::test]
+    async fn an_admin_clears_a_forgotten_pin() {
+        let h = house(&[("ada", Role::Admin), ("kid", Role::HouseholdMember)]).await;
+        let admin = h.token(&h.people[0]);
+        let kid = h.token(&h.people[1]);
+        let id = h.people[1].id;
+
+        let (st, _) = call(
+            &h.app,
+            "PUT",
+            "/auth/pin",
+            &kid,
+            json!({"pin": "4821", "password": "correct horse"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, users) = call(&h.app, "GET", "/auth/users", &admin, json!({})).await;
+        let row = |users: &serde_json::Value| {
+            users
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|u| u["username"] == "kid")
+                .unwrap()["has_pin"]
+                .clone()
+        };
+        assert_eq!(row(&users), json!(true));
+
+        let (st, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/auth/users/{id}/pin"),
+            &kid,
+            json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "only an admin clears another's");
+        let (st, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/auth/users/{id}/pin"),
+            &admin,
+            json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, users) = call(&h.app, "GET", "/auth/users", &admin, json!({})).await;
+        assert_eq!(row(&users), json!(false));
     }
 }

@@ -503,8 +503,16 @@ impl RuleEngine {
                             rules_snapshot.iter().find(|r| r.id == rule_id && r.enabled)
                         {
                             debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger: deferred_rule_fire — re-checking");
-                            if still_matches_for_duration(&rule.trigger, &self.device_cache) {
-                                let tctx = TriggerContext::default();
+                            let index = payload
+                                .get("trigger_index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as usize;
+                            let trigger = rule.all_triggers().nth(index).unwrap_or(&rule.trigger);
+                            if still_matches_for_duration(trigger, &self.device_cache) {
+                                let tctx = TriggerContext {
+                                    trigger_index: (!rule.triggers.is_empty()).then_some(index),
+                                    ..TriggerContext::default()
+                                };
                                 let _ = self.fire_rule(rule, tctx).await?;
                             } else {
                                 debug!(rule_name = %rule.name, "deferred_rule_fire: device state changed, not firing");
@@ -525,56 +533,66 @@ impl RuleEngine {
                 debug!(rule_name = %rule.name, "rule.trigger: SKIP (disabled)");
                 continue;
             }
-            if !trigger_kind_can_match_event(&rule.trigger, event) {
-                continue;
-            }
-            match trigger_check(&rule.trigger, event) {
-                TriggerResult::Matched => {
-                    if rule.log_events {
-                        info!(
-                            rule_name = %rule.name, rule_id = %rule.id,
-                            trigger   = trigger_type(&rule.trigger),
-                            "rule.event: trigger matched"
-                        );
-                    } else {
+            // The first of the rule's moments that matches starts it; a rule
+            // runs once for an event however many of its moments match.
+            let mut found: Option<(usize, &Trigger)> = None;
+            for (index, trigger) in rule.all_triggers().enumerate() {
+                if !trigger_kind_can_match_event(trigger, event) {
+                    continue;
+                }
+                match trigger_check(trigger, event) {
+                    TriggerResult::Matched => {
+                        found = Some((index, trigger));
+                        break;
+                    }
+                    TriggerResult::NoMatch(reason) => {
                         debug!(
                             rule_name = %rule.name, rule_id = %rule.id,
-                            trigger   = trigger_type(&rule.trigger),
-                            matched   = true, "rule.trigger"
+                            trigger   = trigger_type(trigger),
+                            matched   = false, reason, "rule.trigger"
                         );
                     }
-                    let tctx = extract_trigger_ctx(event, rule);
-                    // Check for_duration_secs — if set, defer the fire
-                    let for_dur = trigger_for_duration(&rule.trigger);
-                    matching.push((rule, tctx, for_dur.is_some()));
+                }
+            }
+            let Some((index, trigger)) = found else {
+                continue;
+            };
+            if rule.log_events {
+                info!(
+                    rule_name = %rule.name, rule_id = %rule.id,
+                    trigger   = trigger_type(trigger),
+                    "rule.event: trigger matched"
+                );
+            } else {
+                debug!(
+                    rule_name = %rule.name, rule_id = %rule.id,
+                    trigger   = trigger_type(trigger),
+                    matched   = true, "rule.trigger"
+                );
+            }
+            let tctx = extract_trigger_ctx(event, rule, trigger, index);
+            // Check for_duration_secs — if set, defer the fire
+            let for_dur = trigger_for_duration(trigger);
+            matching.push((rule, tctx, for_dur.is_some()));
 
-                    if let Some(dur_secs) = for_dur {
-                        let rule_id = rule.id;
-                        let rule_name = rule.name.clone();
-                        let trigger = rule.trigger.clone();
-                        let bus = self.pub_bus.clone();
-                        let cache = Arc::clone(&self.device_cache);
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(dur_secs)).await;
-                            if still_matches_for_duration(&trigger, &cache) {
-                                let _ = bus.publish(Event::Custom {
-                                    timestamp: Utc::now(),
-                                    event_type: "deferred_rule_fire".into(),
-                                    payload: serde_json::json!({ "rule_id": rule_id }),
-                                });
-                            } else {
-                                debug!(rule_name = %rule_name, "for_duration_secs: state changed, not firing");
-                            }
+            if let Some(dur_secs) = for_dur {
+                let rule_id = rule.id;
+                let rule_name = rule.name.clone();
+                let trigger = trigger.clone();
+                let bus = self.pub_bus.clone();
+                let cache = Arc::clone(&self.device_cache);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(dur_secs)).await;
+                    if still_matches_for_duration(&trigger, &cache) {
+                        let _ = bus.publish(Event::Custom {
+                            timestamp: Utc::now(),
+                            event_type: "deferred_rule_fire".into(),
+                            payload: serde_json::json!({ "rule_id": rule_id, "trigger_index": index }),
                         });
+                    } else {
+                        debug!(rule_name = %rule_name, "for_duration_secs: state changed, not firing");
                     }
-                }
-                TriggerResult::NoMatch(reason) => {
-                    debug!(
-                        rule_name = %rule.name, rule_id = %rule.id,
-                        trigger   = trigger_type(&rule.trigger),
-                        matched   = false, reason, "rule.trigger"
-                    );
-                }
+                });
             }
         }
 
@@ -670,7 +688,7 @@ impl RuleEngine {
     ) -> RuleFiring {
         RuleFiring {
             timestamp: Utc::now(),
-            trigger_type: trigger_type(&rule.trigger).to_string(),
+            trigger_type: trigger_type(matched_trigger(rule, trigger_ctx)).to_string(),
             trigger_context: trigger_ctx.clone(),
             outcome,
             conditions: vec![],
@@ -863,7 +881,7 @@ impl RuleEngine {
             }
             let firing = RuleFiring {
                 timestamp: Utc::now(),
-                trigger_type: trigger_type(&rule.trigger).to_string(),
+                trigger_type: trigger_type(matched_trigger(rule, &trigger_ctx)).to_string(),
                 trigger_context: trigger_ctx,
                 outcome: FireOutcome::ConditionFailed {
                     at_index: failed_idx,
@@ -908,7 +926,7 @@ impl RuleEngine {
 
         let actions = rule.actions.clone();
         let action_count = actions.len();
-        let trigger_type_str = trigger_type(&rule.trigger).to_string();
+        let trigger_type_str = trigger_type(matched_trigger(rule, &trigger_ctx)).to_string();
         let bus = self.pub_bus.clone();
         let rule_id = rule.id;
         let rule_name = rule.name.clone();
@@ -1629,9 +1647,22 @@ impl RuleEngine {
 // TriggerContext extraction
 // ---------------------------------------------------------------------------
 
-/// Build a `TriggerContext` from the matching event + rule trigger.
-fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
-    let label = rule.trigger_label.clone();
+/// Build a `TriggerContext` from the matching event and the rule's moment
+/// that matched it — `index` of `Rule::all_triggers`.
+fn extract_trigger_ctx(
+    event: &Event,
+    rule: &Rule,
+    trigger: &Trigger,
+    index: usize,
+) -> TriggerContext {
+    let mut tctx = trigger_ctx_of(event, trigger, rule.trigger_label.clone());
+    if !rule.triggers.is_empty() {
+        tctx.trigger_index = Some(index);
+    }
+    tctx
+}
+
+fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> TriggerContext {
     match event {
         Event::DeviceStateChanged {
             device_id,
@@ -1641,7 +1672,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             ..
         } => {
             // Find the attribute specified in this rule's trigger (if any).
-            let attr = match &rule.trigger {
+            let attr = match trigger {
                 Trigger::DeviceStateChanged { attribute, .. } => attribute.clone(),
                 Trigger::ButtonEvent { event, .. } => Some(match event {
                     ButtonEventType::Pushed => "pushed".into(),
@@ -1679,6 +1710,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
                 correlation_id: change.correlation_id.clone(),
                 extra: None,
                 trigger_label: label,
+                trigger_index: None,
             }
         }
         Event::MqttMessage { topic, payload, .. } => TriggerContext {
@@ -1696,6 +1728,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: None,
             trigger_label: label,
+            trigger_index: None,
         },
         // Webhook events: expose body as trigger_value(), query params as trigger_extra().
         Event::Custom {
@@ -1715,6 +1748,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: payload.get("query").cloned(),
             trigger_label: label,
+            trigger_index: None,
         },
         Event::Custom {
             event_type,
@@ -1733,6 +1767,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: None,
             trigger_label: label,
+            trigger_index: None,
         },
         Event::DeviceAvailabilityChanged {
             device_id,
@@ -1751,6 +1786,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: None,
             trigger_label: label,
+            trigger_index: None,
         },
         Event::DeviceBatteryLow {
             device_id,
@@ -1770,6 +1806,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: None,
             trigger_label: label,
+            trigger_index: None,
         },
         Event::DeviceBatteryRecovered {
             device_id,
@@ -1788,6 +1825,7 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
             correlation_id: None,
             extra: None,
             trigger_label: label,
+            trigger_index: None,
         },
         _ => TriggerContext::default(),
     }
@@ -1796,6 +1834,13 @@ fn extract_trigger_ctx(event: &Event, rule: &Rule) -> TriggerContext {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The rule's moment that started this firing (its first, when unknown).
+fn matched_trigger<'a>(rule: &'a Rule, tctx: &TriggerContext) -> &'a Trigger {
+    rule.all_triggers()
+        .nth(tctx.trigger_index.unwrap_or(0))
+        .unwrap_or(&rule.trigger)
+}
 
 /// Returns the `for_duration_secs` value if the trigger has one.
 fn trigger_for_duration(trigger: &Trigger) -> Option<u64> {
@@ -2374,7 +2419,7 @@ fn compare_op_symbol(op: &CompareOp) -> &'static str {
     }
 }
 
-fn compare(actual: &JsonValue, op: &CompareOp, expected: &JsonValue) -> bool {
+pub(crate) fn compare(actual: &JsonValue, op: &CompareOp, expected: &JsonValue) -> bool {
     match op {
         CompareOp::Eq => actual == expected,
         CompareOp::Ne => actual != expected,

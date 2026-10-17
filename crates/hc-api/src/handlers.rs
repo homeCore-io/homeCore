@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::audit;
 use crate::auth_middleware::{
     AreasRead, AreasWrite, AuthUser, AutomationsRead, AutomationsWrite, DashboardsRead,
-    DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
+    DashboardsWrite, DevicesCommand, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite,
+    ScenesRead, ScenesWrite,
 };
 use crate::group_store::RuleGroup;
 use crate::managed_modes::{
@@ -591,7 +592,7 @@ pub async fn get_device_schema(
 
 pub async fn command_device(
     State(s): State<AppState>,
-    DevicesWrite(claims): DevicesWrite,
+    DevicesCommand(claims): DevicesCommand,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -2580,7 +2581,10 @@ pub async fn list_automations(
                         }
                     }
                     if let Some(ref trig) = params.trigger {
-                        if trigger_type_name(&r.trigger) != trig.as_str() {
+                        if !r
+                            .all_triggers()
+                            .any(|t| trigger_type_name(t) == trig.as_str())
+                        {
                             return false;
                         }
                     }
@@ -2647,7 +2651,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
 /// Returns `true` if `device_id` appears anywhere in the rule's trigger,
 /// conditions, or actions (including nested action groups).
 fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
-    let in_trigger = match &rule.trigger {
+    let in_trigger = rule.all_triggers().any(|trigger| match trigger {
         Trigger::DeviceStateChanged {
             device_id: d,
             device_ids,
@@ -2664,7 +2668,7 @@ fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState])
             rule_resolver::reference_points_to_device(d, device_id, devices)
         }
         _ => false,
-    };
+    });
     if in_trigger {
         return true;
     }
@@ -2719,12 +2723,19 @@ fn actions_reference_device(actions: &[Action], device_id: &str, devices: &[Devi
                 actions_reference_device(inner, device_id, devices)
             }
             Action::Conditional {
+                condition,
                 then_actions,
                 else_if,
                 else_actions,
-                ..
             } => {
-                actions_reference_device(then_actions, device_id, devices)
+                [condition]
+                    .into_iter()
+                    .chain(else_if.iter().map(|b| &b.condition))
+                    .any(|c| {
+                        matches!(c, hc_types::rule::IfCheck::Check(check)
+                            if condition_references_device(check, device_id, devices))
+                    })
+                    || actions_reference_device(then_actions, device_id, devices)
                     || else_if
                         .iter()
                         .any(|branch| actions_reference_device(&branch.actions, device_id, devices))
@@ -2745,6 +2756,29 @@ fn actions_reference_device(actions: &[Action], device_id: &str, devices: &[Devi
         }
     }
     false
+}
+
+/// Tell every client which rules changed (H2's rule): each as written —
+/// what `GET /automations/{id}` returns — or that it's gone. Two admins, or
+/// an admin and a file edit, then never overwrite each other unseen.
+async fn announce_rules(s: &AppState, ids: &[Uuid]) {
+    let written: Vec<Rule> = match (&s.source_rules_handle, &s.rules_handle) {
+        (Some(h), _) | (None, Some(h)) => h.read().await.clone(),
+        (None, None) => return,
+    };
+    for id in ids {
+        let event = match written.iter().find(|r| r.id == *id) {
+            Some(rule) => hc_types::event::Event::RuleChanged {
+                timestamp: chrono::Utc::now(),
+                rule: Box::new(rule.clone()),
+            },
+            None => hc_types::event::Event::RuleRemoved {
+                timestamp: chrono::Utc::now(),
+                rule_id: *id,
+            },
+        };
+        let _ = s.event_bus.publish(event);
+    }
 }
 
 pub async fn create_automation(
@@ -2814,6 +2848,7 @@ pub async fn create_automation(
         rh.write().await.push(compiled_rule);
     }
 
+    announce_rules(&s, &[rule.id]).await;
     (StatusCode::CREATED, Json(json!(rule))).into_response()
 }
 
@@ -3031,6 +3066,7 @@ pub async fn update_automation(
         }
     }
 
+    announce_rules(&s, &[id]).await;
     (StatusCode::OK, Json(json!(rule))).into_response()
 }
 
@@ -3099,6 +3135,7 @@ pub async fn delete_automation(
         compiled_rh.write().await.retain(|r| r.id != id);
     }
 
+    announce_rules(&s, &[id]).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -4939,7 +4976,40 @@ pub async fn test_automation(
         }
     };
 
-    // Evaluate each condition independently and collect results.
+    (StatusCode::OK, Json(dry_run(&s, &rule).await))
+}
+
+/// `POST /api/v1/automations/test` — the same dry run, for a rule that isn't
+/// saved: an editor's draft (E6). Its device names are resolved as saving it
+/// would; one that resolves to nothing is the answer, not an error.
+pub async fn test_draft_automation(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Json(mut body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if body.get("id").is_none() {
+        body["id"] = json!(Uuid::nil());
+    }
+    let draft: Rule = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("invalid rule body: {e}") })),
+            );
+        }
+    };
+    match hc_core::rule_resolver::compile_rule_for_store(&s.store, &draft).await {
+        Ok(rule) => (StatusCode::OK, Json(dry_run(&s, &rule).await)),
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// Each condition evaluated against the house now, and what would run.
+async fn dry_run(s: &AppState, rule: &Rule) -> serde_json::Value {
     let mut condition_results = Vec::new();
     let mut all_pass = true;
 
@@ -4951,17 +5021,14 @@ pub async fn test_automation(
         condition_results.push(serde_json::to_value(&detail).unwrap_or(serde_json::Value::Null));
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "rule_id": id,
-            "rule_name": rule.name,
-            "conditions_pass": all_pass,
-            "conditions": condition_results,
-            "would_fire": all_pass,
-            "actions": serde_json::to_value(&rule.actions).unwrap_or(serde_json::Value::Null),
-        })),
-    )
+    json!({
+        "rule_id": rule.id,
+        "rule_name": rule.name,
+        "conditions_pass": all_pass,
+        "conditions": condition_results,
+        "would_fire": all_pass,
+        "actions": serde_json::to_value(&rule.actions).unwrap_or(serde_json::Value::Null),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -5506,6 +5573,7 @@ pub async fn import_automations(
             .extend(prepared.into_iter().map(|(_, compiled)| compiled));
     }
 
+    announce_rules(&s, &saved.iter().map(|r| r.id).collect::<Vec<_>>()).await;
     (
         StatusCode::CREATED,
         Json(json!({ "imported": saved.len(), "rules": saved })),
@@ -5997,6 +6065,10 @@ pub async fn install_plugin(
 
     let mut record = outcome.record;
     record.installed_at = chrono::Utc::now().to_rfc3339();
+    // Reinstalling or updating a plugin someone turned off leaves it off.
+    if let Some(was) = mp.enabled_of(&record.id) {
+        record.enabled = was;
+    }
     if let Err(e) = mp.install(record.clone()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6540,7 +6612,19 @@ pub async fn patch_plugin(
         //    [[plugins]] (e.g. it registered via MQTT only), we log
         //    and continue. The runtime change in `s.plugins` already
         //    landed above; we just don't survive a restart.
-        if let Some(ref path) = s.homecore_config_path {
+        // An installed plugin's on/off lives in its managed record; a static
+        // one's in homecore.toml.
+        let managed = match &s.managed_plugins {
+            Some(mp) => match mp.set_enabled(&id, new_enabled) {
+                Ok(found) => found,
+                Err(e) => {
+                    tracing::warn!(plugin = %id, error = %e, "Failed to persist plugin enabled to managed.toml");
+                    true
+                }
+            },
+            None => false,
+        };
+        if let (false, Some(path)) = (managed, &s.homecore_config_path) {
             match crate::config_writer::persist_plugin_enabled(path.as_path(), &id, new_enabled) {
                 Ok(()) => {
                     tracing::info!(
@@ -6830,6 +6914,20 @@ fn array_identity_match<'a>(incoming: &Value, current: &'a [Value]) -> Option<&'
 }
 
 /// Does this tree still carry a redaction placeholder anywhere?
+/// Take out every value a client echoed back masked — in a patch, a value
+/// not being changed.
+fn drop_redacted(value: &mut Value) {
+    if let Value::Object(map) = value {
+        for v in map.values_mut() {
+            drop_redacted(v);
+        }
+        // A section left with nothing to change isn't written at all.
+        map.retain(|_, v| {
+            v.as_str() != Some(REDACTED_SECRET) && !v.as_object().is_some_and(|o| o.is_empty())
+        });
+    }
+}
+
 fn has_redaction(value: &Value) -> bool {
     match value {
         Value::String(s) => s == REDACTED_SECRET,
@@ -6952,8 +7050,59 @@ pub async fn put_plugin_config(
         // overwrite every credential in it with "__redacted__".
         let current = std::fs::read_to_string(path).unwrap_or_default();
 
-        // Accept either { "config": {...} } (JSON→TOML) or { "raw": "..." } (raw TOML string)
-        let toml_str = if let Some(raw) = body["raw"].as_str() {
+        // Accept { "patch": {...} } or { "array_of_tables": {...} } — the
+        // shapes `PUT /system/config` takes, written in place so comments and
+        // everything else stay — or { "config": {...} } (JSON→TOML, whole
+        // file) or { "raw": "..." } (raw TOML string).
+        let toml_str = if let Some(patch) = body.get("patch") {
+            // A secret echoed back masked is a secret not being changed.
+            let mut patch = patch.clone();
+            drop_redacted(&mut patch);
+            match crate::config_writer::apply_section_patch(&current, &patch) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": format!("patch failed: {e}") })),
+                    )
+                        .into_response()
+                }
+            }
+        } else if let Some(aot) = body.get("array_of_tables") {
+            let section = aot.get("section").and_then(|v| v.as_str());
+            let items = aot.get("items").and_then(|v| v.as_array());
+            let (Some(section), Some(items)) = (section, items) else {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": "`array_of_tables` requires `section` (string) and `items` (array)"
+                    })),
+                )
+                    .into_response();
+            };
+            let mut items = Value::Array(items.clone());
+            if has_redaction(&items) {
+                if let Ok(parsed) = toml::from_str::<toml::Value>(&current) {
+                    let current_json = serde_json::to_value(parsed).unwrap_or_default();
+                    let mut at = &current_json;
+                    for part in section.split('.') {
+                        at = at.get(part).unwrap_or(&Value::Null);
+                    }
+                    restore_json_secrets(&mut items, at);
+                }
+            }
+            let items = items.as_array().cloned().unwrap_or_default();
+            match crate::config_writer::replace_array_of_tables(&current, section, &items) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": format!("array_of_tables write failed: {e}") })),
+                    )
+                        .into_response()
+                }
+            }
+        } else if let Some(raw) = body["raw"].as_str() {
             restore_toml_secrets(raw, &current)
         } else if let Some(config) = body.get("config") {
             let mut config = config.clone();
@@ -7464,6 +7613,7 @@ pub async fn patch_automation(
         }
     }
 
+    announce_rules(&s, &[id]).await;
     (StatusCode::OK, Json(json!(rule))).into_response()
 }
 
@@ -7596,6 +7746,7 @@ pub async fn bulk_patch_automations(
         }
     }
 
+    announce_rules(&s, &updated.iter().map(|r| r.id).collect::<Vec<_>>()).await;
     (
         StatusCode::OK,
         Json(json!({ "updated": updated.len(), "rules": updated })),
@@ -7708,6 +7859,7 @@ pub async fn clone_automation(
             }
         }
     }
+    announce_rules(&s, &[cloned.id]).await;
     (StatusCode::CREATED, Json(json!(cloned))).into_response()
 }
 
@@ -7891,7 +8043,9 @@ pub async fn stale_refs(State(s): State<AppState>, _: AutomationsRead) -> impl I
 /// Collect every device ID referenced by a rule (trigger, conditions, actions).
 fn collect_rule_device_refs(rule: &Rule) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    collect_trigger_refs(&rule.trigger, &mut ids);
+    for trigger in rule.all_triggers() {
+        collect_trigger_refs(trigger, &mut ids);
+    }
     for cond in &rule.conditions {
         collect_condition_refs(cond, &mut ids);
     }
@@ -7964,11 +8118,19 @@ fn collect_action_refs(action: &Action, ids: &mut Vec<String>) {
             }
         }
         Action::Conditional {
+            condition,
             then_actions,
             else_actions,
             else_if,
-            ..
         } => {
+            for check in [condition]
+                .into_iter()
+                .chain(else_if.iter().map(|b| &b.condition))
+            {
+                if let hc_types::rule::IfCheck::Check(check) = check {
+                    collect_condition_refs(check, ids);
+                }
+            }
             for a in then_actions {
                 collect_action_refs(a, ids);
             }
@@ -8205,6 +8367,7 @@ pub async fn set_group_enabled(
         }
     }
 
+    announce_rules(&s, &updated.iter().map(|r| r.id).collect::<Vec<_>>()).await;
     (
         StatusCode::OK,
         Json(json!({ "enabled": enabled, "updated": updated.len(), "rules": updated })),
@@ -8542,18 +8705,15 @@ pub async fn delete_calendar(
         let rules = rh.read().await;
         rules
             .iter()
-            .filter_map(|r| {
-                if let hc_types::rule::Trigger::CalendarEvent {
-                    calendar_id: Some(cid),
-                    ..
-                } = &r.trigger
-                {
-                    if cid == &id {
-                        return Some(json!({ "rule_id": r.id, "rule_name": r.name }));
-                    }
-                }
-                None
+            .filter(|r| {
+                r.all_triggers().any(|t| {
+                    matches!(t, hc_types::rule::Trigger::CalendarEvent {
+                        calendar_id: Some(cid),
+                        ..
+                    } if cid == &id)
+                })
             })
+            .map(|r| json!({ "rule_id": r.id, "rule_name": r.name }))
             .collect()
     } else {
         vec![]
@@ -9170,6 +9330,16 @@ mod tests {
         assert!(cfg.is_object());
     }
     use super::*;
+
+    #[test]
+    fn a_patch_leaves_masked_secrets_alone() {
+        let mut patch = json!({
+            "homecore": { "password": "__redacted__", "broker_port": 1883 },
+            "api": { "token": "__redacted__" }
+        });
+        drop_redacted(&mut patch);
+        assert_eq!(patch, json!({ "homecore": { "broker_port": 1883 } }));
+    }
 
     #[test]
     fn restore_json_secrets_realigns_after_array_element_removed() {

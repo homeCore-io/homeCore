@@ -106,16 +106,18 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
 /// Replace an entire `[[section.name]]` array-of-tables with the
 /// provided items.  `section_path` is a dotted parent path plus a
 /// trailing leaf key (e.g. `"notify.channels"` → parent `notify`,
-/// leaf `channels`).  Each item must be a JSON object whose values
-/// are primitives or arrays of primitives; nested objects are
-/// rejected so callers don't accidentally smuggle an inline table
-/// where an array-of-tables row is expected.
+/// leaf `channels`), or a bare leaf for a top-level array
+/// (`"thermostat"` → `[[thermostat]]`).  Each item must be a JSON
+/// object whose values are primitives or arrays of primitives; nested
+/// objects are rejected so callers don't accidentally smuggle an inline
+/// table where an array-of-tables row is expected.
 ///
-/// Comments and ordering of *other* sections are preserved; the
-/// existing array-of-tables block is replaced wholesale.  Use this
-/// for editors over `[[notify.channels]]` and similar list-shaped
-/// config that doesn't fit `apply_section_patch`'s field-merge
-/// model.
+/// Existing rows are edited **in place**, matched by position: a value
+/// that changes keeps its key's place, alignment and comments, and a
+/// float stays a float when the new value is a whole number; keys an
+/// item no longer has are removed. Rows beyond the existing ones are
+/// appended, rows beyond the items are dropped. Comments and ordering of
+/// *other* sections are untouched.
 pub fn replace_array_of_tables(
     current: &str,
     section_path: &str,
@@ -125,30 +127,102 @@ pub fn replace_array_of_tables(
         .parse()
         .with_context(|| "parse current homecore.toml")?;
 
-    let (parent_path, leaf) = section_path
-        .rsplit_once('.')
-        .ok_or_else(|| anyhow!("section path must be dotted (e.g. notify.channels)"))?;
-
-    let parent = walk_to_table_mut(&mut doc, parent_path)?;
-
-    let mut aot = toml_edit::ArrayOfTables::new();
-    for (idx, item) in items.iter().enumerate() {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| anyhow!("items[{idx}] must be a JSON object (TOML table)"))?;
-        let mut tbl = toml_edit::Table::new();
-        for (k, v) in obj {
-            let item = json_to_toml_item(v)
-                .with_context(|| format!("items[{idx}] field {k:?}: unsupported value type"))?;
-            tbl[k.as_str()] = item;
-        }
-        aot.push(tbl);
+    let (parent, leaf) = match section_path.rsplit_once('.') {
+        Some((parent_path, leaf)) => (walk_to_table_mut(&mut doc, parent_path)?, leaf),
+        None => (doc.as_table_mut(), section_path),
+    };
+    if leaf.is_empty() {
+        return Err(anyhow!("section path is empty"));
     }
 
+    let objects = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            item.as_object()
+                .ok_or_else(|| anyhow!("items[{idx}] must be a JSON object (TOML table)"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(aot) = parent
+        .get_mut(leaf)
+        .and_then(|i| i.as_array_of_tables_mut())
+    {
+        for (idx, obj) in objects.iter().enumerate() {
+            match aot.get_mut(idx) {
+                Some(tbl) => update_row(tbl, obj).with_context(|| format!("items[{idx}]"))?,
+                None => {
+                    aot.push(new_row(obj).with_context(|| format!("items[{idx}]"))?);
+                }
+            }
+        }
+        while aot.len() > objects.len() {
+            aot.remove(aot.len() - 1);
+        }
+        return Ok(doc.to_string());
+    }
+
+    let mut aot = toml_edit::ArrayOfTables::new();
+    for (idx, obj) in objects.iter().enumerate() {
+        aot.push(new_row(obj).with_context(|| format!("items[{idx}]"))?);
+    }
     parent.remove(leaf);
     parent.insert(leaf, toml_edit::Item::ArrayOfTables(aot));
-
     Ok(doc.to_string())
+}
+
+fn new_row(obj: &serde_json::Map<String, serde_json::Value>) -> Result<toml_edit::Table> {
+    let mut tbl = toml_edit::Table::new();
+    for (k, v) in obj {
+        let item =
+            json_to_toml_item(v).with_context(|| format!("field {k:?}: unsupported value type"))?;
+        tbl[k.as_str()] = item;
+    }
+    Ok(tbl)
+}
+
+/// One existing row made to say `obj`, keeping how it was written.
+fn update_row(
+    tbl: &mut toml_edit::Table,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let gone: Vec<String> = tbl
+        .iter()
+        .filter(|(k, item)| item.is_value() && !obj.contains_key(*k))
+        .map(|(k, _)| k.to_string())
+        .collect();
+    for k in gone {
+        tbl.remove(&k);
+    }
+    for (k, v) in obj {
+        let item =
+            json_to_toml_item(v).with_context(|| format!("field {k:?}: unsupported value type"))?;
+        let toml_edit::Item::Value(mut value) = item else {
+            continue;
+        };
+        match tbl.get_mut(k).and_then(|i| i.as_value_mut()) {
+            Some(old) => {
+                // 70.0 edited to 71 is 71.0: a float setting may refuse an integer.
+                if let (toml_edit::Value::Float(_), toml_edit::Value::Integer(i)) = (&*old, &value)
+                {
+                    value = (*i.value() as f64).into();
+                }
+                if same_value(old, &value) {
+                    continue;
+                }
+                *value.decor_mut() = old.decor().clone();
+                *old = value;
+            }
+            None => {
+                tbl[k.as_str()] = toml_edit::Item::Value(value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    a.to_string().trim() == b.to_string().trim()
 }
 
 /// Walk a dotted section path (e.g. "auth.admin_uds") and return a
@@ -428,6 +502,51 @@ whitelist = []
             "server": { "nested": { "no": "good" } }
         });
         assert!(apply_section_patch(input, &patch).is_err());
+    }
+
+    #[test]
+    fn replace_aot_edits_existing_rows_in_place() {
+        let input = r#"[logging]
+level = "info"
+
+# The office's
+[[thermostat]]
+id                 = "office"
+setpoint           = 70.0   # winter
+hysteresis         = 1.0
+
+[[thermostat]]
+id       = "den"
+setpoint = 68.0
+"#;
+        let items = vec![serde_json::json!({ "id": "office", "setpoint": 71, "hysteresis": 1.0 })];
+        let after = replace_array_of_tables(input, "thermostat", &items).unwrap();
+        assert!(after.contains("# The office's"), "{after}");
+        assert!(after.contains("id                 = \"office\""), "{after}");
+        assert!(
+            after.contains("setpoint           = 71.0   # winter"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("den"),
+            "a row the items no longer have goes: {after}"
+        );
+        assert!(after.starts_with("[logging]"));
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(parsed["thermostat"][0]["setpoint"].as_float(), Some(71.0));
+    }
+
+    #[test]
+    fn replace_aot_adds_rows_and_drops_keys() {
+        let input = "[[thermostat]]\nid = \"a\"\nmode = \"heat\"\n";
+        let items = vec![
+            serde_json::json!({ "id": "a" }),
+            serde_json::json!({ "id": "b", "mode": "cool" }),
+        ];
+        let after = replace_array_of_tables(input, "thermostat", &items).unwrap();
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert!(parsed["thermostat"][0].get("mode").is_none());
+        assert_eq!(parsed["thermostat"][1]["mode"].as_str(), Some("cool"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.77"
+  version: "0.1.78"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -306,9 +306,17 @@ paths:
         - $ref: "#/components/parameters/UserId"
       responses:
         "204":
-          description: User deleted
+          description: |
+            User deleted. Their sessions end and their own API keys are
+            revoked; display keys they made are the house's and stay.
         "400":
           description: Cannot delete your own account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: They are the house's only admin
           content:
             application/json:
               schema:
@@ -324,6 +332,11 @@ paths:
     patch:
       operationId: setUserRole
       summary: Change a user's role (admin only)
+      description: |
+        A token carries the scopes of the role it was minted under, so a new
+        role **ends every session** of that user, as a password reset does —
+        they sign in again under it. Their own API keys lose any scope the new
+        role lacks. Setting the role they already have changes nothing.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -342,6 +355,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: They are the house's only admin, and must stay one
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/users/{id}/pin:
+    delete:
+      operationId: clearUserPin
+      summary: Clear someone's PIN (admin only)
+      description: |
+        For a person who has forgotten their PIN: they choose another on their
+        own (`PUT /auth/pin`). An admin never sets one — a PIN says who is at a
+        display, so only its owner should know it. Audited as
+        `user.pin_cleared` with `by_admin: true`.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: Cleared, or there was none
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -657,6 +700,10 @@ paths:
     patch:
       operationId: commandDevice
       summary: Send a command to a device (publishes to MQTT cmd topic)
+      description: |
+        Needs `devices:write`, or `devices:command` — which a household member
+        holds, so they can use every device without renaming, moving or
+        deleting one.
       tags: [devices]
       security:
         - bearerAuth: []
@@ -1273,6 +1320,39 @@ paths:
                 $ref: "#/components/schemas/AutomationTestResult"
         "404":
           $ref: "#/components/responses/NotFound"
+
+
+  /automations/test:
+    post:
+      operationId: testDraftAutomation
+      summary: Dry-run a rule that isn't saved — an editor's draft
+      description: |
+        The same dry run as `POST /automations/{id}/test`, for a rule sent in
+        the body. Device references are resolved as saving would resolve
+        them; `id` may be omitted. Nothing is saved and nothing runs.
+        Listed in `GET /automations/vocabulary` `features` as `test_draft`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleCreate"
+      responses:
+        "200":
+          description: Dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTestResult"
+        "422":
+          description: Not a rule, or it names a device the house doesn't have
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   # ---------------------------------------------------------------------------
   # Dashboards
@@ -2388,13 +2468,17 @@ paths:
         `device_removed` its id. `room_changed` carries the room;
         `room_removed` its id, and `merged_into` when it was merged.
         `scene_changed` / `scene_removed` cover homeCore's own scenes; plugin
-        scenes are devices. A device's room is the area whose `slug` or
+        scenes are devices. `rule_changed` carries a rule as written (as
+        `GET /automations/{id}` returns it) after any change through the API;
+        `rule_removed` its `rule_id`. `plugin_status_changed`
+        (`plugin_id`, `status`, `previous_status`) covers a plugin starting,
+        stopping, going offline and coming back to `active`. A device's room is the area whose `slug` or
         `aliases` contain its `area_override`, else its `area`.
 
         **Event types:** `device_state_changed`, `device_availability_changed`,
         `device_added`, `device_removed`, `device_metadata_changed`,
         `room_changed`, `room_removed`, `scene_changed`, `scene_removed`,
-        `device_name_changed`, `device_schema_changed`, `device_command_sent`,
+        `rule_changed`, `rule_removed`, `device_name_changed`, `device_schema_changed`, `device_command_sent`,
         `device_battery_low`, `device_battery_recovered`, `rule_fired`,
         `scene_activated`, `plugin_registered`, `plugin_offline`,
         `plugin_heartbeat`, `plugin_status_changed`, `plugin_capabilities`,
@@ -2500,6 +2584,10 @@ paths:
         Fetches, verifies and unpacks the artifact, writes a seed config, and
         starts supervising the process. The plugin appears in `GET /plugins`
         immediately, before it has registered.
+
+        Updating is installing again with a newer `version`. A reinstall keeps
+        the operator's config and leaves a plugin that was turned off, off.
+        `{path}` (a local `.tar.zst`) installs without the registry.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -2509,10 +2597,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [plugin_id]
               properties:
-                plugin_id:
+                id:
                   type: string
+                  description: The registry id, e.g. `plugin.hue`. This or `path`.
+                path:
+                  type: string
+                  description: A local artifact to install instead of a registry one.
                 version:
                   type: string
                   description: Defaults to the newest version in the registry.
@@ -2533,19 +2624,36 @@ paths:
             Nowhere to run it — no artifact for this machine, or the plugin needs
             a runtime kind that is not enrolled. The message names the next
             action.
-        "501":
-          description: |
-            The plugin belongs on a runtime, and delivery to runtimes is not
-            wired up yet. The body reports which runtime it would have used.
+        "202":
+          description: Placed on a plugin runtime — `{placed_on, plugin_id, version, note}`
         "200":
           description: Plugin installed and starting
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
-        "422":
-          description: Unknown plugin, bad signature, or unpack failure
+                properties:
+                  installed:
+                    type: string
+                  name:
+                    type: string
+                  version:
+                    type: string
+                  binary:
+                    type: string
+                  config:
+                    type: string
+                  reinstall:
+                    type: boolean
+                  activated:
+                    type: boolean
+                    description: Started (or restarted) now; false for a plugin that is turned off
+                  note:
+                    type: string
+        "400":
+          description: Registry lookup, download, signature or unpack failed
+        "503":
+          description: No registry, or install isn't configured
 
   /plugins/{id}/config/schema:
     get:
@@ -2561,12 +2669,18 @@ paths:
         - $ref: "#/components/parameters/PluginId"
       responses:
         "200":
-          description: JSON Schema document
+          description: "`{plugin_id, schema}` — the JSON Schema document under `schema`"
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [plugin_id, schema]
+                properties:
+                  plugin_id:
+                    type: string
+                  schema:
+                    type: object
+                    additionalProperties: true
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2585,12 +2699,18 @@ paths:
         - $ref: "#/components/parameters/PluginId"
       responses:
         "200":
-          description: Descriptor document
+          description: "`{plugin_id, descriptor}` — the same vocabulary as `GET /system/config/descriptor`"
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [plugin_id, descriptor]
+                properties:
+                  plugin_id:
+                    type: string
+                  descriptor:
+                    type: object
+                    additionalProperties: true
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2610,10 +2730,19 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  additionalProperties: true
+                type: object
+                required: [plugins]
+                properties:
+                  plugins:
+                    type: array
+                    items:
+                      type: object
+                      description: "`{id, name, description, category, versions: [{version, min_core, artifacts: [{os, arch, runtime, abi, url, sha256, size, key_id}]}]}`"
+                      additionalProperties: true
+        "502":
+          description: The registry couldn't be fetched or verified
+        "503":
+          description: No registry is configured
 
   /registry/plugins/{id}:
     get:
@@ -2638,15 +2767,27 @@ paths:
   /plugins/{id}:
     delete:
       operationId: deregisterPlugin
-      summary: Deregister a plugin (removes from in-memory registry)
+      summary: Uninstall a plugin — stop it, and remove its devices, binaries and (by default) config
+      description: |
+        Stops the plugin, deletes every device it reported (rules naming them
+        are turned off), forgets its state, withdraws any runtime placement,
+        and tombstones it so a static `[[plugins]]` entry doesn't respawn it.
+        Its binaries are always removed; its config too unless
+        `keep_config=true`.
       tags: [plugins]
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/PluginId"
+        - name: keep_config
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
       responses:
-        "204":
-          description: Plugin deregistered
+        "200":
+          description: "Uninstalled — `{uninstalled, stopped, devices_removed, device_ids, affected_rules, config_removed, binaries_removed, unplaced}`"
         "404":
           $ref: "#/components/responses/NotFound"
     get:
@@ -2898,6 +3039,23 @@ paths:
         bypass the scope check.
 
         All query parameters are optional filters and are ANDed together.
+
+        Besides sign-ins, accounts, keys, displays, calendars, backups,
+        restores, restarts and homeCore's settings, every change made through
+        the API to how the house works is recorded once it succeeds:
+        `automation.*` (created, updated, deleted, copied, imported,
+        bulk_changed), `automation_group.*`, `device.updated|deleted|bulk_updated`,
+        `helper.created|updated|deleted`, `mode.created|updated|deleted`,
+        `area.created|updated|deleted|devices_set|merged`,
+        `scene.created|updated|deleted|imported`, `alert_rule.*`,
+        `plugin.installed|started|stopped|restarted|config_updated|action_run|devices_removed`,
+        `plugin_runtime.approved|denied|token_issued` and
+        `system.log_level_changed`. `target_kind`/`target_id` name what
+        changed; `detail` holds its `name` as it was when changed (so a removed
+        one can be told apart), `renamed_to` on a rename, the top-level
+        `fields` the change touched, and `enabled`, `count`, `action` or
+        `level` where they apply — never other values. Commanding a device,
+        running a scene and testing a rule are uses, and aren't recorded.
       tags: [system]
       security:
         - bearerAuth: []
@@ -2915,7 +3073,7 @@ paths:
             enum: [user, api_key, local_admin, ip_whitelist, system, anonymous]
         - name: event_type
           in: query
-          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `login.success`
+          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `auth.login`, `automation.updated`
           schema:
             type: string
         - name: target_kind
@@ -3147,6 +3305,11 @@ paths:
                     revoked_at:
                       type: [string, "null"]
                       format: date-time
+                    display:
+                      type: boolean
+                      description: |
+                        A display's key (a wall tablet, managed under
+                        `/displays`), not one made for a program
         "400":
           description: Caller identity could not be resolved to a uid
           content:
@@ -3390,6 +3553,8 @@ paths:
                   revoked_at:
                     type: [string, "null"]
                     format: date-time
+                  display:
+                    type: boolean
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -4027,6 +4192,9 @@ paths:
                         trigger_label:
                           type: string
                           description: User-defined label from the rule's `trigger_label`
+                        trigger_index:
+                          type: integer
+                          description: Which of the rule's moments matched when it has several — 0 is `trigger`, 1 the first of `triggers`. Omitted for a rule with one.
                     outcome:
                       type: object
                       description: Tagged union keyed on `type`
@@ -4699,9 +4867,9 @@ paths:
         non-streaming, no timeout).
 
         **Non-streaming actions** (`stream: false`, the default): the handler
-        blocks up to 5 s for the plugin's RPC reply and returns it verbatim with
-        `200`. A reply whose `status` is `"error"` is surfaced as `504` with the
-        reply's `error` string. No response is returned as `504` as well.
+        waits up to the manifest `timeout_ms` (5 s without one) for the
+        plugin's reply and returns it verbatim with `200` — **including** a
+        reply whose `status` is `"error"`, so check `status`. No reply is `504`.
 
         **Streaming actions** (`stream: true`): core reserves a streaming slot
         keyed by the minted `request_id` before publishing, arms the manifest
@@ -4711,6 +4879,12 @@ paths:
         `request_id` echoed in this response. If the action declares
         `concurrency: single` and one is already in flight, this call is
         rejected with `409` and the active `request_id`.
+
+        **Cancel and answer** go through this same endpoint, to the action in
+        flight: `{"action": "cancel", "target_request_id": …}` for a
+        `cancelable` action, and `{"action": "respond", "target_request_id":
+        …, "response": {…}}` after an `awaiting_user` event. The plugin
+        replies `{request_id, status: "ok" | "error", error?}`.
 
         Requires the `plugins:write` scope (`PluginsWrite` guard). Actions whose
         manifest entry declares `requires_role: admin` additionally require the
@@ -4997,10 +5171,12 @@ paths:
       description: |
         Overwrites the plugin's configuration.
 
-        For locally managed plugins with a known `config_path`, the config file
-        is **fully replaced** (not merged). Supply either `raw` — a TOML string
-        written to the file byte-for-byte — or `config` — a JSON object
-        serialized to pretty TOML. `raw` takes precedence when both are given.
+        For locally managed plugins with a known `config_path`, four shapes:
+        `patch` and `array_of_tables` — the same as `PUT /system/config` —
+        change only what they name, in place, keeping comments and layout;
+        `raw` — a TOML string written to the file byte-for-byte — and
+        `config` — a JSON object serialized to pretty TOML — **fully replace**
+        the file. Precedence: `patch`, `array_of_tables`, `raw`, `config`.
         Writing the file does not itself restart the plugin; use
         `POST /plugins/{id}/restart` to apply it.
 
@@ -5033,6 +5209,24 @@ paths:
                 is sent if present, otherwise the whole body is sent as the
                 config.
               properties:
+                patch:
+                  type: object
+                  description: |
+                    `{ "section": { "field": value } }`, `""` for top-level
+                    fields. A value left as `__redacted__` is left unchanged.
+                    Local plugins only.
+                  additionalProperties: true
+                array_of_tables:
+                  type: object
+                  description: "`{ section, items }` — replaces every `[[section]]` table. Local plugins only."
+                  properties:
+                    section:
+                      type: string
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        additionalProperties: true
                 raw:
                   type: string
                   description: |
@@ -7330,6 +7524,14 @@ paths:
                   timezone:
                     type: string
                     description: Configured IANA timezone (e.g. `America/New_York`)
+                  last_backup_at:
+                    type: [string, "null"]
+                    format: date-time
+                    description: |
+                      When the newest backup was taken, from the audit's
+                      `system.backup_created` records. Null when none is
+                      recorded — audit records are pruned after
+                      `[auth] audit_retention_days`, so null need not mean never.
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -7586,6 +7788,11 @@ paths:
       description: |
         Applies immediately, without a restart.  Requires the `plugins:write`
         scope (admin role).  An invalid level string is rejected with 400.
+
+        The string is an EnvFilter directive and **replaces the whole filter** —
+        a bare `debug` also drops the `rumqttc::state=info,rumqttd=info` that
+        quietens the broker. It is not saved: a restart goes back to
+        `[logging].level`. Audited as `system.log_level_changed`.
       tags: [system]
       security:
         - bearerAuth: []
@@ -7727,6 +7934,10 @@ paths:
         - `rules/*.ron` (and legacy `*.toml`)
         - `plugins/<plugin_id>/config.toml` for each registered plugin
           (optional per plugin)
+        - `calendars/*` — the calendars rules check
+
+        Not included: the audit log (`audit.db`). The archive is built whole
+        in memory before the first byte is sent, so allow it time.
 
         Plugin configs are keyed by plugin id, not absolute path, so a backup
         taken on host A restores correctly on host B.
@@ -7775,16 +7986,33 @@ paths:
         The route raises axum's body limit to **500 MiB**; larger uploads are
         rejected by the framework before the handler runs.
 
-        Each archive entry is mapped back to its canonical location
-        (`state.redb`, `history.db`, `config/*`, `rules/*`, and
+        Each archive entry maps back to its canonical location (`state.redb`,
+        `history.db`, `config/*`, `rules/*`, `calendars/*`, and
         `plugins/<id>/config.toml` — the last resolved against the *running
         host's* plugin table, so an id this host doesn't run is skipped).
-        Unrecognised or unsafe paths are reported in `skipped`, never written.
+        Unrecognised or unsafe paths are reported in `skipped`. An archive
+        with no `state.redb` is refused as not a homeCore backup.
 
-        **A server restart is required afterwards** for changes to take effect.
+        With `check=true` nothing changes: the answer says what would be put
+        back and skipped, and when the backup was taken.
+
+        Otherwise the archive is **staged**, not written over the live files —
+        the databases are open, and overwriting them under a running homeCore
+        could leave the house half one and half the other. homeCore puts it in
+        place at its next start, before it opens anything, and records
+        `system.restore_completed` (actor `system`) in the audit. Restart it
+        (`POST /system/restart`) to finish. Staging is audited as
+        `system.restore_staged`.
       tags: [system]
       security:
         - bearerAuth: []
+      parameters:
+        - name: check
+          in: query
+          description: Only say what the backup would do
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         description: Raw zip archive bytes, as produced by `POST /system/backup`
@@ -7795,16 +8023,22 @@ paths:
               format: binary
       responses:
         "200":
-          description: Restore complete
+          description: Checked, or staged for the next start
           content:
             application/json:
               schema:
                 type: object
-                required: [restored, skipped, message]
+                required: [restored, skipped]
                 properties:
+                  staged:
+                    type: boolean
+                    description: Present (true) when staged rather than only checked
+                  taken_at:
+                    type: [string, "null"]
+                    description: When the backup was taken (its state database's time in the archive)
                   restored:
                     type: array
-                    description: Archive paths written to disk
+                    description: Archive paths that go back in place
                     items:
                       type: string
                   skipped:
@@ -7815,7 +8049,7 @@ paths:
                   message:
                     type: string
         "400":
-          description: Empty request body, or the body is not a valid ZIP archive / a file could not be written
+          description: Empty request body, not a ZIP archive, not a homeCore backup, or it could not be staged
           content:
             application/json:
               schema:
@@ -8057,12 +8291,16 @@ components:
         created_at:
           type: string
           format: date-time
+        has_pin:
+          type: boolean
+          description: Whether they have set a PIN — never the PIN itself
 
     Role:
       type: string
       enum:
         - admin
         - user
+        - household_member
         - read_only
         - observer
         - device_operator
@@ -8071,10 +8309,15 @@ components:
       description: |
         Serialized snake_case. A role is a named bundle of scopes; the scopes are
         what handlers actually check, so the per-operation descriptions name the
-        scope rather than the role.
+        scope rather than the role. Every role holding `devices:write` also
+        holds `devices:command`, and every one holding `scenes:write` also
+        holds `scenes:run`, so either can be handed to a key on its own.
 
         - `admin` — full access, including user and plugin management
         - `user` — read/write devices, automations, scenes, areas, webhooks, events
+        - `household_member` — someone who lives in the house: `read_only` plus
+          `devices:command` and `scenes:run`. Uses every device and scene;
+          renames, deletes and authors nothing.
         - `read_only` — minimal read view: devices, automations, dashboards,
           scenes, areas. Cannot see plugins or the audit log.
         - `observer` — `read_only` plus `plugins:read` and `audit:read`. Good
@@ -8869,6 +9112,14 @@ components:
           description: Higher values are evaluated first
         trigger:
           $ref: "#/components/schemas/Trigger"
+        triggers:
+          type: array
+          description: |
+            More moments that start the rule: it runs when `trigger` or any of
+            these matches, once per event. Omitted for a rule with one. Listed
+            in `GET /automations/vocabulary` `features` as `triggers`.
+          items:
+            $ref: "#/components/schemas/Trigger"
         conditions:
           type: array
           items:
@@ -8892,6 +9143,14 @@ components:
           default: 0
         trigger:
           $ref: "#/components/schemas/Trigger"
+        triggers:
+          type: array
+          description: |
+            More moments that start the rule: it runs when `trigger` or any of
+            these matches, once per event. Omitted for a rule with one. Listed
+            in `GET /automations/vocabulary` `features` as `triggers`.
+          items:
+            $ref: "#/components/schemas/Trigger"
         conditions:
           type: array
           items:
@@ -9026,6 +9285,7 @@ components:
         | `Delay` | `duration_ms` (integer) |
         | `Parallel` | `actions` (array — run concurrently) |
         | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
+        | `Conditional` | `condition` — a Rhai bool expression (string) or a `Condition` (object, `if_checks`), `then_actions`, `else_if` (`[{condition, actions}]`), `else_actions` |
 
         For device-targeting actions, prefer `device` in authored rules so the
         automation remains readable and stable across plugin-specific ID
@@ -9082,17 +9342,39 @@ components:
 
     AutomationTestResult:
       type: object
-      required: [rule_id, conditions_passed, would_fire_actions]
+      required: [rule_id, rule_name, conditions_pass, conditions, would_fire, actions]
       properties:
         rule_id:
           type: string
           format: uuid
-        conditions_passed:
+        rule_name:
+          type: string
+        conditions_pass:
           type: boolean
-        would_fire_actions:
+        conditions:
+          type: array
+          description: Each condition evaluated against the house now, in order
+          items:
+            type: object
+            required: [condition, passed]
+            properties:
+              condition:
+                $ref: "#/components/schemas/Condition"
+              passed:
+                type: boolean
+              actual:
+                description: What was found (any JSON value)
+              expected:
+                description: What the condition wants (any JSON value)
+              reason:
+                type: string
+        would_fire:
+          type: boolean
+        actions:
           type: array
           items:
-            $ref: "#/components/schemas/Action"
+            type: object
+            description: The rule's actions as written (`{enabled, action}`)
 
     # ---- Scenes ----
 

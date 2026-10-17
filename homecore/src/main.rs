@@ -359,22 +359,68 @@ async fn main() -> Result<()> {
     eprintln!("HomeCore config file:    {}", config_path.display());
 
     // ── 2. Load config (path defaults filled in by resolve_paths below) ───
-    let mut config: AppConfig = match std::fs::read_to_string(&config_path) {
-        Ok(s) => match toml::from_str::<AppConfig>(&s) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "Warning: config parse error in {}: {e}; using defaults",
-                    config_path.display()
-                );
-                AppConfig::default()
-            }
-        },
-        Err(_) => AppConfig::default(),
+    let load_config = || -> AppConfig {
+        let mut config: AppConfig = match std::fs::read_to_string(&config_path) {
+            Ok(s) => match toml::from_str::<AppConfig>(&s) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: config parse error in {}: {e}; using defaults",
+                        config_path.display()
+                    );
+                    AppConfig::default()
+                }
+            },
+            Err(_) => AppConfig::default(),
+        };
+        // ── 3. Resolve all path fields relative to base_dir ───────────────
+        config.resolve_paths(&base_dir);
+        config
     };
+    let mut config = load_config();
 
-    // ── 3. Resolve all path fields relative to base_dir ───────────────────
-    config.resolve_paths(&base_dir);
+    // ── 3b. A staged restore (POST /system/restore) goes in place now, before
+    // anything below opens the databases or reads the rules. If it brought a
+    // homecore.toml, that is the config this start runs with.
+    let staged_restore = {
+        let central = hc_api::PluginConfigStore::new(base_dir.join("config").join("plugins"));
+        let paths = hc_api::backup::BackupPaths {
+            state_db_path: PathBuf::from(&config.storage.state_db_path),
+            history_db_path: PathBuf::from(&config.storage.history_db_path),
+            config_path: config_path.clone(),
+            rules_dir: PathBuf::from(&config.rules.dir),
+            plugin_configs: config
+                .plugins
+                .iter()
+                .map(|p| hc_api::backup::PluginConfigEntry {
+                    id: p.id.clone(),
+                    path: if central.exists(&p.id) {
+                        central.path_for(&p.id)
+                    } else {
+                        PathBuf::from(&p.config)
+                    },
+                })
+                .collect(),
+            calendars_dir: Some(PathBuf::from(&config.calendars.dir)),
+        };
+        match hc_api::backup::apply_pending(&paths) {
+            None => None,
+            Some(Ok(done)) => {
+                eprintln!("Restored a staged backup: {done}");
+                if done["restored"]
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|n| n == "config/homecore.toml"))
+                {
+                    config = load_config();
+                }
+                Some(Ok(done))
+            }
+            Some(Err(e)) => {
+                eprintln!("Warning: the staged restore could not be applied: {e}");
+                Some(Err(e.to_string()))
+            }
+        }
+    };
 
     // ── 4. Create standard directory layout under base_dir ────────────────
     //
@@ -484,6 +530,33 @@ async fn main() -> Result<()> {
         &config.storage.history_db_path,
     )
     .await?;
+
+    // The staged restore, applied before the store opened, goes in the audit
+    // now there is one to write to.
+    if let Some(outcome) = staged_restore {
+        let mut e = hc_state::AuditEntry::success(
+            hc_state::AuditActorType::System,
+            None,
+            "system",
+            "system.restore_completed",
+        );
+        e.target_kind = Some("system".into());
+        e.target_id = Some("backup".into());
+        match outcome {
+            Ok(done) => {
+                info!(%done, "Started from a restored backup");
+                e.detail = done;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "The staged restore was not applied");
+                e.result = hc_state::AuditResult::Error;
+                e.detail = serde_json::json!({ "error": err });
+            }
+        }
+        if let Err(err) = store.record_audit(&e).await {
+            tracing::warn!(error = %err, "could not record the restore in the audit");
+        }
+    }
 
     match device_naming::backfill_missing_canonical_names(&store).await {
         Ok(0) => {}
@@ -1093,6 +1166,7 @@ async fn main() -> Result<()> {
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
         plugin_configs,
+        calendars_dir: Some(calendar_dir.clone()),
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();

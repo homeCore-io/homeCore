@@ -115,6 +115,7 @@ fn broken_stub(path: &Path, err: &anyhow::Error) -> Rule {
         priority: 0,
         tags: Vec::new(),
         trigger: Trigger::ManualTrigger,
+        triggers: Vec::new(),
         conditions: Vec::<Condition>::new(),
         actions: Vec::<RuleAction>::new(),
         error: Some(format!("parse error: {err}")),

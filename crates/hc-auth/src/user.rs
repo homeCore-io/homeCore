@@ -20,6 +20,7 @@ use uuid::Uuid;
 /// | `DeviceOperator`   | Observer + command devices; no automation authoring  |
 /// | `RuleEditor`       | Observer + automation/scene/area authoring           |
 /// | `ServiceOperator`  | Typical service account: User + audit:read           |
+/// | `HouseholdMember`  | Family: use devices and run scenes; author nothing   |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -45,16 +46,25 @@ pub enum Role {
     /// service account that needs to command devices and wants audit
     /// visibility over its own actions.
     ServiceOperator,
+    /// Someone who lives in the house (T5, H6a): sees everything a read-only
+    /// account sees, commands devices and runs scenes — and changes nothing
+    /// shared. `devices:command` rather than `devices:write`, so no renaming,
+    /// moving or deleting devices and no making helpers or modes;
+    /// `scenes:run` rather than `scenes:write`. What they personalise (their
+    /// own Home, their phone bar) the client keeps under their own identity
+    /// and needs no scope here.
+    HouseholdMember,
 }
 
 impl Role {
     /// Every role, in rough order of decreasing privilege. The client lists
     /// these so a person can see the whole ladder, not just the three the UI
     /// once hardcoded.
-    pub const fn all() -> [Role; 7] {
+    pub const fn all() -> [Role; 8] {
         [
             Role::Admin,
             Role::User,
+            Role::HouseholdMember,
             Role::ReadOnly,
             Role::Observer,
             Role::DeviceOperator,
@@ -74,6 +84,7 @@ impl Role {
             Role::DeviceOperator => "device_operator",
             Role::RuleEditor => "rule_editor",
             Role::ServiceOperator => "service_operator",
+            Role::HouseholdMember => "household_member",
         }
     }
 
@@ -114,12 +125,19 @@ impl Role {
             // these; whoever may not, may not.
             "content:write",
         ];
+        // Using the house without changing it: command a device, run a scene.
+        // Every role that may write devices or scenes may also do these, so
+        // that its holder can hand exactly these to a key (keys take a subset
+        // of their owner's scopes) — and the household-member role holds only
+        // these.
+        let operate: &[&str] = &["devices:command", "scenes:run"];
         let to_strings = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
         match self {
             Role::Admin => {
                 let mut v = to_strings(read_all);
                 v.push("devices:write".into());
+                v.extend(to_strings(operate));
                 v.extend(to_strings(write_authoring));
                 v.extend([
                     "users:read".into(),
@@ -137,7 +155,13 @@ impl Role {
             Role::User => {
                 let mut v = to_strings(read_all);
                 v.push("devices:write".into());
+                v.extend(to_strings(operate));
                 v.extend(to_strings(write_authoring));
+                v
+            }
+            Role::HouseholdMember => {
+                let mut v = to_strings(read_all);
+                v.extend(to_strings(operate));
                 v
             }
             Role::ReadOnly => to_strings(read_all),
@@ -149,11 +173,13 @@ impl Role {
             Role::DeviceOperator => {
                 let mut v = to_strings(read_all);
                 v.push("devices:write".into());
+                v.push("devices:command".into());
                 v.extend(["plugins:read".into(), "audit:read".into()]);
                 v
             }
             Role::RuleEditor => {
                 let mut v = to_strings(read_all);
+                v.push("scenes:run".into());
                 v.extend(to_strings(write_authoring));
                 v.extend(["plugins:read".into(), "audit:read".into()]);
                 v
@@ -161,6 +187,7 @@ impl Role {
             Role::ServiceOperator => {
                 let mut v = to_strings(read_all);
                 v.push("devices:write".into());
+                v.extend(to_strings(operate));
                 v.extend(to_strings(write_authoring));
                 v.push("audit:read".into());
                 v
@@ -223,7 +250,12 @@ mod role_tests {
             );
         }
 
-        for role in [Role::ReadOnly, Role::Observer, Role::DeviceOperator] {
+        for role in [
+            Role::ReadOnly,
+            Role::Observer,
+            Role::DeviceOperator,
+            Role::HouseholdMember,
+        ] {
             assert!(
                 !role.scopes().contains(&"content:write".to_string()),
                 "{} should not write content",
@@ -280,6 +312,33 @@ mod role_tests {
     }
 
     #[test]
+    fn household_member_uses_the_house_and_changes_nothing() {
+        let s = Role::HouseholdMember.scopes();
+        assert!(s.contains(&"devices:read".into()));
+        assert!(s.contains(&"devices:command".into()));
+        assert!(s.contains(&"scenes:run".into()));
+        assert!(s.iter().all(|x| !x.ends_with(":write")), "{s:?}");
+        assert!(!s.contains(&"plugins:read".into()));
+        assert!(!s.contains(&"audit:read".into()));
+        assert!(!s.contains(&"api_keys:admin".into()));
+    }
+
+    #[test]
+    fn whoever_may_write_devices_or_scenes_may_operate_them() {
+        // A key takes a subset of its owner's scopes, so a person can only
+        // make a "use the house" key if they hold the operating scopes.
+        for role in Role::all() {
+            let s = role.scopes();
+            if s.contains(&"devices:write".into()) {
+                assert!(s.contains(&"devices:command".into()), "{}", role.wire());
+            }
+            if s.contains(&"scenes:write".into()) {
+                assert!(s.contains(&"scenes:run".into()), "{}", role.wire());
+            }
+        }
+    }
+
+    #[test]
     fn role_serde_roundtrip_uses_snake_case() {
         let roles = [
             Role::Admin,
@@ -289,6 +348,7 @@ mod role_tests {
             Role::DeviceOperator,
             Role::RuleEditor,
             Role::ServiceOperator,
+            Role::HouseholdMember,
         ];
         for r in roles {
             let s = serde_json::to_string(&r).unwrap();
@@ -313,13 +373,17 @@ mod role_tests {
             serde_json::to_string(&Role::ServiceOperator).unwrap(),
             "\"service_operator\""
         );
+        assert_eq!(
+            serde_json::to_string(&Role::HouseholdMember).unwrap(),
+            "\"household_member\""
+        );
     }
 
     #[test]
     fn all_covers_every_variant_and_wire_matches_serde() {
         // `all()` feeds the /auth/roles endpoint; if a variant is added to the
         // enum but not to `all()`, the client silently stops offering it.
-        assert_eq!(Role::all().len(), 7);
+        assert_eq!(Role::all().len(), 8);
         // `wire()` must agree with the serde representation exactly, since the
         // client sends role strings back on user create / set-role.
         for r in Role::all() {
@@ -373,6 +437,10 @@ pub struct UserInfo {
     pub username: String,
     pub role: Role,
     pub created_at: DateTime<Utc>,
+    /// Whether they have set a PIN (H5) — never the PIN or its hash. An admin
+    /// sees it to know whether there is one to clear.
+    #[serde(default)]
+    pub has_pin: bool,
 }
 
 impl From<&User> for UserInfo {
@@ -382,6 +450,7 @@ impl From<&User> for UserInfo {
             username: u.username.clone(),
             role: u.role,
             created_at: u.created_at,
+            has_pin: u.pin_hash.is_some(),
         }
     }
 }

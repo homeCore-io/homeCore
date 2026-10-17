@@ -35,6 +35,7 @@ pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod auth_middleware;
 pub mod backup;
+pub mod change_audit;
 pub mod config_writer;
 pub mod dashboard_store;
 pub mod display_handlers;
@@ -427,6 +428,22 @@ pub struct AppState {
     pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
+/// A plugin is back: `plugin_status_changed` to `active`, so a screen showing
+/// it offline or starting needn't poll to see it return.
+fn announce_back(
+    bus: &EventBus,
+    plugin_id: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    previous_status: String,
+) {
+    let _ = bus.publish(hc_types::event::Event::PluginStatusChanged {
+        timestamp,
+        plugin_id: plugin_id.to_string(),
+        status: "active".into(),
+        previous_status,
+    });
+}
+
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
 /// `PluginHeartbeat`, `PluginOffline`, and `PluginCapabilities` events
 /// into the shared `plugins` map.
@@ -476,8 +493,11 @@ pub fn spawn_plugin_registry_listener(
                             notices: Vec::new(),
                             installed_version: None,
                         });
-                    rec.status = "active".into();
+                    let prev = std::mem::replace(&mut rec.status, "active".into());
                     rec.registered_at = timestamp;
+                    if prev != "active" {
+                        announce_back(&event_bus, &plugin_id, timestamp, prev);
+                    }
                 }
                 Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
                     let mut map = plugins.write().await;
@@ -536,7 +556,8 @@ pub fn spawn_plugin_registry_listener(
                         rec.device_count = d;
                     }
                     if rec.status == "offline" || rec.status == "starting" {
-                        rec.status = "active".into();
+                        let prev = std::mem::replace(&mut rec.status, "active".into());
+                        announce_back(&event_bus, &plugin_id, timestamp, prev);
                     }
                 }
                 Ok(hc_types::event::Event::PluginCapabilities {
@@ -1134,6 +1155,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/auth/users/{id}/password",
             patch(auth_handlers::set_user_password),
         )
+        .route(
+            "/auth/users/{id}/pin",
+            delete(display_handlers::clear_user_pin),
+        )
         // API keys
         .route(
             "/auth/api-keys",
@@ -1253,6 +1278,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .delete(handlers::delete_automation),
         )
         .route("/automations/{id}/test", post(handlers::test_automation))
+        .route("/automations/test", post(handlers::test_draft_automation))
         .route(
             "/automations/vocabulary",
             get(handlers::get_rule_vocabulary),
@@ -1483,6 +1509,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // REST log-tail (OPS-1 piece 2). Same auth as /logs/stream;
         // CLI-friendly companion for `curl | jq` workflows.
         .route("/logs", get(logs::list_logs))
+        // Inside authentication (a later route_layer wraps an earlier one), so
+        // it knows who made each change.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            change_audit::record,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let api = Router::new()

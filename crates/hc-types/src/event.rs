@@ -5,7 +5,7 @@
 //! the rule engine and state store consume and produce further event variants.
 
 use crate::device::{Area, DeviceChange, DeviceState};
-use crate::rule::Scene;
+use crate::rule::{Rule, Scene};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -195,6 +195,18 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         scene_id: uuid::Uuid,
     },
+    /// A rule was created or changed through the API — as written, the way
+    /// `GET /automations/{id}` returns it — so a screen showing it, or an
+    /// editor holding a draft of it, knows someone else changed it.
+    RuleChanged {
+        timestamp: DateTime<Utc>,
+        rule: Box<Rule>,
+    },
+    /// A rule was deleted through the API.
+    RuleRemoved {
+        timestamp: DateTime<Utc>,
+        rule_id: uuid::Uuid,
+    },
     /// A device's capability schema changed — what it declares it reports and
     /// accepts, not what it is currently reporting.
     ///
@@ -354,6 +366,8 @@ impl Event {
             | Event::RoomRemoved { timestamp, .. }
             | Event::SceneChanged { timestamp, .. }
             | Event::SceneRemoved { timestamp, .. }
+            | Event::RuleChanged { timestamp, .. }
+            | Event::RuleRemoved { timestamp, .. }
             | Event::DeviceSchemaChanged { timestamp, .. }
             | Event::MqttMessage { timestamp, .. }
             | Event::Custom { timestamp, .. }

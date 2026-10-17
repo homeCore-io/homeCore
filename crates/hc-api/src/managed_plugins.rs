@@ -101,6 +101,31 @@ impl ManagedPluginStore {
         self.persist()
     }
 
+    /// Turn an installed plugin on or off for good. `false` when the id isn't
+    /// a managed record (a static `[[plugins]]` entry is persisted in
+    /// homecore.toml instead).
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> std::io::Result<bool> {
+        {
+            let mut doc = self.doc.write().unwrap();
+            let Some(rec) = doc.records.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            rec.enabled = enabled;
+        }
+        self.persist().map(|()| true)
+    }
+
+    /// Whether an installed plugin is on, if it is a managed record.
+    pub fn enabled_of(&self, id: &str) -> Option<bool> {
+        self.doc
+            .read()
+            .unwrap()
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.enabled)
+    }
+
     /// Add or replace a managed record and clear any tombstone (install / add).
     pub fn install(&self, rec: ManagedRecord) -> std::io::Result<()> {
         {
@@ -154,6 +179,27 @@ mod tests {
         // Reload from disk — tombstone survives.
         let reloaded = ManagedPluginStore::load(dir);
         assert_eq!(reloaded.removed_ids(), vec!["plugin.hue".to_string()]);
+    }
+
+    #[test]
+    fn turning_an_installed_plugin_off_survives_a_reload() {
+        let dir = tmp_dir();
+        let store = ManagedPluginStore::load(dir.clone());
+        store
+            .install(ManagedRecord {
+                id: "plugin.wled".into(),
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(store.set_enabled("plugin.wled", false).unwrap());
+        assert!(
+            !store.set_enabled("plugin.static", false).unwrap(),
+            "not a managed record"
+        );
+        let reloaded = ManagedPluginStore::load(dir);
+        assert_eq!(reloaded.enabled_of("plugin.wled"), Some(false));
+        assert_eq!(reloaded.enabled_of("plugin.static"), None);
     }
 
     #[test]

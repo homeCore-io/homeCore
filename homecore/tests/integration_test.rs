@@ -27,6 +27,35 @@ fn free_port() -> u16 {
 
 #[tokio::test]
 async fn virtual_device_triggers_rule_and_command() -> Result<()> {
+    light_fires_rule(light_trigger(), Vec::new()).await
+}
+
+/// A rule runs when any of its moments matches (E2): here the light is its
+/// second, after one that never happens.
+#[tokio::test]
+async fn a_rules_second_trigger_fires_it() -> Result<()> {
+    let never = Trigger::CustomEvent {
+        event_type: "never_sent".into(),
+    };
+    light_fires_rule(never, vec![light_trigger()]).await
+}
+
+fn light_trigger() -> Trigger {
+    Trigger::DeviceStateChanged {
+        device_id: "test_light".into(),
+        device_ids: vec![],
+        attribute: Some("on".into()),
+        to: None,
+        from: None,
+        not_from: None,
+        not_to: None,
+        for_duration_secs: None,
+        change_kind: None,
+        change_source: None,
+    }
+}
+
+async fn light_fires_rule(trigger: Trigger, triggers: Vec<Trigger>) -> Result<()> {
     let port = free_port();
 
     // 1. Embedded broker.
@@ -52,18 +81,8 @@ async fn virtual_device_triggers_rule_and_command() -> Result<()> {
         enabled: true,
         priority: 0,
         tags: vec![],
-        trigger: Trigger::DeviceStateChanged {
-            device_id: "test_light".into(),
-            device_ids: vec![],
-            attribute: Some("on".into()),
-            to: None,
-            from: None,
-            not_from: None,
-            not_to: None,
-            for_duration_secs: None,
-            change_kind: None,
-            change_source: None,
-        },
+        trigger,
+        triggers,
         conditions: vec![],
         actions: vec![RuleAction {
             enabled: true,

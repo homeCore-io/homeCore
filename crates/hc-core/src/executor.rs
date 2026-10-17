@@ -30,7 +30,9 @@ use hc_scripting::{EffectsBuf, ScriptRuntime, ScriptSideEffect};
 use hc_state::StateStore;
 use hc_types::device::{with_command_change_metadata, DeviceChange};
 use hc_types::event::Event;
-use hc_types::rule::{Action, LogLevel, RuleAction, TriggerContext, VariableOp};
+use hc_types::rule::{
+    Action, Condition, IfCheck, LogLevel, RuleAction, TriggerContext, VariableOp,
+};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -327,6 +329,92 @@ pub async fn execute_actions(
 // ---------------------------------------------------------------------------
 // Internal execution engine
 // ---------------------------------------------------------------------------
+
+/// Whether an if/otherwise's question is answered yes, against the devices
+/// as they were when the rule fired.
+async fn if_passes(check: &IfCheck, snapshot: &Arc<HashMap<String, JsonValue>>) -> Result<bool> {
+    match check {
+        IfCheck::Script(script) => {
+            let snap = Arc::clone(snapshot);
+            let script = script.clone();
+            tokio::task::spawn_blocking(move || {
+                ScriptRuntime::new_with_devices(snap).eval_condition(&script)
+            })
+            .await?
+        }
+        IfCheck::Check(cond) => check_passes(cond, snapshot),
+    }
+}
+
+/// A structured check inside if/otherwise (E3). The kinds that need only the
+/// devices and the clock; the rest belong in a rule's own conditions.
+fn check_passes(cond: &Condition, snapshot: &Arc<HashMap<String, JsonValue>>) -> Result<bool> {
+    Ok(match cond {
+        Condition::DeviceState {
+            device_id,
+            attribute,
+            op,
+            value,
+        } => snapshot
+            .get(device_id)
+            .and_then(|attrs| attrs.get(attribute))
+            .is_some_and(|actual| crate::engine::compare(actual, op, value)),
+        Condition::ModeIs { mode_id, on } => {
+            let actual = snapshot
+                .get(mode_id)
+                .and_then(|attrs| attrs.get("on"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            actual == *on
+        }
+        Condition::TimeWindow { start, end } => {
+            let now = hc_time::now_local().time();
+            if start <= end {
+                now >= *start && now <= *end
+            } else {
+                now >= *start || now <= *end
+            }
+        }
+        Condition::ScriptExpression { script } => {
+            ScriptRuntime::new_with_devices(Arc::clone(snapshot)).eval_condition(script)?
+        }
+        Condition::And { conditions } => {
+            for c in conditions {
+                if !check_passes(c, snapshot)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
+        Condition::Or { conditions } => {
+            for c in conditions {
+                if check_passes(c, snapshot)? {
+                    return Ok(true);
+                }
+            }
+            false
+        }
+        Condition::Xor { conditions } => {
+            let mut yes = 0;
+            for c in conditions {
+                if check_passes(c, snapshot)? {
+                    yes += 1;
+                }
+            }
+            yes == 1
+        }
+        Condition::Not { condition } => !check_passes(condition, snapshot)?,
+        other => {
+            return Err(anyhow!(
+                "an if/otherwise can't ask {} — use a rule condition for that",
+                serde_json::to_value(other)
+                    .ok()
+                    .and_then(|v| v.as_object().and_then(|o| o.keys().next().cloned()))
+                    .unwrap_or_else(|| "this".into())
+            ))
+        }
+    })
+}
 
 fn execute_actions_inner(
     actions: Vec<Action>,
@@ -819,18 +907,10 @@ fn run_single_action(
                 else_if,
                 else_actions,
             } => {
-                let snippet = if condition.len() > 80 {
-                    &condition[..80]
-                } else {
-                    &condition
-                };
+                let said = condition.describe();
+                let snippet = said.chars().take(80).collect::<String>();
                 debug!(condition = %snippet, else_if_branches = else_if.len(), "action: Conditional — evaluating");
-                let snap = snapshot.clone();
-                let cond = condition.clone();
-                let passed = tokio::task::spawn_blocking(move || {
-                    ScriptRuntime::new_with_devices(snap).eval_condition(&cond)
-                })
-                .await??;
+                let passed = if_passes(&condition, &snapshot).await?;
 
                 if passed {
                     debug!(branch = "then", "action: Conditional — selected");
@@ -842,12 +922,7 @@ fn run_single_action(
                         if ctx.exit_flag.load(Ordering::SeqCst) {
                             break;
                         }
-                        let snap = snapshot.clone();
-                        let cond = branch.condition.clone();
-                        let branch_passed = tokio::task::spawn_blocking(move || {
-                            ScriptRuntime::new_with_devices(snap).eval_condition(&cond)
-                        })
-                        .await??;
+                        let branch_passed = if_passes(&branch.condition, &snapshot).await?;
                         if branch_passed {
                             debug!(branch = "else_if", "action: Conditional — selected");
                             execute_actions_inner(
@@ -1749,12 +1824,10 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
         },
         Action::RepeatCount { count, .. } => format!("{} times", count),
         Action::Conditional { condition, .. } => {
-            let c = if condition.len() > 60 {
-                &condition[..60]
-            } else {
-                condition
-            };
-            format!("if {}", c)
+            format!(
+                "if {}",
+                condition.describe().chars().take(60).collect::<String>()
+            )
         }
         Action::Comment { text } => text.clone(),
         Action::LogMessage { message, level } => match level {
@@ -1926,6 +1999,50 @@ mod tests {
 
     fn empty_snapshot() -> Arc<HashMap<String, JsonValue>> {
         Arc::new(HashMap::new())
+    }
+
+    fn check(json: serde_json::Value) -> IfCheck {
+        serde_json::from_value(json).expect("an if/otherwise question")
+    }
+
+    #[tokio::test]
+    async fn an_if_asks_checks_as_well_as_scripts() {
+        let snap = Arc::new(HashMap::from([
+            (
+                "door".to_string(),
+                serde_json::json!({ "open": true, "battery": 40 }),
+            ),
+            ("mode_night".to_string(), serde_json::json!({ "on": false })),
+        ]));
+        let yes = |j| {
+            let s = Arc::clone(&snap);
+            async move { if_passes(&check(j), &s).await.unwrap() }
+        };
+        assert!(yes(serde_json::json!({ "DeviceState": { "device_id": "door", "attribute": "open", "op": "Eq", "value": true } })).await);
+        assert!(!yes(serde_json::json!({ "DeviceState": { "device_id": "door", "attribute": "battery", "op": "Lt", "value": 20 } })).await);
+        assert!(
+            yes(serde_json::json!({ "ModeIs": { "mode_id": "mode_night", "on": false } })).await
+        );
+        assert!(yes(serde_json::json!({ "Or": { "conditions": [
+            { "ModeIs": { "mode_id": "mode_night", "on": true } },
+            { "Not": { "condition": { "DeviceState": { "device_id": "nowhere", "attribute": "on", "op": "Eq", "value": true } } } }
+        ] } })).await);
+        assert!(
+            yes(serde_json::json!({ "TimeWindow": { "start": "00:00:00", "end": "23:59:59" } }))
+                .await
+        );
+        assert!(
+            yes(serde_json::json!(
+                "device_state(\"door\")[\"open\"] == true"
+            ))
+            .await
+        );
+        let err = if_passes(
+            &check(serde_json::json!({ "HubVariable": { "name": "x", "op": "Eq", "value": 1 } })),
+            &snap,
+        )
+        .await;
+        assert!(err.unwrap_err().to_string().contains("HubVariable"));
     }
 
     fn ra(action: Action) -> RuleAction {
