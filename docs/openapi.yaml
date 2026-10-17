@@ -3039,6 +3039,23 @@ paths:
         bypass the scope check.
 
         All query parameters are optional filters and are ANDed together.
+
+        Besides sign-ins, accounts, keys, displays, calendars, backups,
+        restores, restarts and homeCore's settings, every change made through
+        the API to how the house works is recorded once it succeeds:
+        `automation.*` (created, updated, deleted, copied, imported,
+        bulk_changed), `automation_group.*`, `device.updated|deleted|bulk_updated`,
+        `helper.created|updated|deleted`, `mode.created|updated|deleted`,
+        `area.created|updated|deleted|devices_set|merged`,
+        `scene.created|updated|deleted|imported`, `alert_rule.*`,
+        `plugin.installed|started|stopped|restarted|config_updated|action_run|devices_removed`,
+        `plugin_runtime.approved|denied|token_issued` and
+        `system.log_level_changed`. `target_kind`/`target_id` name what
+        changed; `detail` holds its `name` as it was when changed (so a removed
+        one can be told apart), `renamed_to` on a rename, the top-level
+        `fields` the change touched, and `enabled`, `count`, `action` or
+        `level` where they apply — never other values. Commanding a device,
+        running a scene and testing a rule are uses, and aren't recorded.
       tags: [system]
       security:
         - bearerAuth: []
@@ -3056,7 +3073,7 @@ paths:
             enum: [user, api_key, local_admin, ip_whitelist, system, anonymous]
         - name: event_type
           in: query
-          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `login.success`
+          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `auth.login`, `automation.updated`
           schema:
             type: string
         - name: target_kind
@@ -7507,6 +7524,14 @@ paths:
                   timezone:
                     type: string
                     description: Configured IANA timezone (e.g. `America/New_York`)
+                  last_backup_at:
+                    type: [string, "null"]
+                    format: date-time
+                    description: |
+                      When the newest backup was taken, from the audit's
+                      `system.backup_created` records. Null when none is
+                      recorded — audit records are pruned after
+                      `[auth] audit_retention_days`, so null need not mean never.
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -7763,6 +7788,11 @@ paths:
       description: |
         Applies immediately, without a restart.  Requires the `plugins:write`
         scope (admin role).  An invalid level string is rejected with 400.
+
+        The string is an EnvFilter directive and **replaces the whole filter** —
+        a bare `debug` also drops the `rumqttc::state=info,rumqttd=info` that
+        quietens the broker. It is not saved: a restart goes back to
+        `[logging].level`. Audited as `system.log_level_changed`.
       tags: [system]
       security:
         - bearerAuth: []
@@ -7904,6 +7934,10 @@ paths:
         - `rules/*.ron` (and legacy `*.toml`)
         - `plugins/<plugin_id>/config.toml` for each registered plugin
           (optional per plugin)
+        - `calendars/*` — the calendars rules check
+
+        Not included: the audit log (`audit.db`). The archive is built whole
+        in memory before the first byte is sent, so allow it time.
 
         Plugin configs are keyed by plugin id, not absolute path, so a backup
         taken on host A restores correctly on host B.
@@ -7952,16 +7986,33 @@ paths:
         The route raises axum's body limit to **500 MiB**; larger uploads are
         rejected by the framework before the handler runs.
 
-        Each archive entry is mapped back to its canonical location
-        (`state.redb`, `history.db`, `config/*`, `rules/*`, and
+        Each archive entry maps back to its canonical location (`state.redb`,
+        `history.db`, `config/*`, `rules/*`, `calendars/*`, and
         `plugins/<id>/config.toml` — the last resolved against the *running
         host's* plugin table, so an id this host doesn't run is skipped).
-        Unrecognised or unsafe paths are reported in `skipped`, never written.
+        Unrecognised or unsafe paths are reported in `skipped`. An archive
+        with no `state.redb` is refused as not a homeCore backup.
 
-        **A server restart is required afterwards** for changes to take effect.
+        With `check=true` nothing changes: the answer says what would be put
+        back and skipped, and when the backup was taken.
+
+        Otherwise the archive is **staged**, not written over the live files —
+        the databases are open, and overwriting them under a running homeCore
+        could leave the house half one and half the other. homeCore puts it in
+        place at its next start, before it opens anything, and records
+        `system.restore_completed` (actor `system`) in the audit. Restart it
+        (`POST /system/restart`) to finish. Staging is audited as
+        `system.restore_staged`.
       tags: [system]
       security:
         - bearerAuth: []
+      parameters:
+        - name: check
+          in: query
+          description: Only say what the backup would do
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         description: Raw zip archive bytes, as produced by `POST /system/backup`
@@ -7972,16 +8023,22 @@ paths:
               format: binary
       responses:
         "200":
-          description: Restore complete
+          description: Checked, or staged for the next start
           content:
             application/json:
               schema:
                 type: object
-                required: [restored, skipped, message]
+                required: [restored, skipped]
                 properties:
+                  staged:
+                    type: boolean
+                    description: Present (true) when staged rather than only checked
+                  taken_at:
+                    type: [string, "null"]
+                    description: When the backup was taken (its state database's time in the archive)
                   restored:
                     type: array
-                    description: Archive paths written to disk
+                    description: Archive paths that go back in place
                     items:
                       type: string
                   skipped:
@@ -7992,7 +8049,7 @@ paths:
                   message:
                     type: string
         "400":
-          description: Empty request body, or the body is not a valid ZIP archive / a file could not be written
+          description: Empty request body, not a ZIP archive, not a homeCore backup, or it could not be staged
           content:
             application/json:
               schema:

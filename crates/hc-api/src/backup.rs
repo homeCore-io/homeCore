@@ -14,6 +14,10 @@
 //!   backup taken on host A can restore correctly to host B even when
 //!   the absolute config paths differ — destinations on restore come
 //!   from the *running host's* `[[plugins]]` table.
+//! - `calendars/*` — the calendars rules check (`.ics` and their `.meta.json`)
+//!
+//! Not included: the audit log (`audit.db`), which records what happened to
+//! the house rather than what the house is.
 //!
 //! The archive is streamed as `application/zip` with a timestamped filename.
 //! Requires Admin role.
@@ -21,9 +25,16 @@
 //! ## Restore (`POST /system/restore`)
 //!
 //! Accepts the **raw ZIP bytes as the request body** — not JSON, and not
-//! base64.  Extracts to a staging directory, validates the archive structure,
-//! then copies files into place.  A server restart is required after restore for
-//! changes to take effect.  Requires Admin role.
+//! base64. Requires Admin role.
+//!
+//! - `?check=true` reads the archive and says what it would put back and what
+//!   it would skip, changing nothing.
+//! - Otherwise the archive is checked the same way and **staged** beside the
+//!   state database as `restore-pending.zip`. Nothing live is touched: the
+//!   databases are open, and writing over them under a running homeCore could
+//!   leave a house half one and half the other. homeCore puts the backup in
+//!   place at its next start, before it opens anything ([`apply_pending`]),
+//!   so restart it (`POST /system/restart`) to finish.
 //!
 //! ```sh
 //! curl -X POST --data-binary @backup.zip \
@@ -62,7 +73,25 @@ pub struct BackupPaths {
     /// destination path is looked up by `id` against this same table —
     /// so cross-host restores work even when the absolute paths differ.
     pub plugin_configs: Vec<PluginConfigEntry>,
+    /// Where the calendars live, if anywhere.
+    pub calendars_dir: Option<PathBuf>,
 }
+
+impl BackupPaths {
+    /// Where a staged restore waits for the next start.
+    pub fn pending(&self) -> PathBuf {
+        self.state_db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(PENDING)
+    }
+}
+
+/// The staged restore's file name, beside the state database.
+pub const PENDING: &str = "restore-pending.zip";
+/// What a staged restore becomes once applied — kept, one deep, so the last
+/// restore can be looked at afterwards.
+pub const APPLIED: &str = "restore-applied.zip";
 
 /// A single plugin's config file location, threaded into `BackupPaths`.
 #[derive(Clone)]
@@ -143,7 +172,24 @@ pub async fn backup_handler(State(state): State<AppState>, AuthUser(claims): Aut
 fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
     let buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(buf);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // Every entry carries when the backup was taken (UTC), so a restore can
+    // say how old it is. Without it zip stamps 1980.
+    let now = Utc::now();
+    let taken = {
+        use chrono::{Datelike, Timelike};
+        zip::DateTime::from_date_and_time(
+            now.year() as u16,
+            now.month() as u8,
+            now.day() as u8,
+            now.hour() as u8,
+            now.minute() as u8,
+            now.second() as u8,
+        )
+        .unwrap_or_default()
+    };
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(taken);
 
     // ── Databases ──────────────────────────────────────────────────────────
     add_file(&mut zip, &paths.state_db_path, "state.redb", opts)?;
@@ -195,6 +241,21 @@ fn build_zip(paths: &BackupPaths) -> anyhow::Result<Vec<u8>> {
         add_file_opt(&mut zip, &plugin.path, &archive_name, opts)?;
     }
 
+    // ── Calendars ──────────────────────────────────────────────────────────
+    if let Some(dir) = paths.calendars_dir.as_ref().filter(|d| d.is_dir()) {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        for path in files {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                add_file_opt(&mut zip, &path, &format!("calendars/{name}"), opts)?;
+            }
+        }
+    }
+
     let cursor = zip.finish()?;
     Ok(cursor.into_inner())
 }
@@ -235,13 +296,18 @@ fn add_file_opt(
 
 // ── Restore ──────────────────────────────────────────────────────────────────
 
-/// `POST /system/restore` — accept a raw ZIP body and restore files from it.
-///
-/// Validates the archive, then overwrites matching files in their canonical
-/// locations.  A server restart is required afterwards.
+/// `POST /system/restore` — check a backup (`?check=true`), or stage it to be
+/// put in place when homeCore next starts.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RestoreQuery {
+    #[serde(default)]
+    pub check: bool,
+}
+
 pub async fn restore_handler(
     State(state): State<AppState>,
     AuthUser(claims): AuthUser,
+    axum::extract::Query(q): axum::extract::Query<RestoreQuery>,
     body: Bytes,
 ) -> Response {
     if !claims.is_admin() {
@@ -271,27 +337,52 @@ pub async fn restore_handler(
             .into_response();
     }
 
-    let zip_bytes = body.to_vec();
+    let zip_len = body.len();
+    let check = q.check;
+    let staged = tokio::task::spawn_blocking(move || -> anyhow::Result<RestorePlan> {
+        let plan = plan_restore(&paths, &body)?;
+        if !check {
+            stage(&paths, &body)?;
+        }
+        Ok(plan)
+    })
+    .await;
 
-    let zip_len = zip_bytes.len();
-    match tokio::task::spawn_blocking(move || extract_restore(&paths, &zip_bytes)).await {
-        Ok(Ok(summary)) => {
-            let restored_count = summary
-                .get("restored")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            let mut audit_e = audit::entry_from_claims(&claims, "system.restore_completed")
+    match staged {
+        Ok(Ok(plan)) => {
+            if check {
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "restored": plan.restored,
+                        "skipped": plan.skipped,
+                        "taken_at": plan.taken_at,
+                    })),
+                )
+                    .into_response();
+            }
+            let mut audit_e = audit::entry_from_claims(&claims, "system.restore_staged")
                 .with_target("system", "backup");
             audit_e.detail = json!({
-                "bytes":    zip_len,
-                "restored": restored_count,
+                "bytes": zip_len,
+                "restored": plan.restored.len(),
+                "taken_at": plan.taken_at,
             });
             audit::emit(&state, audit_e).await;
-            (StatusCode::OK, Json(summary)).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "staged": true,
+                    "restored": plan.restored,
+                    "skipped": plan.skipped,
+                    "taken_at": plan.taken_at,
+                    "message": "Staged. homeCore puts this backup in place when it next starts — restart it to finish.",
+                })),
+            )
+                .into_response()
         }
         Ok(Err(e)) => {
-            warn!(error = %e, "Restore failed");
+            warn!(error = %e, "Restore refused");
             (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": e.to_string() })),
@@ -309,7 +400,131 @@ pub async fn restore_handler(
     }
 }
 
-/// Validate and extract a backup ZIP, copying files to their canonical locations.
+/// What a backup would put back, and what it would skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestorePlan {
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
+    /// When the backup was taken, as the archive's state database says.
+    pub taken_at: Option<String>,
+}
+
+/// Where an archive entry goes on this host, or `None` to skip it.
+fn destination(paths: &BackupPaths, name: &Path) -> Option<PathBuf> {
+    let name_str = name.display().to_string();
+    match name_str.as_str() {
+        "state.redb" => Some(paths.state_db_path.clone()),
+        "history.db" => Some(paths.history_db_path.clone()),
+        "config/homecore.toml" => Some(paths.config_path.clone()),
+        "config/modes.toml" => paths.config_path.parent().map(|p| p.join("modes.toml")),
+        "config/mode_definitions.json" => paths
+            .config_path
+            .parent()
+            .map(|p| p.join("mode_definitions.json")),
+        // e.g. "rules/my_rule.ron" → rules_dir/my_rule.ron
+        _ if name_str.starts_with("rules/") => name.file_name().map(|n| paths.rules_dir.join(n)),
+        _ if name_str.starts_with("calendars/") => {
+            let dir = paths.calendars_dir.as_ref()?;
+            name.file_name().map(|n| dir.join(n))
+        }
+        // Archive shape: "plugins/<plugin_id>/config.toml". The destination
+        // comes from the running host's [[plugins]] block — ids match across
+        // hosts, paths don't. An id this host doesn't run is skipped.
+        _ if name_str.starts_with("plugins/") => {
+            let id = name_str
+                .strip_prefix("plugins/")
+                .and_then(|s| s.strip_suffix("/config.toml"))
+                .unwrap_or("");
+            paths
+                .plugin_configs
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.path.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Read an archive and say what it would do, changing nothing. Refuses one
+/// that isn't a homeCore backup.
+pub fn plan_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<RestorePlan> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
+        .map_err(|e| anyhow::anyhow!("invalid ZIP archive: {e}"))?;
+    let mut plan = RestorePlan {
+        restored: Vec::new(),
+        skipped: Vec::new(),
+        taken_at: None,
+    };
+    for i in 0..archive.len() {
+        let file = archive.by_index(i)?;
+        let Some(name) = file.enclosed_name().map(|p| p.to_path_buf()) else {
+            plan.skipped.push(format!("unsafe path at index {i}"));
+            continue;
+        };
+        let name_str = name.display().to_string();
+        if name_str == "state.redb" {
+            // Backups from before entries were stamped say 1980: unknown.
+            plan.taken_at = file
+                .last_modified()
+                .filter(|t| t.year() > 1980)
+                .and_then(|t| {
+                    chrono::NaiveDate::from_ymd_opt(
+                        t.year().into(),
+                        t.month().into(),
+                        t.day().into(),
+                    )?
+                    .and_hms_opt(
+                        t.hour().into(),
+                        t.minute().into(),
+                        t.second().into(),
+                    )
+                })
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        }
+        match destination(paths, &name) {
+            Some(_) => plan.restored.push(name_str),
+            None => plan.skipped.push(name_str),
+        }
+    }
+    if !plan.restored.iter().any(|n| n == "state.redb") {
+        anyhow::bail!("this isn't a homeCore backup: it has no state.redb");
+    }
+    Ok(plan)
+}
+
+/// Put an archive beside the state database to be applied at the next start.
+fn stage(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<()> {
+    let dest = paths.pending();
+    let tmp = dest.with_extension("zip.tmp");
+    std::fs::write(&tmp, zip_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to stage {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| anyhow::anyhow!("failed to stage {}: {e}", dest.display()))?;
+    info!(path = %dest.display(), "Restore staged for the next start");
+    Ok(())
+}
+
+/// At start, before anything is opened: put a staged restore in place.
+/// Returns what it did, or `None` when nothing was staged. The staged archive
+/// is kept as `restore-applied.zip`, so it isn't applied twice.
+pub fn apply_pending(paths: &BackupPaths) -> Option<anyhow::Result<serde_json::Value>> {
+    let pending = paths.pending();
+    let bytes = match std::fs::read(&pending) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(Err(anyhow::anyhow!("reading {}: {e}", pending.display()))),
+    };
+    let result = plan_restore(paths, &bytes).and_then(|_| extract_restore(paths, &bytes));
+    // Applied or not, it mustn't be tried again on every start.
+    let applied = pending.with_file_name(APPLIED);
+    if let Err(e) = std::fs::rename(&pending, &applied) {
+        warn!(error = %e, "could not set the staged restore aside");
+        let _ = std::fs::remove_file(&pending);
+    }
+    Some(result)
+}
+
+/// Copy a backup's files to their places on this host.
 fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
     let reader = Cursor::new(zip_bytes);
     let mut archive =
@@ -325,55 +540,14 @@ fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serd
             continue;
         };
         let name_str = name.display().to_string();
-
-        // Map archive path → filesystem destination.
-        let dest = match name_str.as_str() {
-            "state.redb" => Some(paths.state_db_path.clone()),
-            "history.db" => Some(paths.history_db_path.clone()),
-            "config/homecore.toml" => Some(paths.config_path.clone()),
-            "config/modes.toml" => paths.config_path.parent().map(|p| p.join("modes.toml")),
-            "config/mode_definitions.json" => paths
-                .config_path
-                .parent()
-                .map(|p| p.join("mode_definitions.json")),
-            _ if name_str.starts_with("rules/") => {
-                // e.g. "rules/my_rule.ron" → rules_dir/my_rule.ron
-                let filename = name.file_name().map(|n| n.to_os_string());
-                filename.map(|n| paths.rules_dir.join(n))
-            }
-            _ if name_str.starts_with("plugins/") => {
-                // Archive shape: "plugins/<plugin_id>/config.toml"
-                // Look up the destination path from the running host's
-                // [[plugins]] block — IDs match across hosts, paths don't.
-                // An ID not registered locally is skipped (the source host
-                // had a plugin this host doesn't run); an ID registered
-                // locally writes to whatever path local config dictates.
-                let id = name_str
-                    .strip_prefix("plugins/")
-                    .and_then(|s| s.strip_suffix("/config.toml"))
-                    .unwrap_or("");
-                paths
-                    .plugin_configs
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.path.clone())
-            }
-            _ => {
-                skipped.push(name_str);
-                continue;
-            }
-        };
-
-        let Some(dest) = dest else {
+        let Some(dest) = destination(paths, &name) else {
             skipped.push(name_str);
             continue;
         };
 
-        // Ensure parent directory exists.
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         std::fs::write(&dest, &buf)
@@ -386,7 +560,6 @@ fn extract_restore(paths: &BackupPaths, zip_bytes: &[u8]) -> anyhow::Result<serd
     Ok(json!({
         "restored": restored,
         "skipped": skipped,
-        "message": "Restore complete. Please restart the HomeCore server for changes to take effect.",
     }))
 }
 
@@ -418,6 +591,7 @@ mod tests {
             config_path,
             rules_dir,
             plugin_configs,
+            calendars_dir: Some(dir.join("config/calendars")),
         }
     }
 
@@ -567,5 +741,63 @@ mod tests {
             .map(|i| zip.clone().by_index(i).unwrap().name().to_string())
             .collect();
         assert!(!names.iter().any(|n| n.starts_with("plugins/")));
+    }
+
+    #[test]
+    fn a_restore_is_checked_then_staged_and_applied_at_the_next_start() {
+        let src = tempdir().unwrap();
+        let src_paths = make_paths(src.path(), vec![]);
+        let cal = src.path().join("config/calendars");
+        fs::create_dir_all(&cal).unwrap();
+        fs::write(cal.join("bins.ics"), b"BEGIN:VCALENDAR\nEND:VCALENDAR\n").unwrap();
+        fs::write(src.path().join("rules/porch.ron"), b"(name: \"porch\")").unwrap();
+        let bytes = build_zip(&src_paths).unwrap();
+
+        let dst = tempdir().unwrap();
+        let paths = make_paths(dst.path(), vec![]);
+        fs::write(&paths.state_db_path, b"live-redb").unwrap();
+
+        // Checking says what would happen, and when it was taken, and changes nothing.
+        let plan = plan_restore(&paths, &bytes).unwrap();
+        let taken = plan
+            .taken_at
+            .clone()
+            .expect("a backup says when it was taken");
+        let year: i32 = taken[..4].parse().unwrap();
+        assert!(year >= 2026, "{taken}");
+        assert!(plan.restored.contains(&"state.redb".to_string()));
+        assert!(plan.restored.contains(&"calendars/bins.ics".to_string()));
+        assert!(plan.restored.contains(&"rules/porch.ron".to_string()));
+        assert_eq!(fs::read(&paths.state_db_path).unwrap(), b"live-redb");
+
+        // Staging leaves the live files alone too.
+        stage(&paths, &bytes).unwrap();
+        assert_eq!(fs::read(&paths.state_db_path).unwrap(), b"live-redb");
+        assert!(paths.pending().exists());
+
+        // The next start puts it in place, once.
+        let done = apply_pending(&paths)
+            .expect("something was staged")
+            .unwrap();
+        assert!(done["restored"].as_array().unwrap().len() >= 4, "{done}");
+        assert_eq!(fs::read(&paths.state_db_path).unwrap(), b"redb-bytes");
+        assert!(dst.path().join("config/calendars/bins.ics").exists());
+        assert!(!paths.pending().exists());
+        assert!(dst.path().join(APPLIED).exists());
+        assert!(apply_pending(&paths).is_none(), "applied only once");
+    }
+
+    #[test]
+    fn something_that_isnt_a_backup_is_refused() {
+        let dir = tempdir().unwrap();
+        let paths = make_paths(dir.path(), vec![]);
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("holiday.jpg", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"jpeg").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let err = plan_restore(&paths, &bytes).unwrap_err().to_string();
+        assert!(err.contains("isn't a homeCore backup"), "{err}");
+        assert!(plan_restore(&paths, b"not a zip").is_err());
     }
 }
