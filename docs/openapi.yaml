@@ -306,9 +306,17 @@ paths:
         - $ref: "#/components/parameters/UserId"
       responses:
         "204":
-          description: User deleted
+          description: |
+            User deleted. Their sessions end and their own API keys are
+            revoked; display keys they made are the house's and stay.
         "400":
           description: Cannot delete your own account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: They are the house's only admin
           content:
             application/json:
               schema:
@@ -324,6 +332,11 @@ paths:
     patch:
       operationId: setUserRole
       summary: Change a user's role (admin only)
+      description: |
+        A token carries the scopes of the role it was minted under, so a new
+        role **ends every session** of that user, as a password reset does —
+        they sign in again under it. Their own API keys lose any scope the new
+        role lacks. Setting the role they already have changes nothing.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -342,6 +355,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: They are the house's only admin, and must stay one
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/users/{id}/pin:
+    delete:
+      operationId: clearUserPin
+      summary: Clear someone's PIN (admin only)
+      description: |
+        For a person who has forgotten their PIN: they choose another on their
+        own (`PUT /auth/pin`). An admin never sets one — a PIN says who is at a
+        display, so only its owner should know it. Audited as
+        `user.pin_cleared` with `by_admin: true`.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: Cleared, or there was none
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -657,6 +700,10 @@ paths:
     patch:
       operationId: commandDevice
       summary: Send a command to a device (publishes to MQTT cmd topic)
+      description: |
+        Needs `devices:write`, or `devices:command` — which a household member
+        holds, so they can use every device without renaming, moving or
+        deleting one.
       tags: [devices]
       security:
         - bearerAuth: []
@@ -3241,6 +3288,11 @@ paths:
                     revoked_at:
                       type: [string, "null"]
                       format: date-time
+                    display:
+                      type: boolean
+                      description: |
+                        A display's key (a wall tablet, managed under
+                        `/displays`), not one made for a program
         "400":
           description: Caller identity could not be resolved to a uid
           content:
@@ -3484,6 +3536,8 @@ paths:
                   revoked_at:
                     type: [string, "null"]
                     format: date-time
+                  display:
+                    type: boolean
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -8180,12 +8234,16 @@ components:
         created_at:
           type: string
           format: date-time
+        has_pin:
+          type: boolean
+          description: Whether they have set a PIN — never the PIN itself
 
     Role:
       type: string
       enum:
         - admin
         - user
+        - household_member
         - read_only
         - observer
         - device_operator
@@ -8194,10 +8252,15 @@ components:
       description: |
         Serialized snake_case. A role is a named bundle of scopes; the scopes are
         what handlers actually check, so the per-operation descriptions name the
-        scope rather than the role.
+        scope rather than the role. Every role holding `devices:write` also
+        holds `devices:command`, and every one holding `scenes:write` also
+        holds `scenes:run`, so either can be handed to a key on its own.
 
         - `admin` — full access, including user and plugin management
         - `user` — read/write devices, automations, scenes, areas, webhooks, events
+        - `household_member` — someone who lives in the house: `read_only` plus
+          `devices:command` and `scenes:run`. Uses every device and scene;
+          renames, deletes and authors nothing.
         - `read_only` — minimal read view: devices, automations, dashboards,
           scenes, areas. Cannot see plugins or the audit log.
         - `observer` — `read_only` plus `plugins:read` and `audit:read`. Good

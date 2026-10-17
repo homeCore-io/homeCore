@@ -492,6 +492,34 @@ scope_extractor!(AreasWrite, "areas:write");
 scope_extractor!(PluginsRead, "plugins:read");
 scope_extractor!(PluginsWrite, "plugins:write");
 
+/// Scope guard for commanding a device: `devices:write`, or `devices:command`
+/// — which the household-member role holds (T5) so a family member can use
+/// every device without being able to rename, move or delete one.
+pub struct DevicesCommand(pub Claims);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for DevicesCommand {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = parts.extensions.get::<Claims>().cloned().ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "authentication required" })),
+            )
+        })?;
+        if !(claims.has_scope("devices:write") || claims.has_scope("devices:command")) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "scope 'devices:command' required" })),
+            ));
+        }
+        Ok(Self(claims))
+    }
+}
+
 /// Scope guard for running a scene: `scenes:write`, or `scenes:run` — which
 /// a display key holds (H3) so a wall tablet can run scenes without being
 /// able to change them.

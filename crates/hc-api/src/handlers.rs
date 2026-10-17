@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::audit;
 use crate::auth_middleware::{
     AreasRead, AreasWrite, AuthUser, AutomationsRead, AutomationsWrite, DashboardsRead,
-    DashboardsWrite, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite, ScenesRead, ScenesWrite,
+    DashboardsWrite, DevicesCommand, DevicesRead, DevicesWrite, PluginsRead, PluginsWrite,
+    ScenesRead, ScenesWrite,
 };
 use crate::group_store::RuleGroup;
 use crate::managed_modes::{
@@ -591,7 +592,7 @@ pub async fn get_device_schema(
 
 pub async fn command_device(
     State(s): State<AppState>,
-    DevicesWrite(claims): DevicesWrite,
+    DevicesCommand(claims): DevicesCommand,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {

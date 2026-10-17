@@ -384,6 +384,37 @@ pub async fn clear_pin(State(s): State<AppState>, AuthUser(claims): AuthUser) ->
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `DELETE /auth/users/{id}/pin` — an admin clears someone else's PIN, so a
+/// person who has forgotten theirs can choose another on Me. An admin never
+/// sets one: a PIN says who is at the display, so only its owner should know
+/// it.
+pub async fn clear_user_pin(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return err(StatusCode::FORBIDDEN, "admin role required");
+    }
+    let mut user = match s.store.get_user_by_id(id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "user not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    if user.pin_hash.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    user.pin_hash = None;
+    if let Err(e) = s.store.update_user(&user).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    let mut e =
+        audit::entry_from_claims(&claims, "user.pin_cleared").with_target("user", id.to_string());
+    e.detail = json!({ "by_admin": true });
+    audit::emit(&s, e).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// What `/auth/me` says for a display's key: the display, not its maker.
 pub async fn me_as_display(s: &AppState, claims: &Claims) -> Option<serde_json::Value> {
     let d = display_of(s, claims).await?;

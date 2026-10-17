@@ -39,6 +39,7 @@ fn record_to_summary(r: &ApiKeyRecord) -> ApiKeySummary {
         expires_at: r.expires_at,
         allowed_cidrs: r.allowed_cidrs.clone(),
         revoked_at: r.revoked_at,
+        display: r.display,
     }
 }
 

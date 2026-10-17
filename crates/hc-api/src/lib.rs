@@ -1154,6 +1154,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/auth/users/{id}/password",
             patch(auth_handlers::set_user_password),
         )
+        .route(
+            "/auth/users/{id}/pin",
+            delete(display_handlers::clear_user_pin),
+        )
         // API keys
         .route(
             "/auth/api-keys",
