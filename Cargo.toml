@@ -83,6 +83,8 @@ prometheus        = { version = "0.14", default-features = false, features = ["p
 dashmap           = "6"
 cron              = "0.17"
 icalendar         = { version = "0.16", default-features = false, features = ["parser"] }
+# RFC 5545 recurrence (calendar RRULE/EXDATE/RDATE). 0.13 shares our chrono-tz 0.9.
+rrule             = { version = "0.13", default-features = false }
 
 # Size-optimized release profile. Applies workspace-wide.
 # Strip removes debug symbols (~30-50% binary size reduction).

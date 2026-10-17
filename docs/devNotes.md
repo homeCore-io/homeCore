@@ -8100,8 +8100,24 @@ The scheduler checks once per minute. A rule fires when `event.start + offset_mi
 
 ### RRULE support
 
-- `FREQ=YEARLY` — fully expanded over the configured `expansion_days` window (covers most holiday calendars)
-- Other frequencies — base occurrence included only if it falls in the window; a DEBUG log is emitted
+Recurring events are expanded over the configured `expansion_days` window by
+the `rrule` crate (RFC 5545):
+
+- Every frequency — `DAILY`, `WEEKLY` (with `INTERVAL=2` for every other
+  week), `MONTHLY` (by date or `BYDAY=2TU` for the second Tuesday), `YEARLY`,
+  and finer — with `INTERVAL`, `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `BYSETPOS`,
+  `COUNT` and `UNTIL` (a date-only `UNTIL` includes that day).
+- `RDATE` adds occurrences; `EXDATE` removes them.
+- A single occurrence moved or cancelled — a `VEVENT` with the same `UID` and a
+  `RECURRENCE-ID` — replaces that occurrence; `STATUS:CANCELLED` drops it.
+- Times are read in their own zone (`TZID`); a floating time, or an all-day
+  date, in the house's zone (`[location].timezone`). Expansion happens in that
+  zone, so a weekly 07:00 stays 07:00 across a change of clocks. An all-day
+  event starts at the house's midnight.
+- An occurrence still under way when the calendar is read is kept, so
+  `CalendarActive` holds for the whole of an all-day event.
+- At most 2000 occurrences per series in the window; a rule that can't be read
+  keeps only its first occurrence, with a warning in the log.
 
 ### Calendar API
 

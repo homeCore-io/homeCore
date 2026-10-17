@@ -12,10 +12,14 @@
 //!
 //! # Recurrence handling
 //!
-//! `FREQ=YEARLY` rules (the most common pattern in holiday calendars) are
-//! expanded over the configured window (default 400 days).  All other RRULE
-//! frequencies use only the base occurrence if it falls in the window — a
-//! warning is emitted so operators know which calendars need attention.
+//! Recurring events are expanded over the configured window (default 400
+//! days) by the `rrule` crate: every frequency — daily, weekly, every other
+//! week, monthly (by date or "second Tuesday"), yearly — with INTERVAL,
+//! BYDAY, BYMONTHDAY, BYSETPOS, COUNT and UNTIL, plus RDATE and EXDATE, and
+//! single occurrences moved or cancelled (RECURRENCE-ID). Times are read in
+//! their own zone (TZID), a floating time or a date in the house's zone, so a
+//! weekly 07:00 stays 07:00 across a change of clocks. An occurrence still
+//! under way when the calendar is read is kept.
 //!
 //! # URL fetch
 //!
@@ -26,7 +30,7 @@
 //! network access is needed.
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use icalendar::parser as ical_parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -157,24 +161,149 @@ pub fn load_dir(dir: &Path, expansion_days: u32) -> Result<Vec<CalendarEntry>> {
 
 // ── ICS parsing ───────────────────────────────────────────────────────────────
 
+/// When an iCalendar date or date-time property happens.
+#[derive(Debug, Clone, Copy)]
+struct When {
+    at: DateTime<Utc>,
+    /// `VALUE=DATE` — a day, not a moment.
+    date_only: bool,
+    /// The zone the value was written in: its `TZID`, UTC for a trailing `Z`,
+    /// and the house's own zone for a floating time or a date. Recurrence
+    /// is worked out in this zone, so a weekly 07:00 stays 07:00 across a
+    /// change to or from summer time.
+    tz: chrono_tz::Tz,
+}
+
+fn param<'a>(prop: &'a ical_parser::Property<'a>, key: &str) -> Option<&'a str> {
+    prop.params
+        .iter()
+        .find(|p| p.key.as_str().eq_ignore_ascii_case(key))
+        .and_then(|p| p.val.as_ref())
+        .map(|v| v.as_str().trim_matches('"'))
+}
+
+/// Every value of a date or date-time property: one for DTSTART, possibly
+/// several, comma-separated, for EXDATE and RDATE.
+fn whens_of(prop: &ical_parser::Property, house: chrono_tz::Tz) -> Vec<When> {
+    let declared_date = param(prop, "VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
+    let zone = param(prop, "TZID").and_then(|z| z.parse::<chrono_tz::Tz>().ok());
+    prop.val
+        .as_str()
+        .split(',')
+        .filter_map(|raw| {
+            let raw = raw.trim();
+            if declared_date || raw.len() == 8 {
+                let d = NaiveDate::parse_from_str(raw, "%Y%m%d").ok()?;
+                // A day, as the house counts days.
+                let at = local_instant(house, d.and_hms_opt(0, 0, 0)?)?;
+                return Some(When {
+                    at,
+                    date_only: true,
+                    tz: house,
+                });
+            }
+            if let Some(utc) = raw.strip_suffix('Z') {
+                let naive = NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S").ok()?;
+                return Some(When {
+                    at: naive.and_utc(),
+                    date_only: false,
+                    tz: chrono_tz::UTC,
+                });
+            }
+            let naive = NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%S").ok()?;
+            // A named zone homeCore doesn't know (Outlook's "Eastern Standard
+            // Time", say) is read as the house's: nearer than UTC.
+            let tz = zone.unwrap_or(house);
+            Some(When {
+                at: local_instant(tz, naive)?,
+                date_only: false,
+                tz,
+            })
+        })
+        .collect()
+}
+
+/// A wall-clock time in a zone, as an instant. A time that a clock change
+/// skips is taken an hour on; one it repeats is taken the first time.
+fn local_instant(tz: chrono_tz::Tz, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
+    use chrono::TimeZone;
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| {
+            tz.from_local_datetime(&(naive + chrono::Duration::hours(1)))
+                .earliest()
+        })
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn prop_when(component: &ical_parser::Component, name: &str, house: chrono_tz::Tz) -> Option<When> {
+    component
+        .find_prop(name)
+        .and_then(|p| whens_of(p, house).into_iter().next())
+}
+
 /// Parse a single ICS string into a `CalendarEntry` with RRULE expanded.
 ///
 /// Uses `icalendar::parser` (the low-level RFC 5545 parser) which handles line
 /// folding and returns zero-copy types that borrow from the unfolded string.
 /// All interesting data is converted to owned types before this function returns.
 fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Result<CalendarEntry> {
+    parse_ics_at(
+        id,
+        path,
+        content,
+        expansion_days,
+        Utc::now(),
+        hc_time::configured_tz(),
+    )
+}
+
+fn parse_ics_at(
+    id: &str,
+    path: &Path,
+    content: &str,
+    expansion_days: u32,
+    now: DateTime<Utc>,
+    house: chrono_tz::Tz,
+) -> Result<CalendarEntry> {
     // Unfold RFC 5545 continuation lines first.
     let unfolded = ical_parser::unfold(content);
 
     let parsed = ical_parser::read_calendar(&unfolded)
         .map_err(|e| anyhow!("ICS parse error in {}: {}", path.display(), e))?;
 
-    let now = Utc::now();
     let window_end = now + chrono::Duration::days(expansion_days as i64);
     let mut events = Vec::new();
 
+    // One occurrence of a series moved or cancelled is its own VEVENT, with
+    // the series' UID and a RECURRENCE-ID naming the occurrence it replaces.
+    // That occurrence is left out of the series; the replacement (unless it
+    // is cancelled) is an event in its own right below.
+    let mut replaced: std::collections::HashMap<String, Vec<DateTime<Utc>>> =
+        std::collections::HashMap::new();
     for component in &parsed.components {
         if component.name.as_str() != "VEVENT" {
+            continue;
+        }
+        if let (Some(uid), Some(rid)) = (
+            component.find_prop("UID"),
+            prop_when(component, "RECURRENCE-ID", house),
+        ) {
+            replaced
+                .entry(uid.val.as_str().to_owned())
+                .or_default()
+                .push(rid.at);
+        }
+    }
+
+    for component in &parsed.components {
+        if component.name.as_str() != "VEVENT" {
+            continue;
+        }
+        if component
+            .find_prop("STATUS")
+            .is_some_and(|p| p.val.as_str().eq_ignore_ascii_case("CANCELLED"))
+        {
             continue;
         }
 
@@ -188,104 +317,68 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
             .map(|p| p.val.as_str().to_owned())
             .unwrap_or_else(|| "(no title)".to_owned());
 
-        let Some(dtstart_prop) = component.find_prop("DTSTART") else {
+        let Some(start) = prop_when(component, "DTSTART", house) else {
+            debug!(summary = %summary, "No usable DTSTART; skipping event");
             continue;
         };
+        let is_all_day = start.date_only;
 
-        let dtstart_val = dtstart_prop.val.as_str();
-
-        // VALUE=DATE parameter means it is an all-day event.
-        let is_date_only = dtstart_prop.params.iter().any(|p| {
-            p.key.as_str().eq_ignore_ascii_case("VALUE")
-                && match &p.val {
-                    Some(v) => v.as_str().eq_ignore_ascii_case("DATE"),
-                    None => false,
+        // ── How long each occurrence lasts (DTEND or DURATION) ────────────
+        let duration = prop_when(component, "DTEND", house)
+            .map(|end| end.at - start.at)
+            .or_else(|| {
+                component
+                    .find_prop("DURATION")
+                    .and_then(|p| parse_ics_duration(p.val.as_str()))
+            })
+            .filter(|d| *d >= chrono::Duration::zero())
+            // Default: a day for an all-day event, a moment otherwise.
+            .unwrap_or_else(|| {
+                if is_all_day {
+                    chrono::Duration::hours(24)
+                } else {
+                    chrono::Duration::zero()
                 }
-        }) || dtstart_val.len() == 8; // bare YYYYMMDD implies date-only
+            });
 
-        let (start_dt, is_all_day) = if is_date_only {
-            match NaiveDate::parse_from_str(dtstart_val, "%Y%m%d") {
-                Ok(d) => match d.and_hms_opt(0, 0, 0) {
-                    Some(ndt) => (ndt.and_utc(), true),
-                    None => continue,
-                },
-                Err(_) => continue,
-            }
-        } else {
-            // Strip trailing 'Z' and parse as naive, then treat as UTC.
-            let s = dtstart_val.trim_end_matches('Z');
-            match NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S") {
-                Ok(naive) => (naive.and_utc(), false),
-                Err(_) => {
-                    debug!(summary = %summary, dtstart = dtstart_val, "Could not parse DTSTART; skipping event");
-                    continue;
-                }
-            }
-        };
-
-        // ── Compute event duration (DTEND or DURATION) ────────────────────
-        let event_duration = if let Some(dtend_prop) = component.find_prop("DTEND") {
-            let dtend_val = dtend_prop.val.as_str();
-            let end_is_date = dtend_prop.params.iter().any(|p| {
-                p.key.as_str().eq_ignore_ascii_case("VALUE")
-                    && match &p.val {
-                        Some(v) => v.as_str().eq_ignore_ascii_case("DATE"),
-                        None => false,
+        // An occurrence still under way counts: an all-day event is active
+        // all day, not just at its first instant.
+        let from = now - duration;
+        let starts: Vec<DateTime<Utc>> = match component.find_prop("RRULE") {
+            Some(rrule) => {
+                let mut extra = Vec::new();
+                let mut skip = Vec::new();
+                for p in &component.properties {
+                    let name = p.name.as_str();
+                    if name.eq_ignore_ascii_case("RDATE") {
+                        extra.extend(whens_of(p, house).into_iter().map(|w| w.at));
+                    } else if name.eq_ignore_ascii_case("EXDATE") {
+                        skip.extend(whens_of(p, house).into_iter().map(|w| w.at));
                     }
-            }) || dtend_val.len() == 8;
-            if end_is_date {
-                NaiveDate::parse_from_str(dtend_val, "%Y%m%d")
-                    .ok()
-                    .and_then(|d| d.and_hms_opt(0, 0, 0))
-                    .map(|ndt| ndt.and_utc() - start_dt)
-            } else {
-                let s = dtend_val.trim_end_matches('Z');
-                NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S")
-                    .ok()
-                    .map(|ndt| ndt.and_utc() - start_dt)
+                }
+                skip.extend(replaced.get(&uid).into_iter().flatten().copied());
+                expand_rrule(
+                    start,
+                    rrule.val.as_str(),
+                    &extra,
+                    &skip,
+                    from,
+                    window_end,
+                    &summary,
+                )
             }
-        } else if let Some(dur_prop) = component.find_prop("DURATION") {
-            parse_ics_duration(dur_prop.val.as_str())
-        } else {
-            None
+            None if start.at > from && start.at <= window_end => vec![start.at],
+            None => Vec::new(),
         };
 
-        // Default: all-day → 24h, timed → zero-duration.
-        let duration = event_duration.unwrap_or_else(|| {
-            if is_all_day {
-                chrono::Duration::hours(24)
-            } else {
-                chrono::Duration::zero()
-            }
-        });
-
-        // Collect RRULE value (may appear as RRULE property or not at all).
-        let rrule_val: Option<String> = component
-            .find_prop("RRULE")
-            .map(|p| p.val.as_str().to_owned());
-
-        if let Some(rrule) = rrule_val {
-            let occurrences = expand_rrule(start_dt, &rrule, &now, &window_end, &summary);
-            for occ in occurrences {
-                events.push(CalEvent {
-                    uid: uid.clone(),
-                    summary: summary.clone(),
-                    start: occ,
-                    end: occ + duration,
-                    is_all_day,
-                });
-            }
-        } else {
-            // Non-recurring: include only if within the expansion window.
-            if start_dt >= now && start_dt <= window_end {
-                events.push(CalEvent {
-                    uid,
-                    summary,
-                    start: start_dt,
-                    end: start_dt + duration,
-                    is_all_day,
-                });
-            }
+        for at in starts {
+            events.push(CalEvent {
+                uid: uid.clone(),
+                summary: summary.clone(),
+                start: at,
+                end: at + duration,
+                is_all_day,
+            });
         }
     }
 
@@ -303,96 +396,110 @@ fn parse_ics(id: &str, path: &Path, content: &str, expansion_days: u32) -> Resul
 
 // ── RRULE expansion ───────────────────────────────────────────────────────────
 
-/// Expand a recurrence rule into concrete `DateTime<Utc>` occurrences that
-/// fall within `[now, window_end]`.
-///
-/// Only `FREQ=YEARLY` is expanded.  All other values produce a single occurrence
-/// at `dtstart` if it falls in the window, with a warning logged.
+/// Most occurrences one series may produce in the window — a minutely rule
+/// over 400 days would otherwise be half a million.
+const MAX_OCCURRENCES: u16 = 2000;
+
+/// Every occurrence of a recurrence rule starting in `(from, window_end]`:
+/// any frequency (daily, weekly, fortnightly, monthly, yearly…) with its
+/// INTERVAL, BYDAY, BYMONTHDAY, BYSETPOS, COUNT and UNTIL (RFC 5545, via the
+/// `rrule` crate), plus RDATE, less EXDATE and replaced occurrences. Worked
+/// out in the zone the event was written in.
 fn expand_rrule(
-    dtstart: DateTime<Utc>,
+    start: When,
     rrule: &str,
-    now: &DateTime<Utc>,
-    window_end: &DateTime<Utc>,
+    extra: &[DateTime<Utc>],
+    skip: &[DateTime<Utc>],
+    from: DateTime<Utc>,
+    window_end: DateTime<Utc>,
     summary: &str,
 ) -> Vec<DateTime<Utc>> {
-    let mut out = Vec::new();
+    let tz = rrule::Tz::Tz(start.tz);
+    let dt_start = start.at.with_timezone(&tz);
 
-    // Parse RRULE key=value pairs.
-    let is_yearly = rrule
+    // UNTIL is taken out and set as an instant: a date-only UNTIL runs to the
+    // end of that day, and the crate wants it in UTC when the start has a zone.
+    let mut until = None;
+    let rest: Vec<&str> = rrule
         .split(';')
-        .any(|p| p.trim().eq_ignore_ascii_case("FREQ=YEARLY"));
+        .filter(|part| {
+            let Some((k, v)) = part.split_once('=') else {
+                return true;
+            };
+            if !k.trim().eq_ignore_ascii_case("UNTIL") {
+                return true;
+            }
+            until = parse_until(v.trim(), start);
+            false
+        })
+        .collect();
 
-    if !is_yearly {
-        debug!(
-            summary,
-            rrule, "Non-YEARLY RRULE not fully expanded; including base occurrence only"
-        );
-        if dtstart >= *now && dtstart <= *window_end {
-            out.push(dtstart);
+    let parsed = rest.join(";").parse::<rrule::RRule<rrule::Unvalidated>>();
+    let rule = match parsed {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(summary, rrule, error = %e, "Could not read a recurrence rule; using its first occurrence only");
+            return [start.at]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .filter(|t| *t > from && *t <= window_end)
+                .collect();
         }
-        return out;
-    }
-
-    // Parse optional UNTIL= and COUNT= limits.
-    let until: Option<DateTime<Utc>> = rrule
-        .split(';')
-        .find(|p| p.to_ascii_uppercase().starts_with("UNTIL="))
-        .and_then(|p| p.split_once('=').map(|x| x.1))
-        .and_then(parse_ical_dt);
-
-    let count_limit: Option<u32> = rrule
-        .split(';')
-        .find(|p| p.to_ascii_uppercase().starts_with("COUNT="))
-        .and_then(|p| p.split_once('=').map(|x| x.1))
-        .and_then(|s| s.parse().ok());
-
-    let effective_end = match until {
-        Some(u) => u.min(*window_end),
-        None => *window_end,
     };
-
-    let base = dtstart.date_naive();
-    let time = dtstart.time();
-    let mut year = base.year();
-    let mut fired: u32 = 0;
-    // Safety cap: never generate more than 20 occurrences or go more than
-    // 20 years beyond the base year (handles pathological inputs).
-    let year_cap = base.year() + 20;
-
-    loop {
-        if year > year_cap {
-            break;
+    let rule = match until {
+        // An UNTIL before the start leaves no occurrences but the start.
+        Some(u) if u < start.at => rule.count(1),
+        Some(u) => rule.until(u.with_timezone(&rrule::Tz::UTC)),
+        None => rule,
+    };
+    let mut set = match rule.build(dt_start) {
+        Ok(set) => set,
+        Err(e) => {
+            warn!(summary, rrule, error = %e, "Recurrence rule refused; using its first occurrence only");
+            return [start.at]
+                .into_iter()
+                .filter(|t| *t > from && *t <= window_end)
+                .collect();
         }
-
-        let candidate_date = match base.with_year(year) {
-            Some(d) => d,
-            None => {
-                // Feb 29 in a non-leap year — skip.
-                year += 1;
-                continue;
-            }
-        };
-
-        let candidate = NaiveDateTime::new(candidate_date, time).and_utc();
-
-        if candidate > effective_end {
-            break;
-        }
-        if let Some(max) = count_limit {
-            if fired >= max {
-                break;
-            }
-        }
-
-        if candidate >= *now {
-            out.push(candidate);
-        }
-
-        fired += 1;
-        year += 1;
+    };
+    for t in extra {
+        set = set.rdate(t.with_timezone(&tz));
     }
+    for t in skip {
+        set = set.exdate(t.with_timezone(&tz));
+    }
+    let result = set
+        .after(from.with_timezone(&tz))
+        .before(window_end.with_timezone(&tz))
+        .all(MAX_OCCURRENCES);
+    if result.limited {
+        warn!(
+            summary,
+            rrule, "Recurrence produced too many occurrences; keeping the first {MAX_OCCURRENCES}"
+        );
+    }
+    result
+        .dates
+        .into_iter()
+        .map(|d| d.with_timezone(&Utc))
+        .filter(|t| *t > from && *t <= window_end)
+        .collect()
+}
 
-    out
+/// An RRULE's UNTIL as an instant. A date means the whole of that day.
+fn parse_until(v: &str, start: When) -> Option<DateTime<Utc>> {
+    if v.len() == 8 {
+        let d = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
+        return local_instant(start.tz, d.and_hms_opt(23, 59, 59)?);
+    }
+    if let Some(utc) = v.strip_suffix('Z') {
+        return NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S")
+            .ok()
+            .map(|n| n.and_utc());
+    }
+    NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%S")
+        .ok()
+        .and_then(|n| local_instant(start.tz, n))
 }
 
 /// Parse an RFC 5545 DURATION value (e.g. `PT1H30M`, `P1D`, `P1DT2H`).
@@ -441,25 +548,6 @@ fn parse_ics_duration(s: &str) -> Option<chrono::Duration> {
             + chrono::Duration::minutes(minutes)
             + chrono::Duration::seconds(seconds),
     )
-}
-
-/// Parse an iCal date/datetime string to `DateTime<Utc>`.
-///
-/// Accepted formats: `YYYYMMDD`, `YYYYMMDDTHHmmSS`, `YYYYMMDDTHHmmSSZ`.
-fn parse_ical_dt(s: &str) -> Option<DateTime<Utc>> {
-    let s = s.trim_end_matches('Z');
-    if s.len() == 8 {
-        NaiveDate::parse_from_str(s, "%Y%m%d")
-            .ok()
-            .and_then(|d| d.and_hms_opt(0, 0, 0))
-            .map(|dt| dt.and_utc())
-    } else if s.len() == 15 {
-        NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S")
-            .ok()
-            .map(|dt| dt.and_utc())
-    } else {
-        None
-    }
 }
 
 // ── URL fetch ─────────────────────────────────────────────────────────────────
@@ -712,5 +800,150 @@ mod watch_tests {
         assert!(changes_content(&EventKind::Access(AccessKind::Close(
             AccessMode::Write
         ))));
+    }
+}
+
+#[cfg(test)]
+mod recurrence_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    const NY: chrono_tz::Tz = chrono_tz::America::New_York;
+
+    /// "Now" is Saturday 17 October 2026, 10:00 in New York.
+    fn now() -> DateTime<Utc> {
+        NY.with_ymd_and_hms(2026, 10, 17, 10, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn events(vevents: &str) -> Vec<CalEvent> {
+        let ics = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{vevents}END:VCALENDAR\r\n");
+        parse_ics_at("t", Path::new("t.ics"), &ics, 400, now(), NY)
+            .unwrap()
+            .events
+    }
+
+    /// Starts as New York wall-clock strings, for reading the assertions.
+    fn local(evs: &[CalEvent], n: usize) -> Vec<String> {
+        evs.iter()
+            .take(n)
+            .map(|e| {
+                e.start
+                    .with_timezone(&NY)
+                    .format("%a %d %b %H:%M")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_weekly_bin_day_comes_round_every_week_as_a_day() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:bins\r\nSUMMARY:Bins\r\nDTSTART;VALUE=DATE:20261020\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(
+            local(&e, 3),
+            ["Tue 20 Oct 00:00", "Tue 27 Oct 00:00", "Tue 03 Nov 00:00"]
+        );
+        assert!(e.iter().all(|x| x.is_all_day));
+        assert!(e.len() >= 57, "about a year of weeks, got {}", e.len());
+        assert_eq!(e[0].end - e[0].start, chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn daily_with_a_count_and_every_other_week_on_a_day() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:d\r\nSUMMARY:Pills\r\nDTSTART;TZID=America/New_York:20261018T080000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(
+            local(&e, 9),
+            ["Sun 18 Oct 08:00", "Mon 19 Oct 08:00", "Tue 20 Oct 08:00"]
+        );
+
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:r\r\nSUMMARY:Recycling\r\nDTSTART;VALUE=DATE:20261013\r\nRRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(
+            local(&e, 3),
+            ["Tue 27 Oct 00:00", "Tue 10 Nov 00:00", "Tue 24 Nov 00:00"]
+        );
+    }
+
+    #[test]
+    fn the_second_tuesday_of_each_month() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:m\r\nSUMMARY:Council\r\nDTSTART;TZID=America/New_York:20260908T190000\r\nRRULE:FREQ=MONTHLY;BYDAY=2TU\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(
+            local(&e, 3),
+            ["Tue 10 Nov 19:00", "Tue 08 Dec 19:00", "Tue 12 Jan 19:00"]
+        );
+    }
+
+    #[test]
+    fn seven_oclock_stays_seven_oclock_across_the_change_of_clocks() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:w\r\nSUMMARY:Gym\r\nDTSTART;TZID=America/New_York:20261026T070000\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\n",
+        );
+        // US clocks go back on 1 November 2026.
+        assert_eq!(local(&e, 2), ["Mon 26 Oct 07:00", "Mon 02 Nov 07:00"]);
+        assert_eq!(e[0].start.format("%H:%M").to_string(), "11:00");
+        assert_eq!(e[1].start.format("%H:%M").to_string(), "12:00");
+    }
+
+    #[test]
+    fn excluded_moved_and_cancelled_occurrences() {
+        let e = events(concat!(
+            "BEGIN:VEVENT\r\nUID:s\r\nSUMMARY:Lesson\r\nDTSTART;TZID=America/New_York:20261019T160000\r\n",
+            "RRULE:FREQ=WEEKLY;COUNT=4\r\nEXDATE;TZID=America/New_York:20261026T160000\r\nEND:VEVENT\r\n",
+            // The 2 November lesson moved to the Wednesday.
+            "BEGIN:VEVENT\r\nUID:s\r\nSUMMARY:Lesson (moved)\r\nRECURRENCE-ID;TZID=America/New_York:20261102T160000\r\n",
+            "DTSTART;TZID=America/New_York:20261104T170000\r\nEND:VEVENT\r\n",
+            // The 9 November lesson cancelled.
+            "BEGIN:VEVENT\r\nUID:s\r\nSUMMARY:Lesson\r\nSTATUS:CANCELLED\r\nRECURRENCE-ID;TZID=America/New_York:20261109T160000\r\n",
+            "DTSTART;TZID=America/New_York:20261109T160000\r\nEND:VEVENT\r\n",
+        ));
+        assert_eq!(local(&e, 9), ["Mon 19 Oct 16:00", "Wed 04 Nov 17:00"]);
+        assert_eq!(e[1].summary, "Lesson (moved)");
+    }
+
+    #[test]
+    fn an_event_under_way_is_kept_and_a_finished_one_is_not() {
+        // Today's all-day event started at midnight; it's 10:00 now.
+        let e = events(concat!(
+            "BEGIN:VEVENT\r\nUID:a\r\nSUMMARY:Holiday\r\nDTSTART;VALUE=DATE:20261017\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT\r\nUID:b\r\nSUMMARY:Breakfast\r\nDTSTART:20261017T110000Z\r\nDTEND:20261017T120000Z\r\nEND:VEVENT\r\n",
+        ));
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0].summary, "Holiday");
+        assert!(e[0].start <= now() && now() < e[0].end);
+    }
+
+    #[test]
+    fn a_date_only_until_includes_that_day() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Term\r\nDTSTART;VALUE=DATE:20261019\r\nRRULE:FREQ=DAILY;UNTIL=20261021\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(
+            local(&e, 9),
+            ["Mon 19 Oct 00:00", "Tue 20 Oct 00:00", "Wed 21 Oct 00:00"]
+        );
+    }
+
+    #[test]
+    fn yearly_holidays_still_come_round() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:x\r\nSUMMARY:Christmas\r\nDTSTART;VALUE=DATE:20001225\r\nRRULE:FREQ=YEARLY\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(local(&e, 9), ["Fri 25 Dec 00:00"]);
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_read_keeps_its_first_occurrence() {
+        let e = events(
+            "BEGIN:VEVENT\r\nUID:z\r\nSUMMARY:Odd\r\nDTSTART:20261020T120000Z\r\nRRULE:FREQ=SOMETIMES\r\nEND:VEVENT\r\n",
+        );
+        assert_eq!(e.len(), 1);
     }
 }

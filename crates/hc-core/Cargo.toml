@@ -27,6 +27,7 @@ ron          = { workspace = true }
 serde        = { workspace = true }
 cron         = { workspace = true }
 icalendar    = { workspace = true }
+rrule        = { workspace = true }
 
 [dev-dependencies]
 mockito = "1"

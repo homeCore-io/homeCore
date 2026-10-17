@@ -1626,6 +1626,7 @@ dependencies = [
  "notify",
  "reqwest",
  "ron 0.12.2",
+ "rrule",
  "serde",
  "serde_json",
  "tempfile",
@@ -2070,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.78"
+version = "0.1.79"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3921,6 +3922,20 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rrule"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cff1ca93145ff07cdc878b5f6bb90391a299cc8712538af0ad73ebf37613e46a"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "lazy_static",
+ "log",
+ "regex",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
