@@ -113,6 +113,13 @@ pub async fn create_api_key(
         }
     }
 
+    if let Some(bad) = unreadable_cidr(&body.allowed_cidrs) {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("`{bad}` is not an address or a network (like 10.0.10.0/24)"),
+        );
+    }
+
     // Generate token with prefix-collision retry.
     let mut attempt = 0u32;
     let (new_key, record) = loop {
@@ -147,7 +154,7 @@ pub async fn create_api_key(
                 expires_at: body
                     .expires_in_days
                     .map(|d| Utc::now() + Duration::days(d as i64)),
-                allowed_cidrs: body.allowed_cidrs.clone(),
+                allowed_cidrs: tidy_cidrs(&body.allowed_cidrs),
                 revoked_at: None,
                 display: false,
             };
@@ -311,7 +318,13 @@ pub async fn update_api_key(
         rec.expires_at = Some(Utc::now() + Duration::days(days as i64));
     }
     if let Some(cidrs) = body.allowed_cidrs {
-        rec.allowed_cidrs = cidrs;
+        if let Some(bad) = unreadable_cidr(&cidrs) {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("`{bad}` is not an address or a network (like 10.0.10.0/24)"),
+            );
+        }
+        rec.allowed_cidrs = tidy_cidrs(&cidrs);
     }
 
     match s.store.update_api_key(&rec).await {
@@ -410,4 +423,24 @@ pub async fn rotate_api_key(
         expires_at: rotated.expires_at,
     };
     (StatusCode::OK, Json(resp)).into_response()
+}
+
+/// The first address limit that reads as neither an address nor a network.
+/// Refused at the door: the check fails closed on one, which would make the
+/// key unusable without saying why.
+fn unreadable_cidr(cidrs: &[String]) -> Option<&str> {
+    cidrs
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .find(|c| crate::auth_middleware::parse_cidr(c).is_none())
+}
+
+/// Address limits trimmed, blanks dropped.
+fn tidy_cidrs(cidrs: &[String]) -> Vec<String> {
+    cidrs
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
 }

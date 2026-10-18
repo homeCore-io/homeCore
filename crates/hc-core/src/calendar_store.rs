@@ -70,6 +70,8 @@ pub struct CalendarEntry {
     /// Where the file was fetched from, if fetched via the API.
     pub source_url: Option<String>,
     pub fetched_at: Option<DateTime<Utc>>,
+    /// How often a fetched calendar is fetched again, if it is.
+    pub refresh_hours: Option<u64>,
     /// All events within the expansion window, sorted by start time.
     pub events: Vec<CalEvent>,
     pub loaded_at: DateTime<Utc>,
@@ -142,6 +144,7 @@ pub fn load_dir(dir: &Path, expansion_days: u32) -> Result<Vec<CalendarEntry>> {
             Ok(mut entry) => {
                 entry.source_url = meta.source_url;
                 entry.fetched_at = meta.fetched_at;
+                entry.refresh_hours = meta.refresh_hours;
                 info!(
                     id       = %id,
                     events   = entry.events.len(),
@@ -389,6 +392,7 @@ fn parse_ics_at(
         path: path.to_path_buf(),
         source_url: None,
         fetched_at: None,
+        refresh_hours: None,
         events,
         loaded_at: now,
     })
@@ -640,6 +644,10 @@ pub async fn fetch_and_save(
     let mut entry = parse_ics(&cal_name, &ics_path, &content, expansion_days)?;
     entry.source_url = meta.source_url;
     entry.fetched_at = meta.fetched_at;
+    // The live entry must say what the sidecar says: a client that reads the
+    // list and fetches again with what it read would otherwise send `null`
+    // back and stop the refresh it was only asking to run now.
+    entry.refresh_hours = meta.refresh_hours;
     Ok(entry)
 }
 
@@ -945,5 +953,30 @@ mod recurrence_tests {
             "BEGIN:VEVENT\r\nUID:z\r\nSUMMARY:Odd\r\nDTSTART:20261020T120000Z\r\nRRULE:FREQ=SOMETIMES\r\nEND:VEVENT\r\n",
         );
         assert_eq!(e.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::load_dir;
+
+    #[test]
+    fn a_loaded_calendar_says_how_often_it_is_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:a\nDTSTART:20991019T080000Z\nDTEND:20991019T090000Z\nSUMMARY:x\nEND:VEVENT\nEND:VCALENDAR\n";
+        std::fs::write(dir.path().join("school.ics"), ics).unwrap();
+        std::fs::write(
+            dir.path().join("school.meta.json"),
+            r#"{"source_url":"http://x/school.ics","fetched_at":null,"refresh_hours":6}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bins.ics"), ics).unwrap();
+
+        let all = load_dir(dir.path(), 30).unwrap();
+        let school = all.iter().find(|c| c.id == "school").unwrap();
+        assert_eq!(school.refresh_hours, Some(6));
+        assert_eq!(school.source_url.as_deref(), Some("http://x/school.ics"));
+        let bins = all.iter().find(|c| c.id == "bins").unwrap();
+        assert_eq!(bins.refresh_hours, None);
     }
 }

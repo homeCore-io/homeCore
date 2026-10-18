@@ -89,7 +89,7 @@ pub async fn log_stream_handler(
         // against the api_keys store, anything else as a JWT. A key that
         // opened the event stream and not this one would be a credential with
         // an undocumented hole in it.
-        match crate::auth_middleware::validate_query_token(&state, token).await {
+        match crate::auth_middleware::validate_query_token(&state, token, ip).await {
             Ok(claims) => claims.sub,
             Err(resp) => return resp,
         }

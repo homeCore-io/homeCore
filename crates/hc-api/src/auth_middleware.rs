@@ -97,11 +97,16 @@ pub async fn require_auth(
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(|t| t.to_string());
 
+    let remote_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| canonical_ip(ci.0.ip()));
+
     if let Some(token) = bearer_token {
         // API key path — `hc_sk_...` tokens are validated against the
         // api_keys table, not the JWT signing secret.
         if let Some(body) = token.strip_prefix(API_KEY_PREFIX) {
-            match verify_api_key(&state, &token, body).await {
+            match verify_api_key(&state, &token, body, remote_ip).await {
                 Ok(claims) => {
                     request.extensions_mut().insert(claims);
                     return next.run(request).await;
@@ -141,19 +146,6 @@ pub async fn require_auth(
     // Kept functional for one release so operators can migrate; emits a
     // warn-level log on every bypass.
     if !state.whitelist.is_empty() {
-        // Canonicalize IPv4-mapped IPv6 (::ffff:x.x.x.x → x.x.x.x) so that
-        // clients connecting to a dual-stack 0.0.0.0 listener match IPv4 entries.
-        let remote_ip = request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ci| match ci.0.ip() {
-                IpAddr::V6(v6) => v6
-                    .to_ipv4_mapped()
-                    .map(IpAddr::V4)
-                    .unwrap_or(IpAddr::V6(v6)),
-                v4 => v4,
-            });
-
         if let Some(ip) = remote_ip {
             if state.whitelist.iter().any(|net| net.contains(&ip)) {
                 tracing::warn!(
@@ -191,6 +183,7 @@ pub async fn require_auth(
 pub(crate) async fn validate_query_token(
     state: &AppState,
     token: &str,
+    remote_ip: IpAddr,
 ) -> Result<Claims, Response> {
     if token.is_empty() {
         return Err((
@@ -201,7 +194,7 @@ pub(crate) async fn validate_query_token(
     }
 
     if let Some(body) = token.strip_prefix(API_KEY_PREFIX) {
-        return match verify_api_key(state, token, body).await {
+        return match verify_api_key(state, token, body, Some(canonical_ip(remote_ip))).await {
             Ok(claims) => Ok(claims),
             Err(resp) => Err(resp),
         };
@@ -228,6 +221,7 @@ async fn verify_api_key(
     state: &AppState,
     full_token: &str,
     body: &str,
+    remote_ip: Option<IpAddr>,
 ) -> Result<Claims, Response> {
     let Some(prefix) = api_key::lookup_prefix_from_body(body) else {
         return Err((
@@ -267,6 +261,7 @@ async fn verify_api_key(
 
     // Hash verification is CPU-bound — run on a blocking thread.
     let stored_hash = record.hash.clone();
+    let cidrs = record.allowed_cidrs.clone();
     let token_owned = full_token.to_string();
     let ok = tokio::task::spawn_blocking(move || api_key::verify_token(&token_owned, &stored_hash))
         .await
@@ -275,6 +270,17 @@ async fn verify_api_key(
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid API key" })),
+        )
+            .into_response());
+    }
+
+    // Checked after the secret, so a wrong address says nothing about whether
+    // a guessed key exists.
+    if !address_allowed(&cidrs, remote_ip) {
+        tracing::warn!(key = %record.label, ip = ?remote_ip, "API key used from an address it may not use");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "this API key may not be used from this address" })),
         )
             .into_response());
     }
@@ -933,5 +939,87 @@ mod tests {
 
     async fn write_handler(_: DevicesWrite) -> impl IntoResponse {
         StatusCode::OK
+    }
+}
+
+/// IPv4-mapped IPv6 (`::ffff:10.0.0.5`) as the IPv4 address it is, so a
+/// dual-stack listener matches IPv4 entries.
+pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
+}
+
+/// Whether a key limited to `cidrs` may be used from `ip`.
+///
+/// No limit, any address. A limit fails closed: no address to judge, or no
+/// entry that reads as an address or a network, and the key is refused — a
+/// limit that cannot be read must not become no limit. A bare address is that
+/// one address. The address is the connection's own; through a proxy, such as
+/// the UI server, that is the proxy's.
+pub(crate) fn address_allowed(cidrs: &[String], ip: Option<IpAddr>) -> bool {
+    if cidrs.is_empty() {
+        return true;
+    }
+    let Some(ip) = ip.map(canonical_ip) else {
+        return false;
+    };
+    cidrs.iter().any(|c| match parse_cidr(c) {
+        Some(net) => net.contains(&ip),
+        None => false,
+    })
+}
+
+/// A network (`10.0.10.0/24`) or one address (`10.0.10.5`), or `None`.
+pub(crate) fn parse_cidr(s: &str) -> Option<ipnet::IpNet> {
+    let s = s.trim();
+    s.parse::<ipnet::IpNet>()
+        .ok()
+        .or_else(|| s.parse::<IpAddr>().ok().map(ipnet::IpNet::from))
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::{address_allowed, parse_cidr};
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> Option<IpAddr> {
+        Some(s.parse().unwrap())
+    }
+    fn cidrs(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn no_limit_is_anywhere() {
+        assert!(address_allowed(&[], ip("8.8.8.8")));
+        assert!(address_allowed(&[], None));
+    }
+
+    #[test]
+    fn a_network_or_one_address() {
+        let l = cidrs(&["10.0.10.0/24", "192.168.1.7"]);
+        assert!(address_allowed(&l, ip("10.0.10.150")));
+        assert!(address_allowed(&l, ip("192.168.1.7")));
+        assert!(!address_allowed(&l, ip("192.168.1.8")));
+        assert!(!address_allowed(&l, ip("10.0.11.1")));
+        // A dual-stack listener reports IPv4 callers as mapped IPv6.
+        assert!(address_allowed(&l, ip("::ffff:10.0.10.9")));
+    }
+
+    #[test]
+    fn a_limit_fails_closed() {
+        assert!(!address_allowed(&cidrs(&["10.0.10.0/24"]), None));
+        assert!(!address_allowed(
+            &cidrs(&["not an address"]),
+            ip("10.0.10.1")
+        ));
+        assert!(parse_cidr("fd00::/8").is_some());
+        assert!(parse_cidr(" 10.0.0.1 ").is_some());
+        assert!(parse_cidr("10.0.0.0/33").is_none());
     }
 }

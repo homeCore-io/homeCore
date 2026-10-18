@@ -3376,7 +3376,12 @@ paths:
                   type: array
                   items:
                     type: string
-                  description: CIDR ranges the key may be used from; empty (default) means no IP restriction
+                  description: |
+                    Networks (`10.0.10.0/24`) or single addresses the key may be
+                    used from; empty (default) means anywhere. Checked on every
+                    use since 0.1.80 — from anywhere else the key gets 403. The
+                    address is the connection's own: through a proxy, the
+                    proxy's. An entry that is neither is refused with 422.
                 owner_uid:
                   type: [string, "null"]
                   format: uuid
@@ -3529,6 +3534,7 @@ paths:
                   type: array
                   items:
                     type: string
+                  description: Replaces the key's address limit; `[]` lifts it. Same rules as on create.
       responses:
         "200":
           description: Updated API-key summary (no secret material)
@@ -5933,6 +5939,12 @@ paths:
                       type: string
                       format: date-time
                       nullable: true
+                    refresh_hours:
+                      type: integer
+                      nullable: true
+                      description: |
+                        How often a fetched calendar is fetched again, in hours; null
+                        when it isn't (uploaded, or fetched once). Added in 0.1.80.
                     loaded_at:
                       type: string
                       format: date-time

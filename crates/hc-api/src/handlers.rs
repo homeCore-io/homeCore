@@ -6386,7 +6386,7 @@ pub async fn get_plugin_stream_sse(
             // key in its header fallback and not in its query parameter, which
             // is the kind of difference nobody documents and everybody trips
             // over.
-            match crate::auth_middleware::validate_query_token(&s, token).await {
+            match crate::auth_middleware::validate_query_token(&s, token, remote_ip).await {
                 Ok(c) => c,
                 Err(resp) => return resp,
             }
@@ -8451,6 +8451,7 @@ pub async fn list_calendars(State(s): State<AppState>, _: AutomationsRead) -> im
                 "upcoming_count": c.upcoming_count(),
                 "source_url":    c.source_url,
                 "fetched_at":    c.fetched_at,
+                "refresh_hours": c.refresh_hours,
                 "loaded_at":     c.loaded_at,
             })
         })

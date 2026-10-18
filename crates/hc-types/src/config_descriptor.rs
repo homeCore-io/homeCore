@@ -442,6 +442,15 @@ impl Field {
         f.item = Some(Item::Scalar(item_kind.into()));
         f
     }
+    /// A name → value table (`[logging.targets]`: `hc_core = "debug"`). The
+    /// values are scalars of [`item`](Self::item)'s kind; give them choices
+    /// with [`option`](Self::option). Written as a patch on the table, with
+    /// `null` removing a name.
+    pub fn map(key: impl Into<String>, value_kind: impl Into<String>) -> Self {
+        let mut f = Self::keyed("map", key);
+        f.item = Some(Item::Scalar(value_kind.into()));
+        f
+    }
     /// An array of objects, rendered as rows/cards. Give it columns with
     /// [`columns`](Self::columns) and, to bind live rows, a [`Source`].
     pub fn table(key: impl Into<String>) -> Self {
@@ -712,6 +721,11 @@ pub fn missing_schema_coverage(
                     };
                     flatten(child, defs, &path, out);
                 }
+            } else if !prefix.is_empty() {
+                // A name → value table (`HashMap`): no properties to descend
+                // into, so it is one setting. Skipping it hid
+                // `logging.targets` from this check for as long as it existed.
+                out.push(prefix.to_string());
             }
             return;
         }
