@@ -111,7 +111,7 @@ pub async fn require_auth(
                     request.extensions_mut().insert(claims);
                     return next.run(request).await;
                 }
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             }
         }
 
@@ -121,7 +121,7 @@ pub async fn require_auth(
                 // invalidated server-side by a password change. See
                 // `token_version_current`.
                 if let Err(resp) = token_version_current(&state, &claims).await {
-                    return resp;
+                    return *resp;
                 }
                 request.extensions_mut().insert(claims);
                 return next.run(request).await;
@@ -184,13 +184,14 @@ pub(crate) async fn validate_query_token(
     state: &AppState,
     token: &str,
     remote_ip: IpAddr,
-) -> Result<Claims, Response> {
+) -> Result<Claims, Box<Response>> {
     if token.is_empty() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "missing token query parameter" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
 
     if let Some(body) = token.strip_prefix(API_KEY_PREFIX) {
@@ -210,7 +211,7 @@ pub(crate) async fn validate_query_token(
             token_version_current(state, &claims).await?;
             Ok(claims)
         }
-        Err(boxed) => Err(*boxed),
+        Err(boxed) => Err(boxed),
     }
 }
 
@@ -222,13 +223,14 @@ async fn verify_api_key(
     full_token: &str,
     body: &str,
     remote_ip: Option<IpAddr>,
-) -> Result<Claims, Response> {
+) -> Result<Claims, Box<Response>> {
     let Some(prefix) = api_key::lookup_prefix_from_body(body) else {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "malformed API key" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     };
 
     let record = match state.store.get_api_key_by_prefix(prefix).await {
@@ -238,7 +240,8 @@ async fn verify_api_key(
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid API key" })),
             )
-                .into_response());
+                .into_response()
+                .into());
         }
         Err(e) => {
             tracing::warn!(error = %e, "api_key store lookup failed");
@@ -246,7 +249,8 @@ async fn verify_api_key(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "auth store unavailable" })),
             )
-                .into_response());
+                .into_response()
+                .into());
         }
     };
 
@@ -256,7 +260,8 @@ async fn verify_api_key(
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "API key revoked or expired" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
 
     // Hash verification is CPU-bound — run on a blocking thread.
@@ -271,7 +276,8 @@ async fn verify_api_key(
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid API key" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
 
     // Checked after the secret, so a wrong address says nothing about whether
@@ -282,7 +288,8 @@ async fn verify_api_key(
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "this API key may not be used from this address" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
 
     // Fire-and-forget: update last_used_at without blocking the request.
@@ -341,7 +348,7 @@ async fn verify_api_key(
 pub(crate) async fn token_version_current(
     state: &AppState,
     claims: &Claims,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     // Synthetic principals carry no password and no user record.
     if !claims.actor().is_user() {
         return Ok(());
@@ -357,7 +364,7 @@ pub(crate) async fn token_version_current(
 
     let Ok(uid) = uuid::Uuid::parse_str(&claims.uid) else {
         tracing::warn!(uid = %claims.uid, "user token carries an unparseable uid");
-        return Err(deny());
+        return Err(deny().into());
     };
 
     match state.store.get_user_by_id(uid).await {
@@ -369,15 +376,15 @@ pub(crate) async fn token_version_current(
                 current_tv = user.token_version,
                 "rejected a token predating a password change"
             );
-            Err(deny())
+            Err(deny().into())
         }
         Ok(None) => {
             tracing::debug!(%uid, "rejected a token for a user that no longer exists");
-            Err(deny())
+            Err(deny().into())
         }
         Err(e) => {
             tracing::error!(%uid, error = %e, "user lookup failed during token validation");
-            Err(deny())
+            Err(deny().into())
         }
     }
 }

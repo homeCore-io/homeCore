@@ -75,6 +75,198 @@ pub struct BackupPaths {
     pub plugin_configs: Vec<PluginConfigEntry>,
     /// Where the calendars live, if anywhere.
     pub calendars_dir: Option<PathBuf>,
+    /// Backups homeCore makes by itself (`[backup]`), and where it keeps them.
+    pub kept: Option<KeptBackups>,
+}
+
+/// `[backup]`, resolved: how often, how many, and the folder.
+#[derive(Clone)]
+pub struct KeptBackups {
+    pub dir: PathBuf,
+    /// 0 makes none on a schedule.
+    pub every_hours: u32,
+    pub keep: u32,
+}
+
+const KEPT_PREFIX: &str = "homecore-backup-";
+
+fn kept_name_ok(name: &str) -> bool {
+    name.starts_with(KEPT_PREFIX)
+        && name.ends_with(".zip")
+        && !name.contains(['/', '\\'])
+        && !name.contains("..")
+}
+
+/// The kept backups, newest first: (name, bytes, modified).
+fn kept_list(dir: &Path) -> Vec<(String, u64, chrono::DateTime<Utc>)> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !kept_name_ok(&name) {
+                return None;
+            }
+            let md = e.metadata().ok()?;
+            let at = md.modified().ok().map(chrono::DateTime::<Utc>::from)?;
+            Some((name, md.len(), at))
+        })
+        .collect();
+    // The name carries the time, so it sorts as well as the clock does.
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out
+}
+
+/// Make one backup into the folder and drop the oldest past `keep`.
+fn make_kept(paths: &BackupPaths, kept: &KeptBackups) -> anyhow::Result<(String, usize)> {
+    std::fs::create_dir_all(&kept.dir)?;
+    let bytes = build_zip(paths)?;
+    let name = format!("{KEPT_PREFIX}{}.zip", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let tmp = kept.dir.join(format!(".{name}.part"));
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, kept.dir.join(&name))?;
+    for (old, _, _) in kept_list(&kept.dir)
+        .into_iter()
+        .skip(kept.keep.max(1) as usize)
+    {
+        if let Err(e) = std::fs::remove_file(kept.dir.join(&old)) {
+            warn!(file = %old, error = %e, "Could not remove an old backup");
+        }
+    }
+    Ok((name, bytes.len()))
+}
+
+/// Make backups on the `[backup]` schedule, for as long as homeCore runs.
+/// The first comes one interval after the newest one already kept, so a
+/// restart doesn't make an extra.
+pub fn spawn_schedule(state: AppState) {
+    let Some(paths) = state.backup_paths.clone() else {
+        return;
+    };
+    let Some(kept) = paths.kept.clone().filter(|k| k.every_hours > 0) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let every = chrono::Duration::hours(i64::from(kept.every_hours));
+        loop {
+            let newest = {
+                let dir = kept.dir.clone();
+                tokio::task::spawn_blocking(move || kept_list(&dir).first().map(|k| k.2))
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let wait = newest
+                .map(|at| (at + every - Utc::now()).to_std().unwrap_or_default())
+                .unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            let (p, k) = (paths.clone(), kept.clone());
+            match tokio::task::spawn_blocking(move || make_kept(&p, &k)).await {
+                Ok(Ok((name, bytes))) => {
+                    info!(file = %name, bytes, "Scheduled backup made");
+                    let mut e = hc_state::AuditEntry::success(
+                        hc_state::AuditActorType::System,
+                        None,
+                        "system",
+                        "system.backup_created",
+                    )
+                    .with_target("system", "backup");
+                    e.detail = json!({ "filename": name, "bytes": bytes, "scheduled": true });
+                    audit::emit(&state, e).await;
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Scheduled backup failed; trying again in an hour");
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+                Err(e) => {
+                    warn!(error = %e, "Scheduled backup task panicked");
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            }
+        }
+    });
+}
+
+/// `GET /system/backups` — the schedule and the backups kept on the house.
+pub async fn list_kept_handler(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> Response {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    let Some(kept) = state.backup_paths.as_ref().and_then(|p| p.kept.clone()) else {
+        return Json(json!({ "every_hours": 0, "keep": 0, "dir": null, "backups": [] }))
+            .into_response();
+    };
+    let dir = kept.dir.clone();
+    let list = tokio::task::spawn_blocking(move || kept_list(&dir))
+        .await
+        .unwrap_or_default();
+    Json(json!({
+        "every_hours": kept.every_hours,
+        "keep": kept.keep,
+        "dir": kept.dir.display().to_string(),
+        "backups": list
+            .into_iter()
+            .map(|(name, bytes, at)| json!({ "name": name, "bytes": bytes, "created_at": at }))
+            .collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// `GET /system/backups/{name}` — one kept backup, as a download.
+pub async fn download_kept_handler(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    let Some(kept) = state.backup_paths.as_ref().and_then(|p| p.kept.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such backup" })),
+        )
+            .into_response();
+    };
+    if !kept_name_ok(&name) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such backup" })),
+        )
+            .into_response();
+    }
+    match tokio::fs::read(kept.dir.join(&name)).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/zip".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such backup" })),
+        )
+            .into_response(),
+    }
 }
 
 impl BackupPaths {
@@ -592,7 +784,34 @@ mod tests {
             rules_dir,
             plugin_configs,
             calendars_dir: Some(dir.join("config/calendars")),
+            kept: None,
         }
+    }
+
+    #[test]
+    fn kept_backups_are_pruned_to_keep_and_only_ours_are_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = make_paths(tmp.path(), Vec::new());
+        let dir = tmp.path().join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        for n in ["20200101T000000Z", "20200102T000000Z", "20200103T000000Z"] {
+            fs::write(dir.join(format!("homecore-backup-{n}.zip")), b"old").unwrap();
+        }
+        fs::write(dir.join("notes.txt"), b"mine").unwrap();
+        let kept = KeptBackups {
+            dir: dir.clone(),
+            every_hours: 24,
+            keep: 2,
+        };
+        let (name, _) = make_kept(&paths, &kept).unwrap();
+        let left: Vec<String> = kept_list(&dir).into_iter().map(|k| k.0).collect();
+        assert_eq!(
+            left,
+            vec![name, "homecore-backup-20200103T000000Z.zip".to_string()]
+        );
+        assert!(dir.join("notes.txt").exists());
+        assert!(!kept_name_ok("homecore-backup-../../etc.zip"));
+        assert!(!kept_name_ok("state.redb"));
     }
 
     fn write_plugin_config(dir: &Path, id: &str, contents: &str) -> PluginConfigEntry {

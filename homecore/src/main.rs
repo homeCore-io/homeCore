@@ -402,6 +402,7 @@ async fn main() -> Result<()> {
                 })
                 .collect(),
             calendars_dir: Some(PathBuf::from(&config.calendars.dir)),
+            kept: None,
         };
         match hc_api::backup::apply_pending(&paths) {
             None => None,
@@ -1169,6 +1170,18 @@ async fn main() -> Result<()> {
         rules_dir: rules_dir.clone(),
         plugin_configs,
         calendars_dir: Some(calendar_dir.clone()),
+        kept: Some(hc_api::backup::KeptBackups {
+            dir: {
+                let d = std::path::PathBuf::from(&config.backup.dir);
+                if d.is_absolute() {
+                    d
+                } else {
+                    base_dir.join(d)
+                }
+            },
+            every_hours: config.backup.every_hours,
+            keep: config.backup.keep,
+        }),
     };
     let publish_handle_rpc = publish_handle.clone();
     let pub_bus_rpc = pub_bus.clone();
@@ -1263,6 +1276,8 @@ async fn main() -> Result<()> {
         }
         _ => app_state,
     };
+
+    hc_api::backup::spawn_schedule(app_state.clone());
 
     // Reconcile plugin status: plugins that registered before the AppState
     // subscriber was active will still show "starting".  Check device store

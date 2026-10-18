@@ -3,7 +3,7 @@ name: Canary (latest stable Rust)
 # Early warning for the pinned toolchain.
 #
 # CI compiles with rust-ci.yml's pinned rust_version, which matches the
-# rust:1.95-alpine digest the Dockerfiles build from — so CI green means the
+# rust:1.99-alpine digest the Dockerfiles build from — so CI green means the
 # artifact we actually ship builds. The cost of pinning is that we stop
 # hearing about new lints and deprecations until someone bumps the pin, and
 # then they all arrive at once.

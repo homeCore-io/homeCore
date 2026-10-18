@@ -6748,7 +6748,7 @@ pub async fn get_plugin_stream_sse(
             // over.
             match crate::auth_middleware::validate_query_token(&s, token, remote_ip).await {
                 Ok(c) => c,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             }
         }
     };
