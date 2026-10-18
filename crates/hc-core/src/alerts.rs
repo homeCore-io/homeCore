@@ -12,14 +12,23 @@
 //! "Held for" uses the device's persisted `attributes_changed_at`, so a rule
 //! like "unlocked for 30 minutes" survives a restart. Being offline has no
 //! such record, so it counts from when this engine first saw it.
+//!
+//! What a person ignored (stored) is left out before the difference is
+//! announced, so an ignored alert clears. An acknowledgement is kept here,
+//! for as long as its alert lasts — a restart forgets it, and the alert is
+//! shown as new. A new alert is sent to its rule's channel, or for the
+//! built-in kinds to `[alerts] notify_channel` (low batteries have
+//! `[battery]`'s own); not on the first pass after a start, which would
+//! re-send everything already true.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveTime, Utc};
+use hc_notify::NotificationService;
 use hc_state::StateStore;
-use hc_types::alert::{Alert, AlertKind, AlertRule};
+use hc_types::alert::{Acknowledged, Alert, AlertIgnore, AlertKind, AlertOp, AlertRule};
 use hc_types::device::DeviceState;
 use hc_types::event::{AlertSeverity, Event};
 use serde_json::Value;
@@ -44,6 +53,8 @@ const SETTLE: Duration = Duration::from_millis(300);
 #[derive(Clone, Default)]
 pub struct AlertsHandle {
     active: Arc<RwLock<BTreeMap<String, Alert>>>,
+    /// Acknowledgements, by alert id, while their alerts last.
+    acks: Arc<RwLock<HashMap<String, Acknowledged>>>,
     wake: Arc<Notify>,
 }
 
@@ -71,6 +82,32 @@ impl AlertsHandle {
     pub fn rules_changed(&self) {
         self.wake.notify_one();
     }
+
+    /// Mark an active alert seen. The alert as it now is, or None when no
+    /// such alert is active. Acknowledging it again keeps the first.
+    pub fn acknowledge(&self, id: &str, by: &str) -> Option<Alert> {
+        let mut active = self.active.write().ok()?;
+        let alert = active.get_mut(id)?;
+        if alert.acknowledged.is_none() {
+            let ack = Acknowledged {
+                by: by.to_string(),
+                at: Utc::now(),
+            };
+            if let Ok(mut acks) = self.acks.write() {
+                acks.insert(id.to_string(), ack.clone());
+            }
+            alert.acknowledged = Some(ack);
+        }
+        Some(alert.clone())
+    }
+}
+
+/// Where new alerts are sent, besides a rule's own channel.
+#[derive(Clone, Default)]
+pub struct AlertNotify {
+    pub service: Option<Arc<NotificationService>>,
+    /// For the built-in kinds other than a low battery.
+    pub channel: Option<String>,
 }
 
 fn rank(s: AlertSeverity) -> u8 {
@@ -99,8 +136,9 @@ pub fn spawn(
     state: StateStore,
     handle: AlertsHandle,
     battery: Option<watch::Receiver<BatteryConfig>>,
+    notify: AlertNotify,
 ) {
-    tokio::spawn(run(pub_bus, state, handle, battery));
+    tokio::spawn(run(pub_bus, state, handle, battery, notify));
 }
 
 async fn run(
@@ -108,12 +146,14 @@ async fn run(
     state: StateStore,
     handle: AlertsHandle,
     battery: Option<watch::Receiver<BatteryConfig>>,
+    notify: AlertNotify,
 ) {
     info!("Alert engine starting");
     let mut rx = pub_bus.subscribe();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut memory = Memory::default();
+    let mut primed = false;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
@@ -148,9 +188,13 @@ async fn run(
             .as_ref()
             .map(|b| b.borrow().clone())
             .unwrap_or_default();
+        let ignores = state.list_alert_ignores().await.unwrap_or_else(|e| {
+            warn!(error = %e, "Alert engine could not read what is ignored");
+            Vec::new()
+        });
         let before = handle.active.read().map(|a| a.clone()).unwrap_or_default();
         let now = Utc::now();
-        let after = desired(
+        let mut after = desired(
             &devices,
             &rules,
             &before,
@@ -159,6 +203,20 @@ async fn run(
             &cfg,
             &mut memory,
         );
+        unignored(&mut after, &ignores, now);
+        if let Ok(mut acks) = handle.acks.write() {
+            acks.retain(|id, _| after.contains_key(id));
+            for (id, alert) in after.iter_mut() {
+                alert.acknowledged = acks.get(id).cloned();
+            }
+        }
+
+        if primed {
+            for alert in after.values().filter(|a| !before.contains_key(&a.id)) {
+                send(&notify, &rules, alert).await;
+            }
+        }
+        primed = true;
 
         for (id, alert) in &after {
             if before.get(id) != Some(alert) {
@@ -180,6 +238,49 @@ async fn run(
         if let Ok(mut active) = handle.active.write() {
             *active = after;
         }
+    }
+}
+
+/// Leave out what a person chose not to see.
+pub fn unignored(
+    alerts: &mut BTreeMap<String, Alert>,
+    ignores: &[AlertIgnore],
+    now: DateTime<Utc>,
+) {
+    alerts.retain(|_, a| !ignores.iter().any(|i| i.covers(a, now)));
+}
+
+/// The channel a new alert goes to, if any.
+pub fn channel_for<'a>(
+    alert: &Alert,
+    rules: &'a [AlertRule],
+    builtin: Option<&'a str>,
+) -> Option<&'a str> {
+    match alert.kind {
+        AlertKind::Rule => rules
+            .iter()
+            .find(|r| Some(r.id.as_str()) == alert.rule_id.as_deref())
+            .and_then(|r| r.notify.as_deref()),
+        // `[battery]` has its own notification.
+        AlertKind::LowBattery => None,
+        _ => builtin,
+    }
+    .filter(|c| !c.trim().is_empty())
+}
+
+async fn send(notify: &AlertNotify, rules: &[AlertRule], alert: &Alert) {
+    let Some(svc) = notify.service.as_ref() else {
+        return;
+    };
+    let Some(channel) = channel_for(alert, rules, notify.channel.as_deref()) else {
+        return;
+    };
+    let title = match alert.severity {
+        AlertSeverity::Critical => "Alert",
+        _ => "Needs attention",
+    };
+    if let Err(e) = svc.notify(channel, title, &alert.message).await {
+        warn!(channel, alert = %alert.id, error = %e, "Alert notification failed");
     }
 }
 
@@ -230,6 +331,7 @@ pub fn desired(
                 reason,
                 severity,
                 raised_at: at.unwrap_or(now),
+                acknowledged: None,
             };
 
         // ---- offline ----
@@ -321,13 +423,21 @@ pub fn desired(
             let matches = d
                 .attributes
                 .get(&rule.attribute)
-                .is_some_and(|v| same(v, &rule.value));
+                .is_some_and(|v| rule.matches(v));
             if !matches {
                 memory.held_since.remove(&id);
                 continue;
             }
-            let from = since(d, &rule.attribute)
-                .unwrap_or_else(|| *memory.held_since.entry(id.clone()).or_insert(now));
+            // An attribute's change time says when it became the value, which
+            // is when "is" began — but a temperature above a line changes
+            // while staying above it, so the rest count from when this
+            // engine first saw it so.
+            let changed = match rule.op {
+                AlertOp::Eq => since(d, &rule.attribute),
+                _ => None,
+            };
+            let from =
+                changed.unwrap_or_else(|| *memory.held_since.entry(id.clone()).or_insert(now));
             let held = rule
                 .for_minutes
                 .is_none_or(|m| now.signed_duration_since(from).num_seconds() >= i64::from(m) * 60);
@@ -344,6 +454,7 @@ pub fn desired(
                 reason,
                 severity: rule.severity,
                 raised_at: from,
+                acknowledged: None,
             });
         }
     }
@@ -355,14 +466,6 @@ fn first_true<'a>(d: &DeviceState, attrs: &[&'a str]) -> Option<&'a str> {
         .iter()
         .copied()
         .find(|a| d.attributes.get(*a) == Some(&Value::Bool(true)))
-}
-
-/// JSON equality, with numbers compared as numbers (`1` and `1.0` agree).
-fn same(a: &Value, b: &Value) -> bool {
-    match (a.as_f64(), b.as_f64()) {
-        (Some(x), Some(y)) => x == y,
-        _ => a == b,
-    }
 }
 
 fn lower_first(s: &str) -> String {
@@ -377,6 +480,7 @@ fn lower_first(s: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Duration as Span;
+    use hc_types::alert::same;
     use serde_json::json;
 
     fn device(id: &str, attrs: Value) -> DeviceState {
@@ -401,6 +505,8 @@ mod tests {
             until: Some("06:00".into()),
             for_minutes: None,
             severity: AlertSeverity::Warning,
+            op: AlertOp::Eq,
+            notify: None,
         }
     }
     fn pass(
@@ -623,6 +729,134 @@ mod tests {
             &mut memory,
         );
         assert_eq!(first, again);
+    }
+
+    #[test]
+    fn a_reading_above_a_line_counts_from_when_it_was_first_seen_there() {
+        // The freezer warms: its temperature changes every reading, so its
+        // change time can't say how long it has been too warm.
+        let now = Utc::now();
+        let mut d = device("freezer", json!({"temperature": -4.0}));
+        d.attributes_changed_at
+            .insert("temperature".into(), now - Span::seconds(30));
+        let rule = AlertRule {
+            id: "r3".into(),
+            device_ids: vec!["freezer".into()],
+            attribute: "temperature".into(),
+            value: json!(-10),
+            op: AlertOp::Above,
+            state_label: None,
+            after: None,
+            until: None,
+            for_minutes: Some(15),
+            ..garage_rule()
+        };
+        let rules = [rule];
+        let mut memory = Memory::default();
+        assert!(pass(
+            &[d.clone()],
+            &rules,
+            &BTreeMap::new(),
+            now,
+            at(3, 0),
+            &mut memory
+        )
+        .is_empty());
+        let later = now + Span::minutes(16);
+        d.attributes_changed_at.insert("temperature".into(), later);
+        let out = pass(
+            &[d],
+            &rules,
+            &BTreeMap::new(),
+            later,
+            at(3, 16),
+            &mut memory,
+        );
+        assert_eq!(
+            out["rule:r3:freezer"].reason,
+            "temperature above -10 for 15 min"
+        );
+        assert_eq!(out["rule:r3:freezer"].raised_at, now);
+    }
+
+    #[test]
+    fn an_ignored_alert_is_left_out() {
+        let d = [
+            device("lock", json!({"battery_pct": 5})),
+            device("remote", json!({"battery_pct": 4})),
+            device("leak", json!({"water_detected": true})),
+        ];
+        let now = Utc::now();
+        let mut out = pass(
+            &d,
+            &[],
+            &BTreeMap::new(),
+            now,
+            at(12, 0),
+            &mut Memory::default(),
+        );
+        assert_eq!(out.len(), 3);
+        let ignore = AlertIgnore {
+            id: "i".into(),
+            kind: Some(AlertKind::LowBattery),
+            device_id: Some("lock".into()),
+            rule_id: None,
+            until: None,
+            note: None,
+            by: None,
+            created_at: now,
+        };
+        unignored(&mut out, &[ignore], now);
+        assert!(!out.contains_key("low_battery:lock"));
+        assert!(out.contains_key("low_battery:remote"));
+        assert!(out.contains_key("wet:leak"));
+    }
+
+    #[test]
+    fn a_new_alert_goes_to_its_rules_channel_or_the_built_in_one() {
+        let d = [
+            device("garage_door", json!({"open": true})),
+            device("lock", json!({"battery_pct": 5})),
+            device("leak", json!({"water_detected": true})),
+        ];
+        let mut rule = garage_rule();
+        rule.notify = Some("telegram".into());
+        let rules = [rule];
+        let out = pass(
+            &d,
+            &rules,
+            &BTreeMap::new(),
+            Utc::now(),
+            at(23, 0),
+            &mut Memory::default(),
+        );
+        let ch = |id: &str, builtin| channel_for(&out[id], &rules, builtin);
+        assert_eq!(ch("rule:r1:garage_door", Some("all")), Some("telegram"));
+        assert_eq!(ch("wet:leak", Some("all")), Some("all"));
+        assert_eq!(ch("wet:leak", None), None);
+        // A low battery has [battery]'s own notification.
+        assert_eq!(ch("low_battery:lock", Some("all")), None);
+    }
+
+    #[test]
+    fn an_acknowledgement_marks_the_active_alert_and_keeps_the_first() {
+        let handle = AlertsHandle::new();
+        let d = [device("leak", json!({"water_detected": true}))];
+        let out = pass(
+            &d,
+            &[],
+            &BTreeMap::new(),
+            Utc::now(),
+            at(12, 0),
+            &mut Memory::default(),
+        );
+        *handle.active.write().unwrap() = out;
+        assert!(handle.acknowledge("wet:nothing", "sam").is_none());
+        let a = handle.acknowledge("wet:leak", "sam").unwrap();
+        assert_eq!(a.acknowledged.as_ref().unwrap().by, "sam");
+        let again = handle.acknowledge("wet:leak", "alex").unwrap();
+        assert_eq!(again.acknowledged.unwrap().by, "sam");
+        assert_eq!(handle.list()[0].acknowledged.as_ref().unwrap().by, "sam");
     }
 
     #[test]

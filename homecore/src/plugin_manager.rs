@@ -432,12 +432,20 @@ async fn set_status(
             return;
         }
     }
+    let now = Utc::now();
     let _ = event_bus.publish(Event::PluginStatusChanged {
-        timestamp: Utc::now(),
+        timestamp: now,
         plugin_id: plugin_id.to_string(),
         status: new_status.to_string(),
         previous_status,
     });
+    // `plugin_offline` is its own event too, for whoever waits for just that.
+    if new_status == "offline" {
+        let _ = event_bus.publish(Event::PluginOffline {
+            timestamp: now,
+            plugin_id: plugin_id.to_string(),
+        });
+    }
 }
 
 async fn record_restart(plugins: &Arc<RwLock<HashMap<String, PluginRecord>>>, plugin_id: &str) {

@@ -56,6 +56,7 @@ pub fn system_config_descriptor() -> Value {
         .section(storage())
         .section(directories())
         .section(battery())
+        .section(alerts())
         .section(influx())
         .section(metrics())
         .section(registry())
@@ -349,6 +350,22 @@ fn battery() -> Section {
             Field::toggle("battery.notify_on_recovered")
                 .label("Notify on recovery")
                 .help("Also send when a device climbs back above the threshold."),
+        )
+}
+
+fn alerts() -> Section {
+    Section::new("alerts", "Alerts")
+        .help(
+            "What homeCore does with the alerts it raises itself. A time rule \
+             names its own channel; a low battery is the battery settings'.",
+        )
+        .field(
+            Field::text("alerts.notify_channel")
+                .label("Notify channel")
+                .help(
+                    "A channel name from Notifications, or `all`, told when something \
+                     is wet, smoky, jammed or offline. Empty = shown, not sent.",
+                ),
         )
 }
 

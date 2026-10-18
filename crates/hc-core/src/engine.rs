@@ -495,6 +495,39 @@ impl RuleEngine {
                 return Ok(());
             }
 
+            // Someone asked for the rule to run now (POST /automations/{id}/run):
+            // off or on, whatever its moments, with or without its checks.
+            if event_type == MANUAL_RUN_EVENT {
+                let rule_id = payload
+                    .get("rule_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| Uuid::parse_str(v).ok());
+                if let Some(rule) =
+                    rule_id.and_then(|id| rules_snapshot.iter().find(|r| r.id == id))
+                {
+                    let checks = payload
+                        .get("checks")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let tctx = TriggerContext {
+                        event_type: Some(MANUAL_RUN.into()),
+                        change_actor_id: payload
+                            .get("actor_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        change_actor_name: payload
+                            .get("actor_name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        trigger_label: rule.trigger_label.clone(),
+                        ..TriggerContext::default()
+                    };
+                    info!(rule_name = %rule.name, rule_id = %rule.id, checks, "rule.run: asked to run now");
+                    let _ = self.fire(rule, tctx, Run::Asked { checks }).await?;
+                }
+                return Ok(());
+            }
+
             // Deferred for_duration_secs re-check
             if event_type == "deferred_rule_fire" {
                 if let Some(rule_id_str) = payload.get("rule_id").and_then(|v| v.as_str()) {
@@ -688,7 +721,7 @@ impl RuleEngine {
     ) -> RuleFiring {
         RuleFiring {
             timestamp: Utc::now(),
-            trigger_type: trigger_type(matched_trigger(rule, trigger_ctx)).to_string(),
+            trigger_type: fired_by(rule, trigger_ctx),
             trigger_context: trigger_ctx.clone(),
             outcome,
             conditions: vec![],
@@ -699,8 +732,15 @@ impl RuleEngine {
 
     /// Fire a rule, returning `Ok(true)` if the rule chain should stop.
     async fn fire_rule(&self, rule: &Rule, trigger_ctx: TriggerContext) -> Result<bool> {
+        self.fire(rule, trigger_ctx, Run::Event).await
+    }
+
+    /// Fire a rule because its moment came, or because someone asked.
+    async fn fire(&self, rule: &Rule, trigger_ctx: TriggerContext, run: Run) -> Result<bool> {
+        let checks = run.checks();
         // ── Pause check ───────────────────────────────────────────────────────
-        if self.pause_state.get(&rule.id).map(|v| *v).unwrap_or(false) {
+        // Pausing and resting stop a rule running by itself, not when asked.
+        if run == Run::Event && self.pause_state.get(&rule.id).map(|v| *v).unwrap_or(false) {
             debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.fire: skipping — rule is paused");
             let firing = self.early_firing(rule, &trigger_ctx, FireOutcome::Paused);
             self.push_history(rule.id, firing);
@@ -708,7 +748,7 @@ impl RuleEngine {
         }
 
         // ── Cooldown check ────────────────────────────────────────────────────
-        if let Some(cooldown_secs) = rule.cooldown_secs {
+        if let Some(cooldown_secs) = rule.cooldown_secs.filter(|_| run == Run::Event) {
             if let Some(last_fire) = self.cooldown_map.get(&rule.id) {
                 let elapsed = last_fire.elapsed().as_secs();
                 if elapsed < cooldown_secs {
@@ -733,7 +773,7 @@ impl RuleEngine {
         let snapshot = self.snapshot_from_cache();
 
         // ── Required Expression gate ──────────────────────────────────────────
-        if let Some(ref expr) = rule.required_expression {
+        if let Some(expr) = rule.required_expression.as_ref().filter(|_| checks) {
             let snap = snapshot.clone();
             let tctx = trigger_ctx.clone();
             let ast = self.get_or_compile_ast(expr, true)?;
@@ -767,7 +807,7 @@ impl RuleEngine {
         }
 
         // ── Trigger Condition gate ────────────────────────────────────────────
-        if let Some(ref expr) = rule.trigger_condition {
+        if let Some(expr) = rule.trigger_condition.as_ref().filter(|_| checks) {
             let snap = snapshot.clone();
             let tctx = trigger_ctx.clone();
             let ast = self.get_or_compile_ast(expr, true)?;
@@ -854,8 +894,13 @@ impl RuleEngine {
         }
 
         let eval_start = Instant::now();
-        let condition_traces = self.evaluate_conditions(rule, &snapshot).await?;
-        let conditions_passed = rule.conditions.is_empty()
+        let condition_traces = if checks {
+            self.evaluate_conditions(rule, &snapshot).await?
+        } else {
+            Vec::new()
+        };
+        let conditions_passed = !checks
+            || rule.conditions.is_empty()
             || (condition_traces.len() == rule.conditions.len()
                 && condition_traces.iter().all(|t| t.passed));
         let eval_ms = eval_start.elapsed().as_millis() as u64;
@@ -881,7 +926,7 @@ impl RuleEngine {
             }
             let firing = RuleFiring {
                 timestamp: Utc::now(),
-                trigger_type: trigger_type(matched_trigger(rule, &trigger_ctx)).to_string(),
+                trigger_type: fired_by(rule, &trigger_ctx),
                 trigger_context: trigger_ctx,
                 outcome: FireOutcome::ConditionFailed {
                     at_index: failed_idx,
@@ -926,7 +971,7 @@ impl RuleEngine {
 
         let actions = rule.actions.clone();
         let action_count = actions.len();
-        let trigger_type_str = trigger_type(matched_trigger(rule, &trigger_ctx)).to_string();
+        let trigger_type_str = fired_by(rule, &trigger_ctx);
         let bus = self.pub_bus.clone();
         let rule_id = rule.id;
         let rule_name = rule.name.clone();
@@ -1836,6 +1881,37 @@ fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> Tr
 // ---------------------------------------------------------------------------
 
 /// The rule's moment that started this firing (its first, when unknown).
+/// `TriggerContext.event_type` of a run someone asked for.
+pub const MANUAL_RUN: &str = "manual_run";
+/// The bus event that asks the engine to run a rule now.
+pub const MANUAL_RUN_EVENT: &str = "manual_rule_fire";
+
+/// Why a rule is firing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// One of its moments came.
+    Event,
+    /// Someone asked; `checks` says whether its only-ifs still apply.
+    Asked { checks: bool },
+}
+
+impl Run {
+    fn checks(self) -> bool {
+        match self {
+            Run::Event => true,
+            Run::Asked { checks } => checks,
+        }
+    }
+}
+
+/// What started a firing, for its history: the moment, or `ManualRun`.
+fn fired_by(rule: &Rule, tctx: &TriggerContext) -> String {
+    if tctx.event_type.as_deref() == Some(MANUAL_RUN) {
+        return "ManualRun".into();
+    }
+    trigger_type(matched_trigger(rule, tctx)).to_string()
+}
+
 fn matched_trigger<'a>(rule: &'a Rule, tctx: &TriggerContext) -> &'a Trigger {
     rule.all_triggers()
         .nth(tctx.trigger_index.unwrap_or(0))

@@ -150,6 +150,44 @@ pub async fn create_display(
     (StatusCode::CREATED, Json(out)).into_response()
 }
 
+#[derive(Deserialize)]
+pub struct RenameDisplayBody {
+    pub name: String,
+}
+
+/// `PATCH /displays/{id}` — a new name; the key, and the tablet using it,
+/// carry on as they were.
+pub async fn rename_display(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RenameDisplayBody>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return err(StatusCode::FORBIDDEN, "only an admin manages displays");
+    }
+    let name = body.name.trim();
+    if name.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "give the display a name");
+    }
+    let mut record = match s.store.get_api_key_by_id(id).await {
+        Ok(Some(r)) if r.display && r.revoked_at.is_none() => r,
+        Ok(_) => return err(StatusCode::NOT_FOUND, "no such display"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let previous = std::mem::replace(&mut record.label, name.to_string());
+    if let Err(e) = s.store.update_api_key(&record).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    if previous != record.label {
+        let mut e = audit::entry_from_claims(&claims, "display.renamed")
+            .with_target("display", id.to_string());
+        e.detail = json!({ "name": previous, "renamed_to": record.label });
+        audit::emit(&s, e).await;
+    }
+    Json(summary(&record)).into_response()
+}
+
 /// `DELETE /displays/{id}` — the tablet is signed out on its next request.
 pub async fn delete_display(
     State(s): State<AppState>,
@@ -462,7 +500,12 @@ mod tests {
     #[test]
     fn a_display_may_see_and_use_the_house_and_nothing_more() {
         let s = display_scopes();
-        for want in ["devices:read", "devices:write", "scenes:run", "areas:read"] {
+        for want in [
+            "devices:read",
+            "devices:command",
+            "scenes:run",
+            "areas:read",
+        ] {
             assert!(s.iter().any(|x| x == want), "{want}");
         }
         for never in [
@@ -474,6 +517,9 @@ mod tests {
             "automations:write",
             "content:write",
             "areas:write",
+            // Using a device is not changing it: a display can't rename,
+            // move or delete one.
+            "devices:write",
         ] {
             assert!(!s.iter().any(|x| x == never), "{never}");
         }

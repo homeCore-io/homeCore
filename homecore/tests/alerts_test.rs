@@ -60,7 +60,13 @@ async fn a_time_rule_raises_and_clears_an_alert() -> Result<()> {
     let bus = EventBus::new(64);
     let mut rx = bus.subscribe();
     let handle = AlertsHandle::new();
-    alerts::spawn(bus.clone(), store.clone(), handle.clone(), None);
+    alerts::spawn(
+        bus.clone(),
+        store.clone(),
+        handle.clone(),
+        None,
+        alerts::AlertNotify::default(),
+    );
 
     // Always, so the test doesn't depend on the time of day.
     store
@@ -76,6 +82,8 @@ async fn a_time_rule_raises_and_clears_an_alert() -> Result<()> {
             until: None,
             for_minutes: None,
             severity: AlertSeverity::Critical,
+            op: Default::default(),
+            notify: None,
         })
         .await?;
     handle.rules_changed();

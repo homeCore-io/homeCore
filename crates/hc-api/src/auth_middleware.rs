@@ -300,7 +300,14 @@ async fn verify_api_key(
         exp: u64::MAX,     // Expiry already enforced by record.is_usable.
         role: Role::Admin, // Role is decorative when an Actor is present —
         // scope enforcement uses `scopes` directly.
-        scopes: record.scopes.clone(),
+        // A display holds what a display may do now, not what was stored
+        // when it was made: displays from before 0.1.81 were given
+        // `devices:write`, which they no longer have.
+        scopes: if record.display {
+            hc_auth::user::display_scopes()
+        } else {
+            record.scopes.clone()
+        },
         actor: Some(Actor::ApiKey {
             id: record.id,
             owner_uid: record.owner_uid,

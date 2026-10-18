@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.80"
+  version: "0.1.81"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1184,7 +1184,10 @@ paths:
       description: |
         Every trigger, condition and action kind with its fields, so an editor
         can offer exactly what this core version supports instead of a
-        hard-coded list that drifts.
+        hard-coded list that drifts. `features` names what rules can do
+        beyond the kinds: `triggers`, `if_checks`, `rule_events`,
+        `test_draft`, `run_now` (`POST /automations/{id}/run`) and `test_at`
+        (`at` on the dry runs).
       tags: [automations]
       security:
         - bearerAuth: []
@@ -1306,11 +1309,18 @@ paths:
     post:
       operationId: testAutomation
       summary: Dry-run a rule — evaluate conditions and return would-fire actions without executing them
+      description: |
+        Each condition is judged against the house now — or, with `at`, as if
+        it were that time: time windows and how long things have lasted move
+        with it, devices and modes stay as they are now, and a script still
+        reads the real clock (its result says so). `at` is listed in
+        `GET /automations/vocabulary` `features` as `test_at`.
       tags: [automations]
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/AutomationId"
+        - $ref: "#/components/parameters/TestAt"
       responses:
         "200":
           description: Dry-run result
@@ -1318,6 +1328,60 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AutomationTestResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: "`at` isn't a time"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/{id}/run:
+    post:
+      operationId: runAutomation
+      summary: Run a rule now
+      description: |
+        As if its moment came — whether the rule is on or off, paused or
+        resting after its last run, and whatever its moments are (a rule
+        whose moment is `ManualTrigger` runs only this way). With `checks`
+        (the default) its only-ifs — conditions, `required_expression`,
+        `trigger_condition` — still decide; with `checks: false` it just does
+        its steps. Its run mode still applies.
+
+        The answer comes before the run does. The run is in the rule's
+        history with `trigger_type` `ManualRun`, and `rule_fired` announces
+        it. Listed in `GET /automations/vocabulary` `features` as `run_now`.
+        Needs `automations:write`. Audited as `automation.run`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AutomationId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                checks:
+                  type: boolean
+                  default: true
+      responses:
+        "202":
+          description: Asked; it runs in a moment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rule_id, checks]
+                properties:
+                  rule_id:
+                    type: string
+                    format: uuid
+                  checks:
+                    type: boolean
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1331,9 +1395,12 @@ paths:
         the body. Device references are resolved as saving would resolve
         them; `id` may be omitted. Nothing is saved and nothing runs.
         Listed in `GET /automations/vocabulary` `features` as `test_draft`.
+        Takes `at` as `POST /automations/{id}/test` does.
       tags: [automations]
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TestAt"
       requestBody:
         required: true
         content:
@@ -1348,7 +1415,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/AutomationTestResult"
         "422":
-          description: Not a rule, or it names a device the house doesn't have
+          description: Not a rule, it names a device the house doesn't have, or `at` isn't a time
           content:
             application/json:
               schema:
@@ -2156,8 +2223,10 @@ paths:
       description: |
         A display — a kitchen panel, a hall tablet — is its own identity, not a
         person's: an API key marked as a display, which may read the house,
-        command devices and run scenes (`scenes:run`), and nothing else. It is
-        never an admin. Admins only.
+        command devices (`devices:command`) and run scenes (`scenes:run`), and
+        nothing else — not rename, move or delete devices. It is never an
+        admin. A display made before 0.1.81 was stored with `devices:write`;
+        it is given what a display may do now, whatever was stored. Admins only.
       tags: [displays]
       security:
         - bearerAuth: []
@@ -2210,6 +2279,44 @@ paths:
           description: Not an admin
 
   /displays/{id}:
+    patch:
+      operationId: renameDisplay
+      summary: Rename a display
+      description: Its key, and the tablet using it, carry on. Admins only. Audited as `display.renamed`.
+      tags: [displays]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: Hall
+      responses:
+        "200":
+          description: The display as it now is
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Display"
+        "400":
+          description: No name
+        "403":
+          description: Not an admin
+        "404":
+          $ref: "#/components/responses/NotFound"
     delete:
       operationId: deleteDisplay
       summary: Remove a display
@@ -2334,8 +2441,18 @@ paths:
           minutes;
         - **time rules** (`/alert-rules`).
 
-        Needs `devices:read`. Changes are announced as `alert_raised` and
-        `alert_cleared` on the event stream.
+        Alerts covered by an ignore (`/alert-ignores`) are left out — an alert
+        that becomes ignored clears. An acknowledged alert carries
+        `acknowledged` until it clears; homeCore keeps acknowledgements in
+        memory, so after a restart an alert still true is unacknowledged.
+
+        New alerts are sent to a time rule's `notify` channel, or for wet,
+        smoke, jammed and offline to `[alerts] notify_channel` (a low battery
+        is `[battery] notify_channel`'s) — not on homeCore's first look after
+        it starts, which would resend everything already true.
+
+        Needs `devices:read`. Changes are announced as `alert_raised` (also
+        when one is acknowledged) and `alert_cleared` on the event stream.
       tags: [alerts]
       security:
         - bearerAuth: []
@@ -2348,6 +2465,103 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Alert"
+
+  /alerts/{id}/acknowledge:
+    post:
+      operationId: acknowledgeAlert
+      summary: Say an alert has been seen
+      description: |
+        It stays until its condition ends, marked with who saw it and when;
+        acknowledging it again keeps the first. Announced as `alert_raised`
+        with `acknowledged` set. Needs `devices:command` — anyone who may use
+        the house, a display included. Audited as `alert.acknowledged`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The alert's id, e.g. `wet:kitchen_leak`
+      responses:
+        "200":
+          description: The alert as it now is
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Alert"
+        "404":
+          description: No such alert is active — it may have cleared
+
+  /alert-ignores:
+    get:
+      operationId: listAlertIgnores
+      summary: What alerts are being ignored
+      description: Every ignore, oldest first — one that has run out is listed until removed. Needs `automations:read`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every ignore
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlertIgnore"
+    post:
+      operationId: createAlertIgnore
+      summary: Stop showing some alerts
+      description: |
+        A kind (every low battery), a device's alerts, a time rule's, or a
+        kind on one device — for good, or `until` a time. At least one of
+        `kind`, `device_id` and `rule_id`: ignoring every alert is turning
+        alerts off. What it covers clears at once and isn't raised or sent
+        while it lasts; a low battery it covers isn't sent by
+        `[battery] notify_channel` either. homeCore sets `id`, `by` and
+        `created_at`. Needs `automations:write`. Audited as
+        `alert_ignore.created`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertIgnore"
+      responses:
+        "201":
+          description: The ignore as saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertIgnore"
+        "400":
+          description: It names nothing to ignore; `error` says why
+
+  /alert-ignores/{id}:
+    delete:
+      operationId: deleteAlertIgnore
+      summary: Show those alerts again
+      description: What it hid, if still true, is raised at once. Needs `automations:write`. Audited as `alert_ignore.deleted`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Removed
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /alert-rules:
     get:
@@ -2830,8 +3044,11 @@ paths:
 
         `enabled` is persisted to `homecore.toml`, so it survives a restart, and
         the supervisor starts or stops the plugin process to match. `log_level`
-        is pushed to the running plugin over the management channel and is **not**
-        persisted — it reverts on restart.
+        is pushed to the running plugin over the management channel and written
+        to `[logging] level` in the plugin's own config, so it starts at it next
+        time too (a plugin running on another runtime keeps its file there, so
+        there the change lasts until it restarts). Since 0.1.81; before, it
+        reverted on restart.
 
         Both changes are written to the audit log.
 
@@ -2853,7 +3070,7 @@ paths:
                   description: Persisted to homecore.toml; starts or stops the plugin process.
                 log_level:
                   type: string
-                  description: Pushed to the live plugin. Not persisted.
+                  description: Pushed to the live plugin and kept in its config's `[logging] level`.
                   examples: ["debug"]
       responses:
         "200":
@@ -6708,6 +6925,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: renameMode
+      summary: Rename a mode
+      description: |
+        Its entry in `modes.toml` and its device both, so every screen and
+        the next start agree; a name given the device itself is dropped for
+        this one. The id — and every rule naming it — stays. Announced as
+        `device_name_changed`. Requires scope `devices:write`. Audited as
+        `mode.renamed`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Mode identifier (e.g. `mode_night`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: Late night
+      responses:
+        "200":
+          description: The mode's config as it now is
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: No name
+        "404":
+          $ref: "#/components/responses/NotFound"
     delete:
       operationId: deleteMode
       summary: Delete a mode
@@ -7396,6 +7655,12 @@ paths:
         `device_type = "timer"` and initial attributes
         `state: "idle"`, `duration_secs: 0`, `remaining_secs: 0`,
         `repeat: false`.
+
+        It is told what to do as any device is (`PATCH /devices/{id}/state`):
+        `{"command": "start", "duration_secs": 600}`, `pause`, `resume`,
+        `cancel`, `restart`, and `{"command": "extend", "duration_secs": 300}`
+        to add time to a running or paused one (0.1.81) — a repeating timer's
+        next cycle is its usual length.
 
         The `timer_` prefix is enforced: `id = "garage_close"` yields the
         device id `timer_garage_close`; an id that already starts with
@@ -8157,6 +8422,16 @@ components:
         type: string
         format: uuid
       description: Automation rule UUID
+
+    TestAt:
+      name: at
+      in: query
+      required: false
+      schema:
+        type: string
+      description: |
+        Judge the checks as if it were this time: an RFC 3339 instant, a
+        house-local `2026-10-18T22:30`, or a time of day today (`22:30`).
 
     SceneId:
       name: id
@@ -9034,6 +9309,50 @@ components:
           type: string
           format: date-time
           description: When the condition began, as near as homeCore knows.
+        acknowledged:
+          type: object
+          required: [by, at]
+          description: Someone has seen it (`POST /alerts/{id}/acknowledge`). Omitted until then.
+          properties:
+            by:
+              type: string
+              description: Who, as they signed in — or the display's name.
+            at:
+              type: string
+              format: date-time
+
+    AlertIgnore:
+      type: object
+      description: Alerts not to show. At least one of `kind`, `device_id`, `rule_id`.
+      properties:
+        id:
+          type: string
+          readOnly: true
+        kind:
+          type: string
+          enum: [wet, smoke, offline, jammed, low_battery, rule]
+          description: Only this kind; every kind when left out.
+        device_id:
+          type: string
+          description: Only this device's; every device's when left out.
+        rule_id:
+          type: string
+          description: Only this time rule's alerts.
+        until:
+          type: string
+          format: date-time
+          description: Ignored until then; for good when left out.
+        note:
+          type: string
+          description: Why, in the person's words.
+        by:
+          type: string
+          readOnly: true
+          description: Who asked.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
 
     AlertRule:
       type: object
@@ -9055,7 +9374,19 @@ components:
           type: string
           example: open
         value:
-          description: The value that counts — `true`, say.
+          description: The value that counts — `true`, say; a number for `above` and `below`.
+        op:
+          type: string
+          enum: [eq, ne, above, below]
+          default: eq
+          description: |
+            How the device's value is compared with `value`. With `above` or
+            `below`, `for_minutes` counts from when homeCore first saw it so —
+            a reading changes while staying over a line.
+        notify:
+          type: string
+          nullable: true
+          description: A notification channel (or `all`) told when one of its alerts is raised.
         state_label:
           type: string
           description: The state in the device's words, for the alert's message.
@@ -9380,9 +9711,13 @@ components:
           type: string
         conditions_pass:
           type: boolean
+        at:
+          type: string
+          format: date-time
+          description: The time the checks were judged at, when one was asked for
         conditions:
           type: array
-          description: Each condition evaluated against the house now, in order
+          description: Each condition evaluated against the house now (or `at`), in order
           items:
             type: object
             required: [condition, passed]

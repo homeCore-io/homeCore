@@ -108,6 +108,8 @@ pub struct Core {
     battery_config: Option<watch::Receiver<battery_watcher::BatteryConfig>>,
     /// Where the alert engine keeps its active alerts (H4). None runs none.
     alerts: Option<alerts::AlertsHandle>,
+    /// `[alerts] notify_channel`: where new built-in alerts are sent.
+    alert_channel: Option<String>,
 }
 
 impl Core {
@@ -139,6 +141,7 @@ impl Core {
             log_ring: None,
             battery_config: None,
             alerts: None,
+            alert_channel: None,
         }
     }
 
@@ -146,6 +149,12 @@ impl Core {
     /// with the API, which lists them and tells the engine when rules change.
     pub fn with_alerts(mut self, handle: alerts::AlertsHandle) -> Self {
         self.alerts = Some(handle);
+        self
+    }
+
+    /// Send new built-in alerts to this notification channel.
+    pub fn with_alert_channel(mut self, channel: Option<String>) -> Self {
+        self.alert_channel = channel;
         self
     }
 
@@ -396,6 +405,10 @@ impl Core {
                 self.state.clone(),
                 handle,
                 self.battery_config.clone(),
+                alerts::AlertNotify {
+                    service: self.notify.clone(),
+                    channel: self.alert_channel.clone(),
+                },
             );
         }
         if let Some(cfg) = self.battery_config.clone() {

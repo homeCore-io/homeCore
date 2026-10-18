@@ -78,6 +78,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub battery: BatterySection,
     #[serde(default)]
+    pub alerts: AlertsSection,
+    #[serde(default)]
     pub influx: InfluxConfig,
     #[serde(default)]
     pub metrics: MetricsSection,
@@ -258,6 +260,18 @@ pub fn default_server_host() -> String {
 }
 pub fn default_server_port() -> u16 {
     8080
+}
+
+/// `[alerts]` section of homecore.toml — what homeCore does with the alerts
+/// it raises itself.
+#[derive(Deserialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AlertsSection {
+    /// A notification channel (or `all`) told when a built-in alert — wet,
+    /// smoke, jammed, offline — is raised. Unset: shown, not sent. A low
+    /// battery is `[battery]`'s, and a time rule names its own.
+    #[serde(default)]
+    pub notify_channel: Option<String>,
 }
 
 /// `[battery]` section of homecore.toml — drives the battery watcher.
