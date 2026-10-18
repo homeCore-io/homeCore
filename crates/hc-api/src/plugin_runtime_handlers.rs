@@ -763,7 +763,10 @@ pub async fn get_placement_artifact(
     // Re-resolve rather than trusting the URL recorded at placement time: this
     // re-runs signature verification over the index, so a stored row can never
     // become a way to fetch something the registry no longer vouches for.
-    let pv = match reg.version_of(&plugin_id, Some(&placement.version)).await {
+    let pv = match reg
+        .version_of(&plugin_id, Some(&placement.version), state.homecore_version)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             return err(

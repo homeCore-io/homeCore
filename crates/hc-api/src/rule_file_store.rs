@@ -303,6 +303,64 @@ pub fn nullify_device_refs(
     Ok(affected)
 }
 
+/// Point every rule that names `from` — as it is, or as the `DELETED:from`
+/// placeholder its deletion left — at `to` instead. A rule turned off only
+/// because `from` was deleted is turned on again. Returns the rules changed,
+/// by name.
+pub fn repoint_device_refs(
+    dir: &Path,
+    from: &str,
+    to: &str,
+    devices: &[DeviceState],
+) -> Result<Vec<String>> {
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let placeholder = format!("DELETED:{from}");
+    // References resolve against the house's devices, and a deleted one is in
+    // neither form: stand-ins let the same matching find them.
+    let mut known = devices.to_vec();
+    for id in [placeholder.as_str(), from] {
+        if !known.iter().any(|d| d.device_id == id) {
+            known.push(DeviceState::new(id, id, "core.repoint"));
+        }
+    }
+    let deleted_error = format!("references deleted device: {from}");
+    let mut changed = Vec::new();
+
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("scanning rules directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if !is_rule_file(&path) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(mut rule) = parse_rule_file(&path, &content) else {
+            continue;
+        };
+        let names_it = rule_references_device(&rule, from, &known)
+            || rule_references_device(&rule, &placeholder, &known);
+        if !names_it {
+            continue;
+        }
+        replace_device_refs(&mut rule, &placeholder, to, &known);
+        replace_device_refs(&mut rule, from, to, &known);
+        if rule.error.as_deref() == Some(deleted_error.as_str()) {
+            rule.error = None;
+            rule.enabled = true;
+        }
+        let updated = serialize_rule(&rule, &path)
+            .with_context(|| format!("serialising rule {}", rule.name))?;
+        std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
+        tracing::info!(rule_name = %rule.name, from, to, "Rule repointed");
+        changed.push(rule.name.clone());
+    }
+    Ok(changed)
+}
+
 /// Returns `true` if any trigger, condition, or action in `rule` directly
 /// references `device_id` (does not search inside Rhai script strings).
 fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
@@ -655,5 +713,80 @@ mod tests {
             kept.contains(&original.id.to_string()),
             "the original's file no longer contains the original rule"
         );
+    }
+
+    #[test]
+    fn a_device_is_repointed_in_every_rule_even_after_its_deletion() {
+        use super::{nullify_device_refs, repoint_device_refs, Rule, RuleFileStore, Trigger};
+        use hc_types::device::DeviceState;
+
+        use uuid::Uuid;
+
+        let rule = |name: &str, device: &str| Rule {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            enabled: true,
+            priority: 0,
+            tags: vec![],
+            trigger: serde_json::from_value(serde_json::json!({
+                "DeviceStateChanged": { "device_id": device, "attribute": "open", "to": true }
+            }))
+            .unwrap(),
+            triggers: Vec::new(),
+            conditions: vec![],
+            actions: vec![],
+            error: None,
+            cooldown_secs: None,
+            log_events: false,
+            log_triggers: false,
+            log_actions: false,
+            required_expression: None,
+            cancel_on_false: false,
+            trigger_condition: None,
+            variables: Default::default(),
+            trigger_label: None,
+            run_mode: Default::default(),
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = RuleFileStore::new(dir.path());
+        store.write_rule(&rule("Door A", "old_door")).unwrap();
+        store.write_rule(&rule("Door B", "old_door")).unwrap();
+        store.write_rule(&rule("Other", "other_door")).unwrap();
+        let mut devices = vec![
+            DeviceState::new("old_door", "Old door", "test"),
+            DeviceState::new("new_door", "New door", "test"),
+            DeviceState::new("other_door", "Other door", "test"),
+        ];
+
+        // The old door is deleted: its rules are turned off, naming it so.
+        let off = nullify_device_refs(dir.path(), "old_door", &devices).unwrap();
+        assert_eq!(off.len(), 2);
+        devices.retain(|d| d.device_id != "old_door");
+
+        let mut changed =
+            repoint_device_refs(dir.path(), "old_door", "new_door", &devices).unwrap();
+        changed.sort();
+        assert_eq!(changed, ["Door A", "Door B"]);
+        let rules: Vec<Rule> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let path = e.unwrap().path();
+                let text = std::fs::read_to_string(&path).ok()?;
+                super::parse_rule_file(&path, &text)
+            })
+            .collect();
+        for r in rules.iter().filter(|r| r.name.starts_with("Door")) {
+            assert!(r.enabled, "{} is on again", r.name);
+            assert!(r.error.is_none());
+            let Trigger::DeviceStateChanged { device_id, .. } = &r.trigger else {
+                panic!()
+            };
+            assert_eq!(device_id, "new_door");
+        }
+        let other = rules.iter().find(|r| r.name == "Other").unwrap();
+        let Trigger::DeviceStateChanged { device_id, .. } = &other.trigger else {
+            panic!()
+        };
+        assert_eq!(device_id, "other_door");
     }
 }

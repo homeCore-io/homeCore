@@ -23,7 +23,6 @@ pub mod rule_loader;
 pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
-pub mod switch_manager;
 pub mod timer_manager;
 
 pub use calendar_store::CalendarHandle;
@@ -110,6 +109,8 @@ pub struct Core {
     alerts: Option<alerts::AlertsHandle>,
     /// `[alerts] notify_channel`: where new built-in alerts are sent.
     alert_channel: Option<String>,
+    /// The rule engine's hub variables, shared with the API.
+    hub_vars: engine::HubVars,
 }
 
 impl Core {
@@ -142,6 +143,7 @@ impl Core {
             battery_config: None,
             alerts: None,
             alert_channel: None,
+            hub_vars: Default::default(),
         }
     }
 
@@ -150,6 +152,11 @@ impl Core {
     pub fn with_alerts(mut self, handle: alerts::AlertsHandle) -> Self {
         self.alerts = Some(handle);
         self
+    }
+
+    /// The hub variables the rule engine will keep, for the API to list.
+    pub fn hub_vars_handle(&self) -> engine::HubVars {
+        Arc::clone(&self.hub_vars)
     }
 
     /// Send new built-in alerts to this notification channel.
@@ -367,7 +374,8 @@ impl Core {
             self.notify.clone(),
         )
         .with_drain_timeout(self.drain_timeout_secs)
-        .with_calendars(Arc::clone(&early_calendar_handle));
+        .with_calendars(Arc::clone(&early_calendar_handle))
+        .with_hub_vars(Arc::clone(&self.hub_vars));
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.
@@ -439,12 +447,11 @@ impl Core {
         }
         tokio::spawn(glue_mgr.start());
 
-        // Migrate legacy plugin_ids (core.switch → core.glue) on startup.
+        // On startup: schemas for core's own devices, and groups worked out again.
         {
             let store = self.state.clone();
             let bus = self.pub_bus.clone();
             tokio::spawn(async move {
-                glue::migrate_legacy_plugin_ids(&store).await;
                 // Core's own devices never had schemas, so every client
                 // inferred them — a timer's `state` became a text box wanting
                 // `"finished"` with the quotes.

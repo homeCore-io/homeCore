@@ -297,85 +297,6 @@ impl GlueManager {
 
 // ── Migration ────────────────────────────────────────────────────────────────
 
-/// Migrate legacy `core.switch` devices to `core.glue` plugin_id, and backfill
-/// missing `device_type` for any glue/timer devices.
-/// Called once on startup. Idempotent — skips devices already migrated.
-pub async fn migrate_legacy_plugin_ids(store: &StateStore) {
-    let devices = match store.list_devices().await {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, "Glue migration: failed to list devices");
-            return;
-        }
-    };
-
-    let mut migrated = 0u32;
-    for mut dev in devices {
-        let mut changed = false;
-
-        // Migrate legacy plugin_id
-        if dev.plugin_id == "core.switch" {
-            dev.plugin_id = "core.glue".to_string();
-            dev.device_type = Some("switch".to_string());
-            changed = true;
-        }
-
-        // Heal switches written by `POST /switches` before it was fixed: it set
-        // device_type = "virtual_switch", which matches neither the glue
-        // convention nor the `list_switches` filter, so those switches existed
-        // in the store but `GET /switches` could never return them.  Scoped to
-        // core.glue on purpose — "virtual_switch" is a legitimate device_type
-        // for a plugin-supplied device (see hc-topic-map's device_types).
-        if dev.plugin_id == "core.glue" && dev.device_type.as_deref() == Some("virtual_switch") {
-            dev.device_type = Some("switch".to_string());
-            changed = true;
-        }
-
-        // Backfill missing device_type from device_id prefix
-        if dev.device_type.is_none()
-            && (dev.plugin_id == "core.glue" || dev.plugin_id == "core.timer")
-        {
-            let prefixes = &[
-                "switch_",
-                "timer_",
-                "counter_",
-                "number_",
-                "select_",
-                "text_",
-                "button_",
-                "datetime_",
-                "group_",
-                "threshold_",
-                "schedule_",
-            ];
-            for prefix in prefixes {
-                if dev.device_id.starts_with(prefix) {
-                    dev.device_type = Some(prefix.trim_end_matches('_').to_string());
-                    changed = true;
-                    break;
-                }
-            }
-        }
-
-        if !changed {
-            continue;
-        }
-
-        if let Err(e) = store.upsert_device(&dev).await {
-            warn!(device_id = %dev.device_id, error = %e, "Glue migration: failed to update device");
-        } else {
-            migrated += 1;
-        }
-    }
-
-    if migrated > 0 {
-        info!(
-            migrated,
-            "Glue migration: updated legacy devices (plugin_id / device_type)"
-        );
-    }
-}
-
 /// Give core's own devices the schema they never had.
 ///
 /// Write the schema for a core-owned device, unless it already has one.
@@ -411,6 +332,19 @@ pub async fn upsert_device_with_schema(
     store: &StateStore,
     dev: &DeviceState,
 ) -> anyhow::Result<()> {
+    // A helper or mode made through the API has no plugin registration to
+    // give it the name rules call it by, so it had none until the next
+    // start's backfill: rules naming it by that name couldn't find it.
+    if dev.canonical_name.is_none() {
+        let mut named = dev.clone();
+        let devices = store.list_devices().await?;
+        named.canonical_name = Some(crate::device_naming::ensure_unique_canonical_name(
+            &named, &devices,
+        ));
+        store.upsert_device(&named).await?;
+        ensure_device_schema(store, &named).await;
+        return Ok(());
+    }
     store.upsert_device(dev).await?;
     ensure_device_schema(store, dev).await;
     Ok(())
@@ -418,8 +352,8 @@ pub async fn upsert_device_with_schema(
 
 /// Glue devices are created directly in the state store rather than registered
 /// over MQTT, so the schema-publishing path plugins use never applied to them
-/// and clients were left inferring every attribute. Runs on startup beside
-/// [`migrate_legacy_plugin_ids`], and is idempotent: the schema is derived
+/// and clients were left inferring every attribute. Runs on startup, and is
+/// idempotent: the schema is derived
 /// from the device type, so re-running writes the same bytes.
 pub async fn publish_core_device_schemas(store: &StateStore) {
     let devices = match store.list_devices().await {
@@ -500,6 +434,19 @@ mod tests {
         let mut dev = DeviceState::new(device_id, device_id, GLUE_PLUGIN_ID);
         dev.device_type = Some(device_type.to_string());
         dev
+    }
+
+    #[tokio::test]
+    async fn a_helper_made_now_has_its_rule_name_at_once() {
+        let store = store().await;
+        upsert_device_with_schema(&store, &glue("counter_cups", "counter"))
+            .await
+            .unwrap();
+        let d = store.get_device("counter_cups").await.unwrap().unwrap();
+        assert!(
+            d.canonical_name.is_some(),
+            "named when made, not at the next start"
+        );
     }
 
     #[tokio::test]

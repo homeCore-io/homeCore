@@ -346,6 +346,8 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Per-rule ring buffer of recent evaluation results; provided by the rule engine.
     pub fire_history: Option<hc_core::FireHistoryHandle>,
+    /// The rule engine's hub variables, for `GET /automations/variables`.
+    pub hub_vars: Option<hc_core::engine::HubVars>,
     /// Named rule groups (id, name, description, rule_ids).
     pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
     /// Persistent store for rule groups (groups.json in rules dir).
@@ -853,6 +855,7 @@ impl AppState {
             notify: None,
             started_at: chrono::Utc::now(),
             fire_history: None,
+            hub_vars: None,
             rule_groups: None,
             group_store: None,
             dashboards: None,
@@ -986,6 +989,12 @@ impl AppState {
     /// to spawn the process again after exit.
     pub fn with_shutdown_tx(mut self, tx: tokio::sync::watch::Sender<bool>) -> Self {
         self.shutdown_tx = Some(Arc::new(tx));
+        self
+    }
+
+    /// Attach the rule engine's hub variables.
+    pub fn with_hub_vars(mut self, handle: hc_core::engine::HubVars) -> Self {
+        self.hub_vars = Some(handle);
         self
     }
 
@@ -1198,6 +1207,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         // Must stay ahead of `/devices/:id` so "orphaned" is not read as an id.
         .route("/devices/orphaned", get(handlers::orphaned_devices))
+        .route("/devices/removed", get(handlers::list_removed_devices))
+        .route("/devices/removed/{id}", delete(handlers::bring_back_device))
         .route(
             "/devices/{id}",
             get(handlers::get_device)
@@ -1211,17 +1222,6 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // LAN address), which a browser generally cannot reach. Core fetches it
         // and hands it back same-origin.
         .route("/devices/{id}/media/art", get(handlers::device_media_art))
-        // Timers (timer devices are also visible via /devices)
-        .route(
-            "/timers",
-            get(handlers::list_timers).post(handlers::create_timer),
-        )
-        .route("/timers/{id}", get(handlers::get_timer))
-        // Switches (switch devices are also visible via /devices)
-        .route(
-            "/switches",
-            get(handlers::list_switches).post(handlers::create_switch),
-        )
         // Glue devices (unified CRUD for all glue device types)
         .route(
             "/glue",
@@ -1311,6 +1311,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/automations/{id}/test", post(handlers::test_automation))
         .route("/automations/{id}/run", post(handlers::run_automation))
+        .route("/automations/repoint", post(handlers::repoint_automations))
+        .route("/automations/variables", get(handlers::list_hub_variables))
         .route("/automations/test", post(handlers::test_draft_automation))
         .route(
             "/automations/vocabulary",

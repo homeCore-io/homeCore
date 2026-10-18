@@ -433,12 +433,20 @@ impl StateBridge {
             }
         };
 
-        let mut device = self.store.get_device(device_id).await?.unwrap_or_else(|| {
-            // Derive plugin_id from the device_id prefix convention:
-            // "shelly_abc" → "shelly", "tasmota_abc" → "tasmota", etc.
-            let plugin_id = device_id.split('_').next().unwrap_or("unknown");
-            DeviceState::new(device_id, device_id, plugin_id)
-        });
+        let mut device = match self.store.get_device(device_id).await? {
+            Some(d) => d,
+            // Someone removed it: its plugin reporting it again doesn't bring it back.
+            None if self.store.is_forgotten(device_id).await? => {
+                debug!(device_id, "State for a removed device; ignoring");
+                return Ok(());
+            }
+            None => {
+                // Derive plugin_id from the device_id prefix convention:
+                // "shelly_abc" → "shelly", "tasmota_abc" → "tasmota", etc.
+                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+                DeviceState::new(device_id, device_id, plugin_id)
+            }
+        };
 
         let previous = device.attributes.clone();
         let previous_name = device.name.clone();
@@ -713,6 +721,12 @@ impl StateBridge {
                     });
                 }
             }
+            None if self.store.is_forgotten(device_id).await? => {
+                debug!(
+                    device_id,
+                    plugin_id, "Registration for a removed device; ignoring"
+                );
+            }
             None => {
                 // First registration — create the device record.
                 let mut device = DeviceState::new(device_id, new_name, plugin_id);
@@ -832,10 +846,14 @@ impl StateBridge {
     }
 
     async fn handle_availability(&self, device_id: &str, available: bool) -> Result<()> {
-        let mut device = self.store.get_device(device_id).await?.unwrap_or_else(|| {
-            let plugin_id = device_id.split('_').next().unwrap_or("unknown");
-            DeviceState::new(device_id, device_id, plugin_id)
-        });
+        let mut device = match self.store.get_device(device_id).await? {
+            Some(d) => d,
+            None if self.store.is_forgotten(device_id).await? => return Ok(()),
+            None => {
+                let plugin_id = device_id.split('_').next().unwrap_or("unknown");
+                DeviceState::new(device_id, device_id, plugin_id)
+            }
+        };
 
         let changed = device.available != available;
         device.available = available;

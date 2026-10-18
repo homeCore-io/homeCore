@@ -6277,15 +6277,16 @@ devices. Both appear as first-class devices in the state store and are fully vis
 `homecore/devices/{id}/cmd` MQTT topic and emit `DeviceStateChanged` events so the rule engine
 can trigger on them.
 
-| Plugin ID     | Prefix        | Manager                       | API route       |
-|---------------|---------------|-------------------------------|-----------------|
-| `core.timer`  | `timer_`      | `timer_manager::TimerManager` | `/api/v1/timers`   |
-| `core.switch` | `switch_`     | `switch_manager::SwitchManager` | `/api/v1/switches` |
+Both are helpers: `plugin_id = "core.glue"`, made with `POST /api/v1/glue` and listed by
+`GET /api/v1/glue`.
 
-Native built-ins also publish explicit `device_type` values:
+| `device_type` | Prefix    | Handled by                         |
+|---------------|-----------|------------------------------------|
+| `timer`       | `timer_`  | `timer_manager::TimerManager`      |
+| `switch`      | `switch_` | `glue::GlueManager`                |
 
-- `core.timer` → `timer`
-- `core.switch` → `vswitch`
+The `core.timer` and `core.switch` plugin ids, the `/timers` and `/switches` routes and the
+startup migration between them were removed in 0.1.82.
 
 ---
 
@@ -6298,14 +6299,14 @@ e.g., "vacation mode", "guest mode", "sleep mode".
 #### Creating a switch
 
 ```bash
-POST /api/v1/switches
+POST /api/v1/glue
 Content-Type: application/json
 
-{"id": "vacation_mode", "label": "Vacation Mode"}
+{"type": "switch", "id": "vacation_mode", "name": "Vacation Mode"}
 ```
 
-This creates a device with `device_id = "switch_vacation_mode"`, `plugin_id = "core.switch"`,
-`device_type = "vswitch"`, and initial state `{"on": false}`. The device is immediately visible
+This creates a device with `device_id = "switch_vacation_mode"`, `plugin_id = "core.glue"`,
+`device_type = "switch"`, and initial state `{"on": false}`. The device is immediately visible
 via `GET /api/v1/devices`.
 
 #### Commands
@@ -6451,10 +6452,8 @@ message = "Motion in back yard."
 
 | File | Role |
 |---|---|
-| `crates/hc-core/src/switch_manager.rs` | `SwitchManager` — listens on event bus, handles `on`/`off`/`toggle`, persists state, emits `DeviceStateChanged` |
-| `crates/hc-core/src/lib.rs` | Spawns `SwitchManager` in `Core::start()` |
-| `crates/hc-api/src/handlers.rs` | `create_switch`, `list_switches` handlers |
-| `crates/hc-api/src/lib.rs` | `/api/v1/switches` route |
+| `crates/hc-core/src/glue/mod.rs` | `GlueManager` — handles a switch's `on`/`off`/`toggle`, persists state, emits `DeviceStateChanged` |
+| `crates/hc-api/src/handlers.rs` | `create_glue`, `list_glue`, `update_glue`, `delete_glue` |
 
 ---
 

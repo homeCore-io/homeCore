@@ -52,10 +52,19 @@ pub fn default_runtime() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginVersion {
     pub version: String,
+    /// The oldest homeCore it runs on; empty when it doesn't say.
     #[serde(default)]
     pub min_core: String,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+}
+
+impl PluginVersion {
+    /// Whether it runs on homeCore `core`.
+    pub fn runs_on(&self, core: &str) -> bool {
+        self.min_core.trim().is_empty()
+            || compare_versions(core, &self.min_core) != std::cmp::Ordering::Less
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +119,15 @@ impl RegistryPlugin {
     }
     pub fn version(&self, v: &str) -> Option<&PluginVersion> {
         self.versions.iter().find(|pv| pv.version == v)
+    }
+    /// The newest version that runs on homeCore `core`.
+    pub fn latest_for(&self, core: &str) -> Option<&PluginVersion> {
+        self.versions.iter().filter(|pv| pv.runs_on(core)).reduce(
+            |best, pv| match compare_versions(&pv.version, &best.version) {
+                std::cmp::Ordering::Greater => pv,
+                _ => best,
+            },
+        )
     }
 }
 
@@ -317,7 +335,15 @@ impl RegistryClient {
     /// Placement needs this: deciding a plugin belongs on a python runtime means
     /// looking at artifacts core itself cannot run, which `resolve` deliberately
     /// hides.
-    pub async fn version_of(&self, id: &str, version: Option<&str>) -> Result<PluginVersion> {
+    /// A version of `id`: the one named, or the newest that runs on homeCore
+    /// `core`. A named version is returned whatever it needs — whether to
+    /// install it is the caller's question ([`PluginVersion::runs_on`]).
+    pub async fn version_of(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        core: &str,
+    ) -> Result<PluginVersion> {
         let idx = self.index().await?;
         let plugin = idx
             .plugin(id)
@@ -326,9 +352,19 @@ impl RegistryClient {
             Some(v) => plugin
                 .version(v)
                 .ok_or_else(|| anyhow!("version `{v}` of `{id}` not found"))?,
-            None => plugin
-                .latest()
-                .ok_or_else(|| anyhow!("`{id}` has no published versions"))?,
+            None => match plugin.latest_for(core) {
+                Some(pv) => pv,
+                None => {
+                    let newest = plugin
+                        .latest()
+                        .ok_or_else(|| anyhow!("`{id}` has no published versions"))?;
+                    return Err(anyhow!(
+                        "no version of `{id}` runs on homeCore {core}: the newest, {}, needs {}",
+                        newest.version,
+                        newest.min_core
+                    ));
+                }
+            },
         };
         Ok(pv.clone())
     }
@@ -445,6 +481,19 @@ mod tests {
             "0.1.10", "0.1.11", "0.1.12", "0.1.13", "0.1.14", "0.1.4", "0.1.5", "0.1.6", "0.1.7",
         ]);
         assert_eq!(p.latest().unwrap().version, "0.1.14");
+    }
+
+    #[test]
+    fn a_version_runs_on_the_homecore_it_says_or_newer() {
+        let mut p = plugin_with(&["0.1.0", "0.2.0", "0.3.0"]);
+        p.versions[1].min_core = "0.1.80".into();
+        p.versions[2].min_core = "0.1.90".into();
+        assert!(p.versions[0].runs_on("0.1.1"));
+        assert!(p.versions[1].runs_on("0.1.80") && p.versions[1].runs_on("0.1.81"));
+        assert!(!p.versions[2].runs_on("0.1.81"));
+        assert_eq!(p.latest_for("0.1.81").unwrap().version, "0.2.0");
+        assert_eq!(p.latest_for("0.1.79").unwrap().version, "0.1.0");
+        assert_eq!(p.latest_for("0.1.95").unwrap().version, "0.3.0");
     }
 
     #[test]

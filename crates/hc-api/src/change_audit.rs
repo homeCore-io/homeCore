@@ -64,6 +64,7 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("POST", "/automations/{id}/clone") => c("automation.copied", "automation"),
         ("POST", "/automations/{id}/run") => c("automation.run", "automation"),
         ("POST", "/automations/import") => c("automation.imported", "automation"),
+        ("POST", "/automations/repoint") => c("automation.repointed", "automation"),
         ("POST", "/automations/groups") => c("automation_group.created", "automation_group"),
         ("PATCH", "/automations/groups/{id}") => c("automation_group.updated", "automation_group"),
         ("DELETE", "/automations/groups/{id}") => c("automation_group.deleted", "automation_group"),
@@ -74,13 +75,12 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("PATCH", "/devices") => c("device.bulk_updated", "device"),
         ("PATCH", "/devices/{id}") => c("device.updated", "device"),
         ("DELETE", "/devices/{id}") => c("device.deleted", "device"),
-        ("POST", "/timers") | ("POST", "/switches") | ("POST", "/glue") => {
-            c("helper.created", "device")
-        }
+        ("DELETE", "/devices/removed/{id}") => c("device.brought_back", "device"),
+        ("POST", "/glue") => c("helper.created", "device"),
         ("PATCH", "/glue/{id}") => c("helper.updated", "device"),
         ("DELETE", "/glue/{id}") => c("helper.deleted", "device"),
         ("POST", "/modes") => c("mode.created", "device"),
-        ("PATCH", "/modes/{id}") => c("mode.renamed", "device"),
+        ("PATCH", "/modes/{id}") => c("mode.updated", "device"),
         ("DELETE", "/modes/{id}") => c("mode.deleted", "device"),
         ("PUT", "/modes/{id}/definition") | ("DELETE", "/modes/{id}/definition") => {
             c("mode.updated", "device")

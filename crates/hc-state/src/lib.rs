@@ -522,6 +522,31 @@ impl StateStore {
         Ok(())
     }
 
+    // --- Removed plugin devices ---
+
+    pub async fn forget_device(&self, f: device_store::ForgottenDevice) -> Result<()> {
+        let store = Arc::clone(&self.devices);
+        tokio::task::spawn_blocking(move || store.forget(&f)).await?
+    }
+
+    pub async fn is_forgotten(&self, device_id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.devices);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.is_forgotten(&id)).await?
+    }
+
+    pub async fn list_forgotten(&self) -> Result<Vec<device_store::ForgottenDevice>> {
+        let store = Arc::clone(&self.devices);
+        tokio::task::spawn_blocking(move || store.list_forgotten()).await?
+    }
+
+    /// Whether there was such a record.
+    pub async fn unforget_device(&self, device_id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.devices);
+        let id = device_id.to_string();
+        tokio::task::spawn_blocking(move || store.unforget(&id)).await?
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> Result<bool> {
         let store = Arc::clone(&self.devices);
         let id = device_id.to_string();

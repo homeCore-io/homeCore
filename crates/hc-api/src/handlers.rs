@@ -84,18 +84,7 @@ fn load_mode_definitions_response(
 }
 
 pub(crate) fn normalize_native_device_type(mut device: DeviceState) -> DeviceState {
-    if device.device_type.is_none() {
-        // Legacy devices that haven't been migrated yet.
-        if device.plugin_id == "core.switch" {
-            device.device_type = Some("switch".to_string());
-        } else if device.plugin_id == "core.timer" {
-            device.device_type = Some("timer".to_string());
-        } else if device.device_id.starts_with("switch_") {
-            device.device_type = Some("switch".to_string());
-        } else if device.device_id.starts_with("timer_") {
-            device.device_type = Some("timer".to_string());
-        }
-    } else if let Some(device_type) = device.device_type.as_deref() {
+    if let Some(device_type) = device.device_type.as_deref() {
         device.device_type = Some(canonical_device_type_name(device_type));
     }
     device
@@ -824,6 +813,62 @@ pub async fn update_device(
     .into_response()
 }
 
+/// A plugin's device someone removes would be back the next time its plugin
+/// reported it, history and all: remember it, so it stays gone until brought
+/// back (`DELETE /devices/removed/{id}`). homeCore's own devices — helpers,
+/// modes — aren't reported by anything, so need no remembering.
+async fn remember_removed(s: &AppState, before: &[DeviceState], id: &str) {
+    let Some(d) = before.iter().find(|d| d.device_id == id) else {
+        return;
+    };
+    if d.plugin_id.starts_with("core.") {
+        return;
+    }
+    let f = hc_state::device_store::ForgottenDevice {
+        device_id: d.device_id.clone(),
+        plugin_id: d.plugin_id.clone(),
+        name: d.effective_name().to_string(),
+        removed_at: chrono::Utc::now(),
+    };
+    if let Err(e) = s.store.forget_device(f).await {
+        tracing::warn!(device_id = %id, error = %e, "could not remember a removed device");
+    }
+}
+
+/// `GET /api/v1/devices/removed` — plugin devices kept out, newest first.
+pub async fn list_removed_devices(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    match s.store.list_forgotten().await {
+        Ok(list) => Json(json!(list)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/v1/devices/removed/{id}` — stop keeping a removed device
+/// out: it comes back the next time its plugin reports it, history and all.
+pub async fn bring_back_device(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.store.unforget_device(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no removed device by that id" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_device(
     State(s): State<AppState>,
     _: DevicesWrite,
@@ -840,6 +885,7 @@ pub async fn delete_device(
         }
     };
 
+    remember_removed(&s, &devices_before_delete, &id).await;
     match s.store.delete_device(&id).await {
         Ok(false) => {
             return (
@@ -1020,6 +1066,7 @@ pub async fn bulk_delete_devices(
     };
 
     for id in &ids {
+        remember_removed(&s, &devices_before_delete, id).await;
         match s.store.delete_device(id).await {
             Ok(false) => not_found.push(id.clone()),
             Err(e) => {
@@ -1203,104 +1250,6 @@ fn downsample_per_attribute(
 
 // ---------- Timers ----------
 
-#[derive(Deserialize)]
-pub struct CreateTimerBody {
-    /// Slug used to form the device_id: "garage_close" → "timer_garage_close".
-    pub id: String,
-    pub label: Option<String>,
-}
-
-pub async fn create_timer(
-    State(s): State<AppState>,
-    _: DevicesWrite,
-    Json(body): Json<CreateTimerBody>,
-) -> impl IntoResponse {
-    // Enforce the timer_ prefix convention.
-    let device_id = if body.id.starts_with("timer_") {
-        body.id.clone()
-    } else {
-        format!("timer_{}", body.id)
-    };
-
-    if let Ok(Some(_)) = s.store.get_device(&device_id).await {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "timer already exists" })),
-        )
-            .into_response();
-    }
-
-    let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
-    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
-    dev.device_type = Some("timer".to_string());
-    dev.available = true;
-    dev.attributes.insert("state".into(), json!("idle"));
-    dev.attributes.insert("duration_secs".into(), json!(0_u64));
-    dev.attributes.insert("remaining_secs".into(), json!(0_u64));
-    dev.attributes.insert("repeat".into(), json!(false));
-
-    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-pub async fn list_timers(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
-    match s.store.list_devices().await {
-        Ok(devices) => {
-            let timers: Vec<_> = devices
-                .into_iter()
-                .filter(|d| {
-                    d.plugin_id == "core.timer"
-                        || (d.plugin_id == "core.glue" && d.device_type.as_deref() == Some("timer"))
-                })
-                .map(normalize_native_device_type)
-                .map(compute_timer_remaining)
-                .collect();
-            (StatusCode::OK, Json(json!(timers)))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-pub async fn get_timer(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    _: DevicesRead,
-) -> impl IntoResponse {
-    let device_id = if id.starts_with("timer_") {
-        id.clone()
-    } else {
-        format!("timer_{id}")
-    };
-    match s.store.get_device(&device_id).await {
-        Ok(Some(dev)) => (
-            StatusCode::OK,
-            Json(json!(compute_timer_remaining(
-                normalize_native_device_type(dev)
-            ))),
-        )
-            .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "timer not found" })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
 /// For a running timer, recompute `remaining_secs` from `started_at` + `duration_secs`
 /// so callers always see an accurate countdown without requiring periodic store writes.
 fn compute_timer_remaining(
@@ -1330,76 +1279,6 @@ fn compute_timer_remaining(
     dev
 }
 
-// ---------- Switches ----------
-
-#[derive(Deserialize)]
-pub struct CreateSwitchBody {
-    /// Slug used to form the device_id: "vacation_mode" → "switch_vacation_mode".
-    pub id: String,
-    pub label: Option<String>,
-}
-
-pub async fn create_switch(
-    State(s): State<AppState>,
-    _: DevicesWrite,
-    Json(body): Json<CreateSwitchBody>,
-) -> impl IntoResponse {
-    // Enforce the switch_ prefix convention.
-    let device_id = if body.id.starts_with("switch_") {
-        body.id.clone()
-    } else {
-        format!("switch_{}", body.id)
-    };
-
-    if let Ok(Some(_)) = s.store.get_device(&device_id).await {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "switch already exists" })),
-        )
-            .into_response();
-    }
-
-    let display_name = body.label.as_deref().unwrap_or(&device_id).to_string();
-    let mut dev = hc_types::device::DeviceState::new(&device_id, &display_name, "core.glue");
-    // Must be "switch", not "virtual_switch": that is what `GLUE_TYPES` writes,
-    // what the `core.switch` → `core.glue` migration backfills, and what
-    // `list_switches` filters on.  Writing "virtual_switch" here created
-    // switches that GET /switches could never return.
-    dev.device_type = Some("switch".to_string());
-    dev.available = true;
-    dev.attributes.insert("on".into(), json!(false));
-
-    match hc_core::glue::upsert_device_with_schema(&s.store, &dev).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!(dev))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-pub async fn list_switches(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
-    match s.store.list_devices().await {
-        Ok(devices) => {
-            let switches: Vec<_> = devices
-                .into_iter()
-                .filter(|d| {
-                    d.plugin_id == "core.switch"
-                        || (d.plugin_id == "core.glue"
-                            && d.device_type.as_deref() == Some("switch"))
-                })
-                .map(normalize_native_device_type)
-                .collect();
-            (StatusCode::OK, Json(json!(switches)))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
 // ---------- Glue Devices ----------
 
 /// Glue device type prefixes and their default attributes.
@@ -1419,7 +1298,8 @@ const GLUE_TYPES: &[(&str, &str, &str)] = &[
 
 #[derive(Debug, Deserialize)]
 pub struct CreateGlueBody {
-    /// Device type: "counter", "number", "select", "text", "button", "datetime", "group", "threshold", "schedule".
+    /// Device type: "switch", "timer", "counter", "number", "select", "text", "button",
+    /// "datetime", "group", "threshold", "schedule".
     #[serde(rename = "type")]
     pub glue_type: String,
     /// Device ID slug (prefix auto-added if missing).
@@ -1635,11 +1515,7 @@ pub async fn list_glue(State(s): State<AppState>, _: DevicesRead) -> impl IntoRe
         Ok(devices) => {
             let glue: Vec<_> = devices
                 .into_iter()
-                .filter(|d| {
-                    d.plugin_id == "core.glue"
-                        || d.plugin_id == "core.timer"
-                        || d.plugin_id == "core.switch"
-                })
+                .filter(|d| d.plugin_id == "core.glue")
                 .map(compute_timer_remaining)
                 .collect();
             (StatusCode::OK, Json(json!(glue)))
@@ -1674,8 +1550,41 @@ fn glue_config_keys(device_type: &str) -> &'static [&'static str] {
             "hysteresis",
         ],
         "timer" => &["duration_secs", "repeat"],
+        "schedule" => &["blocks"],
         _ => &[],
     }
+}
+
+/// What's wrong with a schedule's blocks, or None: each names days and a
+/// start and an end, `HH:MM` (an end earlier than its start runs overnight).
+fn schedule_blocks_problem(blocks: &Value) -> Option<String> {
+    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let time = |v: &Value| {
+        v.as_str()
+            .and_then(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").ok())
+            .is_some()
+    };
+    let Some(list) = blocks.as_array() else {
+        return Some("`blocks` is a list".into());
+    };
+    for (i, b) in list.iter().enumerate() {
+        let n = i + 1;
+        let days = b.get("days").and_then(Value::as_array);
+        match days {
+            Some(d)
+                if !d.is_empty()
+                    && d.iter()
+                        .all(|x| x.as_str().is_some_and(|x| DAYS.contains(&x))) => {}
+            _ => return Some(format!("block {n}: `days` lists Mon, Tue, … Sun")),
+        }
+        if !b.get("start").is_some_and(time) || !b.get("end").is_some_and(time) {
+            return Some(format!("block {n}: `start` and `end` are times like 08:00"));
+        }
+        if b.get("start") == b.get("end") {
+            return Some(format!("block {n}: it starts and ends at the same time"));
+        }
+    }
+    None
 }
 
 /// `PATCH /api/v1/glue/:id` — reconfigure an existing helper.
@@ -1745,6 +1654,15 @@ pub async fn update_glue(
         incoming.insert("member_ids".into(), members);
     }
 
+    if let Some(problem) = incoming.get("blocks").and_then(schedule_blocks_problem) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": problem })),
+        )
+            .into_response();
+    }
+
+    let previous = dev.attributes.clone();
     for key in allowed {
         if let Some(v) = incoming.get(*key) {
             dev.attributes.insert((*key).to_string(), v.clone());
@@ -1773,33 +1691,119 @@ pub async fn update_glue(
         }
     }
 
-    match s.store.upsert_device(&dev).await {
-        Ok(_) => (StatusCode::OK, Json(json!(dev))).into_response(),
-        Err(e) => (
+    if let Err(e) = s.store.upsert_device(&dev).await {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         )
-            .into_response(),
+            .into_response();
     }
+
+    // Its settings are attributes, which the store keeps without announcing:
+    // say what changed, as any change to a device is said, so every open
+    // screen shows the helper as it now is.
+    let changed: Vec<String> = dev
+        .attributes
+        .iter()
+        .filter(|(k, v)| previous.get(*k) != Some(*v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if !changed.is_empty() {
+        let _ = s
+            .event_bus
+            .publish(hc_types::event::Event::DeviceStateChanged {
+                timestamp: chrono::Utc::now(),
+                device_id: dev.device_id.clone(),
+                device_name: Some(dev.effective_name().to_string()),
+                previous,
+                current: dev.attributes.clone(),
+                changed,
+                change: DeviceChange::homecore("helper_settings"),
+            });
+    }
+    // What it is follows from its settings: work it out again now rather
+    // than at the next minute's tick or member's change.
+    match device_type.as_str() {
+        "schedule" => {
+            hc_core::glue::schedule::recalculate(&s.store, &s.event_bus, &dev.device_id).await
+        }
+        "group" => hc_core::glue::group::recalculate(&s.store, &s.event_bus, &dev.device_id).await,
+        _ => {}
+    }
+    let now = s
+        .store
+        .get_device(&dev.device_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(dev);
+    (StatusCode::OK, Json(json!(now))).into_response()
 }
 
+/// `DELETE /api/v1/glue/:id` — a helper goes as any device does: rules that
+/// name it are turned off and say why, and the answer names them.
 pub async fn delete_glue(
     State(s): State<AppState>,
-    _: DevicesWrite,
+    w: DevicesWrite,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    match s.store.delete_device(&id).await {
-        Ok(true) => (StatusCode::OK, Json(json!({ "deleted": true }))).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "device not found" })),
+) -> axum::response::Response {
+    match s.store.get_device(&id).await {
+        Ok(Some(d)) if d.plugin_id == "core.glue" => {}
+        Ok(Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "not a helper device — delete it under /devices" })),
+            )
+                .into_response()
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+    delete_device(State(s), w, Path(id)).await.into_response()
+}
+
+#[cfg(test)]
+mod schedule_block_tests {
+    use super::schedule_blocks_problem;
+    use serde_json::json;
+
+    #[test]
+    fn blocks_are_days_and_two_times() {
+        assert!(schedule_blocks_problem(&json!([])).is_none());
+        assert!(schedule_blocks_problem(&json!([
+            { "days": ["Mon", "Fri"], "start": "08:00", "end": "17:00" },
+            { "days": ["Sat"], "start": "22:00", "end": "06:00" }
+        ]))
+        .is_none());
+        assert!(schedule_blocks_problem(&json!({})).is_some());
+        assert!(schedule_blocks_problem(
+            &json!([{ "days": [], "start": "08:00", "end": "09:00" }])
         )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+        .is_some());
+        assert!(schedule_blocks_problem(
+            &json!([{ "days": ["Monday"], "start": "08:00", "end": "09:00" }])
         )
-            .into_response(),
+        .is_some());
+        assert!(schedule_blocks_problem(
+            &json!([{ "days": ["Mon"], "start": "8am", "end": "09:00" }])
+        )
+        .is_some());
+        assert!(schedule_blocks_problem(
+            &json!([{ "days": ["Mon"], "start": "09:00", "end": "09:00" }])
+        )
+        .is_some());
     }
 }
 
@@ -2350,25 +2354,44 @@ pub async fn delete_mode_definition(
 /// Rejects built-in solar modes with 400.
 #[derive(Debug, Deserialize)]
 pub struct PatchModeBody {
-    pub name: String,
+    pub name: Option<String>,
+    /// A sun-following mode's events and offsets.
+    pub on_event: Option<hc_types::rule::SunEventType>,
+    pub off_event: Option<hc_types::rule::SunEventType>,
+    pub on_offset_minutes: Option<i32>,
+    pub off_offset_minutes: Option<i32>,
 }
 
-/// `PATCH /api/v1/modes/{id}` — rename a mode: its entry in `modes.toml`
-/// and its device both, so every screen and the next start agree. Its id,
-/// and so every rule naming it, stays.
+/// `PATCH /api/v1/modes/{id}` — change a mode: its name (its entry in
+/// `modes.toml` and its device both, so every screen and the next start
+/// agree), and for one that follows the sun, which events and how far from
+/// them. Its id, and so every rule naming it, stays. The mode manager reads
+/// the file again and works out the mode's state and today's times.
 pub async fn patch_mode(
     State(s): State<AppState>,
     _: DevicesWrite,
     Path(id): Path<String>,
     Json(body): Json<PatchModeBody>,
 ) -> impl IntoResponse {
-    let name = body.name.trim().to_string();
-    if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "give the mode a name" })),
-        )
-            .into_response();
+    let bad = |msg: &str| (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    let name = match body.name.as_deref().map(str::trim) {
+        Some("") => return bad("give the mode a name"),
+        other => other.map(str::to_string),
+    };
+    let sun = body.on_event.is_some()
+        || body.off_event.is_some()
+        || body.on_offset_minutes.is_some()
+        || body.off_offset_minutes.is_some();
+    if name.is_none() && !sun {
+        return bad("nothing to change: send `name`, or a solar mode's events or offsets");
+    }
+    for m in [body.on_offset_minutes, body.off_offset_minutes]
+        .into_iter()
+        .flatten()
+    {
+        if m.abs() > 12 * 60 {
+            return bad("an offset is at most 12 hours (720 minutes) either way");
+        }
     }
     let Some(path) = s.modes_path.as_ref().map(|p| p.as_ref().clone()) else {
         return (
@@ -2394,7 +2417,24 @@ pub async fn patch_mode(
         )
             .into_response();
     };
-    mode.name = name.clone();
+    if sun && mode.kind != hc_core::mode_manager::ModeKind::Solar {
+        return bad("only a mode that follows the sun has events and offsets");
+    }
+    if let Some(n) = &name {
+        mode.name = n.clone();
+    }
+    if let Some(e) = body.on_event {
+        mode.on_event = Some(e);
+    }
+    if let Some(e) = body.off_event {
+        mode.off_event = Some(e);
+    }
+    if let Some(m) = body.on_offset_minutes {
+        mode.on_offset_minutes = m;
+    }
+    if let Some(m) = body.off_offset_minutes {
+        mode.off_offset_minutes = m;
+    }
     let cfg = mode.clone();
     if let Err(e) = hc_core::mode_manager::write_modes(&path, &modes) {
         return (
@@ -2405,26 +2445,28 @@ pub async fn patch_mode(
     }
     // The device keeps the name it was made with, so it is renamed too —
     // and a name given it as a device is dropped, this one being the mode's.
-    if let Ok(Some(mut device)) = s.store.get_device(&id).await {
-        let previous = device.effective_name().to_string();
-        device.name = name.clone();
-        device.name_override = None;
-        if let Err(e) = s.store.upsert_device(&device).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-        if previous != name {
-            let _ = s
-                .event_bus
-                .publish(hc_types::event::Event::DeviceNameChanged {
-                    timestamp: chrono::Utc::now(),
-                    device_id: id.clone(),
-                    previous_name: previous,
-                    current_name: name,
-                });
+    if let Some(name) = name {
+        if let Ok(Some(mut device)) = s.store.get_device(&id).await {
+            let previous = device.effective_name().to_string();
+            device.name = name.clone();
+            device.name_override = None;
+            if let Err(e) = s.store.upsert_device(&device).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+            if previous != name {
+                let _ = s
+                    .event_bus
+                    .publish(hc_types::event::Event::DeviceNameChanged {
+                        timestamp: chrono::Utc::now(),
+                        device_id: id.clone(),
+                        previous_name: previous,
+                        current_name: name,
+                    });
+            }
         }
     }
     (StatusCode::OK, Json(json!(cfg))).into_response()
@@ -5130,6 +5172,79 @@ pub async fn run_automation(
     )
 }
 
+/// `GET /api/v1/automations/variables` — the hub variables rules have set,
+/// by name, as they are now. Kept in memory: a restart empties them until a
+/// rule sets one again.
+pub async fn list_hub_variables(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    let mut hub: Vec<(String, Value)> = s
+        .hub_vars
+        .as_ref()
+        .map(|h| {
+            h.iter()
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    hub.sort_by(|a, b| a.0.cmp(&b.0));
+    let hub: serde_json::Map<String, Value> = hub.into_iter().collect();
+    Json(json!({ "hub": hub }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepointBody {
+    pub from: String,
+    pub to: String,
+}
+
+/// `POST /api/v1/automations/repoint` — every rule that names one device,
+/// now naming another: a sensor replaced, or one deleted. A rule turned off
+/// only because the old device was deleted is turned on again.
+pub async fn repoint_automations(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Json(body): Json<RepointBody>,
+) -> impl IntoResponse {
+    let (from, to) = (body.from.trim(), body.to.trim());
+    let from = from.strip_prefix("DELETED:").unwrap_or(from);
+    if from.is_empty() || to.is_empty() || from == to {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name two different devices: `from` and `to`" })),
+        );
+    }
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        }
+    };
+    if !devices.iter().any(|d| d.device_id == to) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": format!("there is no device `{to}`") })),
+        );
+    }
+    let Some(rfs) = &s.rule_file_store else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rules aren't kept in files here" })),
+        );
+    };
+    match crate::rule_file_store::repoint_device_refs(&rfs.dir, from, to, &devices) {
+        Ok(changed) => (StatusCode::OK, Json(json!({ "changed": changed }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 /// `?at=` on a dry run: the time to judge the rule's checks at.
 #[derive(Debug, Default, Deserialize)]
 pub struct TestAt {
@@ -6127,7 +6242,7 @@ pub async fn install_plugin(
         // Where does this run? A plugin whose artifact targets a runtime is
         // dispatched there rather than unpacked here, and the admin who clicked
         // Install does not need to know which case they hit.
-        let pv = match reg.version_of(id, version).await {
+        let pv = match reg.version_of(id, version, s.homecore_version).await {
             Ok(v) => v,
             Err(e) => {
                 return (
@@ -6137,6 +6252,21 @@ pub async fn install_plugin(
                     .into_response();
             }
         };
+        // A version that needs a newer homeCore would start and fail, or not
+        // start at all; say so before downloading it.
+        if !pv.runs_on(s.homecore_version) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!(
+                        "{id} {} needs homeCore {} or later; this is {}",
+                        pv.version, pv.min_core, s.homecore_version
+                    ),
+                    "min_core": pv.min_core,
+                })),
+            )
+                .into_response();
+        }
         let runtime_records = s.store.plugin_runtimes().list().unwrap_or_default();
         let candidates = crate::placement::candidates(&runtime_records);
         let runtime_artifacts: Vec<(&str, &str, &str)> = pv
@@ -6877,7 +7007,11 @@ pub async fn patch_plugin(
         // 2. Auto-start / auto-stop on transition. The seeded config
         //    expects this — flipping the toggle is the user-visible
         //    action; spinning the supervisor is a side effect.
-        if new_enabled != prev_enabled {
+        // Turning on a plugin that's on but not running — it crashed, or its
+        // supervisor gave up — starts it, as turning it on would be expected
+        // to; it used to do nothing, leaving only Restart.
+        let not_running = matches!(new_rec.status.as_str(), "offline" | "stopped");
+        if new_enabled != prev_enabled || (new_enabled && not_running) {
             let cmds = s.plugin_commands.read().await;
             if let Some(tx) = cmds.get(&id) {
                 let action = if new_enabled {
@@ -9681,7 +9815,7 @@ mod tests {
 
     use crate::auth_middleware::{
         whitelist_claims, AreasRead, AreasWrite, AuthUser, AutomationsWrite, DashboardsWrite,
-        DevicesRead, DevicesWrite,
+        DevicesWrite,
     };
     use crate::dashboard_store::{DashboardStore, DashboardStoreData};
     use axum::extract::{Path, Query, State};
@@ -10246,38 +10380,6 @@ token = "TOKEN-TWO"
             .expect("load")
             .expect("device");
         assert_eq!(stored.area_override.as_deref(), Some("studio_c"));
-    }
-
-    #[tokio::test]
-    async fn a_created_switch_is_actually_listed() {
-        let state = mk_state().await;
-
-        let resp = create_switch(
-            State(state.clone()),
-            DevicesWrite(whitelist_claims()),
-            Json(CreateSwitchBody {
-                id: "vacation_mode".into(),
-                label: Some("Vacation Mode".into()),
-            }),
-        )
-        .await
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-
-        let resp = list_switches(State(state.clone()), DevicesRead(whitelist_claims()))
-            .await
-            .into_response();
-        let switches: Vec<DeviceState> = parse_json(resp).await;
-
-        // Regression: create_switch wrote device_type "virtual_switch", which
-        // list_switches filters out — so POST /switches created a device that
-        // GET /switches could never return. It existed, and was invisible.
-        assert_eq!(
-            switches.len(),
-            1,
-            "the switch we just created is missing from GET /switches"
-        );
-        assert_eq!(switches[0].device_id, "switch_vacation_mode");
     }
 
     #[tokio::test]

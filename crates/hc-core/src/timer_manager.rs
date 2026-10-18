@@ -1,13 +1,14 @@
 //! Timer helper devices — virtual countdown timers for automation rules.
 //!
-//! Timers appear as first-class devices in the state store (`plugin_id = "core.timer"`).
+//! Timers appear as first-class devices in the state store (`plugin_id = "core.glue"`,
+//! `device_type = "timer"`).
 //! They accept commands on the standard `homecore/devices/{id}/cmd` MQTT topic,
 //! and emit `DeviceStateChanged` events on the internal bus so the rule engine
 //! can trigger on timer state transitions.
 //!
 //! # Creating a timer
 //!
-//! `POST /api/v1/timers` with `{"id": "garage_close", "label": "Garage close delay"}`.
+//! `POST /api/v1/glue` with `{"type": "timer", "id": "garage_close", "name": "Garage close delay"}`.
 //! This creates a device with `device_id = "timer_garage_close"`.
 //!
 //! # Commands  (PATCH /api/v1/devices/timer_garage_close/state)
@@ -65,7 +66,6 @@ use tracing::{debug, info, warn};
 
 use crate::EventBus;
 
-pub const TIMER_PLUGIN_ID: &str = "core.timer";
 pub const TIMER_ID_PREFIX: &str = "timer_";
 
 // ---------------------------------------------------------------------------
@@ -166,9 +166,7 @@ impl TimerManager {
         };
 
         for dev in devices {
-            // Accept both legacy core.timer and new core.glue timer devices.
-            let is_timer = dev.plugin_id == TIMER_PLUGIN_ID
-                || (dev.plugin_id == "core.glue" && dev.device_id.starts_with("timer_"));
+            let is_timer = dev.plugin_id == "core.glue" && dev.device_id.starts_with("timer_");
             if !is_timer {
                 continue;
             }
