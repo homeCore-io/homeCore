@@ -91,7 +91,7 @@ pub async fn log_stream_handler(
         // an undocumented hole in it.
         match crate::auth_middleware::validate_query_token(&state, token, ip).await {
             Ok(claims) => claims.sub,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         }
     };
 

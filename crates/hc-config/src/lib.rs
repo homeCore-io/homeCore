@@ -80,6 +80,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub alerts: AlertsSection,
     #[serde(default)]
+    pub backup: BackupSection,
+    #[serde(default)]
     pub influx: InfluxConfig,
     #[serde(default)]
     pub metrics: MetricsSection,
@@ -260,6 +262,41 @@ pub fn default_server_host() -> String {
 }
 pub fn default_server_port() -> u16 {
     8080
+}
+
+/// `[backup]` section of homecore.toml — backups homeCore makes by itself.
+#[derive(Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BackupSection {
+    /// Make one this often, in hours. Default 24 (daily); 0 only when asked.
+    #[serde(default = "default_backup_every_hours")]
+    pub every_hours: u32,
+    /// How many to keep; older ones are deleted. Default 7.
+    #[serde(default = "default_backup_keep")]
+    pub keep: u32,
+    /// Where they're kept; relative to homeCore's home. Default `backups`.
+    #[serde(default = "default_backup_dir")]
+    pub dir: String,
+}
+
+impl Default for BackupSection {
+    fn default() -> Self {
+        Self {
+            every_hours: default_backup_every_hours(),
+            keep: default_backup_keep(),
+            dir: default_backup_dir(),
+        }
+    }
+}
+
+pub fn default_backup_every_hours() -> u32 {
+    24
+}
+pub fn default_backup_keep() -> u32 {
+    7
+}
+pub fn default_backup_dir() -> String {
+    "backups".into()
 }
 
 /// `[alerts]` section of homecore.toml — what homeCore does with the alerts

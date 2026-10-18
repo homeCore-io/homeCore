@@ -44,6 +44,10 @@ pub struct RefreshTokenRecord {
     /// Soft fingerprint for the "active sessions" UI. Best-effort.
     #[serde(default)]
     pub user_agent: String,
+    /// When the session this token belongs to began — the sign-in, carried
+    /// through every refresh. None on tokens from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_started: Option<DateTime<Utc>>,
 }
 
 impl RefreshTokenRecord {
@@ -272,6 +276,7 @@ mod tests {
             expires_at: Utc::now() + chrono::Duration::days(30),
             revoked_at: None,
             user_agent: String::new(),
+            session_started: None,
         }
     }
 

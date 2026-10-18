@@ -347,14 +347,17 @@ pub struct SetPinBody {
     pub password: String,
 }
 
-async fn signed_in_user(s: &AppState, claims: &Claims) -> Result<User, axum::response::Response> {
+async fn signed_in_user(
+    s: &AppState,
+    claims: &Claims,
+) -> Result<User, Box<axum::response::Response>> {
     let Actor::User { uid, .. } = claims.actor() else {
-        return Err(err(StatusCode::FORBIDDEN, "only a person has a PIN"));
+        return Err(err(StatusCode::FORBIDDEN, "only a person has a PIN").into());
     };
     match s.store.get_user_by_id(uid).await {
         Ok(Some(u)) => Ok(u),
-        Ok(None) => Err(err(StatusCode::NOT_FOUND, "user not found")),
-        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
+        Ok(None) => Err(err(StatusCode::NOT_FOUND, "user not found").into()),
+        Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into()),
     }
 }
 
@@ -366,7 +369,7 @@ pub async fn set_pin(
 ) -> impl IntoResponse {
     let mut user = match signed_in_user(&s, &claims).await {
         Ok(u) => u,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let (password, hash) = (body.password.clone(), user.password_hash.clone());
     let right = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
@@ -410,7 +413,7 @@ pub async fn set_pin(
 pub async fn clear_pin(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl IntoResponse {
     let mut user = match signed_in_user(&s, &claims).await {
         Ok(u) => u,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     user.pin_hash = None;
     if let Err(e) = s.store.update_user(&user).await {

@@ -144,6 +144,12 @@ token_expiry_hours = 24
 # state_db_path   = "data/state.redb"    # relative to base_dir (default)
 # history_db_path = "data/history.db"    # relative to base_dir (default)
 
+# Backups homeCore makes by itself, beside (not instead of) copies kept elsewhere.
+[backup]
+# every_hours = 24          # default: daily; 0 = only when asked
+# keep        = 7           # the oldest beyond this are deleted
+# dir         = "backups"   # relative to base_dir
+
 # ---------------------------------------------------------------------------
 # Automation rules
 #

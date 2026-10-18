@@ -198,7 +198,7 @@ pub async fn ws_events_handler(
     // `require_auth`, so the token-version check has to be repeated here or a
     // session invalidated by a password change could still open a stream.
     if let Err(resp) = crate::auth_middleware::token_version_current(&state, &claims).await {
-        return resp;
+        return *resp;
     }
 
     let user_agent = headers
@@ -243,9 +243,7 @@ pub(crate) async fn authenticate_ws(
         return Ok(whitelist_claims());
     }
 
-    crate::auth_middleware::validate_query_token(state, token, ip)
-        .await
-        .map_err(Box::new)
+    crate::auth_middleware::validate_query_token(state, token, ip).await
 }
 
 /// The house as it stands, for a client that asked for it on connect.

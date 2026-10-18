@@ -57,6 +57,7 @@ pub fn system_config_descriptor() -> Value {
         .section(directories())
         .section(battery())
         .section(alerts())
+        .section(backups())
         .section(influx())
         .section(metrics())
         .section(registry())
@@ -366,6 +367,33 @@ fn alerts() -> Section {
                     "A channel name from Notifications, or `all`, told when something \
                      is wet, smoky, jammed or offline. Empty = shown, not sent.",
                 ),
+        )
+}
+
+fn backups() -> Section {
+    Section::new("backup", "Backups")
+        .help(
+            "Backups homeCore makes by itself, kept beside it — beside, not instead of, \
+             copies kept somewhere else.",
+        )
+        .field(
+            Field::int("backup.every_hours")
+                .label("Every")
+                .unit("hours")
+                .min(0.0)
+                .help("24, the default, is once a day; 168 once a week. 0 makes them only when asked."),
+        )
+        .field(
+            Field::int("backup.keep")
+                .label("Keep")
+                .min(1.0)
+                .help("How many; the oldest go."),
+        )
+        .field(
+            Field::text("backup.dir")
+                .label("Folder")
+                .placeholder("backups")
+                .help("Relative to homeCore's home, unless it starts with /. Applies after a restart."),
         )
 }
 

@@ -119,7 +119,6 @@ jobs:
       extra_files: |
         config/profiles
         scripts/service-templates/homecore.service
-      rust_version: "stable"
       # Docker image: hc-core (binary is "homecore", image name diverges).
       #
       # hc-core is the API and the embedded broker. Nothing else. The UI is
@@ -152,7 +151,6 @@ jobs:
       source_dir: plugins/${{ needs.resolve.outputs.name }}
       version_manifest: plugins/${{ needs.resolve.outputs.name }}/Cargo.toml
       config_example: plugins/${{ needs.resolve.outputs.name }}/config/config.toml.example
-      rust_version: "stable"
       # Plugins ship as signed registry artifacts (tar.zst), not containers: on
       # a tag release, package the binary, attach it to the GitHub Release, and
       # notify the plugin registry to index it.

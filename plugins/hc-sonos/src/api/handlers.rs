@@ -49,11 +49,11 @@ fn bad_req(msg: &str) -> Response {
 }
 
 /// Clone a speaker handle by room name, enforcing availability.
-async fn get_speaker(state: &AppState, room: &str) -> Result<Speaker, Response> {
+async fn get_speaker(state: &AppState, room: &str) -> Result<Speaker, Box<Response>> {
     let st = state.read().await;
     match st.find_by_room(room) {
-        None => Err(not_found("room")),
-        Some(e) if !e.available => Err(offline()),
+        None => Err(not_found("room").into()),
+        Some(e) if !e.available => Err(offline().into()),
         Some(e) => Ok(e.speaker.clone()),
     }
 }
@@ -461,7 +461,7 @@ pub async fn room_state(Path(room): Path<String>, State(state): State<AppState>)
 pub async fn room_favorites(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match content::list_favorites(&sp).await {
         Ok(items) => Json(content_view(&items)).into_response(),
@@ -473,7 +473,7 @@ pub async fn room_favorites(Path(room): Path<String>, State(state): State<AppSta
 pub async fn room_playlists(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match content::list_playlists(&sp).await {
         Ok(items) => Json(content_view(&items)).into_response(),
@@ -488,7 +488,7 @@ pub async fn room_playlists(Path(room): Path<String>, State(state): State<AppSta
 pub async fn play(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.play().await {
         Ok(()) => ok(),
@@ -499,7 +499,7 @@ pub async fn play(Path(room): Path<String>, State(state): State<AppState>) -> Re
 pub async fn pause(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.pause().await {
         Ok(()) => ok(),
@@ -510,7 +510,7 @@ pub async fn pause(Path(room): Path<String>, State(state): State<AppState>) -> R
 pub async fn playpause(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.is_playing().await {
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, e),
@@ -531,7 +531,7 @@ pub async fn playpause(Path(room): Path<String>, State(state): State<AppState>) 
 pub async fn stop(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.stop().await {
         Ok(()) => ok(),
@@ -542,7 +542,7 @@ pub async fn stop(Path(room): Path<String>, State(state): State<AppState>) -> Re
 pub async fn next(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.next().await {
         Ok(()) => ok(),
@@ -553,7 +553,7 @@ pub async fn next(Path(room): Path<String>, State(state): State<AppState>) -> Re
 pub async fn previous(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.previous().await {
         Ok(()) => ok(),
@@ -571,7 +571,7 @@ pub async fn volume(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let result = if let Some(n) = level.strip_prefix('+') {
         match n.parse::<i16>() {
@@ -598,7 +598,7 @@ pub async fn volume(
 pub async fn mute(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.set_mute(true).await {
         Ok(()) => ok(),
@@ -609,7 +609,7 @@ pub async fn mute(Path(room): Path<String>, State(state): State<AppState>) -> Re
 pub async fn unmute(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.set_mute(false).await {
         Ok(()) => ok(),
@@ -620,7 +620,7 @@ pub async fn unmute(Path(room): Path<String>, State(state): State<AppState>) -> 
 pub async fn togglemute(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.mute().await {
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, e),
@@ -641,7 +641,7 @@ pub async fn loudness(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let value = match mode.as_str() {
         "on" => true,
@@ -664,7 +664,7 @@ pub async fn bass(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match level.parse::<i8>() {
         Err(_) => bad_req("bass must be -10..10"),
@@ -681,7 +681,7 @@ pub async fn treble(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match level.parse::<i8>() {
         Err(_) => bad_req("treble must be -10..10"),
@@ -702,7 +702,7 @@ pub async fn shuffle(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let value = match mode.as_str() {
         "on" => true,
@@ -725,7 +725,7 @@ pub async fn repeat(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let value = match mode.as_str() {
         "on" | "all" => RepeatMode::All,
@@ -752,7 +752,7 @@ pub async fn crossfade(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let value = match mode.as_str() {
         "on" => true,
@@ -779,7 +779,7 @@ pub async fn seek(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match secs.parse::<u32>() {
         Err(_) => bad_req("position must be seconds (integer)"),
@@ -796,7 +796,7 @@ pub async fn seekby(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match secs.parse::<i32>() {
         Err(_) => bad_req("offset must be an integer (positive or negative seconds)"),
@@ -813,7 +813,7 @@ pub async fn trackseek(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match index.parse::<u32>() {
         Err(_) => bad_req("track index must be an integer"),
@@ -856,7 +856,7 @@ pub async fn join(
 pub async fn leave(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.leave().await {
         Ok(()) => ok(),
@@ -872,7 +872,7 @@ pub async fn leave(Path(room): Path<String>, State(state): State<AppState>) -> R
 pub async fn queue(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.queue().await {
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, e),
@@ -898,7 +898,7 @@ pub async fn queue(Path(room): Path<String>, State(state): State<AppState>) -> R
 pub async fn clearqueue(Path(room): Path<String>, State(state): State<AppState>) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match sp.clear_queue().await {
         Ok(()) => ok(),
@@ -913,7 +913,7 @@ pub async fn queue_remove(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match index.parse::<u32>() {
         Err(_) => bad_req("track index must be an integer"),
@@ -931,7 +931,7 @@ pub async fn queue_add(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let uri = uri.replace('&', "&amp;");
     match sp.queue_end(&uri, "").await {
@@ -947,7 +947,7 @@ pub async fn queue_add_next(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let uri = uri.replace('&', "&amp;");
     match sp.queue_next(&uri, "").await {
@@ -971,7 +971,7 @@ pub async fn play_favorite(
     };
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match content::get_favorite_by_index(&sp, idx).await {
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, e),
@@ -997,7 +997,7 @@ pub async fn play_playlist(
     };
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match content::get_playlist_by_index(&sp, idx).await {
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, e),
@@ -1019,7 +1019,7 @@ pub async fn play_uri(
 ) -> Response {
     let sp = match get_speaker(&state, &room).await {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let uri = uri.replace('&', "&amp;");
     match sp.set_transport_uri(&uri, "").await {

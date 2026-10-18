@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -111,7 +111,19 @@ async fn bring_keys_within(s: &AppState, owner: Uuid, role: Option<hc_auth::Role
 
 /// `POST /api/v1/auth/login`
 /// Returns a signed JWT on success.
-pub async fn login(State(s): State<AppState>, Json(body): Json<LoginRequest>) -> impl IntoResponse {
+pub async fn login(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginRequest>,
+) -> impl IntoResponse {
+    // What signed in, for the person's list of sessions.
+    let agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .chars()
+        .take(256)
+        .collect::<String>();
     // Fetch user record.
     let user = match s.store.get_user_by_username(&body.username).await {
         Ok(Some(u)) => u,
@@ -169,13 +181,14 @@ pub async fn login(State(s): State<AppState>, Json(body): Json<LoginRequest>) ->
             // Mint a refresh token alongside. If minting fails, still return
             // the access token — login shouldn't break just because the
             // refresh store had a transient issue.
-            let (refresh_token, refresh_expires_in) = match issue_refresh(&s, user.id, None).await {
-                Ok(r) => (Some(r.0), Some(r.1)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "refresh token issue failed on login");
-                    (None, None)
-                }
-            };
+            let (refresh_token, refresh_expires_in) =
+                match issue_refresh(&s, user.id, None, &agent).await {
+                    Ok(r) => (Some(r.0), Some(r.1)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "refresh token issue failed on login");
+                        (None, None)
+                    }
+                };
             let body = LoginResponse {
                 token,
                 token_type: "Bearer".into(),
@@ -194,11 +207,144 @@ pub async fn login(State(s): State<AppState>, Json(body): Json<LoginRequest>) ->
     }
 }
 
+// ---- your sessions ----
+
+/// `GET /api/v1/auth/sessions` — where you're signed in: each browser or app
+/// holding a refresh token of yours, by what it said it was and when it
+/// signed in. Your own only; an admin sees theirs too.
+pub async fn list_sessions(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> impl IntoResponse {
+    let Some(uid) = claims.actor().effective_uid() else {
+        return Json(json!([])).into_response();
+    };
+    let now = chrono::Utc::now();
+    match s.store.list_refresh_by_user(uid).await {
+        Ok(mut list) => {
+            list.retain(|r| r.is_usable(now));
+            list.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+            Json(
+                list.iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "user_agent": r.user_agent,
+                            "started_at": r.session_started,
+                            "last_active": r.created_at,
+                            "expires_at": r.expires_at,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/v1/auth/sessions/{id}` — end one: it can't refresh, so it
+/// signs out when its current access token runs out (an hour at most).
+pub async fn end_session(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let uid = claims.actor().effective_uid();
+    match s.store.get_refresh_by_id(id).await {
+        Ok(Some(r)) if Some(r.user_id) == uid => {}
+        Ok(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such session of yours" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+    if let Err(e) = s.store.revoke_refresh(id).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+    let e = audit::entry_from_claims(&claims, "auth.session_ended")
+        .with_target("session", id.to_string());
+    audit::emit(&s, e).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /api/v1/auth/sessions/end-all` — sign out everywhere, this one
+/// included: every refresh token goes, and every access token issued before
+/// now stops working at once.
+pub async fn end_all_sessions(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> impl IntoResponse {
+    let Some(uid) = claims.actor().effective_uid() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "not a person's session" })),
+        )
+            .into_response();
+    };
+    if !claims.actor().is_user() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "an API key has no sessions to end" })),
+        )
+            .into_response();
+    }
+    let mut user = match s.store.get_user_by_id(uid).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such person" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    user.token_version += 1;
+    if let Err(e) = s.store.update_user(&user).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+    let revoked = revoke_all_sessions(&s, uid).await;
+    let mut e = audit::entry_from_claims(&claims, "auth.signed_out_everywhere")
+        .with_target("user", uid.to_string());
+    e.detail = json!({ "refresh_tokens_revoked": revoked });
+    audit::emit(&s, e).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// Mint a refresh token and persist it. Returns `(full_token, ttl_seconds)`.
 async fn issue_refresh(
     s: &AppState,
     user_id: Uuid,
-    parent_id: Option<Uuid>,
+    parent: Option<&RefreshTokenRecord>,
+    user_agent: &str,
 ) -> anyhow::Result<(String, u64)> {
     // Collision-safe generate.
     let new_tok = {
@@ -226,12 +372,16 @@ async fn issue_refresh(
         user_id,
         prefix: new_tok.lookup_prefix,
         hash: new_tok.hash,
-        parent_id,
+        parent_id: parent.map(|p| p.id),
         created_at: chrono::Utc::now(),
         used_at: None,
         expires_at,
         revoked_at: None,
-        user_agent: String::new(),
+        // The session goes on: what signed in, and when.
+        user_agent: parent.map_or_else(|| user_agent.to_string(), |p| p.user_agent.clone()),
+        session_started: Some(parent.map_or_else(chrono::Utc::now, |p| {
+            p.session_started.unwrap_or(p.created_at)
+        })),
     };
     s.store.create_refresh_token(&rec).await?;
     Ok((new_tok.full_token, ttl_days * 24 * 3600))
@@ -371,7 +521,7 @@ pub async fn refresh(
                 .into_response();
         }
     };
-    let (new_refresh, refresh_ttl) = match issue_refresh(&s, rec.user_id, Some(rec.id)).await {
+    let (new_refresh, refresh_ttl) = match issue_refresh(&s, rec.user_id, Some(&rec), "").await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "failed to issue rotated refresh");

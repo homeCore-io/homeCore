@@ -1164,6 +1164,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
     let protected = Router::new()
         // Auth / user management
         .route("/auth/me", get(auth_handlers::me))
+        .route("/auth/sessions", get(auth_handlers::list_sessions))
+        .route(
+            "/auth/sessions/end-all",
+            post(auth_handlers::end_all_sessions),
+        )
+        .route("/auth/sessions/{id}", delete(auth_handlers::end_session))
         .route("/auth/roles", get(auth_handlers::list_roles))
         .route(
             "/auth/change-password",
@@ -1519,6 +1525,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/system/status", get(handlers::system_status))
         .route("/system/battery_settings", get(handlers::battery_settings))
         .route("/system/backup", post(backup::backup_handler))
+        .route("/system/backups", get(backup::list_kept_handler))
+        .route("/system/backups/{name}", get(backup::download_kept_handler))
         .route(
             "/system/restore",
             post(backup::restore_handler).layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT_BYTES)),
