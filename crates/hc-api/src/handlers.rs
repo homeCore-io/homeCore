@@ -2348,6 +2348,88 @@ pub async fn delete_mode_definition(
 
 /// `DELETE /api/v1/modes/:id` — remove a mode.
 /// Rejects built-in solar modes with 400.
+#[derive(Debug, Deserialize)]
+pub struct PatchModeBody {
+    pub name: String,
+}
+
+/// `PATCH /api/v1/modes/{id}` — rename a mode: its entry in `modes.toml`
+/// and its device both, so every screen and the next start agree. Its id,
+/// and so every rule naming it, stays.
+pub async fn patch_mode(
+    State(s): State<AppState>,
+    _: DevicesWrite,
+    Path(id): Path<String>,
+    Json(body): Json<PatchModeBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "give the mode a name" })),
+        )
+            .into_response();
+    }
+    let Some(path) = s.modes_path.as_ref().map(|p| p.as_ref().clone()) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "modes not configured" })),
+        )
+            .into_response();
+    };
+    let mut modes = match hc_core::mode_manager::load_modes(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let Some(mode) = modes.iter_mut().find(|m| m.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "mode not found" })),
+        )
+            .into_response();
+    };
+    mode.name = name.clone();
+    let cfg = mode.clone();
+    if let Err(e) = hc_core::mode_manager::write_modes(&path, &modes) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+    // The device keeps the name it was made with, so it is renamed too —
+    // and a name given it as a device is dropped, this one being the mode's.
+    if let Ok(Some(mut device)) = s.store.get_device(&id).await {
+        let previous = device.effective_name().to_string();
+        device.name = name.clone();
+        device.name_override = None;
+        if let Err(e) = s.store.upsert_device(&device).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        if previous != name {
+            let _ = s
+                .event_bus
+                .publish(hc_types::event::Event::DeviceNameChanged {
+                    timestamp: chrono::Utc::now(),
+                    device_id: id.clone(),
+                    previous_name: previous,
+                    current_name: name,
+                });
+        }
+    }
+    (StatusCode::OK, Json(json!(cfg))).into_response()
+}
+
 pub async fn delete_mode(
     State(s): State<AppState>,
     _: DevicesWrite,
@@ -4959,7 +5041,17 @@ pub async fn test_automation(
     State(s): State<AppState>,
     _: AutomationsRead,
     Path(id): Path<Uuid>,
+    Query(q): Query<TestAt>,
 ) -> impl IntoResponse {
+    let clock = match q.clock() {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": msg })),
+            )
+        }
+    };
     let Some(rh) = &s.rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4976,7 +5068,123 @@ pub async fn test_automation(
         }
     };
 
-    (StatusCode::OK, Json(dry_run(&s, &rule).await))
+    (StatusCode::OK, Json(dry_run(&s, &rule, &clock).await))
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RunBody {
+    /// Whether its only-ifs still apply (default) or are skipped.
+    #[serde(default = "default_true")]
+    pub checks: bool,
+}
+
+/// `POST /api/v1/automations/{id}/run` — run a rule now, as if its moment
+/// came: on or off, paused or resting. With `checks` (the default) its
+/// only-ifs decide, as they would; without, it just does its steps. The
+/// answer comes before the run does: the run is in its history, and
+/// `rule_fired` says when it ran.
+pub async fn run_automation(
+    State(s): State<AppState>,
+    AutomationsWrite(claims): AutomationsWrite,
+    Path(id): Path<Uuid>,
+    body: Option<Json<RunBody>>,
+) -> impl IntoResponse {
+    let checks = body.map(|Json(b)| b.checks).unwrap_or(true);
+    let Some(rh) = &s.rules_handle else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "rule engine not available" })),
+        );
+    };
+    if !rh.read().await.iter().any(|r| r.id == id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "rule not found" })),
+        );
+    }
+    let actor = claims.actor();
+    let (actor_id, actor_name) = match &actor {
+        hc_auth::Actor::User { uid, username, .. } => {
+            (Some(uid.to_string()), Some(username.clone()))
+        }
+        hc_auth::Actor::ApiKey { id, label, .. } => (Some(id.to_string()), Some(label.clone())),
+        hc_auth::Actor::LocalAdmin { .. } => (None, Some("local admin".to_string())),
+    };
+    let _ = s.event_bus.publish(hc_types::event::Event::Custom {
+        timestamp: chrono::Utc::now(),
+        event_type: hc_core::engine::MANUAL_RUN_EVENT.into(),
+        payload: json!({
+            "rule_id": id,
+            "checks": checks,
+            "actor_id": actor_id,
+            "actor_name": actor_name,
+        }),
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "rule_id": id, "checks": checks })),
+    )
+}
+
+/// `?at=` on a dry run: the time to judge the rule's checks at.
+#[derive(Debug, Default, Deserialize)]
+pub struct TestAt {
+    pub at: Option<String>,
+}
+
+/// The time a dry run judges by: now, or the one asked for.
+#[derive(Debug, Clone, Copy)]
+pub struct DryClock {
+    pub now: chrono::DateTime<chrono::Utc>,
+    pub local: chrono::NaiveTime,
+    /// Asked for, rather than now.
+    pub chosen: bool,
+}
+
+impl TestAt {
+    /// `at` as a time: an RFC 3339 instant, a house-local `2026-10-18T22:30`
+    /// (seconds optional), or a time of day today (`22:30`).
+    pub fn clock(&self) -> Result<DryClock, String> {
+        let Some(raw) = self.at.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            let now = hc_time::now_local();
+            return Ok(DryClock {
+                now: now.with_timezone(&chrono::Utc),
+                local: now.time(),
+                chosen: false,
+            });
+        };
+        let tz = hc_time::configured_tz();
+        let local = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+            dt.with_timezone(&tz)
+        } else {
+            let naive = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"]
+                .iter()
+                .find_map(|f| chrono::NaiveDateTime::parse_from_str(raw, f).ok())
+                .or_else(|| {
+                    ["%H:%M:%S", "%H:%M"].iter().find_map(|f| {
+                        chrono::NaiveTime::parse_from_str(raw, f)
+                            .ok()
+                            .map(|t| hc_time::now_local().date_naive().and_time(t))
+                    })
+                })
+                .ok_or_else(|| {
+                    format!("`at` must be a date and time like 2026-10-18T22:30, or a time like 22:30 — not `{raw}`")
+                })?;
+            use chrono::TimeZone;
+            tz.from_local_datetime(&naive)
+                .earliest()
+                .ok_or_else(|| format!("`{raw}` doesn't happen in this house's time zone"))?
+        };
+        Ok(DryClock {
+            now: local.with_timezone(&chrono::Utc),
+            local: local.time(),
+            chosen: true,
+        })
+    }
 }
 
 /// `POST /api/v1/automations/test` — the same dry run, for a rule that isn't
@@ -4985,8 +5193,18 @@ pub async fn test_automation(
 pub async fn test_draft_automation(
     State(s): State<AppState>,
     _: AutomationsRead,
+    Query(q): Query<TestAt>,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let clock = match q.clock() {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": msg })),
+            )
+        }
+    };
     if body.get("id").is_none() {
         body["id"] = json!(Uuid::nil());
     }
@@ -5000,7 +5218,7 @@ pub async fn test_draft_automation(
         }
     };
     match hc_core::rule_resolver::compile_rule_for_store(&s.store, &draft).await {
-        Ok(rule) => (StatusCode::OK, Json(dry_run(&s, &rule).await)),
+        Ok(rule) => (StatusCode::OK, Json(dry_run(&s, &rule, &clock).await)),
         Err(e) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": e.to_string() })),
@@ -5008,27 +5226,32 @@ pub async fn test_draft_automation(
     }
 }
 
-/// Each condition evaluated against the house now, and what would run.
-async fn dry_run(s: &AppState, rule: &Rule) -> serde_json::Value {
+/// Each condition evaluated against the house now — or at a time asked for,
+/// as far as a time can be: the clock moves, the devices stay as they are.
+async fn dry_run(s: &AppState, rule: &Rule, clock: &DryClock) -> serde_json::Value {
     let mut condition_results = Vec::new();
     let mut all_pass = true;
 
     for condition in &rule.conditions {
-        let detail = eval_condition_dry_detail(condition, &s.store).await;
+        let detail = eval_condition_dry_detail(condition, &s.store, clock).await;
         if !detail.passed {
             all_pass = false;
         }
         condition_results.push(serde_json::to_value(&detail).unwrap_or(serde_json::Value::Null));
     }
 
-    json!({
+    let mut out = json!({
         "rule_id": rule.id,
         "rule_name": rule.name,
         "conditions_pass": all_pass,
         "conditions": condition_results,
         "would_fire": all_pass,
         "actions": serde_json::to_value(&rule.actions).unwrap_or(serde_json::Value::Null),
-    })
+    });
+    if clock.chosen {
+        out["at"] = json!(clock.now);
+    }
+    out
 }
 
 #[derive(serde::Serialize)]
@@ -5048,6 +5271,7 @@ struct ConditionDetail {
 async fn eval_condition_dry_detail(
     condition: &hc_types::rule::Condition,
     store: &StateStore,
+    clock: &DryClock,
 ) -> ConditionDetail {
     use hc_types::rule::Condition;
     let cond_json = serde_json::to_value(condition).unwrap_or(serde_json::Value::Null);
@@ -5105,7 +5329,7 @@ async fn eval_condition_dry_detail(
             }
         }
         Condition::TimeWindow { start, end } => {
-            let now = hc_time::now_local().time();
+            let now = clock.local;
             let passed = if start <= end {
                 now >= *start && now <= *end
             } else {
@@ -5138,6 +5362,9 @@ async fn eval_condition_dry_detail(
                 elapsed_ms: None,
                 reason: if result.is_none() {
                     Some("script error".into())
+                } else if clock.chosen {
+                    // Scripts read the real clock, whatever time was asked.
+                    Some("a script is judged now, not at the time asked".into())
                 } else {
                     None
                 },
@@ -5172,7 +5399,7 @@ async fn eval_condition_dry_detail(
                 }
             };
             // Dry-run uses last_seen as the conservative elapsed baseline.
-            let elapsed_secs = (chrono::Utc::now() - device.last_seen).num_seconds().max(0);
+            let elapsed_secs = (clock.now - device.last_seen).num_seconds().max(0);
             let passed = elapsed_secs as u64 >= *duration_secs;
             ConditionDetail {
                 condition: cond_json,
@@ -5271,7 +5498,7 @@ async fn eval_condition_dry_detail(
             }
         }
         Condition::Not { condition: inner } => {
-            let mut inner_detail = Box::pin(eval_condition_dry_detail(inner, store)).await;
+            let mut inner_detail = Box::pin(eval_condition_dry_detail(inner, store, clock)).await;
             inner_detail.passed = !inner_detail.passed;
             inner_detail.condition = cond_json;
             if inner_detail.reason.is_none() && !inner_detail.passed {
@@ -5283,7 +5510,7 @@ async fn eval_condition_dry_detail(
             let mut passed = true;
             let mut reason = None;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
                 if !detail.passed {
                     passed = false;
                     reason = Some(
@@ -5306,7 +5533,7 @@ async fn eval_condition_dry_detail(
         Condition::Or { conditions } => {
             let mut passed = false;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
                 if detail.passed {
                     passed = true;
                     break;
@@ -5328,7 +5555,7 @@ async fn eval_condition_dry_detail(
         Condition::Xor { conditions } => {
             let mut count = 0usize;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
                 if detail.passed {
                     count += 1;
                 }
@@ -6093,6 +6320,9 @@ pub async fn install_plugin(
         });
         entry.binary_path = Some(record.binary.clone());
         entry.config_path = Some(record.config.clone());
+        if entry.log_level.is_none() {
+            entry.log_level = crate::configured_log_level(&record.config);
+        }
         entry.installed_version = Some(record.version.clone());
         entry.enabled = record.enabled;
     }
@@ -6662,6 +6892,31 @@ pub async fn patch_plugin(
                     enabled = new_enabled,
                     "Plugin enabled flipped but plugin is not locally managed — \
                      no start/stop side effect"
+                );
+            }
+        }
+    }
+
+    // ── Keep the log level for the next start ───────────────────────────
+    // A plugin reads `[logging] level` from its own config when it starts;
+    // the change above reached the running plugin, and this one outlives it.
+    // A plugin running elsewhere (on a runtime) keeps its file there.
+    if let Some(level) = body["log_level"].as_str() {
+        if let Some(path) = new_rec.config_path.as_ref() {
+            let patch = json!({ "logging": { "level": level } });
+            let written = std::fs::read_to_string(path)
+                .map_err(anyhow::Error::from)
+                .and_then(|current| crate::config_writer::apply_section_patch(&current, &patch))
+                .and_then(|next| {
+                    crate::config_writer::write_atomic(std::path::Path::new(path), next.as_bytes())
+                        .map_err(anyhow::Error::from)
+                });
+            if let Err(e) = written {
+                tracing::warn!(
+                    plugin = %id,
+                    error = %e,
+                    "Failed to keep the plugin's log level in its config \
+                     (applied now; back to the file's after a restart)"
                 );
             }
         }

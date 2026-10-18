@@ -156,7 +156,18 @@ async fn run(
                 BatteryEdge::WentLow => true,
                 BatteryEdge::Recovered => cfg.notify_on_recovered,
             };
-            if send {
+            // A low battery someone chose to ignore isn't told of either.
+            let ignored = state.list_alert_ignores().await.is_ok_and(|all| {
+                all.iter().any(|i| {
+                    i.covers_parts(
+                        hc_types::alert::AlertKind::LowBattery,
+                        &device_id,
+                        None,
+                        Utc::now(),
+                    )
+                })
+            });
+            if send && !ignored {
                 let display_name = device_name.as_deref().unwrap_or(&device_id);
                 let (title, message) = match edge {
                     BatteryEdge::WentLow => (

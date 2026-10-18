@@ -1100,6 +1100,8 @@
     "triggers",
     "if_checks",
     "rule_events",
-    "test_draft"
+    "test_draft",
+    "run_now",
+    "test_at"
   ]
 }

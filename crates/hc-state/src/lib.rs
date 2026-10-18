@@ -322,6 +322,25 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.delete(&id)).await?
     }
 
+    // --- Alert ignores ---
+
+    pub async fn list_alert_ignores(&self) -> Result<Vec<hc_types::alert::AlertIgnore>> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.list_ignores()).await?
+    }
+
+    pub async fn upsert_alert_ignore(&self, ignore: hc_types::alert::AlertIgnore) -> Result<()> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.upsert_ignore(&ignore)).await?
+    }
+
+    /// Whether there was such an ignore.
+    pub async fn delete_alert_ignore(&self, id: &str) -> Result<bool> {
+        let store = Arc::clone(&self.alert_rules);
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || store.delete_ignore(&id)).await?
+    }
+
     /// Drop the battery latch entry for a device (called when the device
     /// is deleted from the registry).
     pub async fn forget_battery(&self, device_id: &str) -> Result<()> {

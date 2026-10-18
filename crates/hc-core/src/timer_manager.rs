@@ -18,7 +18,11 @@
 //! { "command": "resume" }
 //! { "command": "cancel" }
 //! { "command": "restart" }
+//! { "command": "extend",  "duration_secs": 300 }
 //! ```
+//!
+//! `extend` adds time to a running or paused timer, as "five more minutes"
+//! does; the next cycle of a repeating one is its usual length.
 //!
 //! # States
 //!
@@ -83,6 +87,10 @@ enum TimerCommand {
     Cancel,
     /// Reset to full duration and restart immediately.
     Restart,
+    /// Add time to what's left.
+    Extend {
+        duration_secs: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -325,13 +333,77 @@ impl TimerManager {
                     .unwrap_or(false);
 
                 if remaining_secs > 0 {
-                    self.set_state(device_id, "running", None, change.clone())
+                    // What's left is worked out from when it started and how
+                    // long it runs: started as long ago as it has run, so a
+                    // timer resumed and then read (or restarted under) agrees.
+                    let ran = duration_secs.saturating_sub(remaining_secs);
+                    let started = Utc::now() - chrono::Duration::seconds(ran as i64);
+                    let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
+                    extra.insert("started_at", serde_json::json!(started.to_rfc3339()));
+                    extra.insert("remaining_secs", serde_json::json!(remaining_secs));
+                    self.set_state(device_id, "running", Some(extra), change.clone())
                         .await;
                     self.spawn_timer_task(device_id, remaining_secs, duration_secs, repeat)
                         .await;
                 } else {
                     self.set_state(device_id, "finished", None, change.clone())
                         .await;
+                }
+            }
+
+            TimerCommand::Extend {
+                duration_secs: more,
+            } => {
+                let Ok(Some(dev)) = self.state.get_device(device_id).await else {
+                    warn!(%device_id, "Timer: extend — device not found");
+                    return;
+                };
+                let attr_u64 = |k: &str| dev.attributes.get(k).and_then(|v| v.as_u64());
+                let state_str = dev
+                    .attributes
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let duration_secs = attr_u64("duration_secs").unwrap_or(0);
+                let repeat = dev
+                    .attributes
+                    .get("repeat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match state_str {
+                    "running" => {
+                        let left = self.compute_remaining(device_id).await + more;
+                        // The usual length, for a repeating timer's next cycle.
+                        let usual = {
+                            let handles = self.handles.read().await;
+                            handles.get(device_id).map(|h| h.duration_secs)
+                        }
+                        .unwrap_or(duration_secs);
+                        self.cancel_task(device_id).await;
+                        let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
+                        // What's left is worked out from when it started and
+                        // how long it runs, so the length grows and the start
+                        // stays.
+                        extra.insert("duration_secs", serde_json::json!(duration_secs + more));
+                        extra.insert("remaining_secs", serde_json::json!(left));
+                        if let Some(started) = dev.attributes.get("started_at") {
+                            extra.insert("started_at", started.clone());
+                        }
+                        self.set_state(device_id, "running", Some(extra), change.clone())
+                            .await;
+                        self.spawn_timer_task(device_id, left, usual, repeat).await;
+                    }
+                    "paused" => {
+                        let left = attr_u64("remaining_secs").unwrap_or(0) + more;
+                        let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
+                        extra.insert("duration_secs", serde_json::json!(duration_secs + more));
+                        extra.insert("remaining_secs", serde_json::json!(left));
+                        self.set_state(device_id, "paused", Some(extra), change.clone())
+                            .await;
+                    }
+                    other => {
+                        warn!(%device_id, state = %other, "Timer: extend — not running or paused");
+                    }
                 }
             }
 
@@ -593,6 +665,9 @@ async fn reset_for_repeat(device_id: &str, duration_secs: u64, state: &StateStor
     );
     dev.attributes
         .insert("remaining_secs".into(), serde_json::json!(duration_secs));
+    // A cycle someone extended is over: the next is the usual length.
+    dev.attributes
+        .insert("duration_secs".into(), serde_json::json!(duration_secs));
     dev.last_seen = Utc::now();
     let change = DeviceChange::homecore("timer_manager");
     dev.last_change = Some(change.clone());

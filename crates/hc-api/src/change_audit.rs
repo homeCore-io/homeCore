@@ -62,6 +62,7 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("PATCH", "/automations/{id}") => c("automation.updated", "automation"),
         ("DELETE", "/automations/{id}") => c("automation.deleted", "automation"),
         ("POST", "/automations/{id}/clone") => c("automation.copied", "automation"),
+        ("POST", "/automations/{id}/run") => c("automation.run", "automation"),
         ("POST", "/automations/import") => c("automation.imported", "automation"),
         ("POST", "/automations/groups") => c("automation_group.created", "automation_group"),
         ("PATCH", "/automations/groups/{id}") => c("automation_group.updated", "automation_group"),
@@ -79,6 +80,7 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("PATCH", "/glue/{id}") => c("helper.updated", "device"),
         ("DELETE", "/glue/{id}") => c("helper.deleted", "device"),
         ("POST", "/modes") => c("mode.created", "device"),
+        ("PATCH", "/modes/{id}") => c("mode.renamed", "device"),
         ("DELETE", "/modes/{id}") => c("mode.deleted", "device"),
         ("PUT", "/modes/{id}/definition") | ("DELETE", "/modes/{id}/definition") => {
             c("mode.updated", "device")
@@ -98,6 +100,9 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("POST", "/alert-rules") => c("alert_rule.created", "alert_rule"),
         ("PUT", "/alert-rules/{id}") => c("alert_rule.updated", "alert_rule"),
         ("DELETE", "/alert-rules/{id}") => c("alert_rule.deleted", "alert_rule"),
+        ("POST", "/alert-ignores") => c("alert_ignore.created", "alert_ignore"),
+        ("DELETE", "/alert-ignores/{id}") => c("alert_ignore.deleted", "alert_ignore"),
+        ("POST", "/alerts/{id}/acknowledge") => c("alert.acknowledged", "alert"),
         // Plugins
         ("POST", "/plugins/install") => c("plugin.installed", "plugin"),
         ("POST", "/plugins/{id}/start") => c("plugin.started", "plugin"),

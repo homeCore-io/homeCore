@@ -444,6 +444,17 @@ fn announce_back(
     });
 }
 
+/// The log level a plugin's config file starts it at (`[logging] level`),
+/// for its record before it says anything itself.
+pub fn configured_log_level(path: impl AsRef<std::path::Path>) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    doc.get("logging")?
+        .get("level")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Subscribe to `event_bus` and mirror `PluginRegistered`,
 /// `PluginHeartbeat`, `PluginOffline`, and `PluginCapabilities` events
 /// into the shared `plugins` map.
@@ -787,6 +798,10 @@ impl AppState {
                                         previous_status: prev,
                                     },
                                 );
+                                let _ = bus_sweep.publish(hc_types::event::Event::PluginOffline {
+                                    timestamp: now,
+                                    plugin_id: rec.plugin_id.clone(),
+                                });
                             }
                         }
                     }
@@ -1223,7 +1238,9 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route(
             "/modes/{id}",
-            get(handlers::get_mode).delete(handlers::delete_mode),
+            get(handlers::get_mode)
+                .patch(handlers::patch_mode)
+                .delete(handlers::delete_mode),
         )
         .route(
             "/modes/{id}/definition",
@@ -1247,7 +1264,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/displays",
             get(display_handlers::list_displays).post(display_handlers::create_display),
         )
-        .route("/displays/{id}", delete(display_handlers::delete_display))
+        .route(
+            "/displays/{id}",
+            patch(display_handlers::rename_display).delete(display_handlers::delete_display),
+        )
         .route("/auth/pin-session", post(display_handlers::pin_session))
         .route(
             "/auth/pin",
@@ -1262,6 +1282,18 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route(
             "/alert-rules/{id}",
             put(alert_handlers::put_alert_rule).delete(alert_handlers::delete_alert_rule),
+        )
+        .route(
+            "/alerts/{id}/acknowledge",
+            post(alert_handlers::acknowledge_alert),
+        )
+        .route(
+            "/alert-ignores",
+            get(alert_handlers::list_alert_ignores).post(alert_handlers::create_alert_ignore),
+        )
+        .route(
+            "/alert-ignores/{id}",
+            delete(alert_handlers::delete_alert_ignore),
         )
         // Automations
         .route(
@@ -1278,6 +1310,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
                 .delete(handlers::delete_automation),
         )
         .route("/automations/{id}/test", post(handlers::test_automation))
+        .route("/automations/{id}/run", post(handlers::run_automation))
         .route("/automations/test", post(handlers::test_draft_automation))
         .route(
             "/automations/vocabulary",

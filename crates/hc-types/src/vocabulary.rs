@@ -69,12 +69,21 @@ pub struct Vocabulary {
     /// - `if_checks` — `Conditional.condition` takes a `Condition` (E3)
     /// - `rule_events` — `rule_changed` / `rule_removed` are announced
     /// - `test_draft` — `POST /automations/test` dry-runs a rule not saved
+    /// - `run_now` — `POST /automations/{id}/run` runs a rule now
+    /// - `test_at` — both dry runs take `?at=`, a time to judge the checks at
     #[serde(default)]
     pub features: Vec<String>,
 }
 
 /// See [`Vocabulary::features`].
-pub const RULE_FEATURES: &[&str] = &["triggers", "if_checks", "rule_events", "test_draft"];
+pub const RULE_FEATURES: &[&str] = &[
+    "triggers",
+    "if_checks",
+    "rule_events",
+    "test_draft",
+    "run_now",
+    "test_at",
+];
 
 impl Vocabulary {
     /// Reads it straight out of the types. This is the whole point: no list.

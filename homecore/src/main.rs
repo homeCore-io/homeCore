@@ -719,7 +719,8 @@ async fn main() -> Result<()> {
     .with_shutdown(shutdown_rx.clone())
     .with_log_stream(log_tx.clone(), log_ring.clone())
     .with_battery_config(battery_rx)
-    .with_alerts(alerts.clone());
+    .with_alerts(alerts.clone())
+    .with_alert_channel(config.alerts.notify_channel.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
     match DeviceTypeRegistry::from_file(&device_types_path.to_string_lossy()) {
@@ -924,7 +925,7 @@ async fn main() -> Result<()> {
                         restart_count: 0,
                         uptime_started: None,
                         device_count: 0,
-                        log_level: None,
+                        log_level: hc_api::configured_log_level(effective_config(p)),
                         version: None,
                         supports_management: false,
                         capabilities: None,

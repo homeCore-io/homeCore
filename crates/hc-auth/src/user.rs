@@ -422,10 +422,13 @@ pub struct User {
 
 /// What a display key may do (H3, D7): see the house and use it — read
 /// everything a person can read, command devices, run scenes — and nothing
-/// else. Never an admin, never an author; no users, plugins or keys.
+/// else. Never an admin, never an author; no users, plugins or keys, and no
+/// renaming, moving or deleting devices (`devices:write`), which displays
+/// made before 0.1.81 held: their stored scopes are not what they are given
+/// (see the API key check).
 pub fn display_scopes() -> Vec<String> {
     let mut v: Vec<String> = Role::ReadOnly.scopes();
-    v.push("devices:write".into());
+    v.push("devices:command".into());
     v.push("scenes:run".into());
     v
 }
