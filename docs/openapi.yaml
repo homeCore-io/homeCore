@@ -6068,9 +6068,11 @@ paths:
       summary: Delete a calendar
       description: |
         Removes the calendar's `.ics` and `.meta.json` files from disk and drops it
-        from the live store.  Automation rules whose trigger is `CalendarEvent` with
-        this `calendar_id` are **not** modified or disabled — they are only reported
-        back in `referencing_rules` as a warning.  Emits a `calendar.deleted` audit entry.
+        from the live store.  Automation rules that name this `calendar_id` — a
+        `CalendarEvent` trigger, or a `CalendarActive` check anywhere, including
+        inside a step's `if` — are **not** modified or disabled; they are only
+        reported back in `referencing_rules` as a warning.  (Before 0.1.80 only
+        triggers were counted.)  Emits a `calendar.deleted` audit entry.
 
         Requires scope `automations:write`.
       tags: [automations]

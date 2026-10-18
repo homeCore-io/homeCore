@@ -8653,6 +8653,63 @@ pub async fn upload_calendar(
 ///
 /// Remove a calendar's `.ics` and `.meta.json` from disk and from the live
 /// store.  Returns a warning list of rules that reference `calendar_id`.
+/// Whether a rule names this calendar anywhere: a `CalendarEvent` trigger, or a
+/// `CalendarActive` check — top-level, inside And/Or/Not, or in a step's `if`.
+///
+/// Walks the rule as JSON rather than its types so a check nested in a step
+/// (where conditions hide inside `Conditional`, `RepeatWhile` and the rest) is
+/// found without a visitor that has to learn every new step kind. Trigger-only,
+/// it told an operator nothing about rules that merely ask "is the calendar on?"
+/// — and those stop working the same.
+fn names_calendar(v: &Value, id: &str) -> bool {
+    match v {
+        Value::Object(map) => {
+            for kind in ["CalendarEvent", "CalendarActive"] {
+                if map
+                    .get(kind)
+                    .and_then(|b| b.get("calendar_id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+                {
+                    return true;
+                }
+            }
+            map.values().any(|x| names_calendar(x, id))
+        }
+        Value::Array(items) => items.iter().any(|x| names_calendar(x, id)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod calendar_reference_tests {
+    use super::names_calendar;
+    use serde_json::json;
+
+    #[test]
+    fn finds_a_calendar_as_trigger_or_as_any_check() {
+        let trigger = json!({ "triggers": [{ "CalendarEvent": { "calendar_id": "bins" } }] });
+        let check = json!({ "conditions": [{ "CalendarActive": { "calendar_id": "bins" } }] });
+        let nested = json!({ "actions": [{ "action": { "Conditional": {
+            "condition": { "Not": { "condition": { "CalendarActive": { "calendar_id": "bins" } } } },
+            "then_actions": [], "else_actions": []
+        } } }] });
+        for rule in [trigger, check, nested] {
+            assert!(names_calendar(&rule, "bins"), "{rule}");
+        }
+    }
+
+    #[test]
+    fn ignores_other_calendars_and_any_calendar() {
+        let other = json!({ "conditions": [{ "CalendarActive": { "calendar_id": "holidays" } }] });
+        let any = json!({ "triggers": [{ "CalendarEvent": { "calendar_id": null } }] });
+        let words = json!({ "actions": [{ "action": { "Comment": { "text": "bins" } } }] });
+        for rule in [other, any, words] {
+            assert!(!names_calendar(&rule, "bins"), "{rule}");
+        }
+    }
+}
+
 pub async fn delete_calendar(
     State(s): State<AppState>,
     AutomationsWrite(claims): AutomationsWrite,
@@ -8705,14 +8762,7 @@ pub async fn delete_calendar(
         let rules = rh.read().await;
         rules
             .iter()
-            .filter(|r| {
-                r.all_triggers().any(|t| {
-                    matches!(t, hc_types::rule::Trigger::CalendarEvent {
-                        calendar_id: Some(cid),
-                        ..
-                    } if cid == &id)
-                })
-            })
+            .filter(|r| serde_json::to_value(r).is_ok_and(|v| names_calendar(&v, &id)))
             .map(|r| json!({ "rule_id": r.id, "rule_name": r.name }))
             .collect()
     } else {
