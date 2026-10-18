@@ -243,7 +243,7 @@ pub(crate) async fn authenticate_ws(
         return Ok(whitelist_claims());
     }
 
-    crate::auth_middleware::validate_query_token(state, token)
+    crate::auth_middleware::validate_query_token(state, token, ip)
         .await
         .map_err(Box::new)
 }

@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.79"
+  version: "0.1.80"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -2981,30 +2981,45 @@ paths:
       summary: Fire a webhook trigger
       description: |
         Any POST to this endpoint fires a `Custom` event with
-        `event_type = "webhook"` onto the internal event bus.
-        Automation rules with `trigger.type = "WebhookReceived"` and a
-        matching `path` will execute.
+        `event_type = "webhook"` and payload `{path, body, query}` onto the
+        internal event bus. Rules whose trigger is `WebhookReceived` with
+        exactly this `path` run; the body is the trigger's value and the query
+        parameters its extras.
+
+        **Public: no token is read.** The path is the only secret, so make it
+        long and hard to guess. Only POST is routed.
       tags: [webhooks]
-      security:
-        - bearerAuth: []
+      security: []
       parameters:
         - name: path
           in: path
           required: true
-          description: Webhook path identifier — must match the rule's `trigger.path`
+          description: |
+            One path segment, compared exactly with the rule's
+            `WebhookReceived.path` — no leading `/` in the rule.
           schema:
             type: string
       requestBody:
         required: false
-        description: Optional JSON body forwarded as `payload.body` in the fired event
+        description: Optional JSON body, forwarded as `payload.body`
         content:
           application/json:
             schema:
               type: object
               additionalProperties: true
       responses:
-        "202":
-          description: Webhook accepted and event fired
+        "200":
+          description: Event fired (whether or not any rule matched)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [accepted]
+                  path:
+                    type: string
 
   # ---------------------------------------------------------------------------
   # System
@@ -3361,7 +3376,12 @@ paths:
                   type: array
                   items:
                     type: string
-                  description: CIDR ranges the key may be used from; empty (default) means no IP restriction
+                  description: |
+                    Networks (`10.0.10.0/24`) or single addresses the key may be
+                    used from; empty (default) means anywhere. Checked on every
+                    use since 0.1.80 — from anywhere else the key gets 403. The
+                    address is the connection's own: through a proxy, the
+                    proxy's. An entry that is neither is refused with 422.
                 owner_uid:
                   type: [string, "null"]
                   format: uuid
@@ -3514,6 +3534,7 @@ paths:
                   type: array
                   items:
                     type: string
+                  description: Replaces the key's address limit; `[]` lifts it. Same rules as on create.
       responses:
         "200":
           description: Updated API-key summary (no secret material)
@@ -5918,6 +5939,12 @@ paths:
                       type: string
                       format: date-time
                       nullable: true
+                    refresh_hours:
+                      type: integer
+                      nullable: true
+                      description: |
+                        How often a fetched calendar is fetched again, in hours; null
+                        when it isn't (uploaded, or fetched once). Added in 0.1.80.
                     loaded_at:
                       type: string
                       format: date-time
@@ -6068,9 +6095,11 @@ paths:
       summary: Delete a calendar
       description: |
         Removes the calendar's `.ics` and `.meta.json` files from disk and drops it
-        from the live store.  Automation rules whose trigger is `CalendarEvent` with
-        this `calendar_id` are **not** modified or disabled — they are only reported
-        back in `referencing_rules` as a warning.  Emits a `calendar.deleted` audit entry.
+        from the live store.  Automation rules that name this `calendar_id` — a
+        `CalendarEvent` trigger, or a `CalendarActive` check anywhere, including
+        inside a step's `if` — are **not** modified or disabled; they are only
+        reported back in `referencing_rules` as a warning.  (Before 0.1.80 only
+        triggers were counted.)  Emits a `calendar.deleted` audit entry.
 
         Requires scope `automations:write`.
       tags: [automations]

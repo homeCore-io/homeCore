@@ -93,6 +93,13 @@ pub fn apply_section_patch(current: &str, patch: &serde_json::Value) -> Result<S
         let table = walk_to_table_mut(&mut doc, section_path)?;
 
         for (key, value) in fields {
+            // `null` takes the key out — the only way a patch can say "back to
+            // the default", or drop one entry of a name → value table such as
+            // `[logging.targets]`. Absent already is the same thing.
+            if value.is_null() {
+                table.remove(key.as_str());
+                continue;
+            }
             let item = json_to_toml_item(value).with_context(|| {
                 format!("section [{section_path}] field {key:?}: unsupported value type")
             })?;
@@ -493,6 +500,19 @@ whitelist = []
         let after = apply_section_patch(input, &patch).unwrap();
         assert!(after.contains(r#""127.0.0.1/32""#));
         assert!(after.contains(r#""::1/128""#));
+    }
+
+    #[test]
+    fn apply_patch_null_removes_a_key_and_keeps_the_rest() {
+        let input = "[logging]\nlevel = \"info\"\n\n[logging.targets]\n# noisy\nhc_core = \"debug\"\nrumqttd = \"warn\"\n";
+        let patch = serde_json::json!({
+            "logging.targets": { "hc_core": null, "hc_api": "trace", "gone_already": null }
+        });
+        let after = apply_section_patch(input, &patch).unwrap();
+        assert!(!after.contains("hc_core"), "{after}");
+        assert!(after.contains(r#"rumqttd = "warn""#), "{after}");
+        assert!(after.contains(r#"hc_api = "trace""#), "{after}");
+        assert!(after.contains(r#"level = "info""#), "{after}");
     }
 
     #[test]

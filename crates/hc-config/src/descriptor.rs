@@ -573,6 +573,19 @@ fn logging() -> Section {
                 .option("utc", "UTC")
                 .default("local"),
         )
+        .field(
+            Field::map("logging.targets", "enum")
+                .label("Per module")
+                .help(
+                    "A level for one part of homeCore or a library, by its name with \
+                     underscores — hc_core, hc_api, rumqttd. Overrides the level above.",
+                )
+                .option("error", "error")
+                .option("warn", "warn")
+                .option("info", "info")
+                .option("debug", "debug")
+                .option("trace", "trace"),
+        )
 }
 
 fn logging_stderr() -> Section {
