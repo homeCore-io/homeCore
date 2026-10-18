@@ -41,7 +41,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — Build
 # -----------------------------------------------------------------------------
-FROM rust:1.95-alpine3.23@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS builder
+FROM rust:1.99-alpine3.23@sha256:96e773beb97c24572dcc462458cf84776fddc347302b9ab732a6b98b7822ad38 AS builder
 
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev pkgconfig
 
