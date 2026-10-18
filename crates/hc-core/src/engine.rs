@@ -236,6 +236,12 @@ impl RuleEngine {
         self
     }
 
+    /// Keep hub variables in `handle`, shared with whoever lists them.
+    pub fn with_hub_vars(mut self, handle: HubVars) -> Self {
+        self.hub_vars = handle;
+        self
+    }
+
     /// Override the graceful shutdown drain timeout (default: 10 s).
     pub fn with_drain_timeout(mut self, secs: u64) -> Self {
         self.drain_timeout_secs = secs;
@@ -1881,6 +1887,10 @@ fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> Tr
 // ---------------------------------------------------------------------------
 
 /// The rule's moment that started this firing (its first, when unknown).
+/// Hub variables — values every rule can read and set — by name. In memory:
+/// a restart starts them empty.
+pub type HubVars = Arc<DashMap<String, JsonValue>>;
+
 /// `TriggerContext.event_type` of a run someone asked for.
 pub const MANUAL_RUN: &str = "manual_run";
 /// The bus event that asks the engine to run a rule now.

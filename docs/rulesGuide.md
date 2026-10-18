@@ -254,7 +254,7 @@ brightness = 80.0
 [actions.state]
 locked = true
 
-# Timer (core.timer device, device_type = "timer")
+# Timer helper (core.glue, device_type = "timer")
 [actions.state]
 command       = "start"
 duration_secs = 300
@@ -263,7 +263,7 @@ label         = "optional label"
 [actions.state]
 command = "cancel"
 
-# Virtual switch (core.switch device, device_type = "vswitch")
+# Switch helper (core.glue, device_type = "switch")
 [actions.state]
 command = "on"      # or "off" or "toggle"
 
@@ -718,27 +718,26 @@ the same trigger/condition/action primitives.
 
 ---
 
-### Timers (`core.timer`)
+### Timers
 
 Countdown timers that fire a `DeviceStateChanged` event when they elapse.
-These built-ins publish `device_type = "timer"`.
+A timer is a helper (`plugin_id = "core.glue"`, `device_type = "timer"`).
 Device IDs are always prefixed `timer_`.
 
 #### Create
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/timers \
+curl -X POST http://localhost:8080/api/v1/glue \
   -H 'Content-Type: application/json' \
-  -d '{"id": "garage_close", "label": "Garage OH1 Auto-Close"}'
+  -d '{"type": "timer", "id": "garage_close", "name": "Garage OH1 Auto-Close"}'
 ```
 
 `id` becomes the suffix: `"garage_close"` → `device_id = "timer_garage_close"`.
-`label` is the human display name (optional; defaults to the device_id).
 
 #### List
 
 ```bash
-curl http://localhost:8080/api/v1/timers
+curl http://localhost:8080/api/v1/glue   # every helper; timers have device_type "timer"
 ```
 
 #### Commands (`PATCH /api/v1/devices/timer_{id}/state`)
@@ -809,19 +808,19 @@ label         = "Garage OH1 auto-close"
 
 ---
 
-### Virtual Switches (`core.switch`)
+### Switches
 
 Software-only on/off switches — useful as flags and guards in automation logic
 (e.g., "auto-close enabled", "vacation mode", "guest mode").
-These built-ins publish `device_type = "vswitch"`.
+A switch is a helper (`plugin_id = "core.glue"`, `device_type = "switch"`).
 Device IDs are always prefixed `switch_`.
 
 #### Create
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/switches \
+curl -X POST http://localhost:8080/api/v1/glue \
   -H 'Content-Type: application/json' \
-  -d '{"id": "auto_garage_door", "label": "Auto Garage Door"}'
+  -d '{"type": "switch", "id": "auto_garage_door", "name": "Auto Garage Door"}'
 ```
 
 `id` becomes the suffix: `"auto_garage_door"` → `device_id = "switch_auto_garage_door"`.
@@ -829,7 +828,7 @@ curl -X POST http://localhost:8080/api/v1/switches \
 #### List
 
 ```bash
-curl http://localhost:8080/api/v1/switches
+curl http://localhost:8080/api/v1/glue   # every helper; switches have device_type "switch"
 ```
 
 #### Commands (`PATCH /api/v1/devices/switch_{id}/state`)

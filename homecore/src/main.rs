@@ -579,7 +579,7 @@ async fn main() -> Result<()> {
 
     // ── 11. Event buses ─────────────────────────────────────────────────────
     // internal_bus: carries only Event::MqttMessage (raw MQTT traffic).
-    //   Subscribers: state_bridge, timer_manager, switch_manager, mode_manager, engine.
+    //   Subscribers: state_bridge, timer_manager, glue, mode_manager, engine.
     // pub_bus: carries all typed events (DeviceStateChanged, RuleFired, etc.).
     //   Subscribers: engine, hc-api (event log, WS stream, plugin registry).
     let internal_bus = EventBus::new(1024);
@@ -799,6 +799,7 @@ async fn main() -> Result<()> {
         core = core.with_notify(svc);
     }
 
+    let hub_vars = core.hub_vars_handle();
     let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
 
     // ── 14. MQTT event loop ────────────────────────────────────────────────
@@ -1202,6 +1203,7 @@ async fn main() -> Result<()> {
     }
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
+    .with_hub_vars(hub_vars)
     .with_group_store(group_store, groups)
     .with_dashboard_store(dashboard_store, dashboard_data)
     .with_skin_store(skin_store, skin_data)

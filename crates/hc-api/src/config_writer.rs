@@ -178,9 +178,18 @@ pub fn replace_array_of_tables(
     Ok(doc.to_string())
 }
 
+/// The keys a row is read by, written first — as a hand-written file has
+/// them — and the rest after, in order. JSON objects here keep no order of
+/// their own, so a new row came out alphabetical: `api_token` before `name`.
+const LEADING_KEYS: [&str; 3] = ["name", "id", "type"];
+
 fn new_row(obj: &serde_json::Map<String, serde_json::Value>) -> Result<toml_edit::Table> {
     let mut tbl = toml_edit::Table::new();
-    for (k, v) in obj {
+    let leading = LEADING_KEYS.iter().filter_map(|k| obj.get_key_value(*k));
+    let rest = obj
+        .iter()
+        .filter(|(k, _)| !LEADING_KEYS.contains(&k.as_str()));
+    for (k, v) in leading.chain(rest) {
         let item =
             json_to_toml_item(v).with_context(|| format!("field {k:?}: unsupported value type"))?;
         tbl[k.as_str()] = item;
@@ -243,9 +252,13 @@ fn walk_to_table_mut<'a>(
 
     let mut current: &mut toml_edit::Table = doc.as_table_mut();
     for seg in segments {
-        let item = current
-            .entry(seg)
-            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        // A table made only to hold what's beneath it is implicit, so a
+        // `[notify]` with nothing of its own isn't written out as one.
+        let item = current.entry(seg).or_insert_with(|| {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            toml_edit::Item::Table(t)
+        });
         match item {
             toml_edit::Item::Table(t) => current = t,
             other => {
@@ -613,6 +626,51 @@ user_key = "obsolete"
         assert!(after.contains(r#"default_channel = "phone""#));
         assert!(after.contains("[server]"));
         assert!(after.contains("port = 8080"));
+    }
+
+    #[test]
+    fn a_section_a_patch_makes_still_has_its_header() {
+        let after = apply_section_patch(
+            "[server]\nport = 8080\n",
+            &serde_json::json!({ "alerts": { "notify_channel": "all" } }),
+        )
+        .unwrap();
+        assert!(after.contains("[alerts]"), "{after}");
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(parsed["alerts"]["notify_channel"].as_str(), Some("all"));
+        let after = apply_section_patch(
+            "",
+            &serde_json::json!({ "logging.targets": { "hc_core": "debug" } }),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(
+            parsed["logging"]["targets"]["hc_core"].as_str(),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn a_new_row_starts_with_its_name_and_type() {
+        let items = vec![serde_json::json!({
+            "user_key": "u", "api_token": "t", "type": "pushover", "name": "phone"
+        })];
+        let after = replace_array_of_tables("", "notify.channels", &items).unwrap();
+        let at = |k: &str| after.find(k).unwrap();
+        assert!(at("name =") < at("type =") && at("type =") < at("api_token ="));
+        assert!(at("api_token =") < at("user_key ="));
+    }
+
+    #[test]
+    fn a_section_made_only_to_hold_rows_isnt_written_empty() {
+        let after =
+            replace_array_of_tables("[server]\nport = 8080\n", "notify.channels", &[]).unwrap();
+        assert!(!after.contains("[notify]"), "{after}");
+        let items = vec![serde_json::json!({ "name": "p", "type": "pushover" })];
+        let after =
+            replace_array_of_tables("[server]\nport = 8080\n", "notify.channels", &items).unwrap();
+        assert!(after.contains("[[notify.channels]]"));
+        assert!(!after.contains("\n[notify]\n"), "{after}");
     }
 
     #[test]

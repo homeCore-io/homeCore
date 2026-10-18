@@ -259,8 +259,29 @@ impl AuditStore {
             args.push(Box::new(a.as_str().to_string()));
         }
         if let Some(e) = &q.event_type {
-            sql.push_str(&format!(" AND event_type = ?{}", args.len() + 1));
-            args.push(Box::new(e.clone()));
+            // `auth.*` is every sign-in kind; `!auth.*` everything else.
+            let (not, pattern) = match e.strip_prefix('!') {
+                Some(rest) => (" NOT", rest),
+                None => ("", e.as_str()),
+            };
+            match pattern.strip_suffix('*') {
+                Some(prefix) => {
+                    sql.push_str(&format!(
+                        " AND event_type{not} LIKE ?{} ESCAPE '\\'",
+                        args.len() + 1
+                    ));
+                    let escaped = prefix
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_");
+                    args.push(Box::new(format!("{escaped}%")));
+                }
+                None => {
+                    let op = if not.is_empty() { "=" } else { "!=" };
+                    sql.push_str(&format!(" AND event_type {op} ?{}", args.len() + 1));
+                    args.push(Box::new(pattern.to_string()));
+                }
+            }
         }
         if let Some(k) = &q.target_kind {
             sql.push_str(&format!(" AND target_kind = ?{}", args.len() + 1));
@@ -379,6 +400,45 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = AuditStore::open(&dir.path().join("audit.db")).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn an_event_type_can_be_a_kind_or_everything_but() {
+        let (_d, s) = fresh();
+        for t in [
+            "auth.login",
+            "auth.refresh",
+            "device.updated",
+            "automation_x.y",
+            "authors.z",
+        ] {
+            s.record(&AuditEntry::success(AuditActorType::User, None, "alice", t))
+                .unwrap();
+        }
+        let types = |e: &str| -> Vec<String> {
+            let mut v: Vec<String> = s
+                .query(&AuditQuery {
+                    limit: 50,
+                    event_type: Some(e.into()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event_type)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(types("auth.*"), ["auth.login", "auth.refresh"]);
+        assert_eq!(
+            types("!auth.*"),
+            ["authors.z", "automation_x.y", "device.updated"]
+        );
+        assert_eq!(types("auth.login"), ["auth.login"]);
+        assert_eq!(types("!auth.login").len(), 4);
+        // `_` is a letter here, not "any one character".
+        assert_eq!(types("automation_*"), ["automation_x.y"]);
+        assert!(types("automationXx*").is_empty());
     }
 
     #[test]

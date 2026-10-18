@@ -680,6 +680,24 @@ impl ModeManager {
             if let Err(e) = write_modes(&self.modes_path, modes) {
                 warn!(error = %e, "ModeManager: failed to write updated offsets to modes.toml");
             }
+            // The reload that follows sees the config it already has (changed
+            // in place above), so it wouldn't touch the device: today's on and
+            // off times are worked out again here, and the state with them.
+            let mode_cfg = modes[mode_idx].clone();
+            if let Some((on_edge, off_edge)) = mode_cfg.solar_window() {
+                let now = hc_time::now_local();
+                let on = solar_mode_is_on(
+                    self.location.latitude,
+                    self.location.longitude,
+                    now.date_naive(),
+                    now.time(),
+                    on_edge,
+                    off_edge,
+                )
+                .unwrap_or(false);
+                let change = extract_change_from_command_payload(cmd).unwrap_or_default();
+                self.write_mode_state(&mode_cfg, on, Some(change)).await;
+            }
         }
     }
 

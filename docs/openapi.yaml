@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.81"
+  version: "0.1.82"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1336,6 +1336,77 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /automations/repoint:
+    post:
+      operationId: repointAutomations
+      summary: Point every rule naming one device at another
+      description: |
+        For a device replaced (a new sensor for an old one) or deleted: every
+        rule that names `from` — as it is, or as the `DELETED:from` its
+        deletion left — names `to` instead. A rule turned off only because
+        `from` was deleted is turned on again. Scripts aren't searched.
+        Since 0.1.82. Needs `automations:write`. Audited as
+        `automation.repointed`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from:
+                  type: string
+                  description: The device named now (it may be gone)
+                to:
+                  type: string
+                  description: The device to name instead; it must exist
+      responses:
+        "200":
+          description: The rules changed, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [changed]
+                properties:
+                  changed:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          description: Not two different devices
+        "422":
+          description: "`to` isn't a device"
+
+  /automations/variables:
+    get:
+      operationId: listHubVariables
+      summary: The hub variables rules have set, as they are now
+      description: |
+        Values every rule can read and set (`SetHubVariable`, the
+        `HubVariable` check), by name. homeCore keeps them in memory: after a
+        restart there are none until a rule sets one. Since 0.1.82. Needs
+        `automations:read`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: By name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hub]
+                properties:
+                  hub:
+                    type: object
+                    additionalProperties: true
 
   /automations/{id}/run:
     post:
@@ -3043,7 +3114,9 @@ paths:
         Both fields are optional; send either or both.
 
         `enabled` is persisted to `homecore.toml`, so it survives a restart, and
-        the supervisor starts or stops the plugin process to match. `log_level`
+        the supervisor starts or stops the plugin process to match. `true` for
+        a plugin that is on but not running (crashed, or given up on) starts
+        it (0.1.82; before, it did nothing). `log_level`
         is pushed to the running plugin over the management channel and written
         to `[logging] level` in the plugin's own config, so it starts at it next
         time too (a plugin running on another runtime keeps its file there, so
@@ -3305,7 +3378,11 @@ paths:
             enum: [user, api_key, local_admin, ip_whitelist, system, anonymous]
         - name: event_type
           in: query
-          description: Exact event type, e.g. `api_key.created`, `user.deleted`, `auth.login`, `automation.updated`
+          description: |
+            An event type, e.g. `api_key.created`, `user.deleted`, `auth.login`,
+            `automation.updated`. A trailing `*` matches a prefix (`auth.*`, every
+            sign-in kind) and a leading `!` turns it round (`!auth.*`, everything
+            else). From 0.1.82; before, the value was matched exactly.
           schema:
             type: string
         - name: target_kind
@@ -4857,6 +4934,60 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
 # =============================================================================
+
+  /devices/removed:
+    get:
+      operationId: listRemovedDevices
+      summary: Plugin devices someone removed, kept out
+      description: |
+        A plugin's device deleted with `DELETE /devices/{id}` is remembered
+        (0.1.82): its plugin reporting it again — registering it, its state,
+        its availability — doesn't bring it back. Before, it came back on the
+        plugin's next report. Its recorded history is kept, so a device
+        brought back has it. homeCore's own devices (helpers, modes) aren't
+        remembered: nothing reports them. Newest first. Needs `devices:read`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Removed devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [device_id, plugin_id, name, removed_at]
+                  properties:
+                    device_id:
+                      type: string
+                    plugin_id:
+                      type: string
+                    name:
+                      type: string
+                      description: What it was called when removed
+                    removed_at:
+                      type: string
+                      format: date-time
+
+  /devices/removed/{id}:
+    delete:
+      operationId: bringBackDevice
+      summary: Stop keeping a removed device out
+      description: |
+        It comes back the next time its plugin reports it, with its history.
+        Needs `devices:write`. Audited as `device.brought_back`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "204":
+          description: No longer kept out
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /devices/orphaned:
     get:
@@ -6464,9 +6595,9 @@ paths:
       operationId: listGlue
       summary: List all glue (virtual helper) devices
       description: |
-        Returns every device whose `plugin_id` is `core.glue`, `core.timer`, or
-        `core.switch`.  For running timers, `attributes.remaining_secs` is
-        recomputed on the fly from `started_at` + `duration_secs`.
+        Returns every device whose `plugin_id` is `core.glue`. For running
+        timers, `attributes.remaining_secs` is recomputed on the fly from
+        `started_at` + `duration_secs`.
 
         Requires scope `devices:read`.
       tags: [devices]
@@ -6575,14 +6706,66 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /glue/{id}:
+    patch:
+      operationId: updateGlue
+      summary: Change what a helper is — its settings, not its value
+      description: |
+        Merges `config` into the helper, taking only the keys its kind has:
+        a counter's `step`, `min`, `max`; a number's `min`, `max`, `step`,
+        `unit`; a select's `options`; a text's `max_length`; a datetime's
+        `has_date`, `has_time`; a group's `member_ids` (or `members`),
+        `attribute`, `mode`, `expect`; a threshold's `source_device_id`,
+        `source_attribute`, `threshold`, `hysteresis`; a timer's
+        `duration_secs`, `repeat`; and (0.1.82) a schedule's `blocks` —
+        each `{ "days": ["Mon", …], "start": "08:00", "end": "17:00" }`, an
+        end before its start running overnight. Operating a helper (setting a
+        number, picking an option) is a command, not this.
+
+        What changed is announced as `device_state_changed` (0.1.82), and a
+        schedule or a group is worked out again at once. Requires scope
+        `devices:write`.
+      tags: [devices]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: The helper as it now is
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceState"
+        "400":
+          description: Not a helper, nothing of its kind to configure, or no `config`
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: A schedule's blocks aren't days and two times; `error` says which
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     delete:
       operationId: deleteGlue
-      summary: Delete a glue device
+      summary: Delete a helper
       description: |
-        Deletes the device from the registry by id.  The handler does not verify
-        that the device is actually a glue device — any device id in the registry
-        will be deleted.  Unlike `DELETE /devices/{id}` this performs **no** rule
-        cascade.
+        As `DELETE /devices/{id}` does, for a helper (0.1.82): rules that name
+        it are turned off with a reason, and the answer lists them in
+        `affected_rules`. A device that isn't a helper is refused (400) —
+        delete it under `/devices`. Before 0.1.82 it deleted any device and
+        left rules naming it as they were.
 
         Requires scope `devices:write`.
       tags: [devices]
@@ -6592,7 +6775,7 @@ paths:
         - $ref: "#/components/parameters/DeviceId"
       responses:
         "200":
-          description: Device deleted
+          description: Deleted
           content:
             application/json:
               schema:
@@ -6601,6 +6784,13 @@ paths:
                 properties:
                   deleted:
                     type: boolean
+                  affected_rules:
+                    type: array
+                    items:
+                      type: string
+                    description: Names of the rules turned off because they named it
+        "400":
+          description: Not a helper
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -6926,14 +7116,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
     patch:
-      operationId: renameMode
-      summary: Rename a mode
+      operationId: patchMode
+      summary: Change a mode — its name, and a sun-following mode's events and offsets
       description: |
-        Its entry in `modes.toml` and its device both, so every screen and
-        the next start agree; a name given the device itself is dropped for
-        this one. The id — and every rule naming it — stays. Announced as
-        `device_name_changed`. Requires scope `devices:write`. Audited as
-        `mode.renamed`.
+        Every field is optional; send what changes.
+
+        - `name` renames the mode: its entry in `modes.toml` and its device
+          both, so every screen and the next start agree; a name given the
+          device itself is dropped for this one. Announced as
+          `device_name_changed`.
+        - `on_event`, `off_event` (`Sunrise`, `Sunset`, `SolarNoon`,
+          `CivilDawn`, `CivilDusk`) and `on_offset_minutes`,
+          `off_offset_minutes` (at most 720 either way) change when a solar
+          mode turns on and off. A manual mode has none (400). Since 0.1.82.
+
+        The id — and every rule naming it — stays. homeCore reads the file
+        again, works out the mode's state and today's on and off times, and
+        announces them. Requires scope `devices:write`. Audited as
+        `mode.updated`.
       tags: [devices]
       security:
         - bearerAuth: []
@@ -6950,11 +7150,24 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
               properties:
                 name:
                   type: string
                   example: Late night
+                on_event:
+                  type: string
+                  enum: [Sunrise, Sunset, SolarNoon, CivilDawn, CivilDusk]
+                off_event:
+                  type: string
+                  enum: [Sunrise, Sunset, SolarNoon, CivilDawn, CivilDusk]
+                on_offset_minutes:
+                  type: integer
+                  minimum: -720
+                  maximum: 720
+                off_offset_minutes:
+                  type: integer
+                  minimum: -720
+                  maximum: 720
       responses:
         "200":
           description: The mode's config as it now is
@@ -6964,7 +7177,7 @@ paths:
                 type: object
                 additionalProperties: true
         "400":
-          description: No name
+          description: An empty name, nothing to change, events for a manual mode, or an offset too large
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
@@ -7244,100 +7457,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   # ---------------------------------------------------------------------------
-  # Switches (virtual on/off switch devices)
-  # ---------------------------------------------------------------------------
-  /switches:
-    get:
-      operationId: listSwitches
-      summary: List virtual switch devices
-      description: |
-        Returns devices with `plugin_id` `core.switch`, plus `core.glue` devices whose
-        `device_type` is `switch`.  Switch devices are also visible via `GET /devices`.
-        Legacy devices without a `device_type` get one inferred from their `plugin_id`
-        or id prefix before being returned.
-
-        Requires scope `devices:read`.
-      tags: [devices]
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: Array of switch devices
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DeviceState"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          description: Store read failed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-    post:
-      operationId: createSwitch
-      summary: Create a virtual switch device
-      description: |
-        Creates a virtual switch: `device_id` is `switch_<id>` (the `switch_` prefix is
-        added if missing), `plugin_id` is `core.glue`, `available` is `true`, and
-        `attributes.on` starts as `false`.
-
-        `device_type` is `switch`, matching what `POST /glue` with
-        `type: switch` produces and what `GET /switches` filters on. (It was
-        previously written as `virtual_switch`, which `GET /switches` filters
-        out — switches created this way existed in the store but could never be
-        listed. Any such device is repaired on the next startup.)
-
-        Requires scope `devices:write`.
-      tags: [devices]
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id]
-              properties:
-                id:
-                  type: string
-                  description: Slug used to form the device id — `vacation_mode` → `switch_vacation_mode`
-                label:
-                  type: string
-                  nullable: true
-                  description: Display name.  Defaults to the resolved device id.
-      responses:
-        "201":
-          description: Created switch device
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DeviceState"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          description: A device with the resolved id already exists
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Store write failed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  # ---------------------------------------------------------------------------
-  # System — status, config, backup/restore, logs, metrics, timers
+  # System — status, config, backup/restore, logs, metrics
   # ---------------------------------------------------------------------------
   # ---------------------------------------------------------------------------
   # Logs
@@ -7606,156 +7726,6 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-
-  # ---------------------------------------------------------------------------
-  # Timers (timer devices are also visible via /devices)
-  # ---------------------------------------------------------------------------
-  /timers:
-    get:
-      operationId: listTimers
-      summary: List virtual countdown timer devices
-      description: |
-        Returns every device with `plugin_id = "core.timer"`, plus `core.glue`
-        devices whose `device_type` is `timer`.  For running timers,
-        `remaining_secs` is recomputed on read from `started_at` +
-        `duration_secs`, so the countdown is always accurate.
-
-        Requires the `devices:read` scope.
-      tags: [devices]
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: Array of timer devices
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DeviceState"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: Missing the `devices:read` scope
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: State store error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-    post:
-      operationId: createTimer
-      summary: Create a virtual countdown timer device
-      description: |
-        Creates a timer device owned by the `core.glue` plugin with
-        `device_type = "timer"` and initial attributes
-        `state: "idle"`, `duration_secs: 0`, `remaining_secs: 0`,
-        `repeat: false`.
-
-        It is told what to do as any device is (`PATCH /devices/{id}/state`):
-        `{"command": "start", "duration_secs": 600}`, `pause`, `resume`,
-        `cancel`, `restart`, and `{"command": "extend", "duration_secs": 300}`
-        to add time to a running or paused one (0.1.81) — a repeating timer's
-        next cycle is its usual length.
-
-        The `timer_` prefix is enforced: `id = "garage_close"` yields the
-        device id `timer_garage_close`; an id that already starts with
-        `timer_` is used verbatim.  When `label` is omitted the display name
-        defaults to the device id.
-
-        Requires the `devices:write` scope.
-      tags: [devices]
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id]
-              properties:
-                id:
-                  type: string
-                  description: Slug used to form the device_id (`timer_` prefix added if absent)
-                label:
-                  type: string
-                  description: Display name; defaults to the resulting device_id
-      responses:
-        "201":
-          description: Timer created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DeviceState"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: Missing the `devices:write` scope
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: A device with this timer id already exists
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: State store error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /timers/{id}:
-    get:
-      operationId: getTimer
-      summary: Get a single timer device
-      description: |
-        The `timer_` prefix is optional in the path — `garage_close` and
-        `timer_garage_close` both resolve to the device `timer_garage_close`.
-        `remaining_secs` is recomputed on read for running timers.
-
-        Requires the `devices:read` scope.
-      tags: [devices]
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: Timer id, with or without the `timer_` prefix
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Timer device
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DeviceState"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: Missing the `devices:read` scope
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          description: State store error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
 
   # ---------------------------------------------------------------------------
   # System
