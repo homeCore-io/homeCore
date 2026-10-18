@@ -2981,30 +2981,45 @@ paths:
       summary: Fire a webhook trigger
       description: |
         Any POST to this endpoint fires a `Custom` event with
-        `event_type = "webhook"` onto the internal event bus.
-        Automation rules with `trigger.type = "WebhookReceived"` and a
-        matching `path` will execute.
+        `event_type = "webhook"` and payload `{path, body, query}` onto the
+        internal event bus. Rules whose trigger is `WebhookReceived` with
+        exactly this `path` run; the body is the trigger's value and the query
+        parameters its extras.
+
+        **Public: no token is read.** The path is the only secret, so make it
+        long and hard to guess. Only POST is routed.
       tags: [webhooks]
-      security:
-        - bearerAuth: []
+      security: []
       parameters:
         - name: path
           in: path
           required: true
-          description: Webhook path identifier — must match the rule's `trigger.path`
+          description: |
+            One path segment, compared exactly with the rule's
+            `WebhookReceived.path` — no leading `/` in the rule.
           schema:
             type: string
       requestBody:
         required: false
-        description: Optional JSON body forwarded as `payload.body` in the fired event
+        description: Optional JSON body, forwarded as `payload.body`
         content:
           application/json:
             schema:
               type: object
               additionalProperties: true
       responses:
-        "202":
-          description: Webhook accepted and event fired
+        "200":
+          description: Event fired (whether or not any rule matched)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [accepted]
+                  path:
+                    type: string
 
   # ---------------------------------------------------------------------------
   # System
