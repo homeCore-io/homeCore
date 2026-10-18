@@ -354,6 +354,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(120_000),
+                danger: false,
             },
             Action {
                 id: "cleanup_stale_devices".into(),
@@ -383,6 +384,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(120_000),
+                danger: true,
             },
             Action {
                 id: "pair_bridge".into(),
@@ -421,6 +423,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: Some(vec![plugin_sdk_rs::types::ItemOp::Add]),
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(90_000),
+                danger: false,
             },
             Action {
                 id: "unpair_bridge".into(),
@@ -452,6 +455,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(60_000),
+                danger: true,
             },
         ],
     }

@@ -90,6 +90,15 @@ pub async fn log_stream_handler(
         // opened the event stream and not this one would be a credential with
         // an undocumented hole in it.
         match crate::auth_middleware::validate_query_token(&state, token, ip).await {
+            // Logs say everything about the house — hosts, ids, errors with
+            // their context. Admins only, like backups.
+            Ok(claims) if !claims.is_admin() => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "admin role required" })),
+                )
+                    .into_response()
+            }
             Ok(claims) => claims.sub,
             Err(resp) => return *resp,
         }
@@ -281,12 +290,20 @@ pub struct LogTailQuery {
 /// }
 /// ```
 ///
-/// Same auth as `/logs/stream` (JWT or whitelist). 503 when the
-/// log-stream feature isn't enabled in config.
+/// Admins only, as `/logs/stream`. 503 when the log-stream feature isn't
+/// enabled in config.
 pub async fn list_logs(
     State(state): State<AppState>,
+    crate::auth_middleware::AuthUser(claims): crate::auth_middleware::AuthUser,
     Query(params): Query<LogTailQuery>,
 ) -> Response {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
     let log_stream = match &state.log_stream {
         Some(ls) => ls.clone(),
         None => {

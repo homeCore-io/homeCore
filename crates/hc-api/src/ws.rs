@@ -35,6 +35,12 @@
 //!   needs to reload to stay right.
 //!
 //!   Opt-in, because a client written before it would not know the frame.
+//!
+//! ## Falling behind
+//! A client too slow to keep up (more than the bus holds) misses events. It
+//! is then sent a fresh snapshot, with `"missed": n`, if it asked for
+//! snapshots — the house as it is now — or `{"type":"lagged","missed":n}`
+//! otherwise, so it knows to read again.
 
 use crate::auth_middleware::whitelist_claims;
 use crate::event_log::{event_device_id, event_type_name};
@@ -505,6 +511,27 @@ async fn handle_socket(
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!("WS event stream lagged by {n} events");
+                            // The client missed `n` events, so what it shows is
+                            // stale. One that asked for a snapshot gets a fresh
+                            // one — the house as it is now, which it already
+                            // knows how to take; any other is told, so it can
+                            // read again.
+                            let frame = if query.snapshot {
+                                snapshot(&state, &claims).await.ok().map(|mut f| {
+                                    f["missed"] = json!(n);
+                                    f
+                                })
+                            } else {
+                                None
+                            }
+                            .unwrap_or_else(|| json!({ "type": "lagged", "missed": n }));
+                            if socket
+                                .send(Message::Text(frame.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break "event_send_failed";
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break "bus_closed",
                     }
@@ -584,6 +611,7 @@ mod tests {
             scopes: Role::User.scopes(),
             actor: None,
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

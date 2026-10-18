@@ -48,6 +48,19 @@ pub struct RefreshTokenRecord {
     /// through every refresh. None on tokens from before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_started: Option<DateTime<Utc>>,
+    /// The session this token belongs to: the first token's id, carried
+    /// through every refresh. Access tokens name it (`Claims::sid`), so
+    /// ending the session ends them too. None on tokens from before it was
+    /// kept — their own id stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+}
+
+impl RefreshTokenRecord {
+    /// This token's session.
+    pub fn session(&self) -> Uuid {
+        self.session_id.unwrap_or(self.id)
+    }
 }
 
 impl RefreshTokenRecord {
@@ -216,6 +229,22 @@ impl RefreshTokenStore {
         Ok(count)
     }
 
+    /// Every session with a token revoked at or after `since`, and when.
+    pub fn ended_since(&self, since: DateTime<Utc>) -> Result<Vec<(Uuid, DateTime<Utc>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(REFRESH_BY_PREFIX)?;
+        let mut out = Vec::new();
+        for row in table.iter()? {
+            let (_, v) = row?;
+            if let Ok(rec) = serde_json::from_str::<RefreshTokenRecord>(v.value()) {
+                if let Some(at) = rec.revoked_at.filter(|at| *at >= since) {
+                    out.push((rec.session(), at));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Delete tokens that are both expired and used/revoked. Safe to call
     /// periodically — active tokens (usable) are never touched.
     pub fn prune(&self, now: DateTime<Utc>) -> Result<usize> {
@@ -277,6 +306,7 @@ mod tests {
             revoked_at: None,
             user_agent: String::new(),
             session_started: None,
+            session_id: None,
         }
     }
 

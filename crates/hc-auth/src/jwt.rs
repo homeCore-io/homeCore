@@ -38,6 +38,12 @@ pub struct Claims {
     /// not backed by a password, so the middleware skips the check for them.
     #[serde(default)]
     pub tv: u64,
+    /// The sign-in this token belongs to — the refresh chain's session id —
+    /// so ending that session ends its access tokens at once, not when they
+    /// expire. `None` for tokens not from a sign-in (PIN sessions, synthetic
+    /// claims) and for tokens from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<Uuid>,
 }
 
 impl Claims {
@@ -133,6 +139,23 @@ impl JwtService {
         self.issue_for(uid, username, role, token_version, self.expiry_hours * 3600)
     }
 
+    /// As [`issue`](Self::issue), for a sign-in: the token names its session,
+    /// so ending the session ends it too.
+    pub fn issue_session(
+        &self,
+        uid: &str,
+        username: &str,
+        role: Role,
+        token_version: u64,
+        sid: Option<Uuid>,
+    ) -> Result<String> {
+        let mut claims =
+            self.claims_for(uid, username, role, token_version, self.expiry_hours * 3600);
+        claims.sid = sid;
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
+            .context("JWT encoding failed")
+    }
+
     /// As [`issue`](Self::issue), lasting `ttl_secs` — a person's few minutes
     /// at a display after their PIN (H5).
     pub fn issue_for(
@@ -143,13 +166,26 @@ impl JwtService {
         token_version: u64,
         ttl_secs: u64,
     ) -> Result<String> {
+        let claims = self.claims_for(uid, username, role, token_version, ttl_secs);
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
+            .context("JWT encoding failed")
+    }
+
+    fn claims_for(
+        &self,
+        uid: &str,
+        username: &str,
+        role: Role,
+        token_version: u64,
+        ttl_secs: u64,
+    ) -> Claims {
         let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
             + ttl_secs;
         let actor_uid = Uuid::parse_str(uid).unwrap_or(Uuid::nil());
-        let claims = Claims {
+        Claims {
             sub: username.to_string(),
             uid: uid.to_string(),
             exp,
@@ -160,9 +196,8 @@ impl JwtService {
                 username: username.to_string(),
             }),
             tv: token_version,
-        };
-        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
-            .context("JWT encoding failed")
+            sid: None,
+        }
     }
 
     /// Validate a JWT and return its claims.
@@ -234,6 +269,7 @@ mod tests {
                 username: "admin".into(),
             }),
             tv: 0,
+            sid: None,
         };
         assert!(
             claims.has_scope("skins:write"),
@@ -259,6 +295,7 @@ mod tests {
                 label: "readonly dashboard".into(),
             }),
             tv: 0,
+            sid: None,
         };
         assert!(claims.has_scope("devices:read"), "its own scope");
         assert!(!claims.has_scope("devices:write"), "NOT its role's scopes");
@@ -278,6 +315,7 @@ mod tests {
             scopes: vec![],
             actor: None,
             tv: 0,
+            sid: None,
         };
         assert!(claims.has_scope("devices:read"));
         assert!(
@@ -365,6 +403,7 @@ mod tests {
             scopes: Role::Admin.scopes(),
             actor: None,
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -389,6 +428,7 @@ mod tests {
                 label: "k".into(),
             }),
             tv: 0,
+            sid: None,
         };
         assert!(!key(vec!["devices:read".into()]).is_admin());
         assert!(!key(crate::user::display_scopes()).is_admin());

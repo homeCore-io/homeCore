@@ -71,6 +71,9 @@ pub struct Vocabulary {
     /// - `test_draft` — `POST /automations/test` dry-runs a rule not saved
     /// - `run_now` — `POST /automations/{id}/run` runs a rule now
     /// - `test_at` — both dry runs take `?at=`, a time to judge the checks at
+    /// - `if_any_check` — an if/otherwise can ask any condition a rule can
+    ///   (calendars, hub values, private booleans, time since a change, …),
+    ///   not only devices, modes and the clock
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -83,6 +86,7 @@ pub const RULE_FEATURES: &[&str] = &[
     "test_draft",
     "run_now",
     "test_at",
+    "if_any_check",
 ];
 
 impl Vocabulary {

@@ -246,6 +246,7 @@ async fn run(
                     item_operations: None,
                     requires_role: plugin_sdk_rs::types::RequiresRole::User,
                     timeout_ms: None,
+                    danger: false,
                 },
                 plugin_sdk_rs::types::Action {
                     id: "reload_config".into(),
@@ -265,6 +266,7 @@ async fn run(
                     item_operations: None,
                     requires_role: plugin_sdk_rs::types::RequiresRole::User,
                     timeout_ms: None,
+                    danger: false,
                 },
             ],
         });

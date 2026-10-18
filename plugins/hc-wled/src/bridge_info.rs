@@ -164,6 +164,25 @@ async fn build_attrs(
         }
     }
 
+    // The effects and palettes by name, as `{id, name}` — what the
+    // `set_effect` / `set_palette` actions offer, so a screen shows names
+    // rather than numbers. Supplemental: a controller that won't say keeps
+    // what it said before.
+    for (path, key) in [("/json/effects", "effects"), ("/json/palettes", "palettes")] {
+        if let Ok(Value::Array(names)) = fetch_json(http, base, path).await {
+            let list: Vec<Value> = names
+                .iter()
+                .enumerate()
+                .filter_map(|(id, n)| n.as_str().map(|name| json!({ "id": id, "name": name })))
+                // WLED marks its reserved slots "RSVD" / "-".
+                .filter(|v| !matches!(v["name"].as_str(), Some("RSVD") | Some("-")))
+                .collect();
+            if !list.is_empty() {
+                attrs.insert(key.into(), Value::Array(list));
+            }
+        }
+    }
+
     // Effect / palette catalog sizes
     if let Some(n) = info.get("fxcount").and_then(Value::as_u64) {
         attrs.insert("effects_count".into(), json!(n));

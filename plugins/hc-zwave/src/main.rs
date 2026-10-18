@@ -269,6 +269,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: Some(vec![ItemOp::Add, ItemOp::Update]),
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(300_000), // 5 min — inclusion windows can be long
+                danger: false,
             },
             Action {
                 id: "exclude_node".into(),
@@ -288,6 +289,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: Some(vec![ItemOp::Remove]),
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(300_000),
+                danger: true,
             },
             Action {
                 id: "rescan_nodes".into(),
@@ -309,6 +311,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: None,
+                danger: false,
             },
         ],
     }

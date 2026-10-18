@@ -170,25 +170,27 @@ pub async fn login(
     }
 
     audit::login_success(&s, user.id, &user.username).await;
-    match s.jwt.issue(
+    // The refresh token first: it begins the session, which the access token
+    // names. If minting fails, still sign in — with an access token that
+    // names no session — rather than break login over a transient store
+    // problem.
+    let (refresh_token, refresh_expires_in, sid) =
+        match issue_refresh(&s, user.id, None, &agent).await {
+            Ok(r) => (Some(r.0), Some(r.1), Some(r.2)),
+            Err(e) => {
+                tracing::warn!(error = %e, "refresh token issue failed on login");
+                (None, None, None)
+            }
+        };
+    match s.jwt.issue_session(
         &user.id.to_string(),
         &user.username,
         user.role,
         user.token_version,
+        sid,
     ) {
         Ok(token) => {
             let expires_in = s.jwt.expiry_hours() * 3600;
-            // Mint a refresh token alongside. If minting fails, still return
-            // the access token — login shouldn't break just because the
-            // refresh store had a transient issue.
-            let (refresh_token, refresh_expires_in) =
-                match issue_refresh(&s, user.id, None, &agent).await {
-                    Ok(r) => (Some(r.0), Some(r.1)),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "refresh token issue failed on login");
-                        (None, None)
-                    }
-                };
             let body = LoginResponse {
                 token,
                 token_type: "Bearer".into(),
@@ -229,6 +231,7 @@ pub async fn list_sessions(
                     .map(|r| {
                         json!({
                             "id": r.id,
+                            "current": claims.sid == Some(r.session()),
                             "user_agent": r.user_agent,
                             "started_at": r.session_started,
                             "last_active": r.created_at,
@@ -247,16 +250,16 @@ pub async fn list_sessions(
     }
 }
 
-/// `DELETE /api/v1/auth/sessions/{id}` — end one: it can't refresh, so it
-/// signs out when its current access token runs out (an hour at most).
+/// `DELETE /api/v1/auth/sessions/{id}` — end one, at once: it can't refresh,
+/// and its access tokens stop working now.
 pub async fn end_session(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let uid = claims.actor().effective_uid();
-    match s.store.get_refresh_by_id(id).await {
-        Ok(Some(r)) if Some(r.user_id) == uid => {}
+    let sid = match s.store.get_refresh_by_id(id).await {
+        Ok(Some(r)) if Some(r.user_id) == uid => r.session(),
         Ok(_) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -271,7 +274,7 @@ pub async fn end_session(
             )
                 .into_response()
         }
-    }
+    };
     if let Err(e) = s.store.revoke_refresh(id).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -279,10 +282,56 @@ pub async fn end_session(
         )
             .into_response();
     }
+    s.end_session(sid);
     let e = audit::entry_from_claims(&claims, "auth.session_ended")
         .with_target("session", id.to_string());
     audit::emit(&s, e).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /api/v1/auth/logout` — sign this browser or app out: its refresh
+/// token is retired and its session ended, so its access tokens stop working
+/// now. Needs no bearer — holding the refresh token is the proof — and says
+/// 204 whatever it was given, so it can't be used to test tokens.
+pub async fn logout(
+    State(s): State<AppState>,
+    Json(body): Json<RefreshRequest>,
+) -> axum::response::Response {
+    let Some(rec) = refresh_record_for(&s, &body.refresh_token).await else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if let Err(e) = s.store.revoke_refresh(rec.id).await {
+        tracing::warn!(error = %e, "revoke_refresh failed on logout");
+    }
+    s.end_session(rec.session());
+    let mut e = hc_state::AuditEntry::success(
+        hc_state::AuditActorType::User,
+        Some(rec.user_id),
+        "user",
+        "auth.signed_out",
+    )
+    .with_target("session", rec.id.to_string());
+    if let Ok(Some(u)) = s.store.get_user_by_id(rec.user_id).await {
+        e.actor_label = format!("user:{}", u.username);
+    }
+    audit::emit(&s, e).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The stored record for a presented refresh token, if it is one and is
+/// still usable.
+async fn refresh_record_for(s: &AppState, token: &str) -> Option<RefreshTokenRecord> {
+    let body = token.strip_prefix(refresh::REFRESH_TOKEN_PREFIX)?;
+    let prefix = refresh::lookup_prefix_from_body(body)?;
+    let rec = s.store.get_refresh_by_prefix(prefix).await.ok()??;
+    if !rec.is_usable(chrono::Utc::now()) {
+        return None;
+    }
+    let (full, hash) = (token.to_string(), rec.hash.clone());
+    tokio::task::spawn_blocking(move || refresh::verify_token(&full, &hash))
+        .await
+        .unwrap_or(false)
+        .then_some(rec)
 }
 
 /// `POST /api/v1/auth/sessions/end-all` — sign out everywhere, this one
@@ -339,13 +388,14 @@ pub async fn end_all_sessions(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Mint a refresh token and persist it. Returns `(full_token, ttl_seconds)`.
+/// Mint a refresh token and persist it. Returns `(full_token, ttl_seconds,
+/// session id)`.
 async fn issue_refresh(
     s: &AppState,
     user_id: Uuid,
     parent: Option<&RefreshTokenRecord>,
     user_agent: &str,
-) -> anyhow::Result<(String, u64)> {
+) -> anyhow::Result<(String, u64, Uuid)> {
     // Collision-safe generate.
     let new_tok = {
         let mut attempt = 0u32;
@@ -367,8 +417,9 @@ async fn issue_refresh(
 
     let ttl_days = s.refresh_token_expiry_days;
     let expires_at = chrono::Utc::now() + chrono::Duration::days(ttl_days as i64);
+    let id = Uuid::new_v4();
     let rec = RefreshTokenRecord {
-        id: Uuid::new_v4(),
+        id,
         user_id,
         prefix: new_tok.lookup_prefix,
         hash: new_tok.hash,
@@ -382,9 +433,10 @@ async fn issue_refresh(
         session_started: Some(parent.map_or_else(chrono::Utc::now, |p| {
             p.session_started.unwrap_or(p.created_at)
         })),
+        session_id: Some(parent.map_or(id, RefreshTokenRecord::session)),
     };
     s.store.create_refresh_token(&rec).await?;
-    Ok((new_tok.full_token, ttl_days * 24 * 3600))
+    Ok((new_tok.full_token, ttl_days * 24 * 3600, rec.session()))
 }
 
 /// `POST /api/v1/auth/refresh`
@@ -448,6 +500,7 @@ pub async fn refresh(
             "Refresh token reuse detected — revoking entire chain"
         );
         let _ = s.store.revoke_refresh_chain(rec.id).await;
+        s.end_session(rec.session());
         audit::refresh_reuse_detected(&s, rec.user_id).await;
         return (
             StatusCode::UNAUTHORIZED,
@@ -506,28 +559,30 @@ pub async fn refresh(
         }
     };
 
-    let access = match s.jwt.issue(
-        &user.id.to_string(),
-        &user.username,
-        user.role,
-        user.token_version,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-    let (new_refresh, refresh_ttl) = match issue_refresh(&s, rec.user_id, Some(&rec), "").await {
+    let (new_refresh, refresh_ttl, sid) = match issue_refresh(&s, rec.user_id, Some(&rec), "").await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "failed to issue rotated refresh");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "could not rotate refresh token" })),
+            )
+                .into_response();
+        }
+    };
+    let access = match s.jwt.issue_session(
+        &user.id.to_string(),
+        &user.username,
+        user.role,
+        user.token_version,
+        Some(sid),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
             )
                 .into_response();
         }
@@ -1155,6 +1210,7 @@ mod me_tests {
             scopes: vec!["dashboards:read".into(), "content:read".into()],
             actor: None,
             tv: 0,
+            sid: None,
         };
 
         let body = body_of(me(State(state), AuthUser(claims)).await.into_response()).await;
@@ -1188,6 +1244,7 @@ mod me_tests {
             scopes: Role::Admin.scopes(),
             actor: None,
             tv: 0,
+            sid: None,
         };
 
         let body = body_of(me(State(state), AuthUser(claims)).await.into_response()).await;

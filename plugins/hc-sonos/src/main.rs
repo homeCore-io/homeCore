@@ -272,6 +272,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: None,
+                danger: false,
             },
             Action {
                 id: "discover_speakers".into(),
@@ -299,6 +300,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(60_000),
+                danger: false,
             },
         ],
     }

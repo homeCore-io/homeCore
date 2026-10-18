@@ -1102,6 +1102,7 @@
     "rule_events",
     "test_draft",
     "run_now",
-    "test_at"
+    "test_at",
+    "if_any_check"
   ]
 }

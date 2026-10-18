@@ -15,6 +15,7 @@
 //!
 //! ```json
 //! { "command": "start",   "duration_secs": 600, "label": "optional", "repeat": false }
+//!   (duration_secs and repeat optional: left out, the timer's own — `default_secs`, `repeat`)
 //! { "command": "pause" }
 //! { "command": "resume" }
 //! { "command": "cancel" }
@@ -76,9 +77,13 @@ pub const TIMER_ID_PREFIX: &str = "timer_";
 #[serde(tag = "command", rename_all = "snake_case")]
 enum TimerCommand {
     Start {
-        duration_secs: u64,
+        /// This run's length. Left out, the timer's own (`default_secs`).
+        #[serde(default)]
+        duration_secs: Option<u64>,
         #[serde(default)]
         label: Option<String>,
+        /// Left out, the timer's own setting — a start no longer turns
+        /// "start again when it finishes" off.
         #[serde(default)]
         repeat: Option<bool>,
     },
@@ -267,12 +272,30 @@ impl TimerManager {
                 label,
                 repeat,
             } => {
+                // The timer's own length and repeat, as its helper settings
+                // say: `default_secs` (older timers only have `duration_secs`,
+                // which was their own until a start overwrote it).
+                let attrs = match self.state.get_device(device_id).await {
+                    Ok(Some(dev)) => dev.attributes,
+                    _ => Default::default(),
+                };
+                let num = |k: &str| attrs.get(k).and_then(|v| v.as_u64());
+                let own_secs = num("default_secs").or_else(|| num("duration_secs"));
+                let Some(duration_secs) = duration_secs.or(own_secs).filter(|s| *s > 0) else {
+                    warn!(%device_id, "Timer: start with no length, and the timer has none of its own");
+                    return;
+                };
+                let repeat = repeat
+                    .or_else(|| attrs.get("repeat").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
                 self.cancel_task(device_id).await;
-                let repeat = repeat.unwrap_or(false);
                 let mut extra: HashMap<&str, serde_json::Value> = HashMap::new();
                 extra.insert("duration_secs", serde_json::json!(duration_secs));
                 extra.insert("remaining_secs", serde_json::json!(duration_secs));
                 extra.insert("repeat", serde_json::json!(repeat));
+                if let Some(own) = own_secs {
+                    extra.insert("default_secs", serde_json::json!(own));
+                }
                 if let Some(lbl) = label {
                     extra.insert("label", serde_json::json!(lbl));
                 }
@@ -704,5 +727,59 @@ fn parse_timer_cmd_topic(topic: &str) -> Option<String> {
         Some(p2.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hc_types::device::DeviceState;
+
+    async fn manager() -> TimerManager {
+        let tmp = std::env::temp_dir().join(format!("hc_timer_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).expect("temp dir");
+        let store = StateStore::open(
+            tmp.join("state.redb").to_str().unwrap(),
+            tmp.join("history.db").to_str().unwrap(),
+        )
+        .await
+        .expect("store opens");
+        let mut dev = DeviceState::new("timer_tea", "Tea", "core.glue");
+        dev.device_type = Some("timer".into());
+        for (k, v) in [
+            ("state", serde_json::json!("idle")),
+            ("duration_secs", serde_json::json!(240)),
+            ("default_secs", serde_json::json!(240)),
+            ("remaining_secs", serde_json::json!(0)),
+            ("repeat", serde_json::json!(true)),
+        ] {
+            dev.attributes.insert(k.into(), v);
+        }
+        store.upsert_device(&dev).await.unwrap();
+        TimerManager::new(EventBus::new(16), EventBus::new(16), store)
+    }
+
+    async fn attrs(m: &TimerManager) -> HashMap<String, serde_json::Value> {
+        let d = m.state.get_device("timer_tea").await.unwrap().unwrap();
+        d.attributes.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn a_start_keeps_the_timers_own_length_and_repeat() {
+        let m = manager().await;
+        m.handle_cmd("timer_tea", br#"{"command":"start"}"#).await;
+        let a = attrs(&m).await;
+        assert_eq!(a["state"], "running");
+        assert_eq!(a["duration_secs"], 240, "its own length");
+        assert_eq!(a["repeat"], true, "a start doesn't turn repeating off");
+
+        // A rule's longer start is this run only.
+        m.handle_cmd("timer_tea", br#"{"command":"start","duration_secs":600}"#)
+            .await;
+        let a = attrs(&m).await;
+        assert_eq!(a["duration_secs"], 600);
+        assert_eq!(a["default_secs"], 240, "its own length is kept");
+        assert_eq!(a["repeat"], true);
+        m.cancel_task("timer_tea").await;
     }
 }

@@ -418,6 +418,16 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.revoke_chain(id, now)).await?
     }
 
+    /// Sessions ended since `since` (a token of theirs revoked), with when —
+    /// so a restart remembers which access tokens no longer count.
+    pub async fn ended_sessions_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(Uuid, chrono::DateTime<chrono::Utc>)>> {
+        let store = self.refresh_tokens.clone();
+        tokio::task::spawn_blocking(move || store.ended_since(since)).await?
+    }
+
     pub async fn revoke_refresh(&self, id: Uuid) -> Result<bool> {
         let store = Arc::clone(&self.refresh_tokens);
         let now = chrono::Utc::now();

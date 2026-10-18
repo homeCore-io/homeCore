@@ -483,6 +483,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // 3s UDP broadcast, then an HTTP probe per manual_host
                 // (8s client timeout each, now concurrent).
                 timeout_ms: Some(30_000),
+                danger: false,
             },
             Action {
                 id: "republish_devices".into(),
@@ -506,6 +507,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // Sets a flag and returns; it makes no request to the
                 // gateway. The window is core's, not this action's.
                 timeout_ms: Some(10_000),
+                danger: false,
             },
             Action {
                 id: "refresh_sensors".into(),
@@ -527,6 +529,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // Two pages, now fetched concurrently, at an 8s client
                 // timeout each.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "get_gateway_info".into(),
@@ -547,6 +550,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // One 8s call — but resolve_gateway_ip may first fall back
                 // to manual-host probes and UDP discovery to find the console.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "get_network".into(),
@@ -566,6 +570,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 requires_role: RequiresRole::User,
                 // As get_gateway_info: an 8s call behind gateway resolution.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "get_units".into(),
@@ -586,6 +591,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 requires_role: RequiresRole::User,
                 // As get_gateway_info: an 8s call behind gateway resolution.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "get_calibration".into(),
@@ -606,6 +612,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 requires_role: RequiresRole::User,
                 // As get_gateway_info: an 8s call behind gateway resolution.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "refresh_iot_devices".into(),
@@ -625,6 +632,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 requires_role: RequiresRole::User,
                 // As get_gateway_info: an 8s call behind gateway resolution.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "get_custom_server".into(),
@@ -646,6 +654,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 requires_role: RequiresRole::User,
                 // Dialect auto-detect can make more than one 8s request.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "set_custom_server".into(),
@@ -727,6 +736,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(60_000),
+                danger: false,
             },
             Action {
                 id: "reboot_gateway".into(),
@@ -749,6 +759,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 // Three candidate URLs tried in order, first 200 wins —
                 // deliberately serial, so up to 3x the 8s client timeout.
                 timeout_ms: Some(30_000),
+                danger: true,
             },
         ],
     }

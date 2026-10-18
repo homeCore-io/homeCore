@@ -172,95 +172,50 @@ impl Scheduler {
                         if !rule.enabled {
                             continue;
                         }
-                        // A rule's first calendar moment (a rule needs no two).
-                        let Some(Trigger::CalendarEvent {
-                            calendar_id,
-                            title_contains,
-                            offset_minutes,
-                        }) = rule
-                            .all_triggers()
-                            .find(|t| matches!(t, Trigger::CalendarEvent { .. }))
-                        else {
-                            continue;
-                        };
-
-                        // The "target" event start time that would cause this rule
-                        // to fire right now after applying offset_minutes.
-                        let target = utc_now - chrono::Duration::minutes(*offset_minutes as i64);
-
-                        let fired = calendars
-                            .iter()
-                            .filter(|cal| {
-                                calendar_id
-                                    .as_deref()
-                                    .map(|id| id == cal.id)
-                                    .unwrap_or(true)
-                            })
-                            .flat_map(|cal| cal.events.iter().map(move |ev| (cal, ev)))
-                            .any(|(cal, ev)| {
-                                // Event start must fall within the current minute window
-                                // after offset adjustment.
-                                let start = ev.start;
-                                let in_window = start.date_naive() == target.date_naive()
-                                    && start.hour() == target.hour()
-                                    && start.minute() == target.minute();
-                                if !in_window {
-                                    return false;
-                                }
-                                if let Some(filter) = title_contains {
-                                    if !ev.summary.to_lowercase().contains(&filter.to_lowercase()) {
-                                        return false;
-                                    }
-                                }
-                                debug!(
-                                    rule_id   = %rule.id,
-                                    cal_id    = %cal.id,
-                                    summary   = %ev.summary,
-                                    "Scheduler: CalendarEvent matched"
-                                );
-                                true
-                            });
-
-                        if fired {
-                            let payload = {
-                                // Find the matched event for the payload (first match).
-                                let ev_info = calendars
-                                    .iter()
-                                    .filter(|cal| {
-                                        calendar_id
-                                            .as_deref()
-                                            .map(|id| id == cal.id)
-                                            .unwrap_or(true)
-                                    })
-                                    .flat_map(|cal| {
-                                        cal.events.iter().map(move |ev| (cal.id.as_str(), ev))
-                                    })
-                                    .find(|(_, ev)| {
-                                        let start = ev.start;
-                                        let in_window = start.date_naive() == target.date_naive()
-                                            && start.hour() == target.hour()
-                                            && start.minute() == target.minute();
-                                        if !in_window {
-                                            return false;
-                                        }
-                                        if let Some(filter) = title_contains {
-                                            return ev
-                                                .summary
-                                                .to_lowercase()
-                                                .contains(&filter.to_lowercase());
-                                        }
-                                        true
-                                    });
-                                match ev_info {
-                                    Some((cal_id, ev)) => serde_json::json!({
-                                        "rule_id":       rule.id,
-                                        "calendar_id":   cal_id,
-                                        "event_summary": ev.summary,
-                                        "event_start":   ev.start,
-                                    }),
-                                    None => serde_json::json!({ "rule_id": rule.id }),
-                                }
+                        // Every calendar moment the rule has: the first event any
+                        // of them matches this minute fires it, once.
+                        let matched = rule.all_triggers().find_map(|t| {
+                            let Trigger::CalendarEvent {
+                                calendar_id,
+                                title_contains,
+                                offset_minutes,
+                            } = t
+                            else {
+                                return None;
                             };
+                            // The event start that would fire it now, after the offset.
+                            let target =
+                                utc_now - chrono::Duration::minutes(*offset_minutes as i64);
+                            calendars
+                                .iter()
+                                .filter(|cal| calendar_id.as_deref().is_none_or(|id| id == cal.id))
+                                .flat_map(|cal| {
+                                    cal.events.iter().map(move |ev| (cal.id.as_str(), ev))
+                                })
+                                .find(|(_, ev)| {
+                                    let start = ev.start;
+                                    start.date_naive() == target.date_naive()
+                                        && start.hour() == target.hour()
+                                        && start.minute() == target.minute()
+                                        && title_contains.as_ref().is_none_or(|f| {
+                                            ev.summary.to_lowercase().contains(&f.to_lowercase())
+                                        })
+                                })
+                        });
+
+                        if let Some((cal_id, ev)) = matched {
+                            debug!(
+                                rule_id = %rule.id,
+                                cal_id,
+                                summary = %ev.summary,
+                                "Scheduler: CalendarEvent matched"
+                            );
+                            let payload = serde_json::json!({
+                                "rule_id":       rule.id,
+                                "calendar_id":   cal_id,
+                                "event_summary": ev.summary,
+                                "event_start":   ev.start,
+                            });
                             debug!(rule_id = %rule.id, "Scheduler firing CalendarEvent trigger");
                             let _ = self.pub_bus.publish(Event::Custom {
                                 timestamp: chrono::Utc::now(),

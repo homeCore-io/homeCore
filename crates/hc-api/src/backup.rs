@@ -529,8 +529,69 @@ pub async fn restore_handler(
             .into_response();
     }
 
+    restore_from(&state, &claims, paths, body, q.check, None).await
+}
+
+/// `POST /system/backups/{name}/restore` — check or stage one of the backups
+/// kept on the house, as `POST /system/restore` does an uploaded one, without
+/// the round trip through a browser.
+pub async fn restore_kept_handler(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<RestoreQuery>,
+) -> Response {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    let Some(paths) = state.backup_paths.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "backup paths not configured" })),
+        )
+            .into_response();
+    };
+    let Some(kept) = paths.kept.clone().filter(|_| kept_name_ok(&name)) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such backup" })),
+        )
+            .into_response();
+    };
+    match tokio::fs::read(kept.dir.join(&name)).await {
+        Ok(bytes) => {
+            restore_from(
+                &state,
+                &claims,
+                paths,
+                Bytes::from(bytes),
+                q.check,
+                Some(name),
+            )
+            .await
+        }
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such backup" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Check an archive, and unless only checking, stage it for the next start.
+async fn restore_from(
+    state: &AppState,
+    claims: &hc_auth::Claims,
+    paths: BackupPaths,
+    body: Bytes,
+    check: bool,
+    from: Option<String>,
+) -> Response {
     let zip_len = body.len();
-    let check = q.check;
     let staged = tokio::task::spawn_blocking(move || -> anyhow::Result<RestorePlan> {
         let plan = plan_restore(&paths, &body)?;
         if !check {
@@ -553,14 +614,15 @@ pub async fn restore_handler(
                 )
                     .into_response();
             }
-            let mut audit_e = audit::entry_from_claims(&claims, "system.restore_staged")
+            let mut audit_e = audit::entry_from_claims(claims, "system.restore_staged")
                 .with_target("system", "backup");
             audit_e.detail = json!({
                 "bytes": zip_len,
                 "restored": plan.restored.len(),
                 "taken_at": plan.taken_at,
+                "kept": from,
             });
-            audit::emit(&state, audit_e).await;
+            audit::emit(state, audit_e).await;
             (
                 StatusCode::OK,
                 Json(json!({

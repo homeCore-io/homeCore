@@ -115,6 +115,7 @@ fn capabilities(caps: &RuntimeCapabilities) -> Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: None,
+                danger: false,
             },
             Action {
                 id: "restart_plugin".into(),
@@ -132,6 +133,7 @@ fn capabilities(caps: &RuntimeCapabilities) -> Capabilities {
                 // back. Core's default action timeout is 5s, which is the wrong
                 // budget for that and shows up as a 504 on a restart that worked.
                 timeout_ms: Some(30_000),
+                danger: false,
             },
         ],
     }

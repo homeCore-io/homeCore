@@ -42,6 +42,9 @@ pub const JUSTIFIED_OMISSIONS: &[&str] = &[
     // Meaningless in the two-container model — hc-web serves the UI from its
     // own image. See claude-notes/plans (CI/CD + deployment redesign).
     "web_admin.dist_path",
+    // Does nothing without `dist_path`, so a switch for it in the form was a
+    // switch that did nothing. Set both in homecore.toml to serve a UI.
+    "web_admin.enabled",
 ];
 
 /// The descriptor for `homecore.toml`.
@@ -69,7 +72,6 @@ pub fn system_config_descriptor() -> Value {
         .section(logging_rules_file())
         .section(logging_syslog())
         .section(logging_stream())
-        .section(web_admin())
         .build()
 }
 
@@ -114,7 +116,12 @@ fn broker() -> Section {
         .field(
             Field::port("broker.v5_port")
                 .label("MQTT v5 port")
-                .help("Optional second listener speaking MQTT 5. Empty = off."),
+                .help(
+                    "A second listener speaking MQTT 5, for devices that need it (Shelly \
+                     Plus/Pro). Default 1884; 0 turns it off.",
+                )
+                .default(1884)
+                .min(0.0),
         )
         .field(
             Field::port("broker.tls_port")
@@ -767,20 +774,6 @@ fn logging_stream() -> Section {
                 .label("Backlog")
                 .unit("lines")
                 .help("How many recent lines a client sees when it connects."),
-        )
-}
-
-fn web_admin() -> Section {
-    Section::new("web_admin", "Bundled web UI")
-        .help(
-            "The UI core used to serve itself. hc-web is its own container now, \
-             so this stays off unless you are running the retired layout.",
-        )
-        .field(
-            Field::toggle("web_admin.enabled")
-                .label("Serve the bundled UI")
-                .help("Serve a UI from core at /.")
-                .default(false),
         )
 }
 
