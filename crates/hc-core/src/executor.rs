@@ -164,6 +164,16 @@ pub type CaptureStore = Arc<DashMap<(Uuid, String), HashMap<String, HashMap<Stri
 /// Create one per rule firing, wrap in `Arc`, then pass to `execute_actions`.
 /// All fields are either immutable or wrapped in concurrent containers so
 /// `Parallel` branches sharing the same context are safe.
+/// Decides any check, as the rule engine does for a rule's own conditions.
+pub type Judge = Arc<
+    dyn Fn(
+            Condition,
+            Arc<HashMap<String, JsonValue>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub struct ExecutorContext {
     pub publish: Option<PublishHandle>,
     pub notify: Option<Arc<NotificationService>>,
@@ -204,6 +214,9 @@ pub struct ExecutorContext {
     pub trace: Option<Arc<Mutex<Vec<ActionTrace>>>>,
     /// Per-firing correlation ID threaded through device commands and events.
     pub correlation_id: Option<String>,
+    /// The engine's judge, so an if/otherwise can ask anything a rule's own
+    /// conditions can. `None` (tests) asks only devices, modes and the clock.
+    pub judge: Option<Judge>,
 }
 
 impl ExecutorContext {
@@ -230,6 +243,7 @@ impl ExecutorContext {
             exit_flag: Arc::new(AtomicBool::new(false)),
             trace: None,
             correlation_id: None,
+            judge: None,
         })
     }
 }
@@ -330,9 +344,37 @@ pub async fn execute_actions(
 // Internal execution engine
 // ---------------------------------------------------------------------------
 
+/// What a `track_event_value` step sends: the value that started the rule,
+/// put where the step says. A step of one setting (`{"on": true}`) sends that
+/// setting with the event's value (`{"on": false}`), so one device can follow
+/// another even under another name. Otherwise the reading under its own name;
+/// a whole object (a webhook's body) as it came. No value: the step as written.
+fn mirrored(state: &JsonValue, trigger: &TriggerContext) -> JsonValue {
+    let Some(value) = trigger.value.clone() else {
+        return state.clone();
+    };
+    if value.is_object() {
+        return value;
+    }
+    match state.as_object() {
+        Some(m) if m.len() == 1 => {
+            let key = m.keys().next().cloned().unwrap_or_default();
+            serde_json::json!({ key: value })
+        }
+        _ => match &trigger.attribute {
+            Some(a) => serde_json::json!({ a.clone(): value }),
+            None => state.clone(),
+        },
+    }
+}
+
 /// Whether an if/otherwise's question is answered yes, against the devices
 /// as they were when the rule fired.
-async fn if_passes(check: &IfCheck, snapshot: &Arc<HashMap<String, JsonValue>>) -> Result<bool> {
+async fn if_passes(
+    check: &IfCheck,
+    snapshot: &Arc<HashMap<String, JsonValue>>,
+    judge: Option<&Judge>,
+) -> Result<bool> {
     match check {
         IfCheck::Script(script) => {
             let snap = Arc::clone(snapshot);
@@ -342,7 +384,10 @@ async fn if_passes(check: &IfCheck, snapshot: &Arc<HashMap<String, JsonValue>>) 
             })
             .await?
         }
-        IfCheck::Check(cond) => check_passes(cond, snapshot),
+        IfCheck::Check(cond) => match judge {
+            Some(judge) => judge((**cond).clone(), Arc::clone(snapshot)).await,
+            None => check_passes(cond, snapshot),
+        },
     }
 }
 
@@ -725,7 +770,7 @@ fn run_single_action(
             } => {
                 let device = device_log_name(ctx.state.as_ref(), &device_id).await;
                 let actual_state = if track_event_value {
-                    ctx.trigger_ctx.value.clone().unwrap_or(state)
+                    mirrored(&state, &ctx.trigger_ctx)
                 } else {
                     state
                 };
@@ -910,7 +955,7 @@ fn run_single_action(
                 let said = condition.describe();
                 let snippet = said.chars().take(80).collect::<String>();
                 debug!(condition = %snippet, else_if_branches = else_if.len(), "action: Conditional — evaluating");
-                let passed = if_passes(&condition, &snapshot).await?;
+                let passed = if_passes(&condition, &snapshot, ctx.judge.as_ref()).await?;
 
                 if passed {
                     debug!(branch = "then", "action: Conditional — selected");
@@ -922,7 +967,8 @@ fn run_single_action(
                         if ctx.exit_flag.load(Ordering::SeqCst) {
                             break;
                         }
-                        let branch_passed = if_passes(&branch.condition, &snapshot).await?;
+                        let branch_passed =
+                            if_passes(&branch.condition, &snapshot, ctx.judge.as_ref()).await?;
                         if branch_passed {
                             debug!(branch = "else_if", "action: Conditional — selected");
                             execute_actions_inner(
@@ -1161,6 +1207,9 @@ fn run_single_action(
                             exit_flag: Arc::new(AtomicBool::new(false)),
                             trace: None, // sub-calls not traced in parent history
                             correlation_id: ctx.correlation_id.clone(),
+                            // The calling rule's judge: the called rule's
+                            // private booleans are read as the caller's.
+                            judge: ctx.judge.clone(),
                         });
                         let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
                         // Use execute_actions so per-action enabled flags are respected.
@@ -2016,7 +2065,7 @@ mod tests {
         ]));
         let yes = |j| {
             let s = Arc::clone(&snap);
-            async move { if_passes(&check(j), &s).await.unwrap() }
+            async move { if_passes(&check(j), &s, None).await.unwrap() }
         };
         assert!(yes(serde_json::json!({ "DeviceState": { "device_id": "door", "attribute": "open", "op": "Eq", "value": true } })).await);
         assert!(!yes(serde_json::json!({ "DeviceState": { "device_id": "door", "attribute": "battery", "op": "Lt", "value": 20 } })).await);
@@ -2040,9 +2089,61 @@ mod tests {
         let err = if_passes(
             &check(serde_json::json!({ "HubVariable": { "name": "x", "op": "Eq", "value": 1 } })),
             &snap,
+            None,
         )
         .await;
         assert!(err.unwrap_err().to_string().contains("HubVariable"));
+    }
+
+    #[test]
+    fn a_mirror_step_sends_the_reading_where_the_step_says() {
+        let mut t = TriggerContext {
+            attribute: Some("on".into()),
+            value: Some(serde_json::json!(false)),
+            ..Default::default()
+        };
+        // Another name: the lamp's `on` drives the keypad LED's `led`.
+        assert_eq!(
+            mirrored(&serde_json::json!({ "led": true }), &t),
+            serde_json::json!({ "led": false })
+        );
+        // Nothing to put it in: under the reading's own name.
+        assert_eq!(
+            mirrored(&serde_json::json!({}), &t),
+            serde_json::json!({ "on": false })
+        );
+        t.value = None;
+        assert_eq!(
+            mirrored(&serde_json::json!({ "on": true }), &t),
+            serde_json::json!({ "on": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_engines_judge_an_if_can_ask_anything_a_rule_can() {
+        let hub = Arc::new(DashMap::<String, JsonValue>::new());
+        hub.insert("alarm".into(), serde_json::json!("armed"));
+        let h = Arc::clone(&hub);
+        let judge: Judge = Arc::new(move |cond, _snap| {
+            let h = Arc::clone(&h);
+            Box::pin(async move {
+                Ok(match cond {
+                    Condition::HubVariable { name, value, .. } => {
+                        h.get(&name).map(|v| v.clone()) == Some(value)
+                    }
+                    _ => false,
+                })
+            })
+        });
+        let snap = Arc::new(HashMap::new());
+        let ask = |v: &str| {
+            serde_json::from_value::<IfCheck>(serde_json::json!(
+                { "HubVariable": { "name": "alarm", "op": "Eq", "value": v } }
+            ))
+            .unwrap()
+        };
+        assert!(if_passes(&ask("armed"), &snap, Some(&judge)).await.unwrap());
+        assert!(!if_passes(&ask("off"), &snap, Some(&judge)).await.unwrap());
     }
 
     fn ra(action: Action) -> RuleAction {

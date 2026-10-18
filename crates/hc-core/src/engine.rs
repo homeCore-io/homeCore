@@ -125,6 +125,7 @@ pub struct RuleFiring {
 /// Per-rule ring buffer of recent firings; keyed by rule `Uuid`.
 pub type FireHistoryHandle = Arc<DashMap<Uuid, VecDeque<RuleFiring>>>;
 
+#[derive(Clone)]
 pub struct RuleEngine {
     internal_bus: EventBus,
     pub_bus: EventBus,
@@ -233,6 +234,13 @@ impl RuleEngine {
     /// Attach a calendar handle for `Condition::CalendarActive` evaluation.
     pub fn with_calendars(mut self, handle: CalendarHandle) -> Self {
         self.calendars = Some(handle);
+        self
+    }
+
+    /// Keep rule pauses (`PauseRule`) in `handle`, shared with the API, so a
+    /// paused rule can be seen and resumed by hand.
+    pub fn with_pauses(mut self, handle: Pauses) -> Self {
+        self.pause_state = handle;
         self
     }
 
@@ -1013,6 +1021,7 @@ impl RuleEngine {
             exit_flag: Arc::new(AtomicBool::new(false)),
             trace: Some(Arc::clone(&action_trace_buf)),
             correlation_id: Some(firing_correlation_id.clone()),
+            judge: Some(self.judge_for(rule)),
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
@@ -1098,6 +1107,23 @@ impl RuleEngine {
             debug!(rule_name = %rule.name, "rule.conditions: all passed");
         }
         Ok(traces)
+    }
+
+    /// A judge for this rule's if/otherwise checks: any check, decided as
+    /// the rule's own conditions are — calendars, hub values, private
+    /// booleans, time since a change, who changed it last.
+    fn judge_for(&self, rule: &Rule) -> crate::executor::Judge {
+        let engine = self.clone();
+        let rule = rule.clone();
+        Arc::new(move |cond, snapshot| {
+            let (engine, rule) = (engine.clone(), rule.clone());
+            Box::pin(async move {
+                engine
+                    .evaluate_one(&rule, 0, 1, &cond, &snapshot)
+                    .await
+                    .map(|(passed, _)| passed)
+            })
+        })
     }
 
     async fn evaluate_one(
@@ -1890,6 +1916,9 @@ fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> Tr
 /// Hub variables — values every rule can read and set — by name. In memory:
 /// a restart starts them empty.
 pub type HubVars = Arc<DashMap<String, JsonValue>>;
+
+/// Rules paused by a `PauseRule` step, until a `ResumeRule` (or a person).
+pub type Pauses = Arc<DashMap<Uuid, bool>>;
 
 /// `TriggerContext.event_type` of a run someone asked for.
 pub const MANUAL_RUN: &str = "manual_run";

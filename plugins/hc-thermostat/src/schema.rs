@@ -130,11 +130,14 @@ fn actions() -> Vec<Action> {
         Action::new("set_setpoint")
             .label("Set the target temperature")
             .category("Thermostat")
+            // Stands in for the reading, so a screen starts the field at it.
+            .writes("setpoint")
             .sentence("set {device} to {value}")
             .param(Param::float("value").label("Target temperature").required()),
         Action::new("set_mode")
             .label("Set the mode")
             .category("Thermostat")
+            .writes("mode")
             .sentence("set {device} to {value}")
             .param(
                 Param::enum_("value")
@@ -145,10 +148,12 @@ fn actions() -> Vec<Action> {
         Action::new("set_hysteresis")
             .label("Set the hysteresis band")
             .category("Tuning")
+            .writes("hysteresis")
             .param(Param::float("value").label("Hysteresis").required()),
         Action::new("set_aggregation")
             .label("Set how multiple sensors combine")
             .category("Tuning")
+            .writes("aggregation")
             .param(
                 Param::enum_("value")
                     .options(["average", "min", "max"])

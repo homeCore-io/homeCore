@@ -86,6 +86,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 item_operations: Some(vec![ItemOp::Add, ItemOp::Update]),
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(10_000),
+                danger: false,
             },
             Action {
                 id: "demo_awaiting_user".into(),
@@ -102,6 +103,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(30_000),
+                danger: false,
             },
             Action {
                 id: "demo_cancelable".into(),
@@ -118,6 +120,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(30_000),
+                danger: false,
             },
             Action {
                 id: "demo_error_vs_warning".into(),
@@ -138,6 +141,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(10_000),
+                danger: false,
             },
             Action {
                 id: "demo_never_completes".into(),
@@ -158,6 +162,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 requires_role: RequiresRole::User,
                 // Intentionally short — core should inject timeout first.
                 timeout_ms: Some(300),
+                danger: false,
             },
             Action {
                 id: "demo_admin_only".into(),
@@ -176,6 +181,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(5_000),
+                danger: false,
             },
         ],
     }

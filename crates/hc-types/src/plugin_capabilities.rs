@@ -54,6 +54,10 @@ pub struct Action {
     pub requires_role: RequiresRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// It can't be taken back, or it interrupts the house — a reboot, an
+    /// unpairing, forgetting devices. A screen asks first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub danger: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +110,7 @@ mod tests {
                 item_operations: None,
                 requires_role: RequiresRole::default(),
                 timeout_ms: None,
+                danger: false,
             }],
         };
         let s = serde_json::to_string(&m).unwrap();

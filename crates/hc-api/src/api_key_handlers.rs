@@ -47,12 +47,39 @@ fn err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+/// A key manages keys only if it was given `api_keys:admin`. Otherwise
+/// whoever holds a key — a wall tablet's display key, a script's narrowed
+/// key — could mint, widen, unfence or revoke keys as its owner.
+fn key_may_not_manage(claims: &hc_auth::Claims) -> Option<axum::response::Response> {
+    (claims.actor().is_api_key() && !claims.has_scope("api_keys:admin")).then(|| {
+        err(
+            StatusCode::FORBIDDEN,
+            "an API key can't manage keys unless it holds api_keys:admin",
+        )
+    })
+}
+
+/// What a key made or changed by this caller may hold: what its owner's role
+/// allows, and no more than the caller holds itself.
+fn grantable(claims: &hc_auth::Claims, owner_role: HashSet<String>) -> HashSet<String> {
+    if claims.actor().is_local_admin() {
+        return owner_role;
+    }
+    owner_role
+        .into_iter()
+        .filter(|sc| claims.scopes.contains(sc))
+        .collect()
+}
+
 /// `POST /api/v1/auth/api-keys`
 pub async fn create_api_key(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> impl IntoResponse {
+    if let Some(no) = key_may_not_manage(&claims) {
+        return no;
+    }
     if body.label.trim().is_empty() {
         return err(StatusCode::UNPROCESSABLE_ENTITY, "label is required");
     }
@@ -91,12 +118,13 @@ pub async fn create_api_key(
 
     // Scope subset check.
     // - User caller (self-scoped): requested ⊆ caller's own scopes.
-    // - ApiKey or LocalAdmin or cross-owner: requested ⊆ owner's role scopes.
+    // - ApiKey or LocalAdmin or cross-owner: requested ⊆ owner's role scopes,
+    //   and never more than the caller holds (`grantable`).
     let allowed_scopes: HashSet<String> = if actor.is_user() && Some(owner_uid) == caller_uid {
         claims.scopes.iter().cloned().collect()
     } else {
         match s.store.get_user_by_id(owner_uid).await {
-            Ok(Some(u)) => u.role.scopes().into_iter().collect(),
+            Ok(Some(u)) => grantable(&claims, u.role.scopes().into_iter().collect()),
             Ok(None) => return err(StatusCode::NOT_FOUND, "owner user not found"),
             Err(e) => {
                 tracing::warn!(error = %e, "get_user_by_id failed");
@@ -108,7 +136,7 @@ pub async fn create_api_key(
         if !allowed_scopes.contains(requested) {
             return err(
                 StatusCode::FORBIDDEN,
-                &format!("scope `{requested}` is not held by the key owner"),
+                &format!("scope `{requested}` is not held by the key owner and you"),
             );
         }
     }
@@ -235,6 +263,9 @@ pub async fn revoke_api_key(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let actor = claims.actor();
+    if let Some(no) = key_may_not_manage(&claims) {
+        return no;
+    }
     // Load to check ownership.
     let rec = match s.store.get_api_key_by_id(id).await {
         Ok(Some(r)) => r,
@@ -273,6 +304,9 @@ pub async fn update_api_key(
     Json(body): Json<UpdateApiKeyRequest>,
 ) -> impl IntoResponse {
     let actor = claims.actor();
+    if let Some(no) = key_may_not_manage(&claims) {
+        return no;
+    }
     let mut rec = match s.store.get_api_key_by_id(id).await {
         Ok(Some(r)) => r,
         Ok(None) => return err(StatusCode::NOT_FOUND, "API key not found"),
@@ -295,9 +329,10 @@ pub async fn update_api_key(
         rec.label = trimmed.to_string();
     }
     if let Some(new_scopes) = body.scopes {
-        // Enforce scope subset against key owner's current role scopes.
+        // Enforce scope subset against key owner's current role scopes — and
+        // the caller's own.
         let owner_scopes: HashSet<String> = match s.store.get_user_by_id(rec.owner_uid).await {
-            Ok(Some(u)) => u.role.scopes().into_iter().collect(),
+            Ok(Some(u)) => grantable(&claims, u.role.scopes().into_iter().collect()),
             Ok(None) => return err(StatusCode::NOT_FOUND, "owner user not found"),
             Err(e) => {
                 tracing::warn!(error = %e, "get_user_by_id failed");
@@ -308,7 +343,7 @@ pub async fn update_api_key(
             if !owner_scopes.contains(requested) {
                 return err(
                     StatusCode::FORBIDDEN,
-                    &format!("scope `{requested}` is not held by the key owner"),
+                    &format!("scope `{requested}` is not held by the key owner and you"),
                 );
             }
         }
@@ -352,6 +387,9 @@ pub async fn rotate_api_key(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let actor = claims.actor();
+    if let Some(no) = key_may_not_manage(&claims) {
+        return no;
+    }
     let rec = match s.store.get_api_key_by_id(id).await {
         Ok(Some(r)) => r,
         Ok(None) => return err(StatusCode::NOT_FOUND, "API key not found"),

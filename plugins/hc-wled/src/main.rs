@@ -211,7 +211,7 @@ async fn try_start(
     }
 
     // Register all devices via DevicePublisher (PluginClient is consumed).
-    let schema = build_wled_schema();
+    let schema = wled_schema_json();
     let capabilities = wled_capabilities();
     for dev in &cfg.devices {
         if let Err(e) = publisher
@@ -229,7 +229,10 @@ async fn try_start(
         {
             warn!(hc_id = %dev.hc_id, error = %e, "Failed to register device");
         }
-        if let Err(e) = publisher.register_device_schema(&dev.hc_id, &schema).await {
+        if let Err(e) = publisher
+            .register_device_schema_json(&dev.hc_id, &schema)
+            .await
+        {
             warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish schema");
         }
         if let Err(e) = publisher.subscribe_commands(&dev.hc_id).await {
@@ -422,10 +425,70 @@ fn build_wled_schema() -> DeviceSchema {
         },
     );
 
+    // The names behind `effect_id` and `palette_id`, for the actions below.
+    for (name, display) in [("effects", "Effects"), ("palettes", "Palettes")] {
+        attrs.insert(
+            name.into(),
+            AttributeSchema {
+                kind: AttributeKind::Json,
+                writable: false,
+                display_name: Some(display.into()),
+                category: Some(AttributeCategory::Diagnostic),
+                ..Default::default()
+            },
+        );
+    }
+
     DeviceSchema {
         attributes: attrs,
         ..Default::default()
     }
+}
+
+/// Choosing an effect or a palette by name. Each stands in for its number
+/// (`writes`), so a screen offers the names — from the `effects` / `palettes`
+/// lists the controller reports — rather than a bare number box.
+fn wled_actions() -> Vec<plugin_sdk_rs::device_actions::Action> {
+    use plugin_sdk_rs::device_actions::{Action, Param, Source};
+    [
+        (
+            "set_effect",
+            "Choose an effect",
+            "effect_id",
+            "effects",
+            "Effect",
+        ),
+        (
+            "set_palette",
+            "Choose a palette",
+            "palette_id",
+            "palettes",
+            "Palette",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, attr, list, what)| {
+        Action::new(id)
+            .label(label)
+            .category("Effects")
+            .writes(attr)
+            .sentence(format!(
+                "set {{device}}'s {} to {{{attr}}}",
+                what.to_lowercase()
+            ))
+            .param(
+                Param::int(attr)
+                    .label(what)
+                    .required()
+                    .options_from(Source::attribute(list).label_key("name").value_key("id")),
+            )
+    })
+    .collect()
+}
+
+/// The schema WLED devices register: attributes, and the actions above.
+fn wled_schema_json() -> serde_json::Value {
+    plugin_sdk_rs::device_actions::with_actions(&build_wled_schema(), wled_actions())
 }
 
 /// Path of the cross-restart device-id snapshot, sibling to
@@ -473,6 +536,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 // 5s default is a budget for the whole action, and a house
                 // with many strips should not be racing it.
                 timeout_ms: Some(15_000),
+                danger: false,
             },
             Action {
                 id: "discover_devices".into(),
@@ -501,6 +565,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 // ample headroom over core's default 5s window so an
                 // unreachable WLED doesn't 504 the discovery.
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "refresh_effects_palettes".into(),
@@ -528,6 +593,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 // are. 15s clears that and core's 5s default, which this used
                 // to exceed on a single unreachable WLED.
                 timeout_ms: Some(15_000),
+                danger: false,
             },
             Action {
                 id: "refresh_presets".into(),
@@ -550,6 +616,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 requires_role: RequiresRole::User,
                 // One call per device, concurrent, 5s client timeout.
                 timeout_ms: Some(15_000),
+                danger: false,
             },
             Action {
                 id: "reboot".into(),
@@ -579,6 +646,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 // A rebooting WLED may not answer the request that told it to
                 // reboot; concurrent, but still bounded well past core's 5s.
                 timeout_ms: Some(15_000),
+                danger: true,
             },
         ],
     }
@@ -604,7 +672,7 @@ async fn run_action(
         // it when nothing is wrong costs one publish per device and changes
         // nothing.
         "republish_devices" => {
-            let schema = build_wled_schema();
+            let schema = wled_schema_json();
             let mut republished = 0usize;
             for dev in devices {
                 if publisher
@@ -620,7 +688,9 @@ async fn run_action(
                 {
                     continue;
                 }
-                let _ = publisher.register_device_schema(&dev.hc_id, &schema).await;
+                let _ = publisher
+                    .register_device_schema_json(&dev.hc_id, &schema)
+                    .await;
                 republished += 1;
             }
             info!(republished, "Republished device registrations and schemas");

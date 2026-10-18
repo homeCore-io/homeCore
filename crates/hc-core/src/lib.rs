@@ -111,6 +111,8 @@ pub struct Core {
     alert_channel: Option<String>,
     /// The rule engine's hub variables, shared with the API.
     hub_vars: engine::HubVars,
+    /// Rules paused by other rules, shared with the API.
+    pauses: engine::Pauses,
 }
 
 impl Core {
@@ -144,6 +146,7 @@ impl Core {
             alerts: None,
             alert_channel: None,
             hub_vars: Default::default(),
+            pauses: Default::default(),
         }
     }
 
@@ -157,6 +160,10 @@ impl Core {
     /// The hub variables the rule engine will keep, for the API to list.
     pub fn hub_vars_handle(&self) -> engine::HubVars {
         Arc::clone(&self.hub_vars)
+    }
+
+    pub fn pauses_handle(&self) -> engine::Pauses {
+        Arc::clone(&self.pauses)
     }
 
     /// Send new built-in alerts to this notification channel.
@@ -375,7 +382,8 @@ impl Core {
         )
         .with_drain_timeout(self.drain_timeout_secs)
         .with_calendars(Arc::clone(&early_calendar_handle))
-        .with_hub_vars(Arc::clone(&self.hub_vars));
+        .with_hub_vars(Arc::clone(&self.hub_vars))
+        .with_pauses(Arc::clone(&self.pauses));
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.

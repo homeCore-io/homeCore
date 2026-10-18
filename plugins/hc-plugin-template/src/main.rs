@@ -410,6 +410,9 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
             // anyway, because the next action copied from it will not be so
             // cheap.
             timeout_ms: Some(5_000),
+            // true for an action that can't be taken back or interrupts the
+            // house (a reboot, forgetting devices): screens ask first.
+            danger: false,
         }],
     }
 }

@@ -308,6 +308,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(60_000),
+                danger: false,
             },
             Action {
                 id: "list_devices".into(),
@@ -330,6 +331,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: None,
+                danger: false,
             },
             Action {
                 id: "refresh_catalog".into(),
@@ -352,6 +354,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(30_000),
+                danger: false,
             },
             Action {
                 id: "device_info".into(),
@@ -372,6 +375,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "send_command".into(),
@@ -398,6 +402,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(20_000),
+                danger: false,
             },
             Action {
                 id: "app_icon".into(),
@@ -423,6 +428,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::User,
                 timeout_ms: Some(15_000),
+                danger: false,
             },
             Action {
                 id: "forget_stale_devices".into(),
@@ -448,6 +454,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_operations: None,
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(30_000),
+                danger: true,
             },
         ],
     }

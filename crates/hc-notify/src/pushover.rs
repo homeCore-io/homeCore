@@ -21,6 +21,8 @@ const PUSHOVER_API_URL: &str = "https://api.pushover.net/1/messages.json";
 /// user_key  = "your-user-or-group-key"
 /// device    = "my-iphone"   # optional — omit to send to all devices
 /// priority  = 0             # optional — -2 (lowest) to 2 (emergency). Default 0.
+/// retry     = 60            # emergency only: seconds between repeats (≥ 30). Default 60.
+/// expire    = 3600          # emergency only: stop repeating after (≤ 10800). Default 3600.
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -33,6 +35,32 @@ pub struct PushoverConfig {
     /// Pushover message priority (-2..=2).  Default 0 (normal).
     #[serde(default)]
     pub priority: Option<i8>,
+    /// Emergency (priority 2) only: how often Pushover repeats it until it's
+    /// acknowledged, in seconds. Pushover requires it and refuses under 30.
+    /// Default 60.
+    #[serde(default)]
+    pub retry: Option<u32>,
+    /// Emergency only: when Pushover stops repeating, in seconds. Pushover
+    /// requires it and caps it at 10800 (3 hours). Default 3600.
+    #[serde(default)]
+    pub expire: Option<u32>,
+}
+
+/// Pushover's limits for an emergency message.
+const RETRY_MIN: u32 = 30;
+const EXPIRE_MAX: u32 = 10_800;
+
+impl PushoverConfig {
+    /// `retry` and `expire` for an emergency message — which Pushover
+    /// refuses without them — kept inside Pushover's limits. None otherwise.
+    fn emergency(&self) -> Option<(u32, u32)> {
+        (self.priority == Some(2)).then(|| {
+            (
+                self.retry.unwrap_or(60).max(RETRY_MIN),
+                self.expire.unwrap_or(3600).clamp(RETRY_MIN, EXPIRE_MAX),
+            )
+        })
+    }
 }
 
 /// Pushover notification channel.
@@ -62,6 +90,10 @@ struct PushoverPayload<'a> {
     device: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority: Option<i8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expire: Option<u32>,
 }
 
 #[async_trait]
@@ -74,6 +106,8 @@ impl NotifyChannel for PushoverChannel {
             message,
             device: self.cfg.device.as_deref(),
             priority: self.cfg.priority,
+            retry: self.cfg.emergency().map(|e| e.0),
+            expire: self.cfg.emergency().map(|e| e.1),
         };
 
         let resp = self
@@ -90,5 +124,32 @@ impl NotifyChannel for PushoverChannel {
             anyhow::bail!("Pushover API returned {status}: {body}");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(priority: Option<i8>, retry: Option<u32>, expire: Option<u32>) -> PushoverConfig {
+        PushoverConfig {
+            api_token: "t".into(),
+            user_key: "u".into(),
+            device: None,
+            priority,
+            retry,
+            expire,
+        }
+    }
+
+    #[test]
+    fn an_emergency_always_says_how_to_repeat_within_pushovers_limits() {
+        assert_eq!(cfg(Some(2), None, None).emergency(), Some((60, 3600)));
+        assert_eq!(
+            cfg(Some(2), Some(5), Some(99_999)).emergency(),
+            Some((30, 10_800))
+        );
+        assert_eq!(cfg(Some(1), Some(60), None).emergency(), None);
+        assert_eq!(cfg(None, None, None).emergency(), None);
     }
 }

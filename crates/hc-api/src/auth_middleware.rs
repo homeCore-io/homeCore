@@ -322,6 +322,7 @@ async fn verify_api_key(
         }),
         // Not password-backed; `token_version_current` skips API-key claims.
         tv: 0,
+        sid: None,
     })
 }
 
@@ -362,6 +363,12 @@ pub(crate) async fn token_version_current(
             .into_response()
     };
 
+    // A session that has been ended — signed out, or ended from another
+    // device — takes its access tokens with it.
+    if claims.sid.is_some_and(|sid| state.session_ended(sid)) {
+        return Err(deny().into());
+    }
+
     let Ok(uid) = uuid::Uuid::parse_str(&claims.uid) else {
         tracing::warn!(uid = %claims.uid, "user token carries an unparseable uid");
         return Err(deny().into());
@@ -400,6 +407,7 @@ pub fn local_admin_claims(peer_uid: Option<u32>) -> Claims {
         scopes: Role::Admin.scopes(),
         actor: Some(Actor::LocalAdmin { peer_uid }),
         tv: 0,
+        sid: None,
     }
 }
 
@@ -417,6 +425,7 @@ pub fn whitelist_claims() -> Claims {
         // "trusted transport, no known principal" for audit purposes.
         actor: Some(hc_auth::Actor::LocalAdmin { peer_uid: None }),
         tv: 0,
+        sid: None,
     }
 }
 
@@ -760,6 +769,7 @@ mod tests {
             scopes: vec![],
             actor: None,
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -809,6 +819,7 @@ mod tests {
             scopes: vec!["devices:write".into()],
             actor: None,
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -858,6 +869,7 @@ mod tests {
                 label: "dashboard".into(),
             }),
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -904,6 +916,7 @@ mod tests {
             scopes: vec!["devices:read".into()],
             actor: None,
             tv: 0,
+            sid: None,
         };
         let token = encode(
             &Header::new(Algorithm::HS256),

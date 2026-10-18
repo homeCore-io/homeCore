@@ -325,6 +325,12 @@ pub struct AppState {
     /// Refresh-token lifetime in days. Set at startup from
     /// `[auth].refresh_token_expiry_days`. Default 30.
     pub refresh_token_expiry_days: u64,
+    /// Sign-ins ended (signed out, or ended from another), by session id,
+    /// with when. An access token naming one is refused, so ending a session
+    /// takes effect at once rather than when its token expires. Kept for one
+    /// access-token lifetime; rebuilt from the token store at startup
+    /// ([`AppState::load_ended_sessions`]).
+    pub ended_sessions: Arc<std::sync::RwLock<HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>>>,
     /// Path to `config/modes.toml` — used by mode API handlers.
     pub modes_path: Option<Arc<std::path::PathBuf>>,
     /// Log streaming state (broadcast channel + ring buffer).
@@ -348,6 +354,8 @@ pub struct AppState {
     pub fire_history: Option<hc_core::FireHistoryHandle>,
     /// The rule engine's hub variables, for `GET /automations/variables`.
     pub hub_vars: Option<hc_core::engine::HubVars>,
+    /// Rules paused by other rules, for `GET /automations/paused`.
+    pub pauses: Option<hc_core::engine::Pauses>,
     /// Named rule groups (id, name, description, rule_ids).
     pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
     /// Persistent store for rule groups (groups.json in rules dir).
@@ -848,6 +856,7 @@ impl AppState {
             metrics_whitelist: Arc::new(Vec::new()),
             uds_allowed_uids: Arc::new(std::collections::HashSet::new()),
             refresh_token_expiry_days: 30,
+            ended_sessions: Arc::default(),
             modes_path: modes_path.map(Arc::new),
             log_stream: None,
             metrics,
@@ -856,6 +865,7 @@ impl AppState {
             started_at: chrono::Utc::now(),
             fire_history: None,
             hub_vars: None,
+            pauses: None,
             rule_groups: None,
             group_store: None,
             dashboards: None,
@@ -944,6 +954,38 @@ impl AppState {
     }
 
     /// Override the refresh-token lifetime (default 30 days).
+    /// Note a session as ended: its access tokens stop working now.
+    pub fn end_session(&self, sid: uuid::Uuid) {
+        let keep = chrono::Duration::hours(self.jwt.expiry_hours() as i64);
+        let now = chrono::Utc::now();
+        if let Ok(mut m) = self.ended_sessions.write() {
+            m.retain(|_, at| *at + keep > now);
+            m.insert(sid, now);
+        }
+    }
+
+    /// Whether this session was ended.
+    pub fn session_ended(&self, sid: uuid::Uuid) -> bool {
+        self.ended_sessions
+            .read()
+            .map(|m| m.contains_key(&sid))
+            .unwrap_or(false)
+    }
+
+    /// Remember, after a restart, the sessions ended within one access-token
+    /// lifetime — any older one's access tokens have expired anyway.
+    pub async fn load_ended_sessions(&self) {
+        let since = chrono::Utc::now() - chrono::Duration::hours(self.jwt.expiry_hours() as i64);
+        match self.store.ended_sessions_since(since).await {
+            Ok(list) => {
+                if let Ok(mut m) = self.ended_sessions.write() {
+                    m.extend(list);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Could not read ended sessions"),
+        }
+    }
+
     pub fn with_refresh_token_expiry_days(mut self, days: u64) -> Self {
         self.refresh_token_expiry_days = days;
         self
@@ -995,6 +1037,11 @@ impl AppState {
     /// Attach the rule engine's hub variables.
     pub fn with_hub_vars(mut self, handle: hc_core::engine::HubVars) -> Self {
         self.hub_vars = Some(handle);
+        self
+    }
+
+    pub fn with_pauses(mut self, handle: hc_core::engine::Pauses) -> Self {
+        self.pauses = Some(handle);
         self
     }
 
@@ -1114,6 +1161,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             post(auth_handlers::login).layer(middleware::from_fn(rate_limit::login_rate_limit)),
         )
         .route("/auth/refresh", post(auth_handlers::refresh))
+        // Holding the refresh token is the proof; no bearer needed.
+        .route("/auth/logout", post(auth_handlers::logout))
         // WebSocket stream authenticates via ?token= query param (browsers can't
         // set Authorization headers during WS upgrade).
         .route("/events/stream", get(ws::ws_events_handler))
@@ -1319,6 +1368,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/automations/{id}/run", post(handlers::run_automation))
         .route("/automations/repoint", post(handlers::repoint_automations))
         .route("/automations/variables", get(handlers::list_hub_variables))
+        .route("/automations/paused", get(handlers::list_paused_rules))
+        .route("/automations/{id}/pause", delete(handlers::resume_rule))
         .route("/automations/test", post(handlers::test_draft_automation))
         .route(
             "/automations/vocabulary",
@@ -1527,6 +1578,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/backups", get(backup::list_kept_handler))
         .route("/system/backups/{name}", get(backup::download_kept_handler))
+        .route(
+            "/system/backups/{name}/restore",
+            post(backup::restore_kept_handler),
+        )
         .route(
             "/system/restore",
             post(backup::restore_handler).layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT_BYTES)),

@@ -484,7 +484,9 @@ async fn main() -> Result<()> {
     let broker_cfg = BrokerConfig {
         host: config.broker.host.clone(),
         port: config.broker.port,
-        v5_port: config.broker.v5_port,
+        // 0 turns the v5 listener off — the form can't say "nothing" for a
+        // field whose default is a port.
+        v5_port: config.broker.v5_port.filter(|p| *p != 0),
         tls_port: config.broker.tls_port,
         cert_path: config.broker.cert_path.clone(),
         key_path: config.broker.key_path.clone(),
@@ -801,6 +803,7 @@ async fn main() -> Result<()> {
     }
 
     let hub_vars = core.hub_vars_handle();
+    let pauses = core.pauses_handle();
     let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
 
     // ── 14. MQTT event loop ────────────────────────────────────────────────
@@ -1217,6 +1220,7 @@ async fn main() -> Result<()> {
     .with_backup_paths(backup_paths)
     .with_fire_history(fire_history)
     .with_hub_vars(hub_vars)
+    .with_pauses(pauses)
     .with_group_store(group_store, groups)
     .with_dashboard_store(dashboard_store, dashboard_data)
     .with_skin_store(skin_store, skin_data)
@@ -1277,6 +1281,8 @@ async fn main() -> Result<()> {
         _ => app_state,
     };
 
+    // Sessions ended before a restart stay ended.
+    app_state.load_ended_sessions().await;
     hc_api::backup::spawn_schedule(app_state.clone());
 
     // Reconcile plugin status: plugins that registered before the AppState

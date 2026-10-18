@@ -1668,6 +1668,13 @@ pub async fn update_glue(
             dev.attributes.insert((*key).to_string(), v.clone());
         }
     }
+    // A timer's own length is `default_secs`; `duration_secs` is the current
+    // run's, which a rule's longer start changes. Setting the helper sets both.
+    if device_type == "timer" {
+        if let Some(v) = incoming.get("duration_secs") {
+            dev.attributes.insert("default_secs".into(), v.clone());
+        }
+    }
 
     // A select whose selected value just fell out of its options would keep
     // reporting a value it can no longer be set to.
@@ -1728,6 +1735,10 @@ pub async fn update_glue(
             hc_core::glue::schedule::recalculate(&s.store, &s.event_bus, &dev.device_id).await
         }
         "group" => hc_core::glue::group::recalculate(&s.store, &s.event_bus, &dev.device_id).await,
+        // A moved line or flap guard: above or below it now, not at the next reading.
+        "threshold" => {
+            hc_core::glue::threshold::recalculate(&s.store, &s.event_bus, &dev.device_id).await
+        }
         _ => {}
     }
     let now = s
@@ -5193,6 +5204,32 @@ pub async fn list_hub_variables(
     Json(json!({ "hub": hub }))
 }
 
+/// `GET /api/v1/automations/paused` — the rules another rule has paused
+/// (`PauseRule`), until a `ResumeRule` or a person resumes them. Kept in
+/// memory: a restart resumes them all.
+pub async fn list_paused_rules(State(s): State<AppState>, _: AutomationsRead) -> impl IntoResponse {
+    let ids: Vec<Uuid> = s
+        .pauses
+        .as_ref()
+        .map(|p| p.iter().filter(|e| *e.value()).map(|e| *e.key()).collect())
+        .unwrap_or_default();
+    Json(json!({ "paused": ids }))
+}
+
+/// `DELETE /api/v1/automations/{id}/pause` — resume a rule another rule
+/// paused, by hand. Announced as `rule_changed`, so screens look again.
+pub async fn resume_rule(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let was = s.pauses.as_ref().and_then(|p| p.remove(&id)).is_some();
+    if was {
+        announce_rules(&s, &[id]).await;
+    }
+    Json(json!({ "rule_id": id, "was_paused": was }))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RepointBody {
     pub from: String,
@@ -5348,7 +5385,7 @@ async fn dry_run(s: &AppState, rule: &Rule, clock: &DryClock) -> serde_json::Val
     let mut all_pass = true;
 
     for condition in &rule.conditions {
-        let detail = eval_condition_dry_detail(condition, &s.store, clock).await;
+        let detail = eval_condition_dry_detail(condition, &s.store, clock, s).await;
         if !detail.passed {
             all_pass = false;
         }
@@ -5387,6 +5424,7 @@ async fn eval_condition_dry_detail(
     condition: &hc_types::rule::Condition,
     store: &StateStore,
     clock: &DryClock,
+    world: &AppState,
 ) -> ConditionDetail {
     use hc_types::rule::Condition;
     let cond_json = serde_json::to_value(condition).unwrap_or(serde_json::Value::Null);
@@ -5613,7 +5651,8 @@ async fn eval_condition_dry_detail(
             }
         }
         Condition::Not { condition: inner } => {
-            let mut inner_detail = Box::pin(eval_condition_dry_detail(inner, store, clock)).await;
+            let mut inner_detail =
+                Box::pin(eval_condition_dry_detail(inner, store, clock, world)).await;
             inner_detail.passed = !inner_detail.passed;
             inner_detail.condition = cond_json;
             if inner_detail.reason.is_none() && !inner_detail.passed {
@@ -5625,7 +5664,7 @@ async fn eval_condition_dry_detail(
             let mut passed = true;
             let mut reason = None;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock, world)).await;
                 if !detail.passed {
                     passed = false;
                     reason = Some(
@@ -5648,7 +5687,7 @@ async fn eval_condition_dry_detail(
         Condition::Or { conditions } => {
             let mut passed = false;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock, world)).await;
                 if detail.passed {
                     passed = true;
                     break;
@@ -5670,7 +5709,7 @@ async fn eval_condition_dry_detail(
         Condition::Xor { conditions } => {
             let mut count = 0usize;
             for c in conditions {
-                let detail = Box::pin(eval_condition_dry_detail(c, store, clock)).await;
+                let detail = Box::pin(eval_condition_dry_detail(c, store, clock, world)).await;
                 if detail.passed {
                     count += 1;
                 }
@@ -5690,25 +5729,40 @@ async fn eval_condition_dry_detail(
             }
         }
         Condition::PrivateBooleanIs { name, value } => {
-            // Dry-run cannot access live runtime state; report as indeterminate.
+            // A rule's private booleans live in the engine, per rule; a test
+            // can't read them. Said so — "can't tell", not "no".
             ConditionDetail {
                 condition: cond_json,
                 passed: false,
                 actual: None,
                 expected: Some(json!(value)),
                 elapsed_ms: None,
-                reason: Some(format!("private boolean '{name}' not available in dry-run")),
+                reason: Some(format!(
+                    "can't tell in a test: private boolean '{name}' is kept by the running rule"
+                )),
             }
         }
-        Condition::HubVariable { name, value, .. } => {
-            // Dry-run cannot access live hub variable state; report as indeterminate.
+        Condition::HubVariable { name, op, value } => {
+            // The hub variables as they are now — a test at another time
+            // still sees today's values.
+            let actual = world
+                .hub_vars
+                .as_ref()
+                .and_then(|v| v.get(name).map(|e| e.value().clone()));
+            let passed = actual
+                .as_ref()
+                .is_some_and(|a| compare_values(a, op, value));
             ConditionDetail {
                 condition: cond_json,
-                passed: false,
-                actual: None,
+                passed,
+                actual: actual.clone(),
                 expected: Some(value.clone()),
                 elapsed_ms: None,
-                reason: Some(format!("hub variable '{name}' not available in dry-run")),
+                reason: match (&actual, passed) {
+                    (None, _) => Some(format!("hub variable '{name}' isn't set")),
+                    (Some(a), false) => Some(format!("hub variable '{name}' is {a}")),
+                    _ => None,
+                },
             }
         }
         Condition::ModeIs { mode_id, on } => {
@@ -5738,15 +5792,44 @@ async fn eval_condition_dry_detail(
                 },
             }
         }
-        Condition::CalendarActive { .. } => {
-            // Dry-run cannot access live calendar state.
+        Condition::CalendarActive {
+            calendar_id,
+            title_contains,
+        } => {
+            // As the engine checks it, at the moment being tested.
+            let Some(cal) = world.calendar.as_ref() else {
+                return ConditionDetail {
+                    condition: cond_json,
+                    passed: false,
+                    actual: None,
+                    expected: None,
+                    elapsed_ms: None,
+                    reason: Some("no calendars are set up".into()),
+                };
+            };
+            let at = clock.now;
+            let entries = cal.read().await;
+            let found = entries
+                .iter()
+                .filter(|e| calendar_id.as_ref().is_none_or(|c| e.id == *c))
+                .flat_map(|e| e.events.iter())
+                .find(|ev| {
+                    ev.start <= at
+                        && at < ev.end
+                        && title_contains
+                            .as_ref()
+                            .is_none_or(|t| ev.summary.to_lowercase().contains(&t.to_lowercase()))
+                })
+                .map(|ev| ev.summary.clone());
             ConditionDetail {
                 condition: cond_json,
-                passed: false,
-                actual: None,
+                passed: found.is_some(),
+                actual: found.as_ref().map(|t| json!(t)),
                 expected: None,
                 elapsed_ms: None,
-                reason: Some("calendar state not available in dry-run".into()),
+                reason: found
+                    .is_none()
+                    .then(|| "no matching calendar event at that time".into()),
             }
         }
     }
@@ -10045,6 +10128,7 @@ token = "TOKEN-TWO"
             scopes: role.scopes(),
             actor: None,
             tv: 0,
+            sid: None,
         }
     }
 
@@ -12336,6 +12420,7 @@ mod event_stream_tests {
                 label: "panel".into(),
             }),
             tv: 0,
+            sid: None,
         };
         let frame = snapshot(&state, &key).await.unwrap();
         assert!(frame.get("devices").is_some());

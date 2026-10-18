@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.83"
+  version: "0.1.84"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -117,6 +117,7 @@ paths:
         Each browser or app holding one of your refresh tokens: what it said
         it was when it signed in, when that was, and when it last refreshed.
         Your own only. Tokens from before 0.1.83 have no start time.
+        `current` (since 0.1.84) marks the session the request came from.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -134,6 +135,9 @@ paths:
                     id:
                       type: string
                       format: uuid
+                    current:
+                      type: boolean
+                      description: This request's own session (since 0.1.84)
                     user_agent:
                       type: string
                     started_at:
@@ -147,13 +151,39 @@ paths:
                       type: string
                       format: date-time
 
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Sign this browser or app out
+      description: |
+        Since 0.1.84. Retires the refresh token and ends its session, so its
+        access tokens stop working at once. Needs no bearer — holding the
+        refresh token is the proof — and answers 204 whatever it is given, so
+        it can't be used to test tokens. Audited as `auth.signed_out`.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "204":
+          description: Signed out (or nothing to sign out)
+
   /auth/sessions/{id}:
     delete:
       operationId: endSession
       summary: End one of your sessions
       description: |
-        It can't refresh again, so it signs out when its access token runs
-        out. Audited as `auth.session_ended`.
+        It can't refresh again, and since 0.1.84 its access tokens stop
+        working at once (before, they lasted until they expired, up to
+        `token_expiry_hours`). Audited as `auth.session_ended`.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -286,9 +316,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [password]
+              required: [new_password]
               properties:
-                password:
+                new_password:
                   type: string
       responses:
         "204":
@@ -1486,6 +1516,62 @@ paths:
                     type: object
                     additionalProperties: true
 
+  /automations/paused:
+    get:
+      operationId: listPausedRules
+      summary: Rules another rule has paused
+      description: |
+        Since 0.1.84. The rules a `PauseRule` step has paused, until a
+        `ResumeRule` step or a person (`DELETE /automations/{id}/pause`)
+        resumes them. A paused rule's own moment doesn't run it. Kept in
+        memory: a restart resumes them all. Needs `automations:read`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Paused rule ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paused]
+                properties:
+                  paused:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+  /automations/{id}/pause:
+    delete:
+      operationId: resumeRule
+      summary: Resume a rule another rule paused
+      description: |
+        Since 0.1.84. Announced as `rule_changed`. `was_paused` says whether
+        it was. Needs `automations:write`.
+      tags: [automations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Resumed (or wasn't paused)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rule_id:
+                    type: string
+                    format: uuid
+                  was_paused:
+                    type: boolean
   /automations/{id}/run:
     post:
       operationId: runAutomation
@@ -2823,6 +2909,10 @@ paths:
         not read is left out. The stream is subscribed before the snapshot is
         read, so a change made meanwhile follows it as an event; applying
         events in order over the snapshot ends at the current state.
+
+        **Falling behind** (since 0.1.84): a client too slow to keep up misses
+        events. It is sent a fresh snapshot, with `"missed": n`, if it asked
+        for snapshots, or `{"type": "lagged", "missed": n}` otherwise.
 
         **Keeping a copy of the house current:** `device_added` and
         `device_metadata_changed` (name, room, type, `ui_hint`, icon, button
@@ -7549,9 +7639,9 @@ paths:
         ring-buffer contents synchronously so `curl | jq` workflows don't need a
         WS client.
 
-        Requires authentication (Bearer JWT, API key, or a whitelisted source
-        IP).  No additional scope is enforced — any authenticated caller may
-        read the tail.
+        **Admin role required** (or a whitelisted source IP), since 0.1.84 —
+        before, any authenticated caller could read it. Logs name hosts,
+        devices and errors with their context.
 
         Returns `503` when log streaming is not enabled in `homecore.toml`
         (the ring buffer only exists when the feature is configured).
@@ -7621,6 +7711,8 @@ paths:
                           description: Structured tracing fields; omitted when null
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: Log streaming not enabled in config
           content:
@@ -7634,6 +7726,8 @@ paths:
       summary: Live WebSocket log stream
       tags: [system]
       description: |
+        **Admin role required** (or a whitelisted source IP), since 0.1.84.
+
         Upgrade to WebSocket.  Each message is a JSON-encoded log line
         (`timestamp`, `level`, `target`, `message`, optional `fields`) — the
         same shape `GET /logs` returns inside `lines`.
@@ -7687,6 +7781,8 @@ paths:
           description: Switching Protocols — WebSocket upgrade accepted
         "401":
           description: Missing or invalid token — upgrade rejected
+        "403":
+          description: Not an admin (since 0.1.84)
         "503":
           description: Log streaming not enabled in config
 
@@ -8390,6 +8486,64 @@ paths:
                 format: binary
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such backup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /system/backups/{name}/restore:
+    post:
+      operationId: restoreKeptBackup
+      summary: Check or stage one of the kept backups
+      description: |
+        **Admin role required.** Since 0.1.84. As `POST /system/restore`, for a
+        backup already kept on the house (`GET /system/backups`), so it needn't
+        be downloaded and uploaded again. `?check=true` says what it would put
+        back and changes nothing; otherwise it is staged and put in place at
+        the next start. Audited as `system.restore_staged` with `detail.kept`.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: check
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: The plan; with `staged` unless only checking
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  staged:
+                    type: boolean
+                  restored:
+                    type: array
+                    items:
+                      type: string
+                  skipped:
+                    type: array
+                    items:
+                      type: string
+                  taken_at:
+                    type: [string, "null"]
+        "400":
+          description: Not a backup homeCore can restore
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":

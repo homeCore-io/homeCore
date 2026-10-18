@@ -184,6 +184,7 @@ async fn try_start(
                 item_operations: None,
                 requires_role: plugin_sdk_rs::types::RequiresRole::User,
                 timeout_ms: None,
+                danger: false,
             }],
         });
 
