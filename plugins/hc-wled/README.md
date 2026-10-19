@@ -61,8 +61,9 @@ sound, identify, restart, install firmware.
   `nodes` (WLED-Sync peers).
 - **Admins:** `get_settings` / `apply_settings` (the controller's `cfg.json`,
   secrets hidden), `backup` / `list_backups` / `get_backup` / `restore`,
-  `copy_presets`, `check_firmware`, `add_device` / `update_device` /
-  `remove_device`, `discover_devices`, `reboot`.
+  `copy_presets`, `copy_preset` (one, or a duplicate), `check_firmware`,
+  `add_device` / `update_device` / `remove_device`, `discover_devices`,
+  `reboot`.
 
 ## Firmware
 
