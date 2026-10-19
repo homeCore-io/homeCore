@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use plugin_sdk_rs::device_actions::{with_actions, Action};
+use plugin_sdk_rs::device_actions::{with_actions, Action, Param};
 use plugin_sdk_rs::types::schema::{
     AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
     StateLabel,
@@ -292,8 +292,207 @@ pub fn light_state(light: &HueLight) -> Value {
         state["color_temp_mirek_max"] = json!(max);
         state["color_temp_min"] = json!(kelvin_from_mirek(max));
     }
+    if light.gradient_points_capable > 0 {
+        state["gradient_points_capable"] = json!(light.gradient_points_capable);
+    }
+    state["supports_color_temp"] = json!(light.supports_color_temp);
+    // Which of its colours is showing: a light keeps reporting its last xy
+    // and its last white both, and a screen should not have to guess.
+    let mode = if light.gradient_points.len() > 1 {
+        Some("gradient")
+    } else if light.color_temp_mirek.is_some() {
+        Some("color_temp")
+    } else if light.color_xy.is_some() {
+        Some("color")
+    } else {
+        None
+    };
+    if let Some(m) = mode {
+        state["color_mode"] = json!(m);
+    }
+    for (k, v) in [
+        ("model_id", &light.model_id),
+        ("product_name", &light.product_name),
+        ("archetype", &light.archetype),
+        ("sw_version", &light.software_version),
+        ("update_state", &light.update_state),
+        ("room_rid", &light.room_rid),
+        ("room_name", &light.room_name),
+    ] {
+        if let Some(v) = v {
+            state[k] = json!(v);
+        }
+    }
 
     state
+}
+
+/// "candle" → "Candle", "no_effect" → "None".
+pub fn effect_label(effect: &str) -> String {
+    if effect == "no_effect" {
+        return "None".into();
+    }
+    let mut out = effect.replace('_', " ");
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+/// What one light can be told, declared from what it can do: a white-only
+/// bulb is offered no colour, and its warmth runs over its own range, not
+/// every Hue light's.
+pub fn light_schema(light: &HueLight) -> DeviceSchema {
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "on".into(),
+        AttributeSchema {
+            kind: AttributeKind::Bool,
+            writable: true,
+            display_name: Some("Power".into()),
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            }),
+            ..Default::default()
+        },
+    );
+    if light.supports_dimming {
+        attrs.insert(
+            "brightness_pct".into(),
+            AttributeSchema {
+                kind: AttributeKind::Float,
+                writable: true,
+                display_name: Some("Brightness".into()),
+                unit: Some("%".into()),
+                min: Some(1.0),
+                max: Some(100.0),
+                step: Some(1.0),
+                ..Default::default()
+            },
+        );
+    }
+    if light.supports_color_temp {
+        attrs.insert(
+            "color_temp".into(),
+            AttributeSchema {
+                kind: AttributeKind::ColorTemp,
+                writable: true,
+                display_name: Some("Colour Temperature".into()),
+                unit: Some("K".into()),
+                min: Some(f64::from(kelvin_from_mirek(light.mirek_max.unwrap_or(500)))),
+                max: Some(f64::from(kelvin_from_mirek(light.mirek_min.unwrap_or(153)))),
+                step: Some(100.0),
+                ..Default::default()
+            },
+        );
+    }
+    if light.supports_color_xy {
+        attrs.insert(
+            "color_xy".into(),
+            AttributeSchema {
+                kind: AttributeKind::ColorXy,
+                writable: true,
+                display_name: Some("Colour".into()),
+                ..Default::default()
+            },
+        );
+    }
+    if !light.effect_values.is_empty() {
+        attrs.insert(
+            "effect".into(),
+            AttributeSchema {
+                kind: AttributeKind::Enum,
+                writable: true,
+                display_name: Some("Effect".into()),
+                options: Some(
+                    light
+                        .effect_values
+                        .iter()
+                        .map(|e| AttributeOption::new(e.clone()).labelled(effect_label(e)))
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        );
+        attrs.insert(
+            "dynamic_speed".into(),
+            AttributeSchema {
+                kind: AttributeKind::Float,
+                writable: true,
+                display_name: Some("Effect speed".into()),
+                min: Some(0.0),
+                max: Some(1.0),
+                step: Some(0.05),
+                ..Default::default()
+            },
+        );
+    }
+    if light.supports_gradient {
+        attrs.insert(
+            "gradient_points".into(),
+            AttributeSchema {
+                kind: AttributeKind::Json,
+                writable: true,
+                display_name: Some("Gradient".into()),
+                ..Default::default()
+            },
+        );
+    }
+    let diagnostic = |display: &str| AttributeSchema {
+        kind: AttributeKind::String,
+        display_name: Some(display.into()),
+        category: Some(AttributeCategory::Diagnostic),
+        ..Default::default()
+    };
+    attrs.insert("model_id".into(), diagnostic("Model"));
+    attrs.insert("product_name".into(), diagnostic("Product"));
+    attrs.insert("sw_version".into(), diagnostic("Software"));
+    attrs.insert("update_state".into(), diagnostic("Software update"));
+    DeviceSchema {
+        attributes: attrs,
+        ..Default::default()
+    }
+}
+
+/// A light's declared actions, beside its attributes.
+pub fn light_actions(light: &HueLight) -> Vec<Action> {
+    let mut out = Vec::new();
+    if light.supports_identify {
+        out.push(
+            Action::new("identify")
+                .label("Flash it to find it")
+                .category("Light")
+                .icon("search")
+                .sentence("flash {device} to find it"),
+        );
+    }
+    out.push(
+        Action::new("breathe")
+            .label("Pulse once")
+            .category("Light")
+            .icon("light")
+            .sentence("pulse {device} once"),
+    );
+    if !light.signal_values.is_empty() {
+        out.push(signal_action());
+    }
+    out
+}
+
+fn signal_action() -> Action {
+    Action::new("signal")
+        .label("Flash, then put it back")
+        .category("Light")
+        .icon("alert")
+        .description("Blinks for a while, then returns to how it was.")
+        .param(Param::enum_("kind").label("How").labelled_options([
+            ("on_off", "Blink"),
+            ("on_off_color", "Blink in a colour"),
+            ("alternating", "Alternate two colours"),
+        ]))
+        .param(Param::duration("duration_ms").label("For"))
+        .sentence("flash {device}")
 }
 
 /// Kelvin from mirek — the reciprocal megakelvin Hue speaks in.
@@ -410,8 +609,89 @@ pub fn grouped_light_state(group: &HueGroupedLight) -> Value {
     if let Some(brightness) = group.brightness_pct {
         state["brightness_pct"] = json!(brightness);
     }
+    if let Some(rid) = &group.owner_rid {
+        state["group_rid"] = json!(rid);
+    }
+    state["light_ids"] = json!(group.light_ids);
+    state["supports_color_xy"] = json!(group.supports_color);
+    state["supports_color_temp"] = json!(group.supports_color_temp);
 
     state
+}
+
+/// A room or zone: everything its lights share.
+pub fn group_schema(group: &HueGroupedLight) -> Value {
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "on".into(),
+        AttributeSchema {
+            kind: AttributeKind::Bool,
+            writable: true,
+            display_name: Some("Power".into()),
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("on", "turns on"),
+                when_false: StateLabel::verbed("off", "turns off"),
+            }),
+            ..Default::default()
+        },
+    );
+    attrs.insert(
+        "brightness_pct".into(),
+        AttributeSchema {
+            kind: AttributeKind::Float,
+            writable: true,
+            display_name: Some("Brightness".into()),
+            unit: Some("%".into()),
+            min: Some(1.0),
+            max: Some(100.0),
+            step: Some(1.0),
+            ..Default::default()
+        },
+    );
+    if group.supports_color_temp {
+        attrs.insert(
+            "color_temp".into(),
+            AttributeSchema {
+                kind: AttributeKind::ColorTemp,
+                writable: true,
+                display_name: Some("Colour Temperature".into()),
+                unit: Some("K".into()),
+                min: Some(2000.0),
+                max: Some(6500.0),
+                step: Some(100.0),
+                ..Default::default()
+            },
+        );
+    }
+    if group.supports_color {
+        attrs.insert(
+            "color_xy".into(),
+            AttributeSchema {
+                kind: AttributeKind::ColorXy,
+                writable: true,
+                display_name: Some("Colour".into()),
+                ..Default::default()
+            },
+        );
+    }
+    let filled = crate::aux_schema::with_published(
+        DeviceSchema {
+            attributes: attrs,
+            ..Default::default()
+        },
+        &grouped_light_state(group),
+    );
+    with_actions(
+        &filled,
+        vec![
+            Action::new("breathe")
+                .label("Pulse once")
+                .category("Light")
+                .icon("light")
+                .sentence("pulse {device} once"),
+            signal_action(),
+        ],
+    )
 }
 
 pub fn grouped_light_capabilities() -> Value {
@@ -444,8 +724,24 @@ pub fn scene_state(scene: &HueScene) -> Value {
     if let Some(active) = scene.active {
         state["active"] = json!(active);
     }
+    if let Some(status) = &scene.status {
+        state["status"] = json!(status);
+    }
+    state["palette"] = json!(scene.palette);
+    state["dynamic_capable"] = json!(scene.dynamic_capable);
 
     state
+}
+
+fn activate_action() -> Action {
+    Action::new("activate")
+        .label("Activate the scene")
+        .category("Scenes")
+        .icon("scene")
+        .param(Param::bool_("dynamic").label("Keep its colours moving"))
+        .param(Param::duration("duration_ms").label("Fade in over"))
+        .param(Param::int("brightness_pct").label("Brightness"))
+        .sentence("activate {device}")
 }
 
 /// **What a Hue bridge is: whether it is reachable, whether it is paired, and
@@ -566,14 +862,7 @@ pub fn scene_schema_for(scene: &HueScene) -> Value {
         // hand-written half said.
         Err(_) => return declared,
     };
-    with_actions(
-        &filled,
-        vec![Action::new("activate")
-            .label("Activate the scene")
-            .category("Scenes")
-            .icon("scene")
-            .sentence("activate {device}")],
-    )
+    with_actions(&filled, vec![activate_action()])
 }
 
 pub fn scene_schema(reports_status: bool) -> Value {
@@ -599,14 +888,7 @@ pub fn scene_schema(reports_status: bool) -> Value {
         attributes: attrs,
         ..Default::default()
     };
-    with_actions(
-        &schema,
-        vec![Action::new("activate")
-            .label("Activate the scene")
-            .category("Scenes")
-            .icon("scene")
-            .sentence("activate {device}")],
-    )
+    with_actions(&schema, vec![activate_action()])
 }
 
 pub fn scene_capabilities() -> Value {
@@ -948,6 +1230,7 @@ mod tests {
             gradient_points: vec![(0.2, 0.3), (0.4, 0.5)],
             supports_gradient: true,
             supports_identify: true,
+            ..HueLight::sample()
         };
 
         let caps = light_capabilities(&light);

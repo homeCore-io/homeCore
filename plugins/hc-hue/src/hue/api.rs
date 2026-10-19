@@ -6,18 +6,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::models::{
-    AccessoryCommand, BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene, LightCommand,
+    AccessoryCommand, BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene,
+    LightCommand, SceneRecall,
 };
-
-#[derive(Clone)]
-struct GroupMeta {
-    name: String,
-    area: String,
-    kind: String,
-}
+use super::resources::{
+    id_of, kind_of, name_of, owner_rid, product_of, white_swatch, xy_to_hex, Resources,
+};
 
 #[derive(Debug, Clone)]
 pub enum EventstreamSignal {
@@ -28,6 +25,11 @@ pub enum EventstreamSignal {
     Data {
         bridge_id: String,
         payload: serde_json::Value,
+    },
+    /// The stream connected (`true`) or dropped (`false`).
+    Live {
+        bridge_id: String,
+        live: bool,
     },
 }
 
@@ -254,552 +256,284 @@ impl HueApiClient {
         Ok(())
     }
 
-    pub async fn fetch_lights(&self) -> Result<Vec<HueLight>> {
+    /// Everything the bridge knows, in one request — see [`Resources`].
+    pub async fn fetch_all(&self) -> Result<Resources> {
         let Some(app_key) = self.current_app_key() else {
-            return Ok(Vec::new());
+            bail!("cannot read the Hue bridge without app_key configured");
         };
-
-        let client = self.http_client();
-
-        let devices_url = format!("https://{}/clip/v2/resource/device", self.target.host);
-        let devices_payload = client
-            .get(devices_url)
+        let url = format!("https://{}/clip/v2/resource", self.target.host);
+        let body = self
+            .http_client()
+            .get(url)
             .header("hue-application-key", &app_key)
             .send()
             .await
-            .context("failed to fetch Hue devices")?
+            .context("request to the Hue bridge failed")?
             .error_for_status()
-            .context("Hue devices endpoint returned non-success")?
+            .context("the Hue bridge refused the request")?
             .json::<serde_json::Value>()
             .await
-            .context("failed parsing Hue devices payload")?;
+            .context("failed parsing the Hue bridge's resources")?;
+        Ok(Resources::from_body(&body))
+    }
 
-        let mut device_names: HashMap<String, String> = HashMap::new();
-        if let Some(items) = devices_payload.get("data").and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let name = item
-                    .get("metadata")
-                    .and_then(|m| m.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(rid)
-                    .to_string();
-                device_names.insert(rid.to_string(), name);
-            }
-        }
+    /// The bridge's summary, as `fetch_bridge_summary` gives it, from a
+    /// snapshot already read.
+    pub fn summary_from(&self, r: &Resources) -> serde_json::Value {
+        json!({
+            "bridge_id": self.target.bridge_id,
+            "host": self.target.host,
+            "auth_configured": true,
+            "verify_tls": self.target.verify_tls,
+            "allow_self_signed": self.target.allow_self_signed,
+            "integration_state": "connected",
+            "v2_bridge": { "errors": [], "data": r.of("bridge") },
+        })
+    }
 
-        let device_area = self.fetch_device_areas(&client, &app_key).await;
-
-        let lights_url = format!("https://{}/clip/v2/resource/light", self.target.host);
-        let lights_payload = client
-            .get(lights_url)
-            .header("hue-application-key", &app_key)
-            .send()
-            .await
-            .context("failed to fetch Hue lights")?
-            .error_for_status()
-            .context("Hue lights endpoint returned non-success")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed parsing Hue lights payload")?;
-
+    pub fn lights(&self, r: &Resources) -> Vec<HueLight> {
+        let rooms = r.rooms_by_device();
         let mut lights = Vec::new();
-        if let Some(items) = lights_payload.get("data").and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-
-                let owner_rid = item
-                    .get("owner")
-                    .and_then(|o| o.get("rid"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(rid);
-
-                let name = device_names.get(owner_rid).cloned().unwrap_or_else(|| {
+        for item in r.of("light") {
+            let Some(rid) = id_of(item) else { continue };
+            let owner_rid = owner_rid(item).unwrap_or(rid);
+            let device = r.owner_device(item);
+            let name = device
+                .and_then(name_of)
+                .or_else(|| name_of(item))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
                     format!("Hue Light {}", rid.chars().take(8).collect::<String>())
                 });
+            let product = device.map(product_of);
+            let reachable = device
+                .and_then(|d| r.service_of(d, "zigbee_connectivity"))
+                .and_then(|z| z.get("status"))
+                .and_then(|v| v.as_str())
+                .map(|s| s == "connected");
 
-                let on = item
+            let ct = item.get("color_temperature");
+            let mirek_bound = |k: &str| {
+                ct.and_then(|c| c.get("mirek_schema"))
+                    .and_then(|s| s.get(k))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u16)
+            };
+            let strings = |v: Option<&serde_json::Value>| -> Vec<String> {
+                v.and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            // `effects_v2` is the newer list (and the only one with the newest
+            // effects); `effects` is what older firmware has. Either will do.
+            let mut effect_values = strings(
+                item.get("effects_v2")
+                    .and_then(|e| e.get("action"))
+                    .and_then(|a| a.get("effect_values")),
+            );
+            if effect_values.is_empty() {
+                effect_values = strings(item.get("effects").and_then(|e| e.get("effect_values")));
+            }
+            let effect = item
+                .get("effects_v2")
+                .and_then(|e| e.get("status"))
+                .and_then(|s| s.get("effect"))
+                .or_else(|| item.get("effects").and_then(|e| e.get("status")))
+                .or_else(|| item.get("effects").and_then(|e| e.get("effect")))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let xy = |v: &serde_json::Value| -> Option<(f64, f64)> {
+                Some((v.get("x")?.as_f64()?, v.get("y")?.as_f64()?))
+            };
+            let gradient = item.get("gradient");
+
+            lights.push(HueLight {
+                bridge_id: self.target.bridge_id.clone(),
+                owner_rid: owner_rid.to_string(),
+                area: rooms
+                    .get(owner_rid)
+                    .and_then(|room| name_of(room))
+                    .map(Self::slugify)
+                    .filter(|a| !a.is_empty()),
+                resource_id: rid.to_string(),
+                device_id: self.target.light_device_id(rid),
+                name,
+                on: item
                     .get("on")
                     .and_then(|o| o.get("on"))
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                let brightness_pct = item
+                    .unwrap_or(false),
+                brightness_pct: item
                     .get("dimming")
                     .and_then(|d| d.get("brightness"))
-                    .and_then(|v| v.as_f64());
-                let supports_dimming = item.get("dimming").is_some();
-
-                let color_temp_mirek = item
-                    .get("color_temperature")
-                    .and_then(|ct| ct.get("mirek"))
+                    .and_then(|v| v.as_f64()),
+                supports_dimming: item.get("dimming").is_some(),
+                color_temp_mirek: ct
+                    .filter(|c| c.get("mirek_valid").and_then(|v| v.as_bool()) != Some(false))
+                    .and_then(|c| c.get("mirek"))
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u16);
-
-                let mirek_min = item
-                    .get("color_temperature")
-                    .and_then(|ct| ct.get("mirek_schema"))
-                    .and_then(|s| s.get("mirek_minimum"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u16);
-
-                let mirek_max = item
-                    .get("color_temperature")
-                    .and_then(|ct| ct.get("mirek_schema"))
-                    .and_then(|s| s.get("mirek_maximum"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u16);
-
-                let color_xy = item.get("color").and_then(|c| c.get("xy")).and_then(|xy| {
-                    let x = xy.get("x")?.as_f64()?;
-                    let y = xy.get("y")?.as_f64()?;
-                    Some((x, y))
-                });
-
-                let supports_color_xy = item.get("color").is_some();
-
-                let effect = item
-                    .get("effects")
-                    .and_then(|e| e.get("effect"))
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-
-                let effect_values = item
-                    .get("effects")
-                    .and_then(|e| e.get("effect_values"))
-                    .and_then(|v| v.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|v| v.as_str().map(ToString::to_string))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                let dynamic_status = item
+                    .map(|v| v as u16),
+                mirek_min: mirek_bound("mirek_minimum"),
+                mirek_max: mirek_bound("mirek_maximum"),
+                supports_color_temp: ct.is_some(),
+                color_xy: item.get("color").and_then(|c| c.get("xy")).and_then(xy),
+                supports_color_xy: item.get("color").is_some(),
+                effect,
+                effect_values,
+                dynamic_status: item
                     .get("dynamics")
                     .and_then(|d| d.get("status"))
                     .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-
-                let dynamic_speed = item
+                    .map(str::to_string),
+                dynamic_speed: item
                     .get("dynamics")
                     .and_then(|d| d.get("speed"))
-                    .and_then(|v| v.as_f64());
-
-                let gradient_points = item
-                    .get("gradient")
+                    .and_then(|v| v.as_f64()),
+                gradient_points: gradient
                     .and_then(|g| g.get("points"))
                     .and_then(|v| v.as_array())
-                    .map(|points| {
-                        points
-                            .iter()
-                            .filter_map(|point| {
-                                let xy = point.get("color")?.get("xy")?;
-                                let x = xy.get("x")?.as_f64()?;
-                                let y = xy.get("y")?.as_f64()?;
-                                Some((x, y))
-                            })
-                            .collect::<Vec<_>>()
+                    .map(|ps| {
+                        ps.iter()
+                            .filter_map(|p| xy(p.get("color")?.get("xy")?))
+                            .collect()
                     })
-                    .unwrap_or_default();
-                let supports_gradient = item.get("gradient").is_some();
-                let supports_identify = item.get("identify").is_some();
-
-                lights.push(HueLight {
-                    bridge_id: self.target.bridge_id.clone(),
-                    owner_rid: owner_rid.to_string(),
-                    area: device_area.get(owner_rid).cloned(),
-                    resource_id: rid.to_string(),
-                    device_id: self.target.light_device_id(rid),
-                    name,
-                    on,
-                    brightness_pct,
-                    supports_dimming,
-                    color_temp_mirek,
-                    mirek_min,
-                    mirek_max,
-                    color_xy,
-                    supports_color_xy,
-                    effect,
-                    effect_values,
-                    dynamic_status,
-                    dynamic_speed,
-                    gradient_points,
-                    supports_gradient,
-                    supports_identify,
-                });
-            }
+                    .unwrap_or_default(),
+                supports_gradient: gradient.is_some(),
+                gradient_points_capable: gradient
+                    .and_then(|g| g.get("points_capable"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u8,
+                supports_identify: item.get("identify").is_some(),
+                signal_values: strings(item.get("signaling").and_then(|s| s.get("signal_values"))),
+                model_id: product
+                    .as_ref()
+                    .and_then(|p| p.model_id)
+                    .map(str::to_string),
+                product_name: product
+                    .as_ref()
+                    .and_then(|p| p.product_name)
+                    .map(str::to_string),
+                archetype: product
+                    .as_ref()
+                    .and_then(|p| p.archetype)
+                    .map(str::to_string),
+                software_version: product
+                    .as_ref()
+                    .and_then(|p| p.software_version)
+                    .map(str::to_string),
+                update_state: device.and_then(|d| r.update_state(d)).map(str::to_string),
+                reachable,
+                room_rid: rooms
+                    .get(owner_rid)
+                    .and_then(|r| id_of(r))
+                    .map(str::to_string),
+                room_name: rooms
+                    .get(owner_rid)
+                    .and_then(|r| name_of(r))
+                    .map(str::to_string),
+            });
         }
-
-        Ok(lights)
+        lights
     }
 
-    pub async fn execute_light_command(
-        &self,
-        light_rid: &str,
-        command: &LightCommand,
-    ) -> Result<()> {
-        let Some(app_key) = self.current_app_key() else {
-            bail!("cannot control Hue light without app_key configured");
-        };
-
-        let mut body = serde_json::Map::new();
-        if let Some(on) = command.on {
-            body.insert("on".to_string(), json!({ "on": on }));
-        }
-        if let Some(brightness) = command.brightness_pct {
-            body.insert("dimming".to_string(), json!({ "brightness": brightness }));
-        }
-        if let Some(mirek) = command.color_temp_mirek {
-            body.insert("color_temperature".to_string(), json!({ "mirek": mirek }));
-        }
-        if let Some((x, y)) = command.color_xy {
-            body.insert(
-                "color".to_string(),
-                json!({
-                    "xy": {
-                        "x": x,
-                        "y": y,
-                    }
-                }),
-            );
-        }
-        if let Some(effect) = &command.effect {
-            body.insert("effects".to_string(), json!({ "effect": effect }));
-        }
-        if let Some(speed) = command.dynamic_speed {
-            body.insert(
-                "dynamics".to_string(),
-                json!({ "speed": speed.clamp(0.0, 1.0) }),
-            );
-        }
-        if let Some(points) = &command.gradient_points {
-            if !points.is_empty() {
-                let points_payload = points
-                    .iter()
-                    .map(|(x, y)| {
-                        json!({
-                            "color": {
-                                "xy": {
-                                    "x": x,
-                                    "y": y,
-                                }
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                body.insert("gradient".to_string(), json!({ "points": points_payload }));
-            }
-        }
-        if let Some(true) = command.identify {
-            body.insert("identify".to_string(), json!({ "action": "identify" }));
-        }
-
-        if body.is_empty() {
-            bail!("no writable fields for light command");
-        }
-
-        let client = self.http_client();
-        let url = format!(
-            "https://{}/clip/v2/resource/light/{light_rid}",
-            self.target.host
-        );
-        let response = client
-            .put(url)
-            .header("hue-application-key", &app_key)
-            .json(&serde_json::Value::Object(body))
-            .send()
-            .await
-            .context("Hue light command request failed")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_else(|_| String::new());
-            bail!("Hue light command failed: status={status} body={text}");
-        }
-
-        Ok(())
-    }
-
-    pub async fn fetch_grouped_lights(&self) -> Result<Vec<HueGroupedLight>> {
-        let Some(app_key) = self.current_app_key() else {
-            return Ok(Vec::new());
-        };
-
-        let client = self.http_client();
-        let mut group_meta: HashMap<String, GroupMeta> = HashMap::new();
-
-        for kind in ["room", "zone"] {
-            let url = format!("https://{}/clip/v2/resource/{kind}", self.target.host);
-            let payload = client
-                .get(url)
-                .header("hue-application-key", &app_key)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await?;
-
-            if let Some(items) = payload.get("data").and_then(|v| v.as_array()) {
-                for item in items {
-                    let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let name = item
-                        .get("metadata")
-                        .and_then(|m| m.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(rid)
-                        .to_string();
-                    group_meta.insert(
-                        rid.to_string(),
-                        GroupMeta {
-                            area: Self::slugify(&name),
-                            name,
-                            kind: kind.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-
-        let grouped_url = format!(
-            "https://{}/clip/v2/resource/grouped_light",
-            self.target.host
-        );
-        let grouped_payload = client
-            .get(grouped_url)
-            .header("hue-application-key", &app_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?;
-
+    /// Rooms and zones as groups of lights: one switch, one dimmer, one
+    /// colour for all of them, and the place their scenes belong.
+    pub fn grouped_lights(&self, r: &Resources) -> Vec<HueGroupedLight> {
         let mut groups = Vec::new();
-        if let Some(items) = grouped_payload.get("data").and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-
-                let owner_rid = item
-                    .get("owner")
-                    .and_then(|o| o.get("rid"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(rid);
-
-                let meta = group_meta.get(owner_rid).cloned();
-                let name = meta.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| {
-                    format!("Hue Group {}", rid.chars().take(8).collect::<String>())
-                });
-
-                let on = item
+        for item in r.of("grouped_light") {
+            let Some(rid) = id_of(item) else { continue };
+            let owner = owner_rid(item).and_then(|o| r.get(o));
+            let kind = owner
+                .and_then(kind_of)
+                .filter(|k| *k == "room" || *k == "zone");
+            // The bridge's own "all lights" group belongs to bridge_home; it
+            // is published (or not) as bridge_home, never as a room.
+            let Some(kind) = kind else { continue };
+            let owner = owner.expect("kind came from the owner");
+            let name = name_of(owner).map(str::to_string).unwrap_or_else(|| {
+                format!("Hue Group {}", rid.chars().take(8).collect::<String>())
+            });
+            let light_rids = r.lights_in(owner);
+            let member = |rid: &&str| r.get(rid);
+            groups.push(HueGroupedLight {
+                bridge_id: self.target.bridge_id.clone(),
+                resource_id: rid.to_string(),
+                device_id: self.target.group_device_id(rid),
+                area: Some(Self::slugify(&name)).filter(|a| !a.is_empty()),
+                name,
+                group_kind: Some(kind.to_string()),
+                on: item
                     .get("on")
                     .and_then(|o| o.get("on"))
-                    .and_then(|v| v.as_bool());
-                let brightness_pct = item
+                    .and_then(|v| v.as_bool()),
+                brightness_pct: item
                     .get("dimming")
                     .and_then(|d| d.get("brightness"))
-                    .and_then(|v| v.as_f64());
-
-                groups.push(HueGroupedLight {
-                    bridge_id: self.target.bridge_id.clone(),
-                    resource_id: rid.to_string(),
-                    device_id: self.target.group_device_id(rid),
-                    name,
-                    area: meta.as_ref().map(|m| m.area.clone()),
-                    group_kind: meta.as_ref().map(|m| m.kind.clone()),
-                    on,
-                    brightness_pct,
-                });
-            }
+                    .and_then(|v| v.as_f64()),
+                owner_rid: id_of(owner).map(str::to_string),
+                supports_color: light_rids
+                    .iter()
+                    .filter_map(member)
+                    .any(|l| l.get("color").is_some()),
+                supports_color_temp: light_rids
+                    .iter()
+                    .filter_map(member)
+                    .any(|l| l.get("color_temperature").is_some()),
+                light_ids: light_rids
+                    .iter()
+                    .map(|l| self.target.light_device_id(l))
+                    .collect(),
+            });
         }
-
-        Ok(groups)
+        groups
     }
 
-    pub async fn fetch_scenes(&self) -> Result<Vec<HueScene>> {
-        let Some(app_key) = self.current_app_key() else {
-            return Ok(Vec::new());
-        };
-
-        let client = self.http_client();
-        let mut group_meta: HashMap<String, GroupMeta> = HashMap::new();
-
-        for kind in ["room", "zone"] {
-            let url = format!("https://{}/clip/v2/resource/{kind}", self.target.host);
-            let payload = client
-                .get(url)
-                .header("hue-application-key", &app_key)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await?;
-
-            if let Some(items) = payload.get("data").and_then(|v| v.as_array()) {
-                for item in items {
-                    let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let name = item
-                        .get("metadata")
-                        .and_then(|m| m.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(rid)
-                        .to_string();
-                    group_meta.insert(
-                        rid.to_string(),
-                        GroupMeta {
-                            area: Self::slugify(&name),
-                            name,
-                            kind: kind.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-
-        let scenes_url = format!("https://{}/clip/v2/resource/scene", self.target.host);
-        let scenes_payload = client
-            .get(scenes_url)
-            .header("hue-application-key", &app_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?;
-
+    pub fn scenes(&self, r: &Resources) -> Vec<HueScene> {
         let mut scenes = Vec::new();
-        if let Some(items) = scenes_payload.get("data").and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-
-                let name = item
-                    .get("metadata")
-                    .and_then(|m| m.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unnamed Scene")
-                    .to_string();
-
-                let group_rid = item
-                    .get("group")
-                    .and_then(|g| g.get("rid"))
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-                let group_name = group_rid
-                    .as_ref()
-                    .and_then(|rid| group_meta.get(rid).map(|m| m.name.clone()));
-                let area = group_rid
-                    .as_ref()
-                    .and_then(|rid| group_meta.get(rid).map(|m| m.area.clone()));
-                let group_kind = group_rid
-                    .as_ref()
-                    .and_then(|rid| group_meta.get(rid).map(|m| m.kind.clone()));
-                // Hue reports scene `status.active` as a string enum —
-                // "inactive" | "static" | "dynamic_palette" — not a bool. A
-                // scene is applied when it's anything other than "inactive".
-                let active = item
-                    .get("status")
-                    .and_then(|s| s.get("active"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s != "inactive");
-
-                scenes.push(HueScene {
-                    bridge_id: self.target.bridge_id.clone(),
-                    resource_id: rid.to_string(),
-                    device_id: self.target.scene_device_id(rid),
-                    name,
-                    area,
-                    group_kind,
-                    active,
-                    group_rid,
-                    group_name,
-                });
-            }
+        for item in r.of("scene") {
+            let Some(rid) = id_of(item) else { continue };
+            let group_rid = item
+                .get("group")
+                .and_then(|g| g.get("rid"))
+                .and_then(|v| v.as_str());
+            let group = group_rid.and_then(|g| r.get(g));
+            let group_name = group.and_then(name_of).map(str::to_string);
+            // Hue reports scene `status.active` as a string enum —
+            // "inactive" | "static" | "dynamic_palette" — not a bool. A scene
+            // is applied when it's anything other than "inactive".
+            let status = item
+                .get("status")
+                .and_then(|s| s.get("active"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            scenes.push(HueScene {
+                bridge_id: self.target.bridge_id.clone(),
+                resource_id: rid.to_string(),
+                device_id: self.target.scene_device_id(rid),
+                name: name_of(item).unwrap_or("Unnamed Scene").to_string(),
+                area: group_name.as_deref().map(Self::slugify),
+                group_kind: group.and_then(kind_of).map(str::to_string),
+                active: status.as_deref().map(|s| s != "inactive"),
+                group_rid: group_rid.map(str::to_string),
+                group_name,
+                palette: scene_palette(item),
+                status,
+                dynamic_capable: item
+                    .get("palette")
+                    .and_then(|p| p.get("color"))
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|c| c.len() > 1),
+            });
         }
-
-        Ok(scenes)
+        scenes
     }
 
-    /// Map each Hue *device* rid to the room it sits in, slugified as a
-    /// homeCore area, so anything owned by that device can carry the room and
-    /// follow it when someone moves the device in the Hue app.
-    ///
-    /// Rooms only — deliberately not zones. In Hue a device belongs to at most
-    /// one room (rooms are physical and exclusive), while zones are arbitrary
-    /// overlapping groupings ("Downstairs", "Colour lights"), so a zone cannot
-    /// answer "which room is this in" unambiguously. A room lists its devices
-    /// as `children`.
-    ///
-    /// Shared by lights and accessories: a motion sensor is in a room just as
-    /// much as a lamp is, and reading rooms only in the lights fetch left every
-    /// sensor unassigned.
-    async fn fetch_device_areas(&self, client: &Client, app_key: &str) -> HashMap<String, String> {
-        let rooms_url = format!("https://{}/clip/v2/resource/room", self.target.host);
-        let mut device_area: HashMap<String, String> = HashMap::new();
-        match client
-            .get(rooms_url)
-            .header("hue-application-key", app_key)
-            .send()
-            .await
-        {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(payload) => {
-                        if let Some(items) = payload.get("data").and_then(|v| v.as_array()) {
-                            for item in items {
-                                let Some(name) = item
-                                    .get("metadata")
-                                    .and_then(|m| m.get("name"))
-                                    .and_then(|v| v.as_str())
-                                else {
-                                    continue;
-                                };
-                                let area = Self::slugify(name);
-                                if area.is_empty() {
-                                    continue;
-                                }
-                                for child in item
-                                    .get("children")
-                                    .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flatten()
-                                {
-                                    if let Some(rid) = child.get("rid").and_then(|v| v.as_str()) {
-                                        device_area.insert(rid.to_string(), area.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => warn!(error = %e, "Could not parse Hue rooms; devices get no area"),
-                },
-                Err(e) => warn!(error = %e, "Hue rooms endpoint returned non-success"),
-            },
-            // Rooms are an enrichment, never a reason to fail the whole sync.
-            Err(e) => warn!(error = %e, "Could not fetch Hue rooms; devices get no area"),
-        }
-        device_area
-    }
-
-    pub async fn fetch_aux_devices(&self) -> Result<Vec<HueAuxDevice>> {
-        let Some(app_key) = self.current_app_key() else {
-            return Ok(Vec::new());
-        };
-
-        let client = self.http_client();
-        let owner_names = self.fetch_owner_names(&client, &app_key).await?;
-        let device_area = self.fetch_device_areas(&client, &app_key).await;
-
+    pub fn aux_devices(&self, r: &Resources) -> Vec<HueAuxDevice> {
+        let rooms = r.rooms_by_device();
         let resource_types = [
             "motion",
             "grouped_motion",
@@ -816,38 +550,25 @@ impl HueApiClient {
             "entertainment_configuration",
             "bridge_home",
         ];
+        let buttons = button_presses(r);
 
         let mut out = Vec::new();
         for resource_type in resource_types {
-            let url = format!(
-                "https://{}/clip/v2/resource/{resource_type}",
-                self.target.host
-            );
-            let payload = client
-                .get(url)
-                .header("hue-application-key", &app_key)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await?;
-
-            let Some(items) = payload.get("data").and_then(|v| v.as_array()) else {
-                continue;
-            };
-
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-
-                let owner_rid = item
-                    .get("owner")
-                    .and_then(|o| o.get("rid"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(rid);
-
-                let name = owner_names.get(owner_rid).cloned().unwrap_or_else(|| {
+            for item in r.of(resource_type) {
+                let Some(rid) = id_of(item) else { continue };
+                let owner_rid = owner_rid(item).unwrap_or(rid);
+                let owner = r.get(owner_rid);
+                // An entertainment area is owned by the bridge's entertainment
+                // service, not a device, so its own name is the one to use.
+                let name = if resource_type == "entertainment_configuration" {
+                    name_of(item).or_else(|| item.get("name").and_then(|v| v.as_str()))
+                } else {
+                    owner
+                        .filter(|o| kind_of(o) == Some("device"))
+                        .and_then(name_of)
+                }
+                .map(str::to_string)
+                .unwrap_or_else(|| {
                     format!(
                         "Hue {} {}",
                         resource_type,
@@ -855,10 +576,26 @@ impl HueApiClient {
                     )
                 });
 
-                let attributes = self.extract_aux_attributes(resource_type, item);
+                let mut attributes = self.extract_aux_attributes(resource_type, item);
+                if resource_type == "button" {
+                    if let (Some(owner), Some(obj)) =
+                        (buttons.get(owner_rid), attributes.as_object_mut())
+                    {
+                        obj.extend(owner.clone());
+                    }
+                }
+                if let Some(state) = owner.and_then(|o| r.update_state(o)) {
+                    if let Some(obj) = attributes.as_object_mut() {
+                        obj.insert("update_state".to_string(), json!(state));
+                    }
+                }
                 out.push(HueAuxDevice {
                     bridge_id: self.target.bridge_id.clone(),
-                    area: device_area.get(owner_rid).cloned(),
+                    area: rooms
+                        .get(owner_rid)
+                        .and_then(|room| name_of(room))
+                        .map(Self::slugify)
+                        .filter(|a| !a.is_empty()),
                     owner_rid: owner_rid.to_string(),
                     resource_type: resource_type.to_string(),
                     resource_id: rid.to_string(),
@@ -868,8 +605,55 @@ impl HueApiClient {
                 });
             }
         }
+        out
+    }
 
-        Ok(out)
+    /// Rooms and zones, for the plugin page: what each holds and what it is
+    /// called, whether or not it is published as a device.
+    pub fn rooms(&self, r: &Resources) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for kind in ["room", "zone"] {
+            for g in r.of(kind) {
+                let Some(rid) = id_of(g) else { continue };
+                let grouped = g
+                    .get("services")
+                    .and_then(|s| s.as_array())
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s.get("rtype").and_then(|v| v.as_str()) == Some("grouped_light"))
+                    .and_then(|s| s.get("rid"))
+                    .and_then(|v| v.as_str());
+                out.push(json!({
+                    "id": rid,
+                    "kind": kind,
+                    "name": name_of(g).unwrap_or(rid),
+                    "bridge_id": self.target.bridge_id,
+                    "lights": r.lights_in(g).len(),
+                    "scenes": r.of("scene").iter().filter(|s| {
+                        s.get("group").and_then(|g| g.get("rid")).and_then(|v| v.as_str()) == Some(rid)
+                    }).count(),
+                    "device_id": grouped.map(|g| self.target.group_device_id(g)),
+                }));
+            }
+        }
+        out
+    }
+
+    pub async fn execute_light_command(
+        &self,
+        light_rid: &str,
+        command: &LightCommand,
+    ) -> Result<()> {
+        let body = light_body(command, true);
+        if body.is_empty() {
+            bail!("no writable fields for light command");
+        }
+        self.put(
+            &format!("light/{light_rid}"),
+            serde_json::Value::Object(body),
+        )
+        .await
+        .context("Hue light command failed")
     }
 
     pub async fn execute_grouped_light_command(
@@ -877,41 +661,38 @@ impl HueApiClient {
         group_rid: &str,
         command: &LightCommand,
     ) -> Result<()> {
-        let Some(app_key) = self.current_app_key() else {
-            bail!("cannot control Hue grouped_light without app_key configured");
-        };
-
-        let mut body = serde_json::Map::new();
-        if let Some(on) = command.on {
-            body.insert("on".to_string(), json!({ "on": on }));
-        }
-        if let Some(brightness) = command.brightness_pct {
-            body.insert("dimming".to_string(), json!({ "brightness": brightness }));
-        }
-
+        let body = light_body(command, false);
         if body.is_empty() {
             bail!("no writable fields for grouped_light command");
         }
+        self.put(
+            &format!("grouped_light/{group_rid}"),
+            serde_json::Value::Object(body),
+        )
+        .await
+        .context("Hue grouped_light command failed")
+    }
 
-        let client = self.http_client();
-        let url = format!(
-            "https://{}/clip/v2/resource/grouped_light/{group_rid}",
-            self.target.host
-        );
-        let response = client
+    /// `PUT /clip/v2/resource/{path}`; anything but 2xx is an error carrying
+    /// what the bridge said.
+    async fn put(&self, path: &str, body: serde_json::Value) -> Result<()> {
+        let Some(app_key) = self.current_app_key() else {
+            bail!("cannot control the Hue bridge without app_key configured");
+        };
+        let url = format!("https://{}/clip/v2/resource/{path}", self.target.host);
+        let response = self
+            .http_client()
             .put(url)
             .header("hue-application-key", &app_key)
-            .json(&serde_json::Value::Object(body))
+            .json(&body)
             .send()
             .await
-            .context("Hue grouped_light command request failed")?;
-
+            .context("request failed")?;
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_else(|_| String::new());
-            bail!("Hue grouped_light command failed: status={status} body={text}");
+            let text = response.text().await.unwrap_or_default();
+            bail!("status={status} body={text}");
         }
-
         Ok(())
     }
 
@@ -1013,7 +794,7 @@ impl HueApiClient {
         Ok(())
     }
 
-    fn slugify(input: &str) -> String {
+    pub fn slugify(input: &str) -> String {
         input
             .trim()
             .to_lowercase()
@@ -1024,139 +805,106 @@ impl HueApiClient {
             .to_string()
     }
 
-    pub async fn activate_scene(&self, scene_rid: &str) -> Result<()> {
-        let Some(app_key) = self.current_app_key() else {
-            bail!("cannot activate Hue scene without app_key configured");
-        };
-
-        let client = self.http_client();
-        let url = format!(
-            "https://{}/clip/v2/resource/scene/{scene_rid}",
-            self.target.host
-        );
-        let response = client
-            .put(url)
-            .header("hue-application-key", &app_key)
-            .json(&json!({ "recall": { "action": "active" } }))
-            .send()
-            .await
-            .context("Hue scene activation request failed")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_else(|_| String::new());
-            bail!("Hue scene activation failed: status={status} body={text}");
+    pub async fn activate_scene(&self, scene_rid: &str, recall: &SceneRecall) -> Result<()> {
+        let mut r = json!({ "action": if recall.dynamic { "dynamic_palette" } else { "active" } });
+        if let Some(ms) = recall.duration_ms {
+            r["duration"] = json!(ms);
         }
-
-        Ok(())
+        if let Some(b) = recall.brightness_pct {
+            r["dimming"] = json!({ "brightness": b.clamp(0.0, 100.0) });
+        }
+        self.put(&format!("scene/{scene_rid}"), json!({ "recall": r }))
+            .await
+            .context("Hue scene activation failed")
     }
 
+    /// Follow the bridge's event stream for as long as the runtime listens,
+    /// reconnecting after `reconnect_secs` whenever it drops. Says when the
+    /// stream is up and when it goes, so the runtime knows whether it can
+    /// trust what it hears or has to ask.
+    ///
+    /// Every `data:` line is passed on. They used to be dropped when one came
+    /// within half a second of the last, which is exactly when a scene recall
+    /// reports its lights — the changes were lost until the next resync.
     pub async fn run_eventstream(
         &self,
         notify_tx: mpsc::Sender<EventstreamSignal>,
         reconnect_secs: u64,
     ) -> Result<()> {
-        let Some(app_key) = self.current_app_key() else {
-            bail!("cannot start eventstream without app_key configured");
-        };
-
         let sleep_dur = Duration::from_secs(reconnect_secs.max(1));
         let bridge_id = self.target.bridge_id.clone();
+        let live = |up: bool| EventstreamSignal::Live {
+            bridge_id: bridge_id.clone(),
+            live: up,
+        };
 
         loop {
-            let client = self.http_client();
+            let Some(app_key) = self.current_app_key() else {
+                bail!("cannot start eventstream without app_key configured");
+            };
+            // The stream is meant to stay open; only the connection may time out.
+            let client = Client::builder()
+                .connect_timeout(Duration::from_secs(8))
+                .danger_accept_invalid_certs(self.target.allow_self_signed)
+                .build()
+                .unwrap_or_else(|_| self.http_client());
             let url = format!("https://{}/eventstream/clip/v2", self.target.host);
             let response = client
                 .get(&url)
                 .header("hue-application-key", &app_key)
                 .header("Accept", "text/event-stream")
                 .send()
-                .await;
+                .await
+                .ok()
+                .and_then(|r| r.error_for_status().ok());
 
-            let Ok(response) = response else {
+            let Some(response) = response else {
                 tokio::time::sleep(sleep_dur).await;
                 continue;
             };
-
-            let Ok(response) = response.error_for_status() else {
-                tokio::time::sleep(sleep_dur).await;
-                continue;
-            };
+            if notify_tx.send(live(true)).await.is_err() {
+                return Ok(());
+            }
 
             let mut stream = response.bytes_stream();
-            let mut buf = String::new();
-            let mut last_emit = tokio::time::Instant::now() - Duration::from_secs(1);
-
+            let mut buf: Vec<u8> = Vec::new();
             while let Some(chunk) = stream.next().await {
                 let Ok(chunk) = chunk else {
                     break;
                 };
-
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(idx) = buf.find('\n') {
-                    let mut line = buf.drain(..=idx).collect::<String>();
-                    line = line.trim().to_string();
-
-                    if let Some(rest) = line.strip_prefix("data:") {
-                        let payload = rest.trim();
-                        if !payload.is_empty() && last_emit.elapsed() >= Duration::from_millis(500)
-                        {
-                            let signal = match serde_json::from_str::<serde_json::Value>(payload) {
-                                Ok(value) => EventstreamSignal::Data {
-                                    bridge_id: bridge_id.clone(),
-                                    payload: value,
-                                },
-                                Err(_) => EventstreamSignal::Refresh {
-                                    bridge_id: bridge_id.clone(),
-                                    reason: "eventstream_parse_error".to_string(),
-                                },
-                            };
-
-                            if notify_tx.send(signal).await.is_err() {
-                                return Ok(());
-                            }
-                            last_emit = tokio::time::Instant::now();
-                        }
+                buf.extend_from_slice(&chunk);
+                // Split on whole lines only, so a UTF-8 character cut across
+                // two chunks is put back together before it is read.
+                while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=idx).collect();
+                    let line = String::from_utf8_lossy(&line);
+                    let Some(payload) = line.trim().strip_prefix("data:").map(str::trim) else {
+                        continue;
+                    };
+                    if payload.is_empty() {
+                        continue;
+                    }
+                    let signal = match serde_json::from_str::<serde_json::Value>(payload) {
+                        Ok(value) => EventstreamSignal::Data {
+                            bridge_id: bridge_id.clone(),
+                            payload: value,
+                        },
+                        Err(_) => EventstreamSignal::Refresh {
+                            bridge_id: bridge_id.clone(),
+                            reason: "eventstream_parse_error".to_string(),
+                        },
+                    };
+                    if notify_tx.send(signal).await.is_err() {
+                        return Ok(());
                     }
                 }
             }
 
+            if notify_tx.send(live(false)).await.is_err() {
+                return Ok(());
+            }
             tokio::time::sleep(sleep_dur).await;
         }
-    }
-
-    async fn fetch_owner_names(
-        &self,
-        client: &Client,
-        app_key: &str,
-    ) -> Result<HashMap<String, String>> {
-        let devices_url = format!("https://{}/clip/v2/resource/device", self.target.host);
-        let devices_payload = client
-            .get(devices_url)
-            .header("hue-application-key", app_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?;
-
-        let mut out = HashMap::new();
-        if let Some(items) = devices_payload.get("data").and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let name = item
-                    .get("metadata")
-                    .and_then(|m| m.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(rid)
-                    .to_string();
-                out.insert(rid.to_string(), name);
-            }
-        }
-        Ok(out)
     }
 
     fn extract_aux_attributes(
@@ -1244,50 +992,59 @@ impl HueApiClient {
                 }
             }
             "button" => {
-                if let Some(v) = item
-                    .get("button_report")
-                    .and_then(|r| r.get("event"))
-                    .and_then(|v| v.as_str())
-                {
+                // CLIP v2 nests the report under `button`; older firmware put
+                // it at the top level.
+                let report = item
+                    .get("button")
+                    .and_then(|b| b.get("button_report"))
+                    .or_else(|| item.get("button_report"));
+                if let Some(v) = report.and_then(|r| r.get("event")).and_then(|v| v.as_str()) {
                     out.insert("button_event".to_string(), json!(v));
                 }
-                if let Some(v) = item
-                    .get("button_report")
+                if let Some(v) = report
                     .and_then(|r| r.get("updated"))
                     .and_then(|v| v.as_str())
                 {
                     out.insert("button_updated".to_string(), json!(v));
                 }
-                if let Some(v) = item.get("repeat_interval").and_then(|v| v.as_u64()) {
+                if let Some(v) = item
+                    .get("button")
+                    .and_then(|b| b.get("repeat_interval"))
+                    .or_else(|| item.get("repeat_interval"))
+                    .and_then(|v| v.as_u64())
+                {
                     out.insert("button_repeat_interval_ms".to_string(), json!(v));
                 }
             }
             "relative_rotary" => {
-                if let Some(v) = item
-                    .get("rotary_report")
+                let report = item
+                    .get("relative_rotary")
+                    .and_then(|r| r.get("rotary_report"))
+                    .or_else(|| {
+                        item.get("relative_rotary")
+                            .and_then(|r| r.get("last_event"))
+                    })
+                    .or_else(|| item.get("rotary_report"));
+                if let Some(v) = report
                     .and_then(|r| r.get("action"))
                     .and_then(|v| v.as_str())
                 {
                     out.insert("rotary_action".to_string(), json!(v));
                 }
-                if let Some(v) = item
-                    .get("rotary_report")
-                    .and_then(|r| r.get("rotation"))
+                let rotation = report.and_then(|r| r.get("rotation"));
+                if let Some(v) = rotation
                     .and_then(|r| r.get("direction"))
                     .and_then(|v| v.as_str())
                 {
                     out.insert("rotary_direction".to_string(), json!(v));
                 }
-                if let Some(v) = item
-                    .get("rotary_report")
-                    .and_then(|r| r.get("rotation"))
+                if let Some(v) = rotation
                     .and_then(|r| r.get("steps"))
                     .and_then(|v| v.as_i64())
                 {
                     out.insert("rotary_steps".to_string(), json!(v));
                 }
-                if let Some(v) = item
-                    .get("rotary_report")
+                if let Some(v) = report
                     .and_then(|r| r.get("updated"))
                     .and_then(|v| v.as_str())
                 {
@@ -1297,8 +1054,12 @@ impl HueApiClient {
             "entertainment_configuration" => {
                 if let Some(v) = item
                     .get("status")
-                    .and_then(|s| s.get("active"))
-                    .and_then(|v| v.as_bool())
+                    .and_then(|s| s.as_str().map(|s| s == "active"))
+                    .or_else(|| {
+                        item.get("status")
+                            .and_then(|s| s.get("active"))
+                            .and_then(|v| v.as_bool())
+                    })
                 {
                     out.insert("entertainment_active".to_string(), json!(v));
                 }
@@ -1312,7 +1073,9 @@ impl HueApiClient {
                 if let Some(v) = item.get("configuration_type").and_then(|v| v.as_str()) {
                     out.insert("entertainment_type".to_string(), json!(v));
                 }
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                if let Some(name) =
+                    name_of(item).or_else(|| item.get("name").and_then(|v| v.as_str()))
+                {
                     out.insert("entertainment_name".to_string(), json!(name));
                 }
                 if let Some(owner) = item
@@ -1462,9 +1225,251 @@ fn extract_light_level_valid(item: &serde_json::Value) -> Option<bool> {
         })
 }
 
+/// The body of a light or grouped_light `PUT` for a command. A grouped light
+/// takes the same fields bar the ones only a single lamp has.
+fn light_body(command: &LightCommand, single: bool) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    let xy = |(x, y): (f64, f64)| json!({ "xy": { "x": x, "y": y } });
+    if let Some(on) = command.on {
+        body.insert("on".into(), json!({ "on": on }));
+    }
+    if let Some(brightness) = command.brightness_pct {
+        body.insert(
+            "dimming".into(),
+            json!({ "brightness": brightness.clamp(0.0, 100.0) }),
+        );
+    }
+    if let Some(step) = command.brightness_step.filter(|s| *s != 0.0) {
+        body.insert(
+            "dimming_delta".into(),
+            json!({ "action": if step > 0.0 { "up" } else { "down" }, "brightness_delta": step.abs().min(100.0) }),
+        );
+    }
+    if let Some(mirek) = command.color_temp_mirek {
+        body.insert("color_temperature".into(), json!({ "mirek": mirek }));
+    }
+    if let Some(c) = command.color_xy {
+        body.insert("color".into(), xy(c));
+    }
+    let mut dynamics = serde_json::Map::new();
+    if let Some(ms) = command.transition_ms {
+        dynamics.insert("duration".into(), json!(ms));
+    }
+    if single {
+        if let Some(speed) = command.dynamic_speed {
+            dynamics.insert("speed".into(), json!(speed.clamp(0.0, 1.0)));
+        }
+        if let Some(effect) = &command.effect {
+            body.insert("effects".into(), json!({ "effect": effect }));
+        }
+        if let Some(points) = command.gradient_points.as_ref().filter(|p| !p.is_empty()) {
+            let points: Vec<_> = points.iter().map(|p| json!({ "color": xy(*p) })).collect();
+            body.insert("gradient".into(), json!({ "points": points }));
+        }
+        if command.identify == Some(true) {
+            body.insert("identify".into(), json!({ "action": "identify" }));
+        }
+    }
+    if !dynamics.is_empty() {
+        body.insert("dynamics".into(), serde_json::Value::Object(dynamics));
+    }
+    if command.breathe {
+        body.insert("alert".into(), json!({ "action": "breathe" }));
+    }
+    if let Some(signal) = &command.signal {
+        let mut s = json!({ "signal": signal.kind, "duration": signal.duration_ms });
+        if !signal.colors.is_empty() {
+            s["colors"] = json!(signal.colors.iter().map(|c| xy(*c)).collect::<Vec<_>>());
+        }
+        body.insert("signaling".into(), s);
+    }
+    body
+}
+
+/// A scene's colours as hex: its palette when it has one, else what its
+/// actions set each light to. Brightness is folded in only a little — a dim
+/// scene should still read as its colour.
+fn scene_palette(scene: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    fn add(out: &mut Vec<String>, hex: String) {
+        if !out.contains(&hex) && out.len() < 5 {
+            out.push(hex);
+        }
+    }
+    let bri = |v: &serde_json::Value| {
+        v.get("dimming")
+            .and_then(|d| d.get("brightness"))
+            .and_then(|b| b.as_f64())
+            .unwrap_or(100.0)
+    };
+    let palette = scene.get("palette");
+    for c in palette
+        .and_then(|p| p.get("color"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if let Some(xy) = c.get("color").and_then(|c| c.get("xy")) {
+            if let (Some(x), Some(y)) = (
+                xy.get("x").and_then(|v| v.as_f64()),
+                xy.get("y").and_then(|v| v.as_f64()),
+            ) {
+                add(&mut out, xy_to_hex(x, y, bri(c)));
+            }
+        }
+    }
+    for c in palette
+        .and_then(|p| p.get("color_temperature"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if let Some(m) = c
+            .get("color_temperature")
+            .and_then(|c| c.get("mirek"))
+            .and_then(|v| v.as_f64())
+        {
+            add(&mut out, white_swatch(m));
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    for a in scene
+        .get("actions")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.get("action"))
+    {
+        if a.get("on")
+            .and_then(|o| o.get("on"))
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        {
+            continue;
+        }
+        let xy = a
+            .get("color")
+            .and_then(|c| c.get("xy"))
+            .and_then(|xy| Some((xy.get("x")?.as_f64()?, xy.get("y")?.as_f64()?)));
+        if let Some((x, y)) = xy {
+            add(&mut out, xy_to_hex(x, y, bri(a)));
+        } else if let Some(m) = a
+            .get("color_temperature")
+            .and_then(|c| c.get("mirek"))
+            .and_then(|v| v.as_f64())
+        {
+            add(&mut out, white_swatch(m));
+        } else if a.get("dimming").is_some() {
+            add(&mut out, white_swatch(366.0));
+        }
+    }
+    out
+}
+
+/// What each button of a remote is called. A Hue dimmer switch's four buttons
+/// are On, Brighter, Dimmer and Off (Hue on the newest one); anything else is
+/// numbered, as the Hue app numbers it.
+pub fn button_label(model_id: Option<&str>, control_id: u64) -> String {
+    let named: &[&str] = match model_id {
+        Some("RWL020" | "RWL021") => &["On", "Brighter", "Dimmer", "Off"],
+        Some("RWL022") => &["On", "Brighter", "Dimmer", "Hue"],
+        Some("ROM001" | "RDM003") => &["Button"],
+        _ => &[],
+    };
+    named
+        .get(control_id.saturating_sub(1) as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("Button {control_id}"))
+}
+
+/// What a press is called, from Hue's `button_report.event`. An automation
+/// starts on a change, so a press runs "down" → "pressed" and a hold runs
+/// "down" → "held" → "released": each press passes through "down", and a
+/// second identical press still changes something.
+pub fn press_word(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "initial_press" => "down",
+        "short_release" => "pressed",
+        "long_press" | "repeat" => "held",
+        "long_release" => "released",
+        "double_short_release" => "double-pressed",
+        _ => return None,
+    })
+}
+
+/// Button rid → its label, for every button the bridge has.
+pub fn button_labels(r: &Resources) -> HashMap<String, String> {
+    r.of("button")
+        .iter()
+        .filter_map(|b| {
+            let model = r.owner_device(b).map(product_of).and_then(|p| p.model_id);
+            let control = b
+                .get("metadata")
+                .and_then(|m| m.get("control_id"))
+                .and_then(|v| v.as_u64())?;
+            Some((id_of(b)?.to_string(), button_label(model, control)))
+        })
+        .collect()
+}
+
+/// Per remote (device rid): which button was pressed last, and how — from the
+/// newest `button_report` among its buttons — and what its buttons are called.
+fn button_presses(r: &Resources) -> HashMap<String, serde_json::Map<String, serde_json::Value>> {
+    let labels = button_labels(r);
+    let mut by_device: HashMap<String, Vec<&serde_json::Value>> = HashMap::new();
+    for b in r.of("button") {
+        if let Some(owner) = owner_rid(b) {
+            by_device.entry(owner.to_string()).or_default().push(b);
+        }
+    }
+    let mut out = HashMap::new();
+    for (device, mut buttons) in by_device {
+        buttons.sort_by_key(|b| {
+            b.get("metadata")
+                .and_then(|m| m.get("control_id"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        });
+        let mut m = serde_json::Map::new();
+        let names: Vec<String> = buttons
+            .iter()
+            .filter_map(|b| labels.get(id_of(b)?).cloned())
+            .collect();
+        m.insert("buttons".into(), json!(names));
+        let newest = buttons
+            .iter()
+            .filter_map(|b| {
+                let report = b
+                    .get("button")
+                    .and_then(|x| x.get("button_report"))
+                    .or_else(|| b.get("button_report"))?;
+                Some((
+                    report.get("updated")?.as_str()?,
+                    report.get("event")?.as_str()?,
+                    *b,
+                ))
+            })
+            .max_by(|a, b| a.0.cmp(b.0));
+        if let Some((updated, event, b)) = newest {
+            if let (Some(label), Some(word)) =
+                (id_of(b).and_then(|i| labels.get(i)), press_word(event))
+            {
+                m.insert("last_button".into(), json!(label));
+                m.insert("last_press".into(), json!(format!("{label} {word}")));
+                m.insert("last_pressed_at".into(), json!(updated));
+            }
+        }
+        out.insert(device, m);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use serde_json::json;
     use serde_json::Value;
 

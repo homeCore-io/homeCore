@@ -16,7 +16,8 @@
 use std::collections::HashMap;
 
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use serde_json::{Map, Value};
 
@@ -135,7 +136,21 @@ pub fn describe_in(
             || name.starts_with("group_")
             || name == "id_v1"
             || name == "raw"
-            || name == "resource_type")
+            || name == "resource_type"
+            // A remote's raw report and its timestamps: `last_press` says it
+            // in words, and a chart of a repeat interval helps nobody.
+            || name.starts_with("button_")
+            || name.starts_with("rotary_updated")
+            || name == "last_pressed_at"
+            || name == "last_button"
+            || name == "buttons"
+            || name == "update_state"
+            || name == "connectivity_status"
+            // The same reading in the other unit, or before conversion.
+            || name == "temperature_c"
+            || name == "temperature_f"
+            || name == "illuminance_raw"
+            || name == "illuminance_lux")
             .then_some(AttributeCategory::Diagnostic)
     });
     if matches!(value, Value::Bool(_)) {
@@ -177,8 +192,30 @@ pub fn schema_for_state(state: &Map<String, Value>) -> DeviceSchema {
     for (name, value) in state {
         attributes.insert(name.clone(), describe_in(name, value, Some(state)));
     }
+    let mut primary = Vec::new();
+    // A remote: what was pressed and how, as a choice an automation can
+    // start on — "Brighter held" — rather than free text to type.
+    if let Some(buttons) = state.get("buttons").and_then(Value::as_array) {
+        let options: Vec<_> = buttons
+            .iter()
+            .filter_map(Value::as_str)
+            .flat_map(|b| {
+                ["pressed", "held", "released", "double-pressed"]
+                    .map(|w| AttributeOption::new(format!("{b} {w}")))
+            })
+            .collect();
+        attributes.insert(
+            "last_press".to_string(),
+            AttributeSchema {
+                options: Some(options),
+                ..AttributeSchema::read_only(AttributeKind::Enum).labelled("Last press")
+            },
+        );
+        primary.push("last_press".to_string());
+    }
     DeviceSchema {
         attributes,
+        primary,
         ..Default::default()
     }
 }

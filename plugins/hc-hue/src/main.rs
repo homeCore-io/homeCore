@@ -1,3 +1,4 @@
+mod alerts;
 mod aux_schema;
 mod bridge;
 mod commands;
@@ -6,6 +7,7 @@ mod hue;
 mod pairing;
 mod sync;
 mod translator;
+mod ui_actions;
 
 use anyhow::Result;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
@@ -153,7 +155,7 @@ async fn try_start(
     let state_writer = client.state_writer();
     let pairing_handle = pairing::PairingHandle::new(
         cfg.clone(),
-        new_bridge_tx,
+        new_bridge_tx.clone(),
         learned_state.clone(),
         state_writer.clone(),
     );
@@ -187,6 +189,34 @@ async fn try_start(
     mgmt = mgmt.with_config_descriptor(config::config_descriptor());
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
+    // The plugin's own quick actions — rooms, bridges to find, pairing the
+    // page watches — answered from a thread of their own, as the SDK's
+    // custom handler is synchronous; pairing itself runs on this runtime.
+    let rt = tokio::runtime::Handle::current();
+    let quick_handle = pairing_handle.clone();
+    let mgmt = mgmt
+        .with_alert_kinds(alerts::kinds())
+        .with_custom_handler(move |cmd| {
+            let action = cmd["action"].as_str()?.to_string();
+            let params = cmd.clone();
+            let handle = quick_handle.clone();
+            let rt = rt.clone();
+            std::thread::spawn(move || {
+                let local = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                local.block_on(async move { ui_actions::run(&action, &params, &handle, &rt).await })
+            })
+            .join()
+            .ok()
+            .flatten()
+        });
+    // Its own screens: the built `ui/` folder it carries, served from here.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
     let mgmt = pairing::register_actions(mgmt, pairing_handle);
     // …and its inverse, unpair_bridge: forget a bridge, delete its devices, and
     // clear its stored app_key from learned state.
@@ -251,49 +281,7 @@ async fn try_start(
 
     // Register bridge devices via DevicePublisher (PluginClient is consumed).
     for bridge in &bridges {
-        let bridge_device_id = bridge.device_id();
-        if let Err(e) = publisher
-            .register_device_full(
-                &bridge_device_id,
-                &format!("Hue Bridge {}", bridge.name),
-                Some("bridge"),
-                None,
-                None,
-            )
-            .await
-        {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
-        }
-        if let Err(e) = publisher.subscribe_commands(&bridge_device_id).await {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe bridge commands");
-        }
-        // The last device declaring nothing. Its own schema, because the aux
-        // publisher deliberately skips anything that owns one — and a bridge
-        // was in that set without having one.
-        // Including whatever `bridge_state` publishes beyond the declared
-        // half — its own id, its kind, its name.
-        let bridge_schema = match serde_json::from_value::<plugin_sdk_rs::types::DeviceSchema>(
-            translator::bridge_schema(),
-        ) {
-            Ok(parsed) => serde_json::to_value(crate::aux_schema::with_published(
-                parsed,
-                &translator::bridge_state(bridge, true, serde_json::json!({})),
-            ))
-            .unwrap_or_else(|_| translator::bridge_schema()),
-            Err(_) => translator::bridge_schema(),
-        };
-        if let Err(e) = publisher
-            .register_device_schema_json(&bridge_device_id, &bridge_schema)
-            .await
-        {
-            warn!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge schema");
-        }
-        if let Err(e) = publisher
-            .publish_availability(&bridge_device_id, true)
-            .await
-        {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
-        }
+        register_bridge_device(&publisher, bridge).await;
     }
 
     if let Err(e) = publisher.publish_plugin_status("active").await {
@@ -312,10 +300,88 @@ async fn try_start(
         learned_state.clone(),
         state_writer,
         client_notices,
+        new_bridge_tx,
     );
     bridge_runtime
         .run(cmd_rx, refresh_rx, new_bridge_rx, unpair_rx)
         .await
+}
+
+/// A bridge's own device: registered, listening for commands, described.
+/// At startup for every configured bridge, and by the runtime for one paired
+/// while the plugin runs.
+pub(crate) async fn register_bridge_device(
+    publisher: &plugin_sdk_rs::DevicePublisher,
+    bridge: &hue::models::BridgeTarget,
+) {
+    let bridge_device_id = bridge.device_id();
+    if let Err(e) = publisher
+        .register_device_full(
+            &bridge_device_id,
+            &format!("Hue Bridge {}", bridge.name),
+            Some("bridge"),
+            None,
+            None,
+        )
+        .await
+    {
+        error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
+    }
+    if let Err(e) = publisher.subscribe_commands(&bridge_device_id).await {
+        error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe bridge commands");
+    }
+    // The last device declaring nothing. Its own schema, because the aux
+    // publisher deliberately skips anything that owns one — and a bridge
+    // was in that set without having one.
+    // Including whatever `bridge_state` publishes beyond the declared
+    // half — its own id, its kind, its name.
+    let bridge_schema = match serde_json::from_value::<plugin_sdk_rs::types::DeviceSchema>(
+        translator::bridge_schema(),
+    ) {
+        Ok(parsed) => serde_json::to_value(crate::aux_schema::with_published(
+            parsed,
+            &translator::bridge_state(bridge, true, serde_json::json!({})),
+        ))
+        .unwrap_or_else(|_| translator::bridge_schema()),
+        Err(_) => translator::bridge_schema(),
+    };
+    if let Err(e) = publisher
+        .register_device_schema_json(&bridge_device_id, &bridge_schema)
+        .await
+    {
+        warn!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge schema");
+    }
+    if let Err(e) = publisher
+        .publish_availability(&bridge_device_id, true)
+        .await
+    {
+        error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
+    }
+}
+
+/// A quick, non-streaming action for the plugin's page.
+fn quick(
+    id: &str,
+    label: &str,
+    description: &str,
+    params: Option<serde_json::Value>,
+    role: plugin_sdk_rs::types::RequiresRole,
+) -> plugin_sdk_rs::types::Action {
+    plugin_sdk_rs::types::Action {
+        id: id.into(),
+        label: label.into(),
+        description: Some(description.into()),
+        params,
+        result: None,
+        stream: false,
+        cancelable: false,
+        concurrency: plugin_sdk_rs::types::Concurrency::default(),
+        item_key: None,
+        item_operations: None,
+        requires_role: role,
+        timeout_ms: Some(15_000),
+        danger: false,
+    }
 }
 
 /// Capability manifest for hc-hue. Plugin actions exposed to the admin
@@ -326,6 +392,39 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
         spec: "1".into(),
         plugin_id: String::new(), // SDK fills from configured plugin_id
         actions: vec![
+            quick(
+                "rooms",
+                "Rooms and zones",
+                "Every bridge's rooms and zones: how many lights and scenes each has, and the homeCore device for it when it is published as one.",
+                None,
+                RequiresRole::ReadOnly,
+            ),
+            quick(
+                "find_bridges",
+                "Look for bridges",
+                "Hue bridges on the network, and whether each is already added.",
+                None,
+                RequiresRole::Admin,
+            ),
+            quick(
+                "pair_start",
+                "Add a bridge",
+                "Start adding a bridge — by `bridge_id` from Look for bridges, or by `host` — then press its link button within 90 seconds. Returns at once; ask Pairing status to follow it.",
+                Some(serde_json::json!({
+                    "bridge_id": { "type": "string", "description": "From Look for bridges" },
+                    "host": { "type": "string", "description": "Its address, when it is not found by itself" },
+                    "name": { "type": "string" },
+                })),
+                RequiresRole::Admin,
+            ),
+            quick(
+                "pair_status",
+                "Pairing status",
+                "How adding a bridge is going: looking, waiting for the button (and how long is left), paired, failed or canceled.",
+                None,
+                RequiresRole::ReadOnly,
+            ),
+            quick("pair_cancel", "Stop adding a bridge", "Stop waiting for the link button.", None, RequiresRole::Admin),
             Action {
                 id: "refresh_devices".into(),
                 label: "Refresh devices".into(),

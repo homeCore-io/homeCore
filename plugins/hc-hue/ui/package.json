@@ -1,0 +1,18 @@
+{
+	"name": "hc-hue-ui",
+	"private": true,
+	"version": "0.0.0",
+	"description": "hc-hue's own screens: its plugin page, light, room and sensor panels, cards and the automation step, as web components the homeCore app loads.",
+	"type": "module",
+	"scripts": {
+		"build": "vite build",
+		"dev": "vite build --watch",
+		"test": "vitest run"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"svelte": "^5.57.2",
+		"vite": "^8.3.4",
+		"vitest": "^4.0.0"
+	}
+}

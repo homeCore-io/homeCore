@@ -9,9 +9,6 @@ use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
-use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
-};
 use plugin_sdk_rs::DevicePublisher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,444 +39,425 @@ pub async fn refresh_bridge_state(
     let target = api.target();
     let device_id = target.device_id();
 
-    match api.fetch_bridge_summary().await {
-        Ok(summary) => {
-            let state = translator::bridge_state(target, true, summary.clone());
-            publisher.publish_state(&device_id, &state).await?;
-            publisher.publish_availability(&device_id, true).await?;
-            registry.upsert_bridge(
-                device_id.clone(),
-                BridgeSnapshot {
-                    online: true,
-                    summary,
-                },
+    // Not paired yet: there is nothing to read but the bridge's public
+    // config, which says it is there and waiting for its button.
+    if !api.has_app_key() {
+        let summary = api.fetch_bridge_summary().await?;
+        let state = translator::bridge_state(target, true, summary.clone());
+        publisher.publish_state(&device_id, &state).await?;
+        publisher.publish_availability(&device_id, true).await?;
+        registry.upsert_bridge(
+            device_id,
+            BridgeSnapshot {
+                online: true,
+                summary,
+            },
+        );
+        return Ok(());
+    }
+
+    let resources = match api.fetch_all().await {
+        Ok(r) => r,
+        Err(e) => {
+            publisher.publish_availability(&device_id, false).await?;
+            publisher
+                .publish_state_partial(
+                    &device_id,
+                    &json!({ "online": false, "integration_state": "unreachable" }),
+                )
+                .await?;
+            return Err(e);
+        }
+    };
+
+    {
+        let summary = api.summary_from(&resources);
+        let mut state = translator::bridge_state(target, true, summary.clone());
+        let bridge_device = resources
+            .of("bridge")
+            .first()
+            .and_then(|b| resources.owner_device(b));
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("light_count".into(), json!(resources.count("light")));
+            obj.insert("scene_count".into(), json!(resources.count("scene")));
+            obj.insert("room_count".into(), json!(resources.count("room")));
+            obj.insert("zone_count".into(), json!(resources.count("zone")));
+            obj.insert(
+                "sensor_count".into(),
+                json!(resources
+                    .of("device")
+                    .iter()
+                    .filter(|d| {
+                        resources.service_of(d, "light").is_none()
+                            && resources.service_of(d, "bridge").is_none()
+                    })
+                    .count()),
             );
-            debug!(device_id, "Hue bridge state refreshed");
-
-            let lights = api.fetch_lights().await?;
-            let light_owner_to_device = build_light_owner_map(&lights);
-            let mut published_light_ids: HashSet<String> = HashSet::new();
-            for light in lights {
-                published_light_ids.insert(light.device_id.clone());
-                if registry.ensure_light(&light) {
-                    publisher
-                        .register_device_full(
-                            &light.device_id,
-                            &light.name,
-                            Some("light"),
-                            // The Hue room, so moving a light between rooms in
-                            // the Hue app moves it in homeCore too. Core keeps
-                            // this as the plugin-delivered area; a user's
-                            // `area_override` still wins.
-                            light.area.as_deref(),
-                            Some(translator::light_capabilities(&light)),
-                        )
-                        .await?;
-                    publisher.subscribe_commands(&light.device_id).await?;
-                    // Publish capability schema for the UI — the declared
-                    // controls, plus everything this light actually publishes
-                    // that the hand-written schema does not mention.
-                    let light_schema = crate::aux_schema::with_published(
-                        build_light_schema(),
-                        &translator::light_state(&light),
-                    );
-                    publisher
-                        .register_device_schema(&light.device_id, &light_schema)
-                        .await
-                        .ok();
-                    debug!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
+            if let Some(d) = bridge_device {
+                let p = crate::hue::resources::product_of(d);
+                if let Some(v) = p.model_id {
+                    obj.insert("model_id".into(), json!(v));
                 }
-
-                publisher
-                    .publish_availability(&light.device_id, true)
-                    .await?;
-                publisher
-                    .publish_state(&light.device_id, &translator::light_state(&light))
-                    .await?;
-            }
-            for stale_light_id in registry.prune_lights_not_in(&published_light_ids) {
-                publisher
-                    .unregister_device(publisher.plugin_id(), &stale_light_id)
-                    .await?;
-                debug!(device_id = %stale_light_id, "Unregistered stale Hue light");
-            }
-
-            if cfg.publish_grouped_lights || !cfg.publish_grouped_lights_for.is_empty() {
-                let groups = api.fetch_grouped_lights().await?;
-                let mut published_group_ids: HashSet<String> = HashSet::new();
-                for group in groups {
-                    if !should_publish_grouped_light(
-                        &group,
-                        cfg.publish_grouped_lights,
-                        &cfg.publish_grouped_lights_for,
-                        &cfg.skip_grouped_lights_for,
-                    ) {
-                        continue;
-                    }
-                    published_group_ids.insert(group.device_id.clone());
-
-                    if registry.ensure_group(&group) {
-                        publisher
-                            .register_device_full(
-                                &group.device_id,
-                                &group.name,
-                                Some("group"),
-                                group.area.as_deref(),
-                                Some(translator::grouped_light_capabilities()),
-                            )
-                            .await?;
-                        publisher.subscribe_commands(&group.device_id).await?;
-                        // Publish capability schema for the UI.
-                        let group_schema = build_group_schema();
-                        publisher
-                            .register_device_schema(&group.device_id, &group_schema)
-                            .await
-                            .ok();
-                        debug!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
-                    }
-
-                    publisher
-                        .publish_availability(&group.device_id, true)
-                        .await?;
-                    publisher
-                        .publish_state(&group.device_id, &translator::grouped_light_state(&group))
-                        .await?;
+                if let Some(v) = p.software_version {
+                    obj.insert("sw_version".into(), json!(v));
                 }
-                for stale_group_id in registry.prune_groups_not_in(&published_group_ids) {
-                    publisher
-                        .unregister_device(publisher.plugin_id(), &stale_group_id)
-                        .await?;
-                }
-            } else {
-                for stale_group_id in registry.prune_groups_not_in(&HashSet::new()) {
-                    publisher
-                        .unregister_device(publisher.plugin_id(), &stale_group_id)
-                        .await?;
-                }
-            }
-
-            let scenes = api.fetch_scenes().await?;
-            let mut published_scene_ids: HashSet<String> = HashSet::new();
-            for scene in scenes {
-                published_scene_ids.insert(scene.device_id.clone());
-                if registry.ensure_scene(&scene) {
-                    publisher
-                        .register_device_full(
-                            &scene.device_id,
-                            &scene.name,
-                            Some("scene"),
-                            scene.area.as_deref(),
-                            Some(translator::scene_capabilities()),
-                        )
-                        .await?;
-                    publisher.subscribe_commands(&scene.device_id).await?;
-                    // Scenes had capabilities but no schema, so a client had
-                    // nothing to render them from — no action to offer, and no
-                    // way to know the bridge reports which scene is applied.
-                    publisher
-                        .register_device_schema_json(
-                            &scene.device_id,
-                            &translator::scene_schema_for(&scene),
-                        )
-                        .await
-                        .ok();
-                    debug!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
-                } else if registry.scene_status_support_changed(&scene) {
-                    publisher
-                        .register_device_schema_json(
-                            &scene.device_id,
-                            &translator::scene_schema_for(&scene),
-                        )
-                        .await
-                        .ok();
-                    debug!(device_id = %scene.device_id,
-                        reports_status = scene.active.is_some(),
-                        "Hue scene status support changed; schema updated");
-                }
-
-                publisher
-                    .publish_availability(&scene.device_id, true)
-                    .await?;
-                publisher
-                    .publish_state(&scene.device_id, &translator::scene_state(&scene))
-                    .await?;
-            }
-            for stale_scene_id in registry.prune_scenes_not_in(&published_scene_ids) {
-                publisher
-                    .unregister_device(publisher.plugin_id(), &stale_scene_id)
-                    .await?;
-                debug!(device_id = %stale_scene_id, "Unregistered stale Hue scene");
-            }
-
-            let aux_devices = api.fetch_aux_devices().await?;
-            let primary_aux_owner_to_device = build_primary_aux_owner_map(&aux_devices);
-            let aux_registration_specs = build_aux_registration_specs(
-                &aux_devices,
-                &primary_aux_owner_to_device,
-                &light_owner_to_device,
-                cfg.compact_motion_facets,
-                cfg.publish_bridge_home,
-                cfg.publish_entertainment_configurations,
-            );
-            let mut aux_published_attrs: HashMap<String, serde_json::Map<String, Value>> =
-                HashMap::new();
-            let mut registered_publish_ids: HashSet<String> = HashSet::new();
-            let mut full_state_published_ids: HashSet<String> = HashSet::new();
-            let mut compacted_partial_patches: HashMap<String, serde_json::Map<String, Value>> =
-                HashMap::new();
-            let mut active_aux_raw_ids: HashSet<String> = HashSet::new();
-            let mut stale_publish_ids: HashSet<String> = HashSet::new();
-            for aux in aux_devices {
-                let publish_device_id = if cfg.compact_motion_facets {
-                    compact_publish_device_id(
-                        &aux,
-                        &primary_aux_owner_to_device,
-                        &light_owner_to_device,
-                    )
-                } else {
-                    aux.device_id.clone()
-                };
-
-                if should_skip_aux_device(
-                    &aux,
-                    &publish_device_id,
-                    cfg.publish_bridge_home,
-                    cfg.publish_entertainment_configurations,
-                ) {
-                    continue;
-                }
-                active_aux_raw_ids.insert(aux.device_id.clone());
-
-                let upsert = registry.upsert_aux(&aux, &publish_device_id);
-                let binding_changed = upsert.previous_publish_device_id.is_some();
-                if let Some(previous_publish_device_id) = upsert.previous_publish_device_id {
-                    stale_publish_ids.insert(previous_publish_device_id);
-                }
-
-                if (upsert.newly_seen || binding_changed)
-                    && registered_publish_ids.insert(publish_device_id.clone())
-                    && !registry.is_primary_device_id(&publish_device_id)
-                {
-                    let registration = aux_registration_specs.get(&publish_device_id);
-                    publisher
-                        .register_device_full(
-                            &publish_device_id,
-                            registration
-                                .map(|spec| spec.name.as_str())
-                                .unwrap_or(aux.name.as_str()),
-                            Some(
-                                registration
-                                    .map(|spec| spec.device_type.as_str())
-                                    .unwrap_or(aux_device_type(&aux.resource_type)),
-                            ),
-                            aux.area.as_deref(),
-                            registration
-                                .map(|spec| Value::Object(spec.capabilities.clone()))
-                                .or_else(|| Some(translator::aux_capabilities(&aux))),
-                        )
-                        .await?;
-                    debug!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
-                }
-
-                publisher
-                    .publish_availability(&publish_device_id, aux_is_available(&aux))
-                    .await?;
-
-                // Skip state publish for zigbee_connectivity compacted onto lights —
-                // connectivity_status is diagnostic noise that triggers a device_state_changed
-                // event on every refresh cycle.  Availability is already tracked separately.
-                if aux.resource_type == "zigbee_connectivity" && publish_device_id != aux.device_id
-                {
-                    continue;
-                }
-
-                let mut state = translator::aux_state(&aux);
-                apply_display_preferences(&mut state, &aux.resource_type, &cfg.display);
-
-                // What this device ends up reporting, however many Hue
-                // resources compacted onto it — the schema is derived from it
-                // once the loop has seen them all.
-                if let Some(obj) = state.as_object() {
-                    let entry = aux_published_attrs
-                        .entry(publish_device_id.clone())
-                        .or_default();
-                    for (k, v) in obj {
-                        entry.insert(k.clone(), v.clone());
-                    }
-                }
-
-                let compacted = cfg.compact_motion_facets && publish_device_id != aux.device_id;
-                if compacted {
-                    strip_aux_metadata(&mut state);
-                    if let Some(obj) = state.as_object() {
-                        compacted_partial_patches
-                            .entry(publish_device_id.clone())
-                            .or_default()
-                            .extend(obj.clone());
-                    }
-                } else if full_state_published_ids.insert(publish_device_id.clone()) {
-                    publisher.publish_state(&publish_device_id, &state).await?;
-                } else {
-                    strip_aux_metadata(&mut state);
-                    publisher
-                        .publish_state_partial(&publish_device_id, &state)
-                        .await?;
-                }
-            }
-
-            for (device_id, patch) in compacted_partial_patches {
-                if !patch.is_empty() {
-                    publisher
-                        .publish_state_partial(&device_id, &Value::Object(patch))
-                        .await?;
-                }
-            }
-
-            // Sensors never described themselves. A Hue motion sensor
-            // publishes motion, temperature, illuminance and battery, and a
-            // client had to infer every one of them and demote the battery by
-            // name. Lights, groups and scenes keep their own declared schemas —
-            // this is only for the devices that had none.
-            for (device_id, attrs) in &aux_published_attrs {
-                if registry.is_primary_device_id(device_id) || attrs.is_empty() {
-                    continue;
-                }
-                let mut names: Vec<String> = attrs.keys().cloned().collect();
-                names.sort();
-                if !registry.aux_schema_changed(device_id, &names) {
-                    continue;
-                }
-                let schema = crate::aux_schema::schema_for_state(attrs);
-                if let Err(e) = publisher.register_device_schema(device_id, &schema).await {
-                    warn!(device_id = %device_id, error = %e, "Failed to publish aux schema");
-                }
-            }
-
-            for removed in registry.prune_aux_not_in(&active_aux_raw_ids) {
-                stale_publish_ids.insert(removed.publish_device_id);
-            }
-
-            for stale_publish_id in stale_publish_ids {
-                if !registry.is_primary_device_id(&stale_publish_id)
-                    && !registry.is_aux_publish_device_id_referenced(&stale_publish_id)
-                {
-                    publisher
-                        .unregister_device(publisher.plugin_id(), &stale_publish_id)
-                        .await?;
+                if let Some(v) = resources.update_state(d) {
+                    obj.insert("update_state".into(), json!(v));
                 }
             }
         }
-        Err(e) => {
-            publisher.publish_availability(&device_id, false).await?;
-            warn!(device_id, error = %e, "Failed to refresh Hue bridge state");
+        publisher.publish_state(&device_id, &state).await?;
+        publisher.publish_availability(&device_id, true).await?;
+        registry.upsert_bridge(
+            device_id.clone(),
+            BridgeSnapshot {
+                online: true,
+                summary,
+            },
+        );
+        registry.set_bridge_update_state(
+            &device_id,
+            bridge_device.and_then(|d| resources.update_state(d)),
+        );
+        registry.set_rooms(&target.bridge_id, api.rooms(&resources));
+        registry.set_button_labels(crate::hue::api::button_labels(&resources));
+    }
+    debug!(device_id, "Hue bridge state refreshed");
+
+    {
+        let lights = api.lights(&resources);
+        let light_owner_to_device = build_light_owner_map(&lights);
+        let mut published_light_ids: HashSet<String> = HashSet::new();
+        for light in &lights {
+            published_light_ids.insert(light.device_id.clone());
+            if registry.ensure_light(light) {
+                publisher
+                    .register_device_full(
+                        &light.device_id,
+                        &light.name,
+                        Some("light"),
+                        // The Hue room, so moving a light between rooms in
+                        // the Hue app moves it in homeCore too. Core keeps
+                        // this as the plugin-delivered area; a user's
+                        // `area_override` still wins.
+                        light.area.as_deref(),
+                        Some(translator::light_capabilities(light)),
+                    )
+                    .await?;
+                publisher.subscribe_commands(&light.device_id).await?;
+                // What this light can do — its own range, colour only if
+                // it has colour — plus everything it publishes that the
+                // declaration does not mention.
+                let light_schema = crate::aux_schema::with_published(
+                    translator::light_schema(light),
+                    &translator::light_state(light),
+                );
+                let with = plugin_sdk_rs::device_actions::with_actions(
+                    &light_schema,
+                    translator::light_actions(light),
+                );
+                publisher
+                    .register_device_schema_json(&light.device_id, &with)
+                    .await
+                    .ok();
+                debug!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
+            }
+
+            publisher
+                .publish_state(&light.device_id, &translator::light_state(light))
+                .await?;
+            // A light the bridge cannot reach is not there, whatever its
+            // last state says: switched off at the wall, or out of range.
+            // After the state, which homeCore takes as a sign of life.
+            publisher
+                .publish_availability(&light.device_id, light.reachable.unwrap_or(true))
+                .await?;
+            registry
+                .set_alerts_if_changed(publisher, &light.device_id, crate::alerts::for_light(light))
+                .await;
+        }
+        for stale_light_id in registry.prune_lights_not_in(&target.bridge_id, &published_light_ids)
+        {
+            publisher
+                .unregister_device(publisher.plugin_id(), &stale_light_id)
+                .await?;
+            debug!(device_id = %stale_light_id, "Unregistered stale Hue light");
+        }
+
+        if cfg.publish_grouped_lights || !cfg.publish_grouped_lights_for.is_empty() {
+            let groups = api.grouped_lights(&resources);
+            let mut published_group_ids: HashSet<String> = HashSet::new();
+            for group in groups {
+                if !should_publish_grouped_light(
+                    &group,
+                    cfg.publish_grouped_lights,
+                    &cfg.publish_grouped_lights_for,
+                    &cfg.skip_grouped_lights_for,
+                ) {
+                    continue;
+                }
+                published_group_ids.insert(group.device_id.clone());
+
+                if registry.ensure_group(&group) {
+                    publisher
+                        .register_device_full(
+                            &group.device_id,
+                            &group.name,
+                            Some("group"),
+                            group.area.as_deref(),
+                            Some(translator::grouped_light_capabilities()),
+                        )
+                        .await?;
+                    publisher.subscribe_commands(&group.device_id).await?;
+                    publisher
+                        .register_device_schema_json(
+                            &group.device_id,
+                            &translator::group_schema(&group),
+                        )
+                        .await
+                        .ok();
+                    debug!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
+                }
+
+                publisher
+                    .publish_availability(&group.device_id, true)
+                    .await?;
+                publisher
+                    .publish_state(&group.device_id, &translator::grouped_light_state(&group))
+                    .await?;
+            }
+            for stale_group_id in
+                registry.prune_groups_not_in(&target.bridge_id, &published_group_ids)
+            {
+                publisher
+                    .unregister_device(publisher.plugin_id(), &stale_group_id)
+                    .await?;
+            }
+        } else {
+            for stale_group_id in registry.prune_groups_not_in(&target.bridge_id, &HashSet::new()) {
+                publisher
+                    .unregister_device(publisher.plugin_id(), &stale_group_id)
+                    .await?;
+            }
+        }
+
+        let scenes = api.scenes(&resources);
+        let mut published_scene_ids: HashSet<String> = HashSet::new();
+        for scene in scenes {
+            published_scene_ids.insert(scene.device_id.clone());
+            if registry.ensure_scene(&scene) {
+                publisher
+                    .register_device_full(
+                        &scene.device_id,
+                        &scene.name,
+                        Some("scene"),
+                        scene.area.as_deref(),
+                        Some(translator::scene_capabilities()),
+                    )
+                    .await?;
+                publisher.subscribe_commands(&scene.device_id).await?;
+                publisher
+                    .register_device_schema_json(
+                        &scene.device_id,
+                        &translator::scene_schema_for(&scene),
+                    )
+                    .await
+                    .ok();
+                debug!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
+            } else if registry.scene_status_support_changed(&scene) {
+                publisher
+                    .register_device_schema_json(
+                        &scene.device_id,
+                        &translator::scene_schema_for(&scene),
+                    )
+                    .await
+                    .ok();
+            }
+
+            publisher
+                .publish_availability(&scene.device_id, true)
+                .await?;
+            publisher
+                .publish_state(&scene.device_id, &translator::scene_state(&scene))
+                .await?;
+        }
+        for stale_scene_id in registry.prune_scenes_not_in(&target.bridge_id, &published_scene_ids)
+        {
+            publisher
+                .unregister_device(publisher.plugin_id(), &stale_scene_id)
+                .await?;
+            debug!(device_id = %stale_scene_id, "Unregistered stale Hue scene");
+        }
+
+        let aux_devices = api.aux_devices(&resources);
+        let primary_aux_owner_to_device = build_primary_aux_owner_map(&aux_devices);
+        let aux_registration_specs = build_aux_registration_specs(
+            &aux_devices,
+            &primary_aux_owner_to_device,
+            &light_owner_to_device,
+            cfg.compact_motion_facets,
+            cfg.publish_bridge_home,
+            cfg.publish_entertainment_configurations,
+        );
+        let mut aux_published_attrs: HashMap<String, serde_json::Map<String, Value>> =
+            HashMap::new();
+        let mut registered_publish_ids: HashSet<String> = HashSet::new();
+        let mut full_state_published_ids: HashSet<String> = HashSet::new();
+        let mut compacted_partial_patches: HashMap<String, serde_json::Map<String, Value>> =
+            HashMap::new();
+        let mut active_aux_raw_ids: HashSet<String> = HashSet::new();
+        let mut stale_publish_ids: HashSet<String> = HashSet::new();
+        for aux in aux_devices {
+            let publish_device_id = if cfg.compact_motion_facets {
+                compact_publish_device_id(
+                    &aux,
+                    &primary_aux_owner_to_device,
+                    &light_owner_to_device,
+                )
+            } else {
+                aux.device_id.clone()
+            };
+
+            if should_skip_aux_device(
+                &aux,
+                &publish_device_id,
+                cfg.publish_bridge_home,
+                cfg.publish_entertainment_configurations,
+            ) {
+                continue;
+            }
+            active_aux_raw_ids.insert(aux.device_id.clone());
+
+            let upsert = registry.upsert_aux(&aux, &publish_device_id);
+            let binding_changed = upsert.previous_publish_device_id.is_some();
+            if let Some(previous_publish_device_id) = upsert.previous_publish_device_id {
+                stale_publish_ids.insert(previous_publish_device_id);
+            }
+
+            if (upsert.newly_seen || binding_changed)
+                && registered_publish_ids.insert(publish_device_id.clone())
+                && !registry.is_primary_device_id(&publish_device_id)
+            {
+                let registration = aux_registration_specs.get(&publish_device_id);
+                publisher
+                    .register_device_full(
+                        &publish_device_id,
+                        registration
+                            .map(|spec| spec.name.as_str())
+                            .unwrap_or(aux.name.as_str()),
+                        Some(
+                            registration
+                                .map(|spec| spec.device_type.as_str())
+                                .unwrap_or(aux_device_type(&aux.resource_type)),
+                        ),
+                        aux.area.as_deref(),
+                        registration
+                            .map(|spec| Value::Object(spec.capabilities.clone()))
+                            .or_else(|| Some(translator::aux_capabilities(&aux))),
+                    )
+                    .await?;
+                debug!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
+            }
+
+            // A lamp's connectivity is its own availability, said with the
+            // lamp above; publishing "available" for the facet here undid it.
+            // Its state is diagnostic noise that would change the lamp on
+            // every resync, so nothing of it is published here.
+            if aux.resource_type == "zigbee_connectivity" && publish_device_id != aux.device_id {
+                continue;
+            }
+
+            publisher
+                .publish_availability(&publish_device_id, aux_is_available(&aux))
+                .await?;
+
+            let mut state = translator::aux_state(&aux);
+            apply_display_preferences(&mut state, &aux.resource_type, &cfg.display);
+
+            // What this device ends up reporting, however many Hue
+            // resources compacted onto it — the schema is derived from it
+            // once the loop has seen them all.
+            if let Some(obj) = state.as_object() {
+                let entry = aux_published_attrs
+                    .entry(publish_device_id.clone())
+                    .or_default();
+                for (k, v) in obj {
+                    entry.insert(k.clone(), v.clone());
+                }
+            }
+
+            let compacted = cfg.compact_motion_facets && publish_device_id != aux.device_id;
+            if compacted {
+                strip_aux_metadata(&mut state);
+                if let Some(obj) = state.as_object() {
+                    compacted_partial_patches
+                        .entry(publish_device_id.clone())
+                        .or_default()
+                        .extend(obj.clone());
+                }
+            } else if full_state_published_ids.insert(publish_device_id.clone()) {
+                publisher.publish_state(&publish_device_id, &state).await?;
+            } else {
+                strip_aux_metadata(&mut state);
+                publisher
+                    .publish_state_partial(&publish_device_id, &state)
+                    .await?;
+            }
+        }
+
+        for (device_id, patch) in compacted_partial_patches {
+            if !patch.is_empty() {
+                publisher
+                    .publish_state_partial(&device_id, &Value::Object(patch))
+                    .await?;
+            }
+        }
+
+        // Sensors never described themselves. A Hue motion sensor
+        // publishes motion, temperature, illuminance and battery, and a
+        // client had to infer every one of them and demote the battery by
+        // name. Lights, groups and scenes keep their own declared schemas —
+        // this is only for the devices that had none.
+        for (device_id, attrs) in &aux_published_attrs {
+            if registry.is_primary_device_id(device_id) || attrs.is_empty() {
+                continue;
+            }
+            let mut names: Vec<String> = attrs.keys().cloned().collect();
+            names.sort();
+            if !registry.aux_schema_changed(device_id, &names) {
+                continue;
+            }
+            let schema = crate::aux_schema::schema_for_state(attrs);
+            if let Err(e) = publisher.register_device_schema(device_id, &schema).await {
+                warn!(device_id = %device_id, error = %e, "Failed to publish aux schema");
+            }
+        }
+
+        for (device_id, attrs) in &aux_published_attrs {
+            if registry.is_primary_device_id(device_id) {
+                continue;
+            }
+            registry
+                .set_alerts_if_changed(publisher, device_id, crate::alerts::for_accessory(attrs))
+                .await;
+        }
+
+        for removed in registry.prune_aux_not_in(&target.bridge_id, &active_aux_raw_ids) {
+            stale_publish_ids.insert(removed.publish_device_id);
+        }
+
+        for stale_publish_id in stale_publish_ids {
+            if !registry.is_primary_device_id(&stale_publish_id)
+                && !registry.is_aux_publish_device_id_referenced(&stale_publish_id)
+            {
+                publisher
+                    .unregister_device(publisher.plugin_id(), &stale_publish_id)
+                    .await?;
+            }
         }
     }
 
     Ok(())
-}
-
-fn make_attr(
-    kind: AttributeKind,
-    writable: bool,
-    display_name: &str,
-    unit: Option<&str>,
-    min: Option<f64>,
-    max: Option<f64>,
-    step: Option<f64>,
-) -> AttributeSchema {
-    AttributeSchema {
-        kind,
-        writable,
-        display_name: Some(display_name.to_string()),
-        unit: unit.map(str::to_string),
-        min,
-        max,
-        step,
-        ..Default::default()
-    }
-}
-
-fn build_light_schema() -> DeviceSchema {
-    let mut attrs = HashMap::new();
-    attrs.insert(
-        "on".into(),
-        // Both directions named. A boolean attribute is two events, and a
-        // client given only "on" needs a Not gate to catch a light going off.
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
-            BoolStates {
-                when_true: StateLabel::verbed("on", "turns on"),
-                when_false: StateLabel::verbed("off", "turns off"),
-            },
-        ),
-    );
-    attrs.insert(
-        "brightness_pct".into(),
-        make_attr(
-            AttributeKind::Integer,
-            true,
-            "Brightness",
-            Some("%"),
-            Some(1.0),
-            Some(100.0),
-            Some(1.0),
-        ),
-    );
-    attrs.insert(
-        "color_temp".into(),
-        make_attr(
-            AttributeKind::ColorTemp,
-            true,
-            "Colour Temperature",
-            Some("K"),
-            Some(2000.0),
-            Some(6535.0),
-            Some(100.0),
-        ),
-    );
-    attrs.insert(
-        "color_xy".into(),
-        AttributeSchema {
-            kind: AttributeKind::ColorXy,
-            writable: true,
-            display_name: Some("Colour".into()),
-            ..Default::default()
-        },
-    );
-    DeviceSchema {
-        attributes: attrs,
-        ..Default::default()
-    }
-}
-
-fn build_group_schema() -> DeviceSchema {
-    let mut attrs = HashMap::new();
-    attrs.insert(
-        "on".into(),
-        // Both directions named. A boolean attribute is two events, and a
-        // client given only "on" needs a Not gate to catch a light going off.
-        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None).with_states(
-            BoolStates {
-                when_true: StateLabel::verbed("on", "turns on"),
-                when_false: StateLabel::verbed("off", "turns off"),
-            },
-        ),
-    );
-    attrs.insert(
-        "brightness_pct".into(),
-        make_attr(
-            AttributeKind::Integer,
-            true,
-            "Brightness",
-            Some("%"),
-            Some(1.0),
-            Some(100.0),
-            Some(1.0),
-        ),
-    );
-    DeviceSchema {
-        attributes: attrs,
-        ..Default::default()
-    }
 }
 
 /// Map a Hue auxiliary resource type to the canonical homeCore device
@@ -594,11 +572,21 @@ async fn apply_event_item(
     let mut saw_known_type = false;
     let mut saw_missing_identity = false;
     let mut unknown_resource_type: Option<String> = None;
+    // A battery or a lamp's reach changed: its alerts come from the whole
+    // device, which a refresh reads in one request.
+    let mut alerts_stale = false;
     let Some(data_items) = event.get("data").and_then(|v| v.as_array()) else {
         return Ok(EventApplyOutcome::Ignored {
             reason: "missing_data".to_string(),
         });
     };
+    // Something added or removed in the Hue app: a new lamp, a deleted scene.
+    // A patch cannot register a device, so read the bridge — one request now.
+    if let Some(kind @ ("add" | "delete")) = event.get("type").and_then(|v| v.as_str()) {
+        return Ok(EventApplyOutcome::NeedsRefresh {
+            reason: format!("resource_{kind}"),
+        });
+    }
 
     for item in data_items {
         let Some(resource_type) = item.get("type").and_then(|v| v.as_str()) else {
@@ -644,6 +632,29 @@ async fn apply_event_item(
                             json!(crate::translator::kelvin_from_mirek(mirek as u16)),
                         );
                     }
+                    // What is showing now: a temperature set says so with a
+                    // valid mirek; a colour set invalidates it.
+                    let mirek_valid = item
+                        .get("color_temperature")
+                        .and_then(|ct| ct.get("mirek_valid"))
+                        .and_then(|v| v.as_bool());
+                    match mirek_valid {
+                        Some(true) => {
+                            patch.insert("color_mode".to_string(), json!("color_temp"));
+                        }
+                        Some(false) if item.get("color").is_some() => {
+                            patch.insert("color_mode".to_string(), json!("color"));
+                        }
+                        _ => {}
+                    }
+                    if item
+                        .get("gradient")
+                        .and_then(|g| g.get("points"))
+                        .and_then(|p| p.as_array())
+                        .is_some_and(|p| p.len() > 1)
+                    {
+                        patch.insert("color_mode".to_string(), json!("gradient"));
+                    }
                     if let Some((x, y)) =
                         item.get("color").and_then(|c| c.get("xy")).and_then(|xy| {
                             let x = xy.get("x")?.as_f64()?;
@@ -654,8 +665,11 @@ async fn apply_event_item(
                         patch.insert("color_xy".to_string(), json!({ "x": x, "y": y }));
                     }
                     if let Some(effect) = item
-                        .get("effects")
-                        .and_then(|e| e.get("effect"))
+                        .get("effects_v2")
+                        .and_then(|e| e.get("status"))
+                        .and_then(|s| s.get("effect"))
+                        .or_else(|| item.get("effects").and_then(|e| e.get("status")))
+                        .or_else(|| item.get("effects").and_then(|e| e.get("effect")))
                         .and_then(|v| v.as_str())
                     {
                         patch.insert("effect".to_string(), json!(effect));
@@ -742,14 +756,16 @@ async fn apply_event_item(
                     // new one to "static", and the bridge emits both events, so
                     // this stays in sync even when the change came from the Hue
                     // app rather than homeCore.
-                    if let Some(active) = item
+                    if let Some(status) = item
                         .get("status")
                         .and_then(|s| s.get("active"))
                         .and_then(|v| v.as_str())
-                        .map(|s| s != "inactive")
                     {
                         publisher
-                            .publish_state_partial(&device_id, &json!({ "active": active }))
+                            .publish_state_partial(
+                                &device_id,
+                                &json!({ "active": status != "inactive", "status": status }),
+                            )
                             .await?;
                         applied = true;
                     }
@@ -883,6 +899,12 @@ async fn apply_event_item(
                         applied = true;
                     }
                 }
+                // Its alert follows from the whole device; read it again.
+                alerts_stale = true;
+            }
+            "device_software_update" => {
+                saw_known_type = true;
+                alerts_stale = true;
             }
             "zigbee_connectivity" => {
                 saw_known_type = true;
@@ -890,15 +912,21 @@ async fn apply_event_item(
                 {
                     applied = true;
                     if let Some(status) = item.get("status").and_then(|v| v.as_str()) {
-                        // Only publish on actual connectivity changes (not keep-alives).
-                        // "connected" is the normal state — only publish disconnects or
-                        // transitions back to connected after a disconnect.
-                        if status != "connected" {
-                            let patch = json!({"connectivity_status": status});
-                            publisher.publish_state_partial(&device_id, &patch).await?;
+                        // A lamp the bridge cannot reach is not there.
+                        publisher
+                            .publish_availability(&device_id, status == "connected")
+                            .await?;
+                        if !registry.is_primary_device_id(&device_id) {
+                            publisher
+                                .publish_state_partial(
+                                    &device_id,
+                                    &json!({"connectivity_status": status}),
+                                )
+                                .await?;
                         }
                     }
                 }
+                alerts_stale = true;
             }
             "button" => {
                 saw_known_type = true;
@@ -908,22 +936,35 @@ async fn apply_event_item(
                     let mut patch = serde_json::Map::new();
                     let mut button_event_value: Option<String> = None;
 
-                    if let Some(v) = item
-                        .get("button_report")
-                        .and_then(|r| r.get("event"))
-                        .and_then(|v| v.as_str())
-                    {
+                    let report = item
+                        .get("button")
+                        .and_then(|b| b.get("button_report"))
+                        .or_else(|| item.get("button_report"));
+                    if let Some(v) = report.and_then(|r| r.get("event")).and_then(|v| v.as_str()) {
                         patch.insert("button_event".to_string(), json!(v));
                         button_event_value = Some(v.to_string());
+                        // Which button, and how: "Brighter held".
+                        if let (Some(label), Some(word)) =
+                            (registry.button_label(rid), crate::hue::api::press_word(v))
+                        {
+                            patch.insert("last_button".to_string(), json!(label));
+                            patch
+                                .insert("last_press".to_string(), json!(format!("{label} {word}")));
+                        }
                     }
-                    if let Some(v) = item
-                        .get("button_report")
+                    if let Some(v) = report
                         .and_then(|r| r.get("updated"))
                         .and_then(|v| v.as_str())
                     {
                         patch.insert("button_updated".to_string(), json!(v));
+                        patch.insert("last_pressed_at".to_string(), json!(v));
                     }
-                    if let Some(v) = item.get("repeat_interval").and_then(|v| v.as_u64()) {
+                    if let Some(v) = item
+                        .get("button")
+                        .and_then(|b| b.get("repeat_interval"))
+                        .or_else(|| item.get("repeat_interval"))
+                        .and_then(|v| v.as_u64())
+                    {
                         patch.insert("button_repeat_interval_ms".to_string(), json!(v));
                     }
 
@@ -952,19 +993,20 @@ async fn apply_event_item(
                 {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    let action = item
-                        .get("rotary_report")
+                    let report = item
+                        .get("relative_rotary")
+                        .and_then(|r| r.get("rotary_report").or_else(|| r.get("last_event")))
+                        .or_else(|| item.get("rotary_report"));
+                    let action = report
                         .and_then(|r| r.get("action"))
                         .and_then(|v| v.as_str())
                         .map(ToString::to_string);
-                    let direction = item
-                        .get("rotary_report")
+                    let direction = report
                         .and_then(|r| r.get("rotation"))
                         .and_then(|r| r.get("direction"))
                         .and_then(|v| v.as_str())
                         .map(ToString::to_string);
-                    let steps = item
-                        .get("rotary_report")
+                    let steps = report
                         .and_then(|r| r.get("rotation"))
                         .and_then(|r| r.get("steps"))
                         .and_then(|v| v.as_i64());
@@ -978,8 +1020,7 @@ async fn apply_event_item(
                     if let Some(v) = steps {
                         patch.insert("rotary_steps".to_string(), json!(v));
                     }
-                    if let Some(v) = item
-                        .get("rotary_report")
+                    if let Some(v) = report
                         .and_then(|r| r.get("updated"))
                         .and_then(|v| v.as_str())
                     {
@@ -1016,10 +1057,16 @@ async fn apply_event_item(
                     let mut active_value: Option<bool> = None;
                     let mut status_value: Option<String> = None;
                     let mut type_value: Option<String> = None;
+                    // CLIP v2 says `status: "active" | "inactive"`; older
+                    // firmware said `status: {active: bool}`.
                     if let Some(v) = item
                         .get("status")
-                        .and_then(|s| s.get("active"))
-                        .and_then(|v| v.as_bool())
+                        .and_then(|s| s.as_str().map(|s| s == "active"))
+                        .or_else(|| {
+                            item.get("status")
+                                .and_then(|s| s.get("active"))
+                                .and_then(|v| v.as_bool())
+                        })
                     {
                         active_value = Some(v);
                         patch.insert("entertainment_active".to_string(), json!(v));
@@ -1116,7 +1163,11 @@ async fn apply_event_item(
         }
     }
 
-    if applied {
+    if alerts_stale {
+        Ok(EventApplyOutcome::NeedsRefresh {
+            reason: "alerts".to_string(),
+        })
+    } else if applied {
         Ok(EventApplyOutcome::Applied)
     } else if saw_known_type {
         Ok(EventApplyOutcome::Ignored {
@@ -1591,9 +1642,14 @@ mod tests {
     /// has no second name.
     #[test]
     fn every_boolean_names_both_of_its_states() {
+        let light = crate::hue::models::HueLight::sample();
+        let group: DeviceSchema = serde_json::from_value(crate::translator::group_schema(
+            &crate::hue::models::HueGroupedLight::sample(),
+        ))
+        .unwrap();
         let schemas = [
-            ("light", build_light_schema()),
-            ("group", build_group_schema()),
+            ("light", crate::translator::light_schema(&light)),
+            ("group", group),
         ];
         for (label, schema) in schemas {
             for (name, attr) in &schema.attributes {
@@ -1617,6 +1673,7 @@ mod tests {
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use crate::hue::models::HueAuxDevice;
     use crate::hue::registry::HueRegistry;
+    use plugin_sdk_rs::types::schema::{AttributeKind, DeviceSchema};
     use plugin_sdk_rs::DevicePublisher;
     use serde_json::json;
 
@@ -1945,6 +2002,10 @@ mod tests {
             group_kind: Some("room".to_string()),
             on: Some(true),
             brightness_pct: Some(50.0),
+            owner_rid: None,
+            light_ids: vec![],
+            supports_color: false,
+            supports_color_temp: false,
         };
 
         assert!(should_publish_grouped_light(
