@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.84"
+  version: "0.1.85"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -2674,7 +2674,18 @@ paths:
           or a level at or under `[battery].threshold_pct`, clearing once it
           is back above the recover band), and a device offline for five
           minutes;
-        - **time rules** (`/alert-rules`).
+        - **time rules** (`/alert-rules`);
+        - **plugins**, about their own devices or themselves: a plugin declares
+          the kinds it can raise on its manifest (`alert_kinds`, listed at
+          `GET /alerts/kinds`) and publishes, retained on
+          `homecore/devices/{id}/alerts` (or `homecore/plugins/{id}/alerts`
+          for itself), the JSON array of those true now — an empty array
+          clears them. A plugin speaks only for devices it registered, never
+          raises `critical` (capped at `error`), and a kind that is off —
+          turned off, or off by default and never turned on — raises nothing.
+          Such an alert has `kind: plugin`, its `plugin_id` and `topic`, and
+          may carry a `key` (what it is about, e.g. a version) and an
+          `action`, its button (`POST /alerts/{id}/press`).
 
         Alerts covered by an ignore (`/alert-ignores`) are left out — an alert
         that becomes ignored clears. An acknowledged alert carries
@@ -2683,7 +2694,9 @@ paths:
 
         New alerts are sent to a time rule's `notify` channel, or for wet,
         smoke, jammed and offline to `[alerts] notify_channel` (a low battery
-        is `[battery] notify_channel`'s) — not on homeCore's first look after
+        is `[battery] notify_channel`'s), or for a plugin's to the channel
+        its kind is set to send to (`PUT /alerts/kinds/{plugin_id}/{topic}`),
+        and nowhere otherwise — not on homeCore's first look after
         it starts, which would resend everything already true.
 
         Needs `devices:read`. Changes are announced as `alert_raised` (also
@@ -2729,6 +2742,115 @@ paths:
                 $ref: "#/components/schemas/Alert"
         "404":
           description: No such alert is active — it may have cleared
+
+  /alerts/{id}/press:
+    post:
+      operationId: pressAlert
+      summary: Press an alert's button
+      description: |
+        Runs the plugin alert's `action`: a device action (`target: device`,
+        the default) is sent to the alert's device as `{action, ...params}`,
+        like any command; a plugin action (`target: plugin`) runs as
+        `POST /plugins/{id}/command` would, and needs `plugins:write` besides.
+        Accepted, not finished — the alert clears when the plugin says the
+        condition has ended. Needs `devices:command`. Audited as
+        `alert.pressed`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The alert's id, e.g. `plugin:plugin.wled:firmware_update:wled_1:17.0.0`
+      responses:
+        "202":
+          description: Sent to the device
+        "200":
+          description: The plugin action's reply, as `POST /plugins/{id}/command` gives it
+        "403":
+          description: A plugin action, and no `plugins:write`
+        "404":
+          description: No such alert is active — it may have cleared
+        "409":
+          description: The alert has no button
+
+  /alerts/kinds:
+    get:
+      operationId: listAlertKinds
+      summary: The kinds of alert plugins can raise
+      description: |
+        Every kind a plugin declared on its manifest, with what the house
+        decided about it: `enabled` is the setting, else the plugin's
+        `default_on`; `notify` the channel it is sent to, if any. Needs
+        `devices:read`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Declared kinds
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlertKindSetting"
+
+  /alerts/kinds/{plugin_id}/{topic}:
+    put:
+      operationId: putAlertKind
+      summary: Turn a kind of plugin alert on or off, and choose where it's sent
+      description: |
+        `enabled` and `notify` left out (or null) are the plugin's defaults;
+        both left out removes the setting. Takes effect at once: alerts of a
+        kind turned off clear. Needs `automations:write`. Audited as
+        `alert_kind.updated`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: plugin_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: topic
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: [boolean, "null"]
+                notify:
+                  type: [string, "null"]
+                  description: A notification channel, `all` for every one
+      responses:
+        "200":
+          description: The setting as saved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plugin_id, topic]
+                properties:
+                  plugin_id:
+                    type: string
+                  topic:
+                    type: string
+                  enabled:
+                    type: boolean
+                  notify:
+                    type: string
 
   /alert-ignores:
     get:
@@ -2937,11 +3059,14 @@ paths:
         `plugin_heartbeat`, `plugin_status_changed`, `plugin_capabilities`,
         `timer_state_changed`, `mode_changed`, `rule_evaluation_failed`,
         `action_failed`, `mqtt_message`, `system_alert`, `custom`,
-        `alert_raised`, `alert_cleared`
+        `alert_raised`, `alert_cleared`, `alert_acknowledged`
 
         `alert_raised` carries the whole `Alert` — sent when one is raised and
-        again whenever what it says changes; `alert_cleared` names the
-        `alert_id` and `device_id` of one whose condition ended. Applied over
+        again whenever what it says changes, then with `update: true`;
+        `alert_cleared` names the `alert_id` and `device_id` of one whose
+        condition ended, and carries the `alert` as it was;
+        `alert_acknowledged` the `alert` someone marked seen. What plugins
+        report (`plugin_alerts`) is sent only to a client that filters for it. Applied over
         the snapshot's `alerts`, they keep a client's list exact.
 
         `device_schema_changed` reports that a device's *declaration* changed —
@@ -5284,6 +5409,45 @@ paths:
   # ---------------------------------------------------------------------------
   # Plugins — capabilities, management protocol, config, lifecycle
   # ---------------------------------------------------------------------------
+  /plugins/{id}/query:
+    post:
+      operationId: queryPlugin
+      summary: Run a plugin action that only reads
+      description: |
+        Like `POST /plugins/{id}/command`, for an action the plugin's manifest
+        declares `requires_role: read_only` — one that changes nothing, such
+        as a WLED controller's effect catalogue. Needs only `devices:read`,
+        so any screen that shows a device may ask. An action the manifest
+        doesn't declare read-only (or doesn't declare at all) is refused:
+        this path never runs anything else.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+              additionalProperties: true
+      responses:
+        "200":
+          description: The plugin's reply, verbatim
+        "403":
+          description: Not a read-only action of this plugin
+        "504":
+          description: The plugin didn't answer in time
+
   /plugins/{id}/capabilities:
     get:
       operationId: getPluginCapabilities
@@ -9570,10 +9734,10 @@ components:
       properties:
         id:
           type: string
-          description: Stable while the condition lasts — `wet:{device}`, `rule:{rule}:{device}`.
+          description: Stable while the condition lasts — `wet:{device}`, `rule:{rule}:{device}`, `plugin:{plugin}:{topic}:{device}[:{key}]`.
         kind:
           type: string
-          enum: [wet, smoke, offline, jammed, low_battery, rule]
+          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
         device_id:
           type: string
         rule_id:
@@ -9588,11 +9752,41 @@ components:
           example: Open after 22:00
         severity:
           type: string
-          enum: [warning, critical]
+          enum: [info, warning, error, critical]
+          description: Time rules raise `warning` or `critical`; plugins `info`, `warning` or `error`.
         raised_at:
           type: string
           format: date-time
           description: When the condition began, as near as homeCore knows.
+        plugin_id:
+          type: string
+          description: A plugin's alert — the plugin.
+        topic:
+          type: string
+          description: A plugin's alert — which of its declared kinds, e.g. `firmware_update`.
+        key:
+          type: string
+          description: A plugin's alert — what it is about within its kind, e.g. `17.0.0`.
+        action:
+          type: object
+          required: [label, id]
+          description: A plugin's alert — its button (`POST /alerts/{id}/press`).
+          properties:
+            label:
+              type: string
+              example: Update…
+            id:
+              type: string
+              description: The device action (or plugin action) to run.
+            target:
+              type: string
+              enum: [device, plugin]
+              default: device
+            params:
+              type: object
+            confirm:
+              type: boolean
+              description: Ask before running it.
         acknowledged:
           type: object
           required: [by, at]
@@ -9605,16 +9799,43 @@ components:
               type: string
               format: date-time
 
+    AlertKindSetting:
+      type: object
+      required: [plugin_id, topic, label, severity, default_on, enabled]
+      properties:
+        plugin_id:
+          type: string
+        topic:
+          type: string
+          example: firmware_update
+        label:
+          type: string
+          example: Firmware update available
+        description:
+          type: [string, "null"]
+        severity:
+          type: string
+          enum: [info, warning, error]
+        default_on:
+          type: boolean
+          description: Shown unless turned off (true), or only once turned on (false).
+        enabled:
+          type: boolean
+          description: As the house has it now.
+        notify:
+          type: [string, "null"]
+          description: The channel new ones are sent to; none when null.
+
     AlertIgnore:
       type: object
-      description: Alerts not to show. At least one of `kind`, `device_id`, `rule_id`.
+      description: Alerts not to show. At least one of `kind`, `device_id`, `rule_id`, `plugin_id`; `topic` and `key` need `plugin_id`. A plugin alert's `key` with its `topic` is "skip this one".
       properties:
         id:
           type: string
           readOnly: true
         kind:
           type: string
-          enum: [wet, smoke, offline, jammed, low_battery, rule]
+          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
           description: Only this kind; every kind when left out.
         device_id:
           type: string
@@ -9622,6 +9843,15 @@ components:
         rule_id:
           type: string
           description: Only this time rule's alerts.
+        plugin_id:
+          type: string
+          description: Only this plugin's alerts.
+        topic:
+          type: string
+          description: Only this kind of the plugin's alerts.
+        key:
+          type: string
+          description: Only the plugin alert about this, e.g. a version.
         until:
           type: string
           format: date-time
@@ -10087,8 +10317,9 @@ components:
         | `plugin_registered` | `plugin_id` |
         | `plugin_offline` | `plugin_id` |
         | `system_alert` | `severity`, `message` |
-        | `alert_raised` | `alert` (an `Alert`) |
-        | `alert_cleared` | `alert_id`, `device_id` |
+        | `alert_raised` | `alert` (an `Alert`), `update` |
+        | `alert_cleared` | `alert_id`, `device_id`, `alert` |
+        | `alert_acknowledged` | `alert` |
         | `custom` | `event_type`, `payload` |
       properties:
         type:

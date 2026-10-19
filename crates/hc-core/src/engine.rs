@@ -162,6 +162,8 @@ pub struct RuleEngine {
     drain_timeout_secs: u64,
     /// Shared calendar store for `Condition::CalendarActive`.
     calendars: Option<CalendarHandle>,
+    /// The active alerts, for the alert checks and steps.
+    alerts: Option<crate::alerts::AlertsHandle>,
     /// Per-script compiled Rhai ASTs, keyed by script text. Populated on first
     /// use and retained for the lifetime of the engine. Stale entries are
     /// harmless — they're simply never referenced again after a rule reload.
@@ -206,6 +208,7 @@ impl RuleEngine {
             rule_in_flight: Arc::new(DashMap::new()),
             drain_timeout_secs: 10,
             calendars: None,
+            alerts: None,
             script_cache: Arc::new(DashMap::new()),
         }
     }
@@ -234,6 +237,12 @@ impl RuleEngine {
     /// Attach a calendar handle for `Condition::CalendarActive` evaluation.
     pub fn with_calendars(mut self, handle: CalendarHandle) -> Self {
         self.calendars = Some(handle);
+        self
+    }
+
+    /// Read the active alerts from `handle`, for the alert checks and steps.
+    pub fn with_alerts(mut self, handle: crate::alerts::AlertsHandle) -> Self {
+        self.alerts = Some(handle);
         self
     }
 
@@ -502,7 +511,19 @@ impl RuleEngine {
                             rules_snapshot.iter().find(|r| r.id == rule_id && r.enabled)
                         {
                             debug!(rule_name = %rule.name, rule_id = %rule.id, "rule.trigger: scheduler_tick matched");
-                            let _ = self.fire_rule(rule, TriggerContext::default()).await?;
+                            // An alert that has lasted long enough rides along.
+                            let tctx = match payload
+                                .get("alert")
+                                .and_then(|a| serde_json::from_value(a.clone()).ok())
+                            {
+                                Some(alert) => alert_trigger_ctx(
+                                    &alert,
+                                    "alert_active_for",
+                                    rule.trigger_label.clone(),
+                                ),
+                                None => TriggerContext::default(),
+                            };
+                            let _ = self.fire_rule(rule, tctx).await?;
                         }
                     }
                 }
@@ -909,7 +930,8 @@ impl RuleEngine {
 
         let eval_start = Instant::now();
         let condition_traces = if checks {
-            self.evaluate_conditions(rule, &snapshot).await?
+            self.evaluate_conditions(rule, &snapshot, trigger_alert_id(&trigger_ctx).as_deref())
+                .await?
         } else {
             Vec::new()
         };
@@ -1021,7 +1043,9 @@ impl RuleEngine {
             exit_flag: Arc::new(AtomicBool::new(false)),
             trace: Some(Arc::clone(&action_trace_buf)),
             correlation_id: Some(firing_correlation_id.clone()),
-            judge: Some(self.judge_for(rule)),
+            judge: Some(self.judge_for(rule, trigger_alert_id(&trigger_ctx))),
+            alerts: self.alerts.clone(),
+            current_alert: Default::default(),
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
@@ -1084,6 +1108,7 @@ impl RuleEngine {
         &self,
         rule: &Rule,
         snapshot: &Arc<HashMap<String, JsonValue>>,
+        trig: Option<&str>,
     ) -> Result<Vec<ConditionTrace>> {
         if rule.conditions.is_empty() {
             debug!(rule_name = %rule.name, "rule.conditions: none — auto-pass");
@@ -1095,7 +1120,7 @@ impl RuleEngine {
         let mut traces = Vec::with_capacity(rule.conditions.len());
         for (i, cond) in rule.conditions.iter().enumerate() {
             let (passed, trace) = self
-                .evaluate_one(rule, i, rule.conditions.len(), cond, snapshot)
+                .evaluate_one(rule, i, rule.conditions.len(), cond, snapshot, trig)
                 .await?;
             traces.push(trace);
             if !passed {
@@ -1112,14 +1137,14 @@ impl RuleEngine {
     /// A judge for this rule's if/otherwise checks: any check, decided as
     /// the rule's own conditions are — calendars, hub values, private
     /// booleans, time since a change, who changed it last.
-    fn judge_for(&self, rule: &Rule) -> crate::executor::Judge {
+    fn judge_for(&self, rule: &Rule, trig: Option<String>) -> crate::executor::Judge {
         let engine = self.clone();
         let rule = rule.clone();
         Arc::new(move |cond, snapshot| {
-            let (engine, rule) = (engine.clone(), rule.clone());
+            let (engine, rule, trig) = (engine.clone(), rule.clone(), trig.clone());
             Box::pin(async move {
                 engine
-                    .evaluate_one(&rule, 0, 1, &cond, &snapshot)
+                    .evaluate_one(&rule, 0, 1, &cond, &snapshot, trig.as_deref())
                     .await
                     .map(|(passed, _)| passed)
             })
@@ -1133,10 +1158,22 @@ impl RuleEngine {
         total: usize,
         condition: &Condition,
         snapshot: &Arc<HashMap<String, JsonValue>>,
+        trig: Option<&str>,
     ) -> Result<(bool, ConditionTrace)> {
         let cond_label = format!("{}/{}", idx + 1, total);
 
         match condition {
+            Condition::AlertActive { .. }
+            | Condition::NoAlertActive { .. }
+            | Condition::TriggerAlertActive => {
+                let active = self.alerts.as_ref().map(|a| a.list()).unwrap_or_default();
+                let (passed, trace) = alert_check(condition, &active, trig);
+                debug!(
+                    rule_name = %rule.name, cond = %cond_label, passed,
+                    reason = %trace.reason, "rule.condition: alerts"
+                );
+                Ok((passed, trace))
+            }
             Condition::DeviceState {
                 device_id,
                 attribute,
@@ -1288,7 +1325,8 @@ impl RuleEngine {
 
             Condition::Not { condition } => {
                 let (inner, _) =
-                    Box::pin(self.evaluate_one(rule, idx, total, condition, snapshot)).await?;
+                    Box::pin(self.evaluate_one(rule, idx, total, condition, snapshot, trig))
+                        .await?;
                 let result = !inner;
                 debug!(
                     rule_name = %rule.name, cond = %cond_label,
@@ -1314,7 +1352,8 @@ impl RuleEngine {
                 let mut all_passed = true;
                 for (i, c) in conditions.iter().enumerate() {
                     let (passed, _) =
-                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot)).await?;
+                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot, trig))
+                            .await?;
                     if !passed {
                         all_passed = false;
                         debug!(rule_name = %rule.name, "rule.condition: And — short-circuit false at {}", i);
@@ -1342,7 +1381,8 @@ impl RuleEngine {
                 let mut any_passed = false;
                 for (i, c) in conditions.iter().enumerate() {
                     let (passed, _) =
-                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot)).await?;
+                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot, trig))
+                            .await?;
                     if passed {
                         any_passed = true;
                         debug!(rule_name = %rule.name, "rule.condition: Or — short-circuit true at {}", i);
@@ -1370,7 +1410,8 @@ impl RuleEngine {
                 let mut count = 0usize;
                 for (i, c) in conditions.iter().enumerate() {
                     let (passed, _) =
-                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot)).await?;
+                        Box::pin(self.evaluate_one(rule, i, conditions.len(), c, snapshot, trig))
+                            .await?;
                     if passed {
                         count += 1;
                     }
@@ -1739,6 +1780,108 @@ fn extract_trigger_ctx(
     tctx
 }
 
+/// The id of the alert that started a firing, if one did.
+pub(crate) fn trigger_alert_id(tctx: &TriggerContext) -> Option<String> {
+    tctx.extra
+        .as_ref()?
+        .get("alert")?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// A firing started by an alert: the alert rides in `extra.alert`, for the
+/// alert steps and `{alert.*}` in messages.
+fn alert_trigger_ctx(
+    alert: &hc_types::alert::Alert,
+    event_type: &str,
+    label: Option<String>,
+) -> TriggerContext {
+    TriggerContext {
+        device_id: Some(alert.device_id.clone()),
+        event_type: Some(event_type.into()),
+        extra: Some(serde_json::json!({ "alert": alert })),
+        trigger_label: label,
+        ..Default::default()
+    }
+}
+
+/// The alert checks, judged against the active alerts. `trig` is the id of
+/// the alert that started the rule, for `TriggerAlertActive`.
+pub fn alert_check(
+    cond: &Condition,
+    active: &[hc_types::alert::Alert],
+    trig: Option<&str>,
+) -> (bool, ConditionTrace) {
+    let trace =
+        |kind: &str, passed: bool, actual: Option<JsonValue>, reason: String| ConditionTrace {
+            condition_type: kind.into(),
+            passed,
+            actual,
+            expected: None,
+            reason,
+        };
+    let names = |alerts: &[&hc_types::alert::Alert]| {
+        alerts
+            .iter()
+            .map(|a| a.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    match cond {
+        Condition::AlertActive { filter, at_least } => {
+            let found: Vec<_> = active.iter().filter(|a| filter.matches(a)).collect();
+            let passed = found.len() as u32 >= (*at_least).max(1);
+            let reason = match (passed, found.len()) {
+                (true, _) => format!("active: {}", names(&found)),
+                (false, 0) => "no alert like that is active".into(),
+                (false, n) => format!("only {n} like that active, not {at_least}"),
+            };
+            (
+                passed,
+                trace("alert_active", passed, Some(found.len().into()), reason),
+            )
+        }
+        Condition::NoAlertActive { filter } => {
+            let found: Vec<_> = active.iter().filter(|a| filter.matches(a)).collect();
+            let passed = found.is_empty();
+            let reason = if passed {
+                "no alert like that is active".into()
+            } else {
+                format!("active: {}", names(&found))
+            };
+            (
+                passed,
+                trace("no_alert_active", passed, Some(found.len().into()), reason),
+            )
+        }
+        Condition::TriggerAlertActive => {
+            let Some(id) = trig else {
+                return (
+                    false,
+                    trace(
+                        "trigger_alert_active",
+                        false,
+                        None,
+                        "no alert started this".into(),
+                    ),
+                );
+            };
+            let passed = active.iter().any(|a| a.id == id);
+            let reason = if passed {
+                "the alert that started this is still active".into()
+            } else {
+                "the alert that started this has cleared".into()
+            };
+            (passed, trace("trigger_alert_active", passed, None, reason))
+        }
+        _ => (
+            false,
+            trace("alert", false, None, "not an alert check".into()),
+        ),
+    }
+}
+
 fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> TriggerContext {
     match event {
         Event::DeviceStateChanged {
@@ -1846,6 +1989,13 @@ fn trigger_ctx_of(event: &Event, trigger: &Trigger, label: Option<String>) -> Tr
             trigger_label: label,
             trigger_index: None,
         },
+        Event::AlertRaised { alert, .. } => alert_trigger_ctx(alert, "alert_raised", label),
+        Event::AlertAcknowledged { alert, .. } => {
+            alert_trigger_ctx(alert, "alert_acknowledged", label)
+        }
+        Event::AlertCleared {
+            alert: Some(alert), ..
+        } => alert_trigger_ctx(alert, "alert_cleared", label),
         Event::DeviceAvailabilityChanged {
             device_id,
             available,
@@ -2053,6 +2203,10 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::ModeChanged { .. } => "ModeChanged",
         Trigger::DeviceBatteryLow { .. } => "DeviceBatteryLow",
         Trigger::DeviceBatteryRecovered { .. } => "DeviceBatteryRecovered",
+        Trigger::AlertRaised { .. } => "AlertRaised",
+        Trigger::AlertCleared { .. } => "AlertCleared",
+        Trigger::AlertAcknowledged { .. } => "AlertAcknowledged",
+        Trigger::AlertActiveFor { .. } => "AlertActiveFor",
     }
 }
 
@@ -2126,6 +2280,7 @@ fn trigger_kind_can_match_event(trigger: &Trigger, event: &Event) -> bool {
         | Trigger::SunEvent { .. }
         | Trigger::Cron { .. }
         | Trigger::Periodic { .. }
+        | Trigger::AlertActiveFor { .. }
         | Trigger::ManualTrigger => return false,
         _ => {}
     }
@@ -2145,6 +2300,9 @@ fn trigger_kind_can_match_event(trigger: &Trigger, event: &Event) -> bool {
         Event::DeviceBatteryRecovered { .. } => {
             matches!(trigger, Trigger::DeviceBatteryRecovered { .. })
         }
+        Event::AlertRaised { .. } => matches!(trigger, Trigger::AlertRaised { .. }),
+        Event::AlertCleared { .. } => matches!(trigger, Trigger::AlertCleared { .. }),
+        Event::AlertAcknowledged { .. } => matches!(trigger, Trigger::AlertAcknowledged { .. }),
         Event::MqttMessage { .. } => matches!(trigger, Trigger::MqttMessage { .. }),
         Event::Custom { event_type, .. } => match event_type.as_str() {
             "webhook" => matches!(trigger, Trigger::WebhookReceived { .. }),
@@ -2504,6 +2662,33 @@ fn trigger_check(trigger: &Trigger, event: &Event) -> TriggerResult {
             NoMatch("wrong trigger type for DeviceBatteryRecovered")
         }
 
+        // ── Alerts ─────────────────────────────────────────────────────────
+        (Trigger::AlertRaised { filter }, Event::AlertRaised { alert, update, .. }) => {
+            if *update {
+                NoMatch("an alert already active changed, not a new one")
+            } else if filter.matches(alert) {
+                Matched
+            } else {
+                NoMatch("not an alert like that")
+            }
+        }
+        (Trigger::AlertCleared { filter }, Event::AlertCleared { alert, .. }) => {
+            match alert.as_deref() {
+                Some(a) if filter.matches(a) => Matched,
+                // Who knows which kind, from a core that didn't say: only a
+                // rule that asked for any alert matches.
+                None if *filter == hc_types::alert::AlertFilter::default() => Matched,
+                _ => NoMatch("not an alert like that"),
+            }
+        }
+        (Trigger::AlertAcknowledged { filter }, Event::AlertAcknowledged { alert, .. }) => {
+            if filter.matches(alert) {
+                Matched
+            } else {
+                NoMatch("not an alert like that")
+            }
+        }
+
         _ => NoMatch("event type does not match trigger type"),
     }
 }
@@ -2567,6 +2752,158 @@ mod tests {
     use chrono::Utc;
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
+
+    fn an_alert(
+        id: &str,
+        topic: Option<&str>,
+        severity: hc_types::event::AlertSeverity,
+    ) -> hc_types::alert::Alert {
+        hc_types::alert::Alert {
+            id: id.into(),
+            kind: if topic.is_some() {
+                hc_types::alert::AlertKind::Plugin
+            } else {
+                hc_types::alert::AlertKind::Offline
+            },
+            device_id: "wled_1".into(),
+            rule_id: None,
+            message: format!("Eaves lights: {id}"),
+            reason: id.into(),
+            severity,
+            raised_at: Utc::now(),
+            acknowledged: None,
+            plugin_id: topic.map(|_| "plugin.wled".into()),
+            topic: topic.map(Into::into),
+            key: topic.map(|_| "17.0.0".into()),
+            action: None,
+        }
+    }
+
+    #[test]
+    fn an_alert_trigger_fires_on_a_new_alert_like_it_only() {
+        use hc_types::alert::AlertFilter;
+        use hc_types::event::AlertSeverity::*;
+        let update = an_alert("fw", Some("firmware_update"), Info);
+        let trigger = Trigger::AlertRaised {
+            filter: AlertFilter {
+                plugin_id: Some("plugin.wled".into()),
+                topic: Some("firmware_update".into()),
+                ..Default::default()
+            },
+        };
+        let raised = |alert: &hc_types::alert::Alert, update: bool| Event::AlertRaised {
+            timestamp: Utc::now(),
+            alert: alert.clone(),
+            update,
+        };
+        assert!(matches!(
+            trigger_check(&trigger, &raised(&update, false)),
+            TriggerResult::Matched
+        ));
+        // The same alert, seen: not a new one.
+        assert!(matches!(
+            trigger_check(&trigger, &raised(&update, true)),
+            TriggerResult::NoMatch(_)
+        ));
+        // Another kind.
+        let offline = an_alert("off", None, Warning);
+        assert!(matches!(
+            trigger_check(&trigger, &raised(&offline, false)),
+            TriggerResult::NoMatch(_)
+        ));
+        // At least a warning: info doesn't count.
+        let serious = Trigger::AlertRaised {
+            filter: AlertFilter {
+                min_severity: Some(Warning),
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            trigger_check(&serious, &raised(&update, false)),
+            TriggerResult::NoMatch(_)
+        ));
+        assert!(matches!(
+            trigger_check(&serious, &raised(&offline, false)),
+            TriggerResult::Matched
+        ));
+        // Cleared, with the alert carried; and the context carries it on.
+        let cleared = Event::AlertCleared {
+            timestamp: Utc::now(),
+            alert_id: "fw".into(),
+            device_id: "wled_1".into(),
+            alert: Some(Box::new(update.clone())),
+        };
+        let on_clear = Trigger::AlertCleared {
+            filter: AlertFilter {
+                topic: Some("firmware_update".into()),
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            trigger_check(&on_clear, &cleared),
+            TriggerResult::Matched
+        ));
+        let tctx = trigger_ctx_of(&cleared, &on_clear, None);
+        assert_eq!(trigger_alert_id(&tctx).as_deref(), Some("fw"));
+        assert_eq!(tctx.device_id.as_deref(), Some("wled_1"));
+        // Only the scheduler fires "active for".
+        let lasting = Trigger::AlertActiveFor {
+            filter: AlertFilter::default(),
+            minutes: 10,
+        };
+        assert!(!trigger_kind_can_match_event(
+            &lasting,
+            &raised(&update, false)
+        ));
+    }
+
+    #[test]
+    fn the_alert_checks_count_what_is_active() {
+        use hc_types::alert::AlertFilter;
+        use hc_types::event::AlertSeverity::*;
+        let active = vec![
+            an_alert("fw", Some("firmware_update"), Info),
+            an_alert("off", None, Warning),
+        ];
+        let fw = AlertFilter {
+            topic: Some("firmware_update".into()),
+            ..Default::default()
+        };
+        let pass = |c: Condition, trig: Option<&str>| alert_check(&c, &active, trig).0;
+        assert!(pass(
+            Condition::AlertActive {
+                filter: fw.clone(),
+                at_least: 1
+            },
+            None
+        ));
+        assert!(!pass(
+            Condition::AlertActive {
+                filter: fw.clone(),
+                at_least: 2
+            },
+            None
+        ));
+        assert!(pass(
+            Condition::AlertActive {
+                filter: AlertFilter::default(),
+                at_least: 2
+            },
+            None
+        ));
+        assert!(!pass(Condition::NoAlertActive { filter: fw.clone() }, None));
+        let serious = AlertFilter {
+            min_severity: Some(Error),
+            ..Default::default()
+        };
+        assert!(pass(Condition::NoAlertActive { filter: serious }, None));
+        assert!(pass(Condition::TriggerAlertActive, Some("fw")));
+        assert!(!pass(Condition::TriggerAlertActive, Some("gone")));
+        assert!(!pass(Condition::TriggerAlertActive, None));
+        // Why not, in the alert's own words.
+        let (_, t) = alert_check(&Condition::NoAlertActive { filter: fw }, &active, None);
+        assert_eq!(t.reason, "active: Eaves lights: fw");
+    }
 
     fn dsc_event(device_id: &str, attr: &str, prev: JsonValue, curr: JsonValue) -> Event {
         let mut previous = HashMap::new();

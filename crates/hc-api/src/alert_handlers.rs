@@ -9,6 +9,11 @@
 //! Acknowledging takes `devices:command` — whoever may act in the house,
 //! a display included, may say they've seen what needs attention. Ignoring
 //! hides alerts from everyone, so it is authoring: `automations:write`.
+//!
+//! Plugins' kinds of alert are listed to anyone who can read devices, and
+//! turned on or off, or sent somewhere, with `automations:write` like an
+//! ignore. Pressing an alert's button is a command: `devices:command` for a
+//! device's action, and `plugins:write` besides for a plugin's.
 
 use axum::{
     extract::{Path, State},
@@ -18,11 +23,13 @@ use axum::{
 };
 use chrono::Utc;
 use hc_auth::{Actor, Claims};
-use hc_types::alert::{AlertIgnore, AlertRule};
+use hc_types::alert::{AlertActionTarget, AlertIgnore, AlertRule, AlertTopicSetting};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth_middleware::{AutomationsRead, AutomationsWrite, DevicesCommand, DevicesRead};
+use crate::auth_middleware::{
+    AutomationsRead, AutomationsWrite, DevicesCommand, DevicesRead, PluginsWrite,
+};
 use crate::AppState;
 
 fn wake(s: &AppState) {
@@ -152,7 +159,15 @@ pub async fn acknowledge_alert(
             let _ = s.event_bus.publish(hc_types::event::Event::AlertRaised {
                 timestamp: Utc::now(),
                 alert: alert.clone(),
+                update: true,
             });
+            // …and as seen, for an automation waiting on that.
+            let _ = s
+                .event_bus
+                .publish(hc_types::event::Event::AlertAcknowledged {
+                    timestamp: Utc::now(),
+                    alert: alert.clone(),
+                });
             Json(alert).into_response()
         }
         None => (
@@ -210,5 +225,142 @@ pub async fn delete_alert_ignore(
         )
             .into_response(),
         Err(e) => failed(e),
+    }
+}
+
+/// `GET /alerts/kinds` — every kind of alert a plugin declared, with what the
+/// house decided about it: `enabled` is the setting or the plugin's default,
+/// `notify` the channel it is sent to, if any.
+pub async fn list_alert_kinds(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    let kinds = s
+        .alerts
+        .as_ref()
+        .map(|a| a.plugin_kinds())
+        .unwrap_or_default();
+    let settings = match s.store.list_alert_topic_settings().await {
+        Ok(t) => t,
+        Err(e) => return failed(e),
+    };
+    let mut out = Vec::new();
+    for (plugin_id, list) in kinds {
+        for k in list {
+            let setting = settings
+                .iter()
+                .find(|t| t.plugin_id == plugin_id && t.topic == k.topic);
+            out.push(json!({
+                "plugin_id": plugin_id,
+                "topic": k.topic,
+                "label": k.label,
+                "description": k.description,
+                "severity": hc_types::alert::plugin_severity(k.severity),
+                "default_on": k.default_on,
+                "enabled": setting.and_then(|t| t.enabled).unwrap_or(k.default_on),
+                "notify": setting.and_then(|t| t.notify.clone()),
+            }));
+        }
+    }
+    Json(out).into_response()
+}
+
+/// The body of `PUT /alerts/kinds/{plugin_id}/{topic}`: `null` (or left out)
+/// is the plugin's default.
+#[derive(serde::Deserialize)]
+pub struct TopicSettingBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    notify: Option<String>,
+}
+
+/// `PUT /alerts/kinds/{plugin_id}/{topic}` — on or off, and where it's sent.
+pub async fn put_alert_kind(
+    State(s): State<AppState>,
+    _: AutomationsWrite,
+    Path((plugin_id, topic)): Path<(String, String)>,
+    Json(body): Json<TopicSettingBody>,
+) -> impl IntoResponse {
+    let notify = body
+        .notify
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    let setting = AlertTopicSetting {
+        plugin_id,
+        topic,
+        enabled: body.enabled,
+        notify,
+    };
+    if let Err(e) = s.store.put_alert_topic_setting(setting.clone()).await {
+        return failed(e);
+    }
+    wake(&s);
+    Json(setting).into_response()
+}
+
+/// `POST /alerts/{id}/press` — run the alert's button: the device action it
+/// names on the alert's device, or the plugin action. Accepted, like any
+/// command; the alert clears when the plugin says it's done.
+pub async fn press_alert(
+    State(s): State<AppState>,
+    DevicesCommand(claims): DevicesCommand,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(alert) = s.alerts.as_ref().and_then(|a| a.get(&id)) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such alert — it may have cleared" })),
+        )
+            .into_response();
+    };
+    let Some(action) = alert.action.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "this alert has no button" })),
+        )
+            .into_response();
+    };
+    let mut body = match action.params {
+        serde_json::Value::Object(m) => serde_json::Value::Object(m),
+        _ => json!({}),
+    };
+    body["action"] = json!(action.id);
+    match action.target {
+        AlertActionTarget::Device => {
+            let change = hc_types::device::DeviceChange::homecore("alert")
+                .with_actor(Some(claims.uid), Some(claims.sub))
+                .with_correlation_id(Some(Uuid::new_v4().to_string()));
+            match crate::handlers::publish_device_command(&s, &alert.device_id, body, change).await
+            {
+                Ok(()) => (
+                    StatusCode::ACCEPTED,
+                    Json(json!({ "status": "accepted", "alert": alert.id })),
+                )
+                    .into_response(),
+                Err(e) => failed(e),
+            }
+        }
+        AlertActionTarget::Plugin => {
+            if !claims.has_scope("plugins:write") {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "scope 'plugins:write' required" })),
+                )
+                    .into_response();
+            }
+            let Some(plugin_id) = alert.plugin_id.clone() else {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "this alert names no plugin" })),
+                )
+                    .into_response();
+            };
+            crate::handlers::post_plugin_command(
+                State(s),
+                PluginsWrite(claims),
+                Path(plugin_id),
+                Json(body),
+            )
+            .await
+            .into_response()
+        }
     }
 }

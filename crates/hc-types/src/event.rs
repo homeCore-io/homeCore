@@ -133,6 +133,19 @@ pub enum Event {
         /// auto-derives a baseline descriptor from `config_schema`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_descriptor: Option<serde_json::Value>,
+        /// The kinds of alert the plugin can raise (`alert_kinds` on the
+        /// manifest), carried alongside for the same reason as `widgets`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alert_kinds: Vec<crate::alert::PluginAlertKind>,
+    },
+    /// A plugin said which of its alerts are true now for one device — or,
+    /// when `device_id` is the plugin's own id, for itself. The whole list:
+    /// one it no longer sends has cleared.
+    PluginAlerts {
+        timestamp: DateTime<Utc>,
+        plugin_id: String,
+        device_id: String,
+        alerts: Vec<crate::alert::PluginAlert>,
     },
     /// A device's human-readable name was changed at the source (plugin or user).
     DeviceNameChanged {
@@ -257,12 +270,25 @@ pub enum Event {
     AlertRaised {
         timestamp: DateTime<Utc>,
         alert: crate::alert::Alert,
+        /// An alert already active that now says something else (its words,
+        /// or that someone has seen it) — not a new one. Automations that
+        /// start "when an alert is raised" start only on a new one.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        update: bool,
     },
     /// An alert's condition ended.
     AlertCleared {
         timestamp: DateTime<Utc>,
         alert_id: String,
         device_id: String,
+        /// The alert as it was, so a rule can tell which kind cleared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alert: Option<Box<crate::alert::Alert>>,
+    },
+    /// Someone marked an active alert seen.
+    AlertAcknowledged {
+        timestamp: DateTime<Utc>,
+        alert: crate::alert::Alert,
     },
     /// A raw MQTT message arrived (used before topic routing is applied).
     MqttMessage {
@@ -383,12 +409,15 @@ impl Event {
             | Event::DeviceBatteryLow { timestamp, .. }
             | Event::DeviceBatteryRecovered { timestamp, .. }
             | Event::AlertRaised { timestamp, .. }
-            | Event::AlertCleared { timestamp, .. } => *timestamp,
+            | Event::AlertCleared { timestamp, .. }
+            | Event::AlertAcknowledged { timestamp, .. }
+            | Event::PluginAlerts { timestamp, .. } => *timestamp,
         }
     }
 }
 
 /// Severity levels for system alerts.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AlertSeverity {

@@ -10,7 +10,6 @@
 //! publishes don't disturb them.
 
 use anyhow::Result;
-use plugin_sdk_rs::DevicePublisher;
 use reqwest::Client;
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -20,13 +19,13 @@ use tracing::{debug, warn};
 /// LED-count rewires, mesh peer churn) — 5 minutes is plenty.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Spawn one refresh task per device. Each task owns its own
-/// `WledClient` and runs a slow tick loop, partial-publishing info
-/// attributes onto the device. Errors are logged and the loop
-/// continues — a transient WLED reboot shouldn't kill the task.
-pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::DeviceConfig>) {
-    for dev in devices {
-        let pub_for_task = publisher.clone();
+/// Spawn one refresh task per device. Each runs on a slow tick — or sooner
+/// when woken (`Runtime::wake`, after its presets change) — and
+/// partial-publishes what the controller is and holds. Errors are logged and
+/// the loop continues — a transient WLED reboot shouldn't kill the task.
+pub fn spawn_per_device(rt: crate::runtime::Runtime) {
+    for dev in rt.cfg.devices.clone() {
+        let rt = rt.clone();
         tokio::spawn(async move {
             // First refresh fires after a brief grace so we don't race
             // the bridge's own initial state publish — we want our
@@ -41,18 +40,20 @@ pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::
                 }
             };
             let base = format!("http://{}", dev.host.trim_end_matches('/'));
-            let mut interval = tokio::time::interval(REFRESH_INTERVAL);
+            let wake = rt.refresh.get(&dev.hc_id).cloned();
+            let mut last_uptime: Option<u64> = None;
+            let mut last_check: Option<std::time::Instant> = None;
             loop {
-                interval.tick().await;
                 match build_attrs(&http, &base).await {
-                    Ok((attrs, hardware)) => {
+                    Ok((mut attrs, hardware, info)) => {
                         // Re-register with what the controller says it is.
                         // Startup registration happens from config alone,
                         // before anything has been asked — this is the first
                         // moment the identity exists. Absent fields leave what
                         // core holds alone, so doing it on every refresh is
                         // idempotent rather than chatty.
-                        if let Err(e) = pub_for_task
+                        if let Err(e) = rt
+                            .publisher
                             .register_device_detailed(
                                 &dev.hc_id,
                                 &dev.name,
@@ -65,7 +66,22 @@ pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::
                         {
                             debug!(hc_id = %dev.hc_id, error = %e, "identity re-register failed");
                         }
-                        if let Err(e) = pub_for_task
+                        // Where this plugin reaches it — the config's address, which
+                        // the plugin page edits; not always the controller's own IP.
+                        attrs.insert("address".into(), json!(dev.host));
+                        attrs.insert(
+                            "catalog_storage".into(),
+                            json!(dev.catalog.clone().unwrap_or_else(|| rt
+                                .cfg
+                                .wled
+                                .catalog
+                                .clone())),
+                        );
+                        if let Some(v) = settings_attrs(&http, &base).await {
+                            attrs.extend(v);
+                        }
+                        if let Err(e) = rt
+                            .publisher
                             .publish_state_partial(&dev.hc_id, &Value::Object(attrs))
                             .await
                         {
@@ -73,14 +89,67 @@ pub fn spawn_per_device(publisher: DevicePublisher, devices: Vec<crate::config::
                         } else {
                             debug!(hc_id = %dev.hc_id, "bridge info refreshed");
                         }
+
+                        // A restart nobody asked for: its uptime went back.
+                        let uptime = info.get("uptime").and_then(Value::as_u64);
+                        if let (Some(was), Some(now)) = (last_uptime, uptime) {
+                            if now < was && !rt.restart_was_expected(&dev.hc_id) {
+                                warn!(hc_id = %dev.hc_id, "Controller restarted by itself");
+                                rt.restarted.lock().unwrap().insert(
+                                    dev.hc_id.clone(),
+                                    (std::time::Instant::now(), chrono::Utc::now().to_rfc3339()),
+                                );
+                            }
+                        }
+                        last_uptime = uptime;
+
+                        // Firmware: what it runs now, and — daily, or as
+                        // configured — what its project has released.
+                        let every = rt.cfg.wled.firmware_check_hours;
+                        let due = every > 0
+                            && last_check
+                                .is_none_or(|t| t.elapsed() >= Duration::from_secs(every * 3600));
+                        crate::firmware_check::refresh(&rt, &dev.hc_id, &info, due).await;
+                        if due {
+                            last_check = Some(std::time::Instant::now());
+                        }
+                        rt.publish_firmware(&dev.hc_id).await;
                     }
                     Err(e) => {
                         debug!(hc_id = %dev.hc_id, error = %e, "bridge info fetch failed");
                     }
                 }
+                match &wake {
+                    Some(n) => {
+                        let _ = tokio::time::timeout(REFRESH_INTERVAL, n.notified()).await;
+                    }
+                    None => tokio::time::sleep(REFRESH_INTERVAL).await,
+                }
             }
         });
     }
+}
+
+/// What the controller's settings say that a screen shows beside its state:
+/// the preset it starts with.
+async fn settings_attrs(http: &Client, base: &str) -> Option<Map<String, Value>> {
+    let cfg = fetch_json(http, base, "/json/cfg").await.ok()?;
+    let mut m = Map::new();
+    let def = cfg.get("def");
+    m.insert(
+        "power_on_preset_id".into(),
+        match def.and_then(|d| d.get("ps")).and_then(Value::as_u64) {
+            Some(n) if n > 0 => json!(n),
+            _ => Value::Null,
+        },
+    );
+    m.insert(
+        "power_on".into(),
+        def.and_then(|d| d.get("on"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    Some(m)
 }
 
 /// What the controller *is*, from the same `/json/info` the attributes come
@@ -116,7 +185,7 @@ fn identity(info: &Value) -> plugin_sdk_rs::DeviceHardware {
 async fn build_attrs(
     http: &Client,
     base: &str,
-) -> Result<(Map<String, Value>, plugin_sdk_rs::DeviceHardware)> {
+) -> Result<(Map<String, Value>, plugin_sdk_rs::DeviceHardware, Value)> {
     // /json/info is the heavy hitter; everything else is supplemental.
     // If it fails we bail — a device that can't answer /json/info
     // isn't going to give us anything useful anyway.
@@ -222,14 +291,44 @@ async fn build_attrs(
     // Preset count — /json/presets returns a {"<id>": {...}, ...} map.
     // The "0" entry is reserved (the "current" preset), so subtract it
     // when present.
-    if let Ok(presets) = fetch_json(http, base, "/presets.json").await {
-        if let Some(obj) = presets.as_object() {
-            let count = obj.len().saturating_sub(usize::from(obj.contains_key("0")));
-            attrs.insert("presets_count".into(), json!(count));
+    if let Ok(file) = fetch_json(http, base, "/presets.json").await {
+        let all = crate::presets::list(&file);
+        attrs.insert("presets_count".into(), json!(all.len()));
+        // `presets` is every slot (a playlist is applied like a preset);
+        // `playlists` only the playlists, for "start a playlist".
+        let playlists: Vec<Value> = all
+            .iter()
+            .filter(|e| e["kind"] == "playlist")
+            .map(|e| json!({ "id": e["id"], "name": e["name"] }))
+            .collect();
+        attrs.insert("presets".into(), Value::Array(all));
+        attrs.insert("playlists".into(), Value::Array(playlists));
+    }
+    // Capabilities a screen needs before offering a control: white
+    // temperature, a white channel.
+    if let Some(leds) = info.get("leds") {
+        // `cct` is a bitmask on newer firmware (bit 2: the strip has CCT), a
+        // bool on older.
+        let cct = match leds.get("cct") {
+            Some(Value::Bool(b)) => *b,
+            Some(v) => v.as_u64().is_some_and(|n| n & 4 != 0 || n == 1),
+            None => false,
+        };
+        attrs.insert("led_cct".into(), json!(cct));
+        if let Some(fps) = leds.get("fps").and_then(Value::as_u64) {
+            attrs.insert("led_fps".into(), json!(fps));
         }
     }
+    // Whether its firmware has the AudioReactive usermod — the sound effects
+    // and settings exist only then.
+    attrs.insert(
+        "has_audio".into(),
+        json!(info
+            .get("u")
+            .is_some_and(|u| u.get("AudioReactive").is_some())),
+    );
 
-    Ok((attrs, hardware))
+    Ok((attrs, hardware, info))
 }
 
 async fn fetch_json(http: &Client, base: &str, path: &str) -> Result<Value> {

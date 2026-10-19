@@ -1,7 +1,7 @@
 //! The rule vocabulary, derived from the rule types themselves.
 //!
-//! Every client that edits rules needs a table of what a rule can contain: 18
-//! triggers, 13 conditions, 34 actions, and the fields each one carries. Those
+//! Every client that edits rules needs a table of what a rule can contain: 22
+//! triggers, 16 conditions, 40 actions, and the fields each one carries. Those
 //! tables have so far been written out BY HAND in each client — and a
 //! hand-written mirror of a Rust enum always cracks eventually. It already did:
 //! core grew a `HouseStatusHero` dashboard widget, shipped it on its own default
@@ -74,6 +74,8 @@ pub struct Vocabulary {
     /// - `if_any_check` — an if/otherwise can ask any condition a rule can
     ///   (calendars, hub values, private booleans, time since a change, …),
     ///   not only devices, modes and the clock
+    /// - `alert_rules` — alerts start, gate and are acted on by automations,
+    ///   and `{alert.*}` fills in a message
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -87,6 +89,7 @@ pub const RULE_FEATURES: &[&str] = &[
     "run_now",
     "test_at",
     "if_any_check",
+    "alert_rules",
 ];
 
 impl Vocabulary {

@@ -476,8 +476,12 @@ async fn handle_socket(
                 event = rx.recv() => {
                     match event {
                         Ok(event) => {
-                            // Skip noisy heartbeats unless the client explicitly asked for them.
-                            if matches!(event, Event::PluginHeartbeat { .. }) && type_filter.is_none() {
+                            // Skip noisy heartbeats unless the client explicitly asked for them —
+                            // and what plugins report as alerts, which a client sees as
+                            // `alert_raised` / `alert_cleared` once the house has decided.
+                            if matches!(event, Event::PluginHeartbeat { .. } | Event::PluginAlerts { .. })
+                                && type_filter.is_none()
+                            {
                                 continue;
                             }
 

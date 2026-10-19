@@ -4,11 +4,16 @@
 //! same for every client — and announces each on the event stream
 //! (`alert_raised`, `alert_cleared`). Screens only show them.
 //!
-//! Two sources:
+//! Three sources:
 //! - **built in:** something wet, smoke, a device offline, a lock jammed, a
 //!   battery low;
 //! - **time rules** an admin writes: "the garage door open after 22:00",
-//!   "the front door unlocked for 30 minutes", "the freezer above -10".
+//!   "the front door unlocked for 30 minutes", "the freezer above -10";
+//! - **plugins**, about their own devices: "firmware 17.0.0 is out", "the
+//!   bridge needs its button pressed". A plugin declares the kinds it can
+//!   raise ([`PluginAlertKind`]) and publishes, per device, the ones that are
+//!   true now ([`PluginAlert`]); homeCore decides whether each is shown and
+//!   where it is sent ([`AlertTopicSetting`]).
 //!
 //! A person can **acknowledge** an alert (it stays, marked as seen, until its
 //! condition ends) or **ignore** a kind of alert, a device's alerts, or both
@@ -20,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::AlertSeverity;
 
 /// Why an alert was raised.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertKind {
@@ -30,6 +36,9 @@ pub enum AlertKind {
     LowBattery,
     /// An admin's time rule; `rule_id` says which.
     Rule,
+    /// A plugin's, about one of its devices or itself; `plugin_id` and
+    /// `topic` say which.
+    Plugin,
 }
 
 impl AlertKind {
@@ -41,6 +50,7 @@ impl AlertKind {
             AlertKind::Jammed => "jammed",
             AlertKind::LowBattery => "low_battery",
             AlertKind::Rule => "rule",
+            AlertKind::Plugin => "plugin",
         }
     }
 }
@@ -65,6 +75,209 @@ pub struct Alert {
     /// and comes back, it is a new alert, unacknowledged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged: Option<Acknowledged>,
+    /// A plugin's alert: the plugin that raised it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// A plugin's alert: which of its declared kinds (`firmware_update`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// A plugin's alert: what this one is about within its kind — the version
+    /// on offer, say — so a person can skip this one without muting the kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// A plugin's alert: the one thing to do about it ("Update…").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<AlertAction>,
+}
+
+/// The button on a plugin's alert: one of the device's own actions, or one of
+/// the plugin's, run with these params when someone (or an automation)
+/// presses it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlertAction {
+    /// What the button says: "Update…".
+    pub label: String,
+    /// The action to run: a device action id (`install_firmware`) when the
+    /// alert is about a device, else one of the plugin's manifest actions.
+    pub id: String,
+    /// `device` (the default) runs it on the alert's device; `plugin` runs it
+    /// as a plugin action.
+    #[serde(default, skip_serializing_if = "AlertActionTarget::is_device")]
+    pub target: AlertActionTarget,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub params: serde_json::Value,
+    /// Ask before running it: it interrupts something.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+}
+
+/// Where an [`AlertAction`] runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertActionTarget {
+    #[default]
+    Device,
+    Plugin,
+}
+
+impl AlertActionTarget {
+    fn is_device(&self) -> bool {
+        *self == AlertActionTarget::Device
+    }
+}
+
+/// A kind of alert a plugin can raise, declared on its capability manifest —
+/// which is how the settings screen can list it before it has ever happened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginAlertKind {
+    /// `snake_case`, stable: what [`PluginAlert::topic`] names.
+    pub topic: String,
+    /// For a person: "Firmware update available".
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// How serious one is. Never `critical`: that is homeCore's own (smoke,
+    /// water); a plugin asking for it gets `error`.
+    #[serde(default = "warning")]
+    pub severity: AlertSeverity,
+    /// Shown unless someone turns it off (true), or only once someone turns
+    /// it on (false) — right for news that isn't a problem.
+    #[serde(default = "yes")]
+    pub default_on: bool,
+}
+
+/// One alert a plugin says is true now, for one device (or for itself).
+///
+/// **Current state, not an event**: the plugin publishes the whole list for a
+/// device each time, and homeCore replaces what it held — an alert it stops
+/// sending has cleared. The same contract as plugin notices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginAlert {
+    /// One of the plugin's declared kinds.
+    pub topic: String,
+    /// What this one is about within its kind (`17.0.0`); a different key is
+    /// a different alert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Without the device's name, for its card: "Firmware 17.0.0 is out".
+    pub reason: String,
+    /// With it, when the plugin wants other words than "{name}: {reason}".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Overrides the kind's declared severity for this one; capped at `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<AlertSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<AlertAction>,
+    /// When the condition began, if the plugin knows; else when homeCore
+    /// first heard of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl PluginAlert {
+    pub fn new(topic: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            topic: topic.into(),
+            key: None,
+            reason: reason.into(),
+            message: None,
+            severity: None,
+            action: None,
+            since: None,
+        }
+    }
+
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    pub fn severity(mut self, severity: AlertSeverity) -> Self {
+        self.severity = Some(severity);
+        self
+    }
+
+    pub fn action(mut self, action: AlertAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+}
+
+/// What the house decided about one kind of plugin alert: shown or not, and
+/// where it is sent. Absent fields mean the plugin's own default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AlertTopicSetting {
+    pub plugin_id: String,
+    pub topic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// A notification channel (`all` for every one); None: shown, not sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
+}
+
+/// Which alerts an automation means — for a trigger, a check, or a step that
+/// acts on alerts. Every field narrows; left empty, it means any alert.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertFilter {
+    /// Only this kind (`plugin` for any plugin's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AlertKind>,
+    /// Only this plugin's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// Only this kind of plugin alert (`firmware_update`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// Only these devices' alerts; any device when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_ids: Vec<String>,
+    /// Only this serious or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<AlertSeverity>,
+    /// Only the one about this (`17.0.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Only one of a time rule's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+}
+
+/// How serious, as a number to compare: info 0 … critical 3.
+pub fn severity_rank(s: AlertSeverity) -> u8 {
+    match s {
+        AlertSeverity::Info => 0,
+        AlertSeverity::Warning => 1,
+        AlertSeverity::Error => 2,
+        AlertSeverity::Critical => 3,
+    }
+}
+
+impl AlertFilter {
+    pub fn matches(&self, a: &Alert) -> bool {
+        let same = |want: &Option<String>, have: &Option<String>| {
+            want.as_deref().is_none_or(|w| have.as_deref() == Some(w))
+        };
+        self.kind.is_none_or(|k| k == a.kind)
+            && same(&self.plugin_id, &a.plugin_id)
+            && same(&self.topic, &a.topic)
+            && same(&self.key, &a.key)
+            && same(&self.rule_id, &a.rule_id)
+            && (self.device_ids.is_empty() || self.device_ids.contains(&a.device_id))
+            && self
+                .min_severity
+                .is_none_or(|m| severity_rank(a.severity) >= severity_rank(m))
+    }
+}
+
+/// The highest severity a plugin may raise.
+pub fn plugin_severity(s: AlertSeverity) -> AlertSeverity {
+    match s {
+        AlertSeverity::Critical => AlertSeverity::Error,
+        other => other,
+    }
 }
 
 /// Who acknowledged an alert, and when.
@@ -149,6 +362,15 @@ pub struct AlertIgnore {
     /// Only this time rule's alerts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
+    /// Only this plugin's alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// Only this kind of plugin alert (with `plugin_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// Only the plugin alert about this (`17.0.0`): "skip this version".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// Ignored until then, and seen again after; for good when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<DateTime<Utc>>,
@@ -167,8 +389,15 @@ impl AlertIgnore {
     /// What a person must fix before it can be saved: ignoring every alert
     /// in the house is turning alerts off, which this is not.
     pub fn validate(&self) -> Result<(), String> {
-        if self.kind.is_none() && self.device_id.is_none() && self.rule_id.is_none() {
-            return Err("say which alerts: a kind, a device or a rule".into());
+        if self.kind.is_none()
+            && self.device_id.is_none()
+            && self.rule_id.is_none()
+            && self.plugin_id.is_none()
+        {
+            return Err("say which alerts: a kind, a device, a rule or a plugin".into());
+        }
+        if (self.topic.is_some() || self.key.is_some()) && self.plugin_id.is_none() {
+            return Err("a `topic` or `key` belongs to a plugin: say which `plugin_id`".into());
         }
         if self
             .device_id
@@ -187,7 +416,13 @@ impl AlertIgnore {
 
     /// Whether it covers this alert at `now`.
     pub fn covers(&self, alert: &Alert, now: DateTime<Utc>) -> bool {
+        let same = |mine: &Option<String>, theirs: &Option<String>| {
+            mine.as_deref().is_none_or(|m| theirs.as_deref() == Some(m))
+        };
         self.covers_parts(alert.kind, &alert.device_id, alert.rule_id.as_deref(), now)
+            && same(&self.plugin_id, &alert.plugin_id)
+            && same(&self.topic, &alert.topic)
+            && same(&self.key, &alert.key)
     }
 
     /// The same, for an alert not made yet — a low battery the battery
@@ -426,6 +661,10 @@ mod tests {
             severity: AlertSeverity::Warning,
             raised_at: Utc::now(),
             acknowledged: None,
+            plugin_id: None,
+            topic: None,
+            key: None,
+            action: None,
         }
     }
 
@@ -435,11 +674,62 @@ mod tests {
             kind,
             device_id: device.map(Into::into),
             rule_id: None,
+            plugin_id: None,
+            topic: None,
+            key: None,
             until: None,
             note: None,
             by: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn skipping_one_plugin_alert_leaves_the_next_of_its_kind() {
+        let now = Utc::now();
+        let update = |key: &str| Alert {
+            plugin_id: Some("plugin.wled".into()),
+            topic: Some("firmware_update".into()),
+            key: Some(key.into()),
+            ..alert(AlertKind::Plugin, "wled_1", None)
+        };
+        let skip = AlertIgnore {
+            plugin_id: Some("plugin.wled".into()),
+            topic: Some("firmware_update".into()),
+            key: Some("17.0.0".into()),
+            device_id: Some("wled_1".into()),
+            ..ignore(None, None)
+        };
+        assert!(skip.validate().is_ok());
+        assert!(skip.covers(&update("17.0.0"), now));
+        assert!(!skip.covers(&update("17.1.0"), now));
+        // The whole kind, on every device.
+        let kind = AlertIgnore {
+            plugin_id: Some("plugin.wled".into()),
+            topic: Some("firmware_update".into()),
+            ..ignore(None, None)
+        };
+        assert!(kind.covers(&update("17.1.0"), now));
+        assert!(!kind.covers(&alert(AlertKind::Offline, "wled_1", None), now));
+        // A topic says nothing without its plugin.
+        let loose = AlertIgnore {
+            topic: Some("firmware_update".into()),
+            ..ignore(Some(AlertKind::Plugin), None)
+        };
+        assert!(loose.validate().is_err());
+    }
+
+    #[test]
+    fn a_plugin_cannot_raise_a_critical_alert() {
+        assert_eq!(
+            plugin_severity(AlertSeverity::Critical),
+            AlertSeverity::Error
+        );
+        assert_eq!(plugin_severity(AlertSeverity::Info), AlertSeverity::Info);
+        let k: PluginAlertKind =
+            serde_json::from_str(r#"{"topic":"firmware_update","label":"Firmware update"}"#)
+                .unwrap();
+        assert_eq!((k.severity, k.default_on), (AlertSeverity::Warning, true));
     }
 
     #[test]

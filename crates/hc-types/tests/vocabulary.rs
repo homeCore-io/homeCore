@@ -14,14 +14,14 @@ fn it_finds_every_variant_the_rule_types_declare() {
     // a change to the vocabulary is impossible to make silently: add a Trigger
     // variant and this fails, which is precisely what a hand-written mirror in a
     // client can never do for you.
-    assert_eq!(v.triggers.len(), 18, "triggers: {:?}", v.tags()["triggers"]);
+    assert_eq!(v.triggers.len(), 22, "triggers: {:?}", v.tags()["triggers"]);
     assert_eq!(
         v.conditions.len(),
-        13,
+        16,
         "conditions: {:?}",
         v.tags()["conditions"]
     );
-    assert_eq!(v.actions.len(), 34, "actions: {:?}", v.tags()["actions"]);
+    assert_eq!(v.actions.len(), 40, "actions: {:?}", v.tags()["actions"]);
 }
 
 #[test]

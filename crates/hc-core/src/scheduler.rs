@@ -42,6 +42,11 @@ pub struct Scheduler {
     pub(crate) last_periodic_fire: Arc<DashMap<Uuid, Instant>>,
     /// Optional calendar store for `CalendarEvent` triggers.
     calendar: Option<CalendarHandle>,
+    /// The active alerts, for `AlertActiveFor` triggers.
+    alerts: Option<crate::alerts::AlertsHandle>,
+    /// `(rule, alert)` pairs an `AlertActiveFor` has fired for — each alert
+    /// fires a rule once, however long it then lasts.
+    alert_fired: Arc<DashMap<(Uuid, String), ()>>,
 }
 
 impl Scheduler {
@@ -60,6 +65,50 @@ impl Scheduler {
             catchup_window_minutes,
             last_periodic_fire: Arc::new(DashMap::new()),
             calendar: None,
+            alerts: None,
+            alert_fired: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Attach the alerts, so `AlertActiveFor` triggers are evaluated.
+    pub fn with_alerts(mut self, handle: crate::alerts::AlertsHandle) -> Self {
+        self.alerts = Some(handle);
+        self
+    }
+
+    /// Fire each rule whose `AlertActiveFor` an alert has now lasted long
+    /// enough for — once per alert. The alert rides in the tick, so the rule
+    /// acts on it as on any alert that started it.
+    fn fire_alerts_active_for(&self, rules: &[Rule]) {
+        let Some(handle) = &self.alerts else {
+            return;
+        };
+        let active = handle.list();
+        // Forget the pairs whose alert has cleared: if it comes back, it is
+        // a new alert, and may fire again.
+        self.alert_fired
+            .retain(|(_, id), _| active.iter().any(|a| &a.id == id));
+        let now = chrono::Utc::now();
+        for rule in rules.iter().filter(|r| r.enabled) {
+            for t in rule.all_triggers() {
+                let Trigger::AlertActiveFor { filter, minutes } = t else {
+                    continue;
+                };
+                for alert in active.iter().filter(|a| filter.matches(a)) {
+                    let lasted = now.signed_duration_since(alert.raised_at).num_minutes();
+                    let key = (rule.id, alert.id.clone());
+                    if lasted < i64::from(*minutes) || self.alert_fired.contains_key(&key) {
+                        continue;
+                    }
+                    self.alert_fired.insert(key, ());
+                    debug!(rule_id = %rule.id, alert = %alert.id, "Scheduler firing AlertActiveFor");
+                    let _ = self.pub_bus.publish(Event::Custom {
+                        timestamp: now,
+                        event_type: "scheduler_tick".into(),
+                        payload: serde_json::json!({ "rule_id": rule.id, "alert": alert }),
+                    });
+                }
+            }
         }
     }
 
@@ -162,6 +211,9 @@ impl Scheduler {
                         });
                     }
                 }
+
+                // ── AlertActiveFor triggers ───────────────────────────────────
+                self.fire_alerts_active_for(&rules);
 
                 // ── CalendarEvent triggers ────────────────────────────────────
                 if let Some(cal_handle) = &self.calendar {

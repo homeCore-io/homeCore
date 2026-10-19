@@ -1,6 +1,51 @@
 {
   "triggers": [
     {
+      "tag": "AlertAcknowledged",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "AlertActiveFor",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "minutes",
+          "type": "integer",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "AlertCleared",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "AlertRaised",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
       "tag": "ButtonEvent",
       "fields": [
         {
@@ -306,6 +351,21 @@
   ],
   "conditions": [
     {
+      "tag": "AlertActive",
+      "fields": [
+        {
+          "name": "at_least",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
       "tag": "And",
       "fields": [
         {
@@ -421,11 +481,21 @@
       ]
     },
     {
+      "tag": "NoAlertActive",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
       "tag": "Not",
       "fields": [
         {
           "name": "condition",
-          "type": "object",
+          "type": "any",
           "required": true
         }
       ]
@@ -501,6 +571,10 @@
       ]
     },
     {
+      "tag": "TriggerAlertActive",
+      "fields": []
+    },
+    {
       "tag": "Xor",
       "fields": [
         {
@@ -512,6 +586,16 @@
     }
   ],
   "actions": [
+    {
+      "tag": "AcknowledgeAlert",
+      "fields": [
+        {
+          "name": "alert_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
     {
       "tag": "ActivateScenePerMode",
       "fields": [
@@ -712,6 +796,41 @@
       ]
     },
     {
+      "tag": "ForEachAlert",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "IgnoreAlerts",
+      "fields": [
+        {
+          "name": "filter",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "minutes",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
       "tag": "LogMessage",
       "fields": [
         {
@@ -797,6 +916,16 @@
         {
           "name": "timeout_ms",
           "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "tag": "PressAlert",
+      "fields": [
+        {
+          "name": "alert_id",
+          "type": "string",
           "required": false
         }
       ]
@@ -1042,8 +1171,38 @@
       ]
     },
     {
+      "tag": "SkipAlert",
+      "fields": [
+        {
+          "name": "alert_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
       "tag": "StopRuleChain",
       "fields": []
+    },
+    {
+      "tag": "WaitAlertCleared",
+      "fields": [
+        {
+          "name": "alert_id",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "otherwise",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "timeout_secs",
+          "type": "integer",
+          "required": true
+        }
+      ]
     },
     {
       "tag": "WaitForEvent",
@@ -1103,6 +1262,7 @@
     "test_draft",
     "run_now",
     "test_at",
-    "if_any_check"
+    "if_any_check",
+    "alert_rules"
   ]
 }

@@ -1,17 +1,23 @@
+mod actions;
 mod bridge;
 mod bridge_info;
+mod catalog;
+mod command;
 mod config;
+mod controller;
 mod discovery;
+mod firmware;
+mod firmware_check;
+mod presets;
+mod runtime;
+mod schema;
+mod state;
 mod wled;
 
 use anyhow::Result;
-use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
-};
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -110,13 +116,9 @@ async fn try_start(
     let notices = client.notices();
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
-    // Stash the device list so the management custom_handler closure
-    // can hit any of them on demand for discovery / refresh / reboot
-    // calls without going through the bridge runtime's command path.
-    let devices_for_mgmt = cfg.devices.clone();
-    // `republish_devices` says everything again, so it needs a publisher.
-    let publisher_for_mgmt = publisher.clone();
-    let discovery_hosts_for_mgmt = cfg.wled.discovery_hosts.clone();
+    // What the bridge, the refresher and the plugin's actions share.
+    let rt = runtime::Runtime::new(cfg.clone(), config_path, publisher.clone());
+    let rt_for_mgmt = rt.clone();
 
     // Enable management protocol (heartbeat + remote config/log commands +
     // capability manifest).
@@ -128,25 +130,24 @@ async fn try_start(
             Some(log_level_handle),
         )
         .await?
-        .with_capabilities(capabilities_manifest())
+        .with_capabilities(actions::manifest())
+        .with_alert_kinds(schema::alert_kinds())
         .with_custom_handler(move |cmd| {
             let action = cmd["action"].as_str()?.to_string();
-            let devices = devices_for_mgmt.clone();
-            let discovery_hosts = discovery_hosts_for_mgmt.clone();
-            let publisher = publisher_for_mgmt.clone();
+            // Core merges an action's params into the command itself.
+            let params = cmd.clone();
+            let rt = rt_for_mgmt.clone();
             // Route each manifest action through a one-shot tokio
             // runtime — the SDK's custom_handler is a sync fn returning
             // Option<Value>, but the WLED HTTP client is async. The
             // runtime is cheap and isolated to this single call.
             let action_for_err = action.clone();
             let result = std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .ok()?;
-                rt.block_on(async move {
-                    run_action(&action, &devices, &discovery_hosts, &publisher).await
-                })
+                runtime.block_on(async move { actions::run(&rt, &action, &params).await })
             })
             .join()
             .ok()
@@ -211,8 +212,8 @@ async fn try_start(
     }
 
     // Register all devices via DevicePublisher (PluginClient is consumed).
-    let schema = wled_schema_json();
-    let capabilities = wled_capabilities();
+    let schema = schema::schema_json();
+    let capabilities = schema::capabilities();
     for dev in &cfg.devices {
         if let Err(e) = publisher
             .register_device_full(
@@ -253,242 +254,10 @@ async fn try_start(
     // firmware/hardware/wifi/peer attributes onto the existing device.
     // Surfaces the data the manifest's get-actions used to fetch on
     // demand but never had a place to display.
-    bridge_info::spawn_per_device(publisher.clone(), cfg.devices.clone());
+    bridge_info::spawn_per_device(rt.clone());
 
-    let bridge = bridge::Bridge::new(cfg.clone(), publisher);
-    bridge.run(cmd_rx).await;
+    bridge::run(rt, cmd_rx).await;
     Ok(())
-}
-
-fn wled_capabilities() -> serde_json::Value {
-    json!({
-        "on":               { "type": "boolean" },
-        "brightness":       { "type": "integer", "minimum": 0, "maximum": 255 },
-        "brightness_pct":   { "type": "number",  "minimum": 0, "maximum": 100 },
-        "color":            { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 },
-        "effect_id":        { "type": "integer", "minimum": 0 },
-        "effect_speed":     { "type": "integer", "minimum": 0, "maximum": 255 },
-        "effect_intensity": { "type": "integer", "minimum": 0, "maximum": 255 },
-        "palette_id":       { "type": "integer", "minimum": 0 },
-        "preset_id":        { "type": "integer" }
-    })
-}
-
-fn build_wled_schema() -> DeviceSchema {
-    let mut attrs = HashMap::new();
-    attrs.insert(
-        "on".into(),
-        // Both directions named: a boolean attribute is two events, and a
-        // client that only learns "on" needs a Not gate for the other half.
-        AttributeSchema {
-            kind: AttributeKind::Bool,
-            writable: true,
-            display_name: Some("Power".into()),
-            states: Some(BoolStates {
-                when_true: StateLabel::verbed("on", "turns on"),
-                when_false: StateLabel::verbed("off", "turns off"),
-            }),
-            ..Default::default()
-        },
-    );
-    attrs.insert(
-        "brightness_pct".into(),
-        AttributeSchema {
-            kind: AttributeKind::Integer,
-            writable: true,
-            display_name: Some("Brightness".into()),
-            unit: Some("%".into()),
-            min: Some(0.0),
-            max: Some(100.0),
-            step: Some(1.0),
-            ..Default::default()
-        },
-    );
-    // **`preset_id`, not `preset`.** The declaration named the wire key the
-    // command path took; the device publishes `preset_id`. So the declared
-    // attribute never appeared in state and the published one was never
-    // declared — a client reading the value and writing it back was ignored.
-    // Both spellings are accepted now, and the published name is what is
-    // declared. Same story for `effect_id` and `palette_id` below.
-    attrs.insert(
-        "preset_id".into(),
-        AttributeSchema {
-            kind: AttributeKind::Integer,
-            writable: true,
-            display_name: Some("Preset".into()),
-            min: Some(1.0),
-            max: Some(250.0),
-            step: Some(1.0),
-            ..Default::default()
-        },
-    );
-
-    // What `state_to_json` publishes off the first segment, and what
-    // `execute_command` writes back to it. Declared because a client that
-    // will not offer a control the plugin has not promised had a colour it
-    // could read and no way to set it.
-    attrs.insert(
-        "color".into(),
-        AttributeSchema {
-            kind: AttributeKind::ColorRgb,
-            writable: true,
-            display_name: Some("Colour".into()),
-            ..Default::default()
-        },
-    );
-    for (name, display) in [
-        ("effect_id", "Effect"),
-        ("palette_id", "Palette"),
-        ("effect_speed", "Effect speed"),
-        ("effect_intensity", "Effect intensity"),
-    ] {
-        let ranged = name.starts_with("effect_s") || name.starts_with("effect_i");
-        attrs.insert(
-            name.into(),
-            AttributeSchema {
-                kind: AttributeKind::Integer,
-                writable: true,
-                display_name: Some(display.into()),
-                min: Some(0.0),
-                max: ranged.then_some(255.0),
-                step: Some(1.0),
-                ..Default::default()
-            },
-        );
-    }
-    // The raw 0-255 twin of `brightness_pct`. Writable — `execute_command`
-    // takes it — but the percentage is the one to render.
-    attrs.insert(
-        "brightness".into(),
-        AttributeSchema {
-            kind: AttributeKind::Integer,
-            writable: true,
-            display_name: Some("Brightness (raw)".into()),
-            min: Some(0.0),
-            max: Some(255.0),
-            step: Some(1.0),
-            category: Some(AttributeCategory::Diagnostic),
-            ..Default::default()
-        },
-    );
-
-    // What the controller *is*, refreshed on a slow tick by `bridge_info`.
-    // None of it is a reading: it is the hardware behind the readings, and
-    // declaring it keeps a client from ranking LED count beside brightness.
-    for (name, display, unit) in [
-        ("arch", "Architecture", None),
-        ("mac", "MAC", None),
-        ("ip", "IP address", None),
-        ("led_count", "LEDs", None),
-        ("led_power_mw", "LED power", Some("mW")),
-        ("led_max_power_mw", "LED power limit", Some("mW")),
-        ("led_max_segments", "Maximum segments", None),
-        ("effects_count", "Effects available", None),
-        ("palettes_count", "Palettes available", None),
-        ("presets_count", "Presets stored", None),
-        ("peers_count", "Mesh peers", None),
-        ("wifi_signal_pct", "WiFi signal", Some("%")),
-        ("wifi_rssi", "WiFi RSSI", Some("dBm")),
-        ("wifi_channel", "WiFi channel", None),
-    ] {
-        let text = matches!(name, "arch" | "mac" | "ip");
-        attrs.insert(
-            name.into(),
-            AttributeSchema {
-                kind: if text {
-                    AttributeKind::String
-                } else {
-                    AttributeKind::Integer
-                },
-                writable: false,
-                display_name: Some(display.into()),
-                unit: unit.map(str::to_string),
-                category: Some(AttributeCategory::Diagnostic),
-                ..Default::default()
-            },
-        );
-    }
-    attrs.insert(
-        "led_rgbw".into(),
-        AttributeSchema {
-            kind: AttributeKind::Bool,
-            writable: false,
-            display_name: Some("RGBW strip".into()),
-            // Hardware, so it never transitions — but both states still need
-            // their own word, or a client renders "RGBW, but Not".
-            states: Some(BoolStates {
-                when_true: StateLabel::new("RGBW"),
-                when_false: StateLabel::new("RGB"),
-            }),
-            category: Some(AttributeCategory::Diagnostic),
-            ..Default::default()
-        },
-    );
-
-    // The names behind `effect_id` and `palette_id`, for the actions below.
-    for (name, display) in [("effects", "Effects"), ("palettes", "Palettes")] {
-        attrs.insert(
-            name.into(),
-            AttributeSchema {
-                kind: AttributeKind::Json,
-                writable: false,
-                display_name: Some(display.into()),
-                category: Some(AttributeCategory::Diagnostic),
-                ..Default::default()
-            },
-        );
-    }
-
-    DeviceSchema {
-        attributes: attrs,
-        ..Default::default()
-    }
-}
-
-/// Choosing an effect or a palette by name. Each stands in for its number
-/// (`writes`), so a screen offers the names — from the `effects` / `palettes`
-/// lists the controller reports — rather than a bare number box.
-fn wled_actions() -> Vec<plugin_sdk_rs::device_actions::Action> {
-    use plugin_sdk_rs::device_actions::{Action, Param, Source};
-    [
-        (
-            "set_effect",
-            "Choose an effect",
-            "effect_id",
-            "effects",
-            "Effect",
-        ),
-        (
-            "set_palette",
-            "Choose a palette",
-            "palette_id",
-            "palettes",
-            "Palette",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, label, attr, list, what)| {
-        Action::new(id)
-            .label(label)
-            .category("Effects")
-            .writes(attr)
-            .sentence(format!(
-                "set {{device}}'s {} to {{{attr}}}",
-                what.to_lowercase()
-            ))
-            .param(
-                Param::int(attr)
-                    .label(what)
-                    .required()
-                    .options_from(Source::attribute(list).label_key("name").value_key("id")),
-            )
-    })
-    .collect()
-}
-
-/// The schema WLED devices register: attributes, and the actions above.
-fn wled_schema_json() -> serde_json::Value {
-    plugin_sdk_rs::device_actions::with_actions(&build_wled_schema(), wled_actions())
 }
 
 /// Path of the cross-restart device-id snapshot, sibling to
@@ -499,493 +268,4 @@ fn published_ids_cache_path(config_path: &str) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".published-device-ids.json")
-}
-
-/// Capability manifest. Plugin-wide actions that aren't tied to a
-/// specific device — discovery, library refresh, reboot. Per-device
-/// commands (`apply_preset`, `save_preset`, `identify`) flow through
-/// `PATCH /devices/:id/state` instead, handled by the bridge's
-/// `execute_command`.
-fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
-    use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
-    Capabilities {
-        spec: "1".into(),
-        plugin_id: String::new(),
-        actions: vec![
-            Action {
-                id: "republish_devices".into(),
-                label: "Republish devices".into(),
-                description: Some(
-                    "Re-send every configured device's registration and \
-                     capability schema. Use when a device has lost its \
-                     controls in homeCore — schemas are published once at \
-                     startup, so anything that dropped one could otherwise \
-                     only be restored by restarting the plugin."
-                        .into(),
-                ),
-                params: None,
-                result: Some(json!({ "republished": { "type": "integer" } })),
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::User,
-                // Two MQTT publishes per configured device and no network
-                // round-trip to the hardware, so this is fast — but core's
-                // 5s default is a budget for the whole action, and a house
-                // with many strips should not be racing it.
-                timeout_ms: Some(15_000),
-                danger: false,
-            },
-            Action {
-                id: "discover_devices".into(),
-                label: "Discover devices".into(),
-                description: Some(
-                    "Find WLED devices on the network. Browses mDNS \
-                     (`_wled._tcp.local`) for instances on the local subnet — \
-                     no configuration required — and also pulls the WLED-Sync \
-                     peer list (`/json/nodes`) from any configured or \
-                     mDNS-discovered node. Returns each instance so you can add \
-                     it to `[[devices]]` in config.toml."
-                        .into(),
-                ),
-                params: None,
-                result: Some(json!({
-                    "discovered": { "type": "array" },
-                    "count": { "type": "integer" },
-                })),
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::User,
-                // Probes every seed host concurrently at ~3s each; 20s gives
-                // ample headroom over core's default 5s window so an
-                // unreachable WLED doesn't 504 the discovery.
-                timeout_ms: Some(20_000),
-                danger: false,
-            },
-            Action {
-                id: "refresh_effects_palettes".into(),
-                label: "Refresh effects + palettes".into(),
-                description: Some(
-                    "Pull the effect-name and palette-name lists from \
-                     each configured WLED device. Returns them per device \
-                     so the UI / hc-mcp can show real names instead of \
-                     opaque numbers. Effects + palettes change with \
-                     firmware updates."
-                        .into(),
-                ),
-                params: None,
-                result: Some(json!({
-                    "devices": { "type": "object" },
-                })),
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::User,
-                // Two calls per device, now issued concurrently, at a 5s client
-                // timeout each — so ~5s wall-clock however many devices there
-                // are. 15s clears that and core's 5s default, which this used
-                // to exceed on a single unreachable WLED.
-                timeout_ms: Some(15_000),
-                danger: false,
-            },
-            Action {
-                id: "refresh_presets".into(),
-                label: "Refresh presets".into(),
-                description: Some(
-                    "Pull `/presets.json` from each configured device. \
-                     Returns the preset name + id list so you can pick \
-                     by name in the UI / hc-mcp."
-                        .into(),
-                ),
-                params: None,
-                result: Some(json!({
-                    "devices": { "type": "object" },
-                })),
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::User,
-                // One call per device, concurrent, 5s client timeout.
-                timeout_ms: Some(15_000),
-                danger: false,
-            },
-            Action {
-                id: "reboot".into(),
-                label: "Reboot devices".into(),
-                description: Some(
-                    "Reboot every configured WLED device by hitting the \
-                     legacy `/win&RB=1` endpoint. Use sparingly — \
-                     interrupts active effects on every device. Optional \
-                     `host` param to target a single device by IP."
-                        .into(),
-                ),
-                params: Some(json!({
-                    "host": {
-                        "type": "string",
-                        "description": "Optional WLED IP/hostname; reboots all configured devices if omitted",
-                    },
-                })),
-                result: Some(json!({
-                    "rebooted": { "type": "array" },
-                })),
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::Admin,
-                // A rebooting WLED may not answer the request that told it to
-                // reboot; concurrent, but still bounded well past core's 5s.
-                timeout_ms: Some(15_000),
-                danger: true,
-            },
-        ],
-    }
-}
-
-async fn run_action(
-    action: &str,
-    devices: &[config::DeviceConfig],
-    discovery_hosts: &[String],
-    publisher: &plugin_sdk_rs::DevicePublisher,
-) -> Option<serde_json::Value> {
-    use crate::wled::WledClient;
-    match action {
-        // **Say everything again.**
-        //
-        // Registration and schema publication happen once, in the startup
-        // loop. Core can lose a schema while this plugin is still running —
-        // an unregister deletes the device *and* its schema, and a restore
-        // from an older backup predates it — and until this action existed
-        // the only repair was restarting the plugin.
-        //
-        // Everything here is an upsert against a retained topic, so running
-        // it when nothing is wrong costs one publish per device and changes
-        // nothing.
-        "republish_devices" => {
-            let schema = wled_schema_json();
-            let mut republished = 0usize;
-            for dev in devices {
-                if publisher
-                    .register_device_full(
-                        &dev.hc_id,
-                        &dev.name,
-                        Some("light"),
-                        dev.area.as_deref(),
-                        Some(wled_capabilities()),
-                    )
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                let _ = publisher
-                    .register_device_schema_json(&dev.hc_id, &schema)
-                    .await;
-                republished += 1;
-            }
-            info!(republished, "Republished device registrations and schemas");
-            Some(json!({ "status": "ok", "republished": republished }))
-        }
-        "discover_devices" => {
-            // PRIMARY: mDNS browse for `_wled._tcp.local.` — finds every WLED
-            // on the local subnet with zero configuration. This is what makes
-            // "discover" actually discover; the mesh-peer probe below only ever
-            // learns about hosts adjacent to one you already know.
-            let (mdns_nodes, mut probe_errors) =
-                crate::discovery::mdns_discover(Duration::from_secs(4)).await;
-            let mdns_count = mdns_nodes.len();
-
-            // SEEDS for WLED-Sync mesh-peer enrichment: everything mDNS just
-            // found, plus configured device hosts, plus any explicit
-            // `[wled].discovery_hosts`. The last is an OPTIONAL fallback for
-            // WLEDs on other subnets, since mDNS is link-local and doesn't
-            // route across VLANs — not a requirement for local discovery.
-            let mut seeds: Vec<String> = Vec::new();
-            for n in &mdns_nodes {
-                if let Some(ip) = n.get("ip").and_then(|v| v.as_str()) {
-                    if !ip.is_empty() {
-                        seeds.push(ip.to_string());
-                    }
-                }
-            }
-            for d in devices {
-                if !seeds.iter().any(|s| s == &d.host) {
-                    seeds.push(d.host.clone());
-                }
-            }
-            for h in discovery_hosts {
-                if !seeds.iter().any(|s| s == h) {
-                    seeds.push(h.clone());
-                }
-            }
-
-            // Query every seed CONCURRENTLY; merge + dedup peer lists. Serial
-            // probing here (5s/host) used to blow past core's response window
-            // and 504 the whole discovery on one unreachable host.
-            let results = futures_util::future::join_all(seeds.iter().map(|seed| {
-                let seed = seed.clone();
-                async move {
-                    let nodes = WledClient::new(&seed).get_nodes().await;
-                    (seed, nodes)
-                }
-            }))
-            .await;
-
-            // Merge mDNS hits first (they carry `source:"mdns"`), then the
-            // mesh-peer lists, deduping by resolved IP.
-            let mut merged: Vec<serde_json::Value> = Vec::new();
-            let mut seen_ips: std::collections::HashSet<String> = Default::default();
-            for node in mdns_nodes {
-                let ip = node
-                    .get("ip")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if ip.is_empty() || seen_ips.insert(ip) {
-                    merged.push(node);
-                }
-            }
-            for (seed, nodes_res) in results {
-                match nodes_res {
-                    Ok(nodes) => {
-                        let arr = match nodes.get("nodes").and_then(|v| v.as_array()) {
-                            Some(a) => a.clone(),
-                            None => nodes.as_array().cloned().unwrap_or_default(),
-                        };
-                        for node in arr {
-                            let ip = node.get("ip").and_then(|v| v.as_str()).map(str::to_string);
-                            let dedup_key = ip.clone().unwrap_or_default();
-                            if dedup_key.is_empty() || seen_ips.insert(dedup_key) {
-                                merged.push(node);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        probe_errors.push(json!({
-                            "host": seed,
-                            "error": e.to_string(),
-                        }));
-                    }
-                }
-            }
-
-            let count = merged.len();
-            Some(json!({
-                "status": "ok",
-                "discovered": merged,
-                "count": count,
-                "mdns_count": mdns_count,
-                "seeds": seeds,
-                "errors": probe_errors,
-                "message": format!(
-                    "Discovered {count} WLED device(s) — {mdns_count} via mDNS."
-                ),
-            }))
-        }
-        "refresh_effects_palettes" => {
-            // Per device, concurrently. Serially this was two 5s calls each,
-            // so a single unreachable WLED already blew past core's 5s default
-            // response window and 504'd the whole action — the same failure
-            // `discover_devices` was fixed for, left in place here.
-            let results = futures_util::future::join_all(devices.iter().map(|d| async move {
-                let client = WledClient::new(&d.host);
-                let (effects, palettes) =
-                    futures_util::join!(client.get_effect_names(), client.get_palette_names());
-                (d, effects.ok(), palettes.ok())
-            }))
-            .await;
-
-            let mut per_device = serde_json::Map::new();
-            for (d, effects, palettes) in results {
-                per_device.insert(
-                    d.hc_id.clone(),
-                    json!({
-                        "host": d.host,
-                        "effects": effects,
-                        "palettes": palettes,
-                    }),
-                );
-            }
-            Some(json!({
-                "status": "ok",
-                "devices": per_device,
-            }))
-        }
-        "refresh_presets" => {
-            let results = futures_util::future::join_all(devices.iter().map(|d| async move {
-                let client = WledClient::new(&d.host);
-                (d, client.get_presets().await.ok())
-            }))
-            .await;
-
-            let mut per_device = serde_json::Map::new();
-            for (d, presets) in results {
-                per_device.insert(
-                    d.hc_id.clone(),
-                    json!({
-                        "host": d.host,
-                        "presets": presets,
-                    }),
-                );
-            }
-            Some(json!({
-                "status": "ok",
-                "devices": per_device,
-            }))
-        }
-        "reboot" => {
-            // No host filter is supported via params here (the
-            // custom_handler closure doesn't see the params object) —
-            // reboots all configured devices. The manifest's `host`
-            // param is documented for future expansion when params
-            // routing through custom_handler is wired in.
-            let outcomes = futures_util::future::join_all(devices.iter().map(|d| async move {
-                let client = WledClient::new(&d.host);
-                (d, client.reboot().await)
-            }))
-            .await;
-
-            let mut rebooted = Vec::new();
-            for (d, outcome) in outcomes {
-                match outcome {
-                    Ok(()) => rebooted.push(d.host.clone()),
-                    Err(e) => {
-                        warn!(host = %d.host, error = %e, "reboot failed");
-                    }
-                }
-            }
-            Some(json!({
-                "status": "ok",
-                "rebooted": rebooted,
-            }))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod schema_tests {
-    use super::*;
-
-    /// Every action here fans out over the configured devices, and core gives
-    /// an action that declares no `timeout_ms` five seconds. The WLED client
-    /// allows 5s per request, so one unreachable device is enough to spend the
-    /// entire window — and the caller sees a 504 rather than partial results.
-    ///
-    /// `discover_devices` was fixed for exactly this once already;
-    /// `refresh_effects_palettes`, `refresh_presets` and `reboot` were left
-    /// behind and each still ran its devices serially on top. This asserts the
-    /// next action added does not repeat it.
-    #[test]
-    fn every_action_declares_more_than_cores_default_window() {
-        const CORE_DEFAULT_MS: u64 = 5_000;
-        let manifest = capabilities_manifest();
-        let actions = &manifest.actions;
-
-        assert!(!actions.is_empty(), "manifest declares no actions");
-        for a in actions {
-            let ms = a.timeout_ms.unwrap_or(CORE_DEFAULT_MS);
-            assert!(
-                ms > CORE_DEFAULT_MS,
-                "action '{}' declares timeout_ms {:?}; it talks to every \
-                 configured device, so core's {}ms default will 504 it",
-                a.id,
-                a.timeout_ms,
-                CORE_DEFAULT_MS
-            );
-        }
-    }
-
-    /// **The declaration must name what the device publishes.** `preset`,
-    /// `effect` and `palette` were declared while `preset_id`, `effect_id`
-    /// and `palette_id` were published, so a client that read a value and
-    /// wrote it back was ignored — three times over.
-    #[test]
-    fn every_published_attribute_is_declared_under_the_name_it_is_published() {
-        use crate::bridge::state_to_json;
-        use crate::wled::WledState;
-
-        let state: WledState = serde_json::from_str(
-            r#"{"on":true,"bri":110,"ps":-1,
-                "seg":[{"col":[[0,128,0]],"fx":52,"sx":120,"ix":230,"pal":5}]}"#,
-        )
-        .expect("a WLED state");
-        let published = state_to_json(&state);
-        let schema = build_wled_schema();
-
-        for name in published.as_object().expect("state").keys() {
-            assert!(
-                schema.attributes.contains_key(name),
-                "{name} is published but not declared"
-            );
-        }
-    }
-
-    /// The info refresher's attributes are declared too, and none of them is
-    /// a reading: LED count beside brightness is the hardware among the
-    /// things the device is doing.
-    #[test]
-    fn the_hardware_facts_are_declared_and_demoted() {
-        let schema = build_wled_schema();
-        for name in [
-            "led_count",
-            "wifi_rssi",
-            "effects_count",
-            "presets_count",
-            "mac",
-            "ip",
-        ] {
-            let a = schema
-                .attributes
-                .get(name)
-                .unwrap_or_else(|| panic!("{name} is not declared"));
-            assert!(!a.writable, "{name} claims to be writable");
-            assert_eq!(
-                a.category,
-                Some(AttributeCategory::Diagnostic),
-                "{name} ranks as a reading"
-            );
-        }
-        // Dots are not a naming convention anywhere else in homeCore, and a
-        // client humanising `led.count` reads "Led.count".
-        assert!(schema.attributes.keys().all(|k| !k.contains('.')));
-    }
-
-    /// Every boolean names both of its states.
-    ///
-    /// A boolean attribute is two events, not one: a client given only "on"
-    /// offers one row, and catching the strip going off needs a Not gate
-    /// wrapped round the trigger.
-    #[test]
-    fn every_boolean_names_both_of_its_states() {
-        let schema = build_wled_schema();
-        for (name, attr) in &schema.attributes {
-            if !matches!(attr.kind, AttributeKind::Bool) {
-                continue;
-            }
-            let s = attr
-                .states
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} is a bool with no state names"));
-            assert_ne!(s.when_true.label, s.when_false.label, "{name}");
-            // Power reads as power. The wording was asserted for every
-            // boolean back when `on` was the only one; `led_rgbw` is a
-            // hardware fact that never turns on or off, and saying it does
-            // would be worse than saying nothing.
-            if name == "on" {
-                assert_eq!(s.when_true.transition(), "turns on");
-                assert_eq!(s.when_false.transition(), "turns off");
-            }
-        }
-    }
 }

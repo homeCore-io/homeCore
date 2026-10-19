@@ -194,6 +194,8 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::RuleRemoved { .. } => "rule_removed",
         Event::AlertRaised { .. } => "alert_raised",
         Event::AlertCleared { .. } => "alert_cleared",
+        Event::AlertAcknowledged { .. } => "alert_acknowledged",
+        Event::PluginAlerts { .. } => "plugin_alerts",
     }
 }
 

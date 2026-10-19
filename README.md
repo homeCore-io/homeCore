@@ -21,7 +21,7 @@ homeCore is written in async Rust (Tokio), stores device state in an embedded [r
 | Feature | Details |
 |---|---|
 | **Embedded MQTT broker** | rumqttd ships in the binary — no external broker needed for basic installs |
-| **Rule engine** | 18 trigger types, 13 condition types (including `Not`/`And`/`Or`/`Xor` nesting), 34 action types, Rhai scripting, per-rule fire history |
+| **Rule engine** | 22 trigger types, 16 condition types (including `Not`/`And`/`Or`/`Xor` nesting), 40 action types, Rhai scripting, per-rule fire history |
 | **Plugin architecture** | Connect devices via Rust, Python, Node.js, or .NET SDKs; plugins run as isolated processes with per-plugin MQTT credentials (topic ACL enforcement when paired with an external Mosquitto broker) |
 | **Plugin registry** | Browse and install signed plugins over the API from the [registry](https://homecore.io/registry/) — ed25519 signature plus per-artifact SHA-256, verified before install |
 | **Plugin notices** | Plugins surface actionable problems (missing credentials, unreachable hub, no devices yet) as structured notices the UI renders inline |

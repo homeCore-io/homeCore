@@ -106,6 +106,7 @@ async fn a_time_rule_raises_and_clears_an_alert() -> Result<()> {
     let wire = serde_json::to_value(Event::AlertRaised {
         timestamp: Utc::now(),
         alert: alert.clone(),
+        update: false,
     })?;
     assert_eq!(wire["type"], "alert_raised");
     assert_eq!(wire["alert"]["kind"], "rule");
@@ -142,5 +143,96 @@ async fn a_time_rule_raises_and_clears_an_alert() -> Result<()> {
         next_alert_event(&mut rx).await,
         Event::AlertCleared { .. }
     ));
+    Ok(())
+}
+
+/// A plugin's alert, from its manifest and its report to the bus: raised as
+/// the house chose (a kind that is off by default, turned on), cleared — with
+/// the alert carried, so a rule can tell which — when the plugin stops saying it.
+#[tokio::test]
+async fn a_plugin_alert_is_raised_and_cleared_from_what_the_plugin_says() -> Result<()> {
+    use hc_types::alert::{AlertTopicSetting, PluginAlert, PluginAlertKind};
+    let dir = tempfile::tempdir()?;
+    let store = StateStore::open(
+        &dir.path().join("state.redb").to_string_lossy(),
+        &dir.path().join("history.db").to_string_lossy(),
+    )
+    .await?;
+    let mut strip = DeviceState::new("wled_1", "Eaves lights", "plugin.wled");
+    strip.available = true;
+    store.upsert_device(&strip).await?;
+    store
+        .put_alert_topic_setting(AlertTopicSetting {
+            plugin_id: "plugin.wled".into(),
+            topic: "firmware_update".into(),
+            enabled: Some(true),
+            notify: None,
+        })
+        .await?;
+
+    let bus = EventBus::new(64);
+    let mut rx = bus.subscribe();
+    let handle = AlertsHandle::new();
+    alerts::spawn(
+        bus.clone(),
+        store.clone(),
+        handle.clone(),
+        None,
+        alerts::AlertNotify::default(),
+    );
+    // Let the engine subscribe before the plugin speaks.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    bus.publish(Event::PluginCapabilities {
+        timestamp: Utc::now(),
+        plugin_id: "plugin.wled".into(),
+        capabilities: hc_types::Capabilities {
+            spec: "1".into(),
+            plugin_id: "plugin.wled".into(),
+            actions: vec![],
+        },
+        widgets: vec![],
+        config_schema: None,
+        config_descriptor: None,
+        alert_kinds: vec![PluginAlertKind {
+            topic: "firmware_update".into(),
+            label: "Firmware update available".into(),
+            description: None,
+            severity: AlertSeverity::Info,
+            default_on: false,
+        }],
+    })?;
+    let say = |alerts: Vec<PluginAlert>| Event::PluginAlerts {
+        timestamp: Utc::now(),
+        plugin_id: "plugin.wled".into(),
+        device_id: "wled_1".into(),
+        alerts,
+    };
+    bus.publish(say(vec![PluginAlert::new(
+        "firmware_update",
+        "Firmware 17.0.0 is out",
+    )
+    .key("17.0.0")]))?;
+
+    let Event::AlertRaised { alert, .. } = next_alert_event(&mut rx).await else {
+        panic!("expected alert_raised first");
+    };
+    assert_eq!(alert.kind, AlertKind::Plugin);
+    assert_eq!(alert.id, "plugin:plugin.wled:firmware_update:wled_1:17.0.0");
+    assert_eq!(alert.message, "Eaves lights: firmware 17.0.0 is out");
+    assert_eq!(alert.severity, AlertSeverity::Info);
+    assert_eq!(handle.list().len(), 1);
+    assert_eq!(handle.plugin_kinds()["plugin.wled"].len(), 1);
+
+    bus.publish(say(vec![]))?;
+    let Event::AlertCleared {
+        alert_id, alert, ..
+    } = next_alert_event(&mut rx).await
+    else {
+        panic!("expected alert_cleared");
+    };
+    assert_eq!(alert_id, "plugin:plugin.wled:firmware_update:wled_1:17.0.0");
+    assert_eq!(alert.unwrap().topic.as_deref(), Some("firmware_update"));
+    assert!(handle.list().is_empty());
     Ok(())
 }

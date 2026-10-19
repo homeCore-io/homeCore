@@ -384,6 +384,10 @@ impl Core {
         .with_calendars(Arc::clone(&early_calendar_handle))
         .with_hub_vars(Arc::clone(&self.hub_vars))
         .with_pauses(Arc::clone(&self.pauses));
+        let engine = match &self.alerts {
+            Some(a) => engine.with_alerts(a.clone()),
+            None => engine,
+        };
 
         // Pre-populate the fire history ring buffer from the database so that
         // history survives server restarts.
@@ -568,6 +572,9 @@ impl Core {
         );
         if let Some(ref cal) = calendar_handle {
             sched = sched.with_calendar(Arc::clone(cal));
+        }
+        if let Some(a) = &self.alerts {
+            sched = sched.with_alerts(a.clone());
         }
         let sched_periodic = Arc::clone(&sched.last_periodic_fire);
         tokio::spawn(sched.run(shutdown_rx.clone()));

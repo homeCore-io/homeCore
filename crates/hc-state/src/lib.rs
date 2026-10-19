@@ -341,6 +341,23 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.delete_ignore(&id)).await?
     }
 
+    // --- Plugins' kinds of alert ---
+
+    pub async fn list_alert_topic_settings(
+        &self,
+    ) -> Result<Vec<hc_types::alert::AlertTopicSetting>> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.list_topic_settings()).await?
+    }
+
+    pub async fn put_alert_topic_setting(
+        &self,
+        setting: hc_types::alert::AlertTopicSetting,
+    ) -> Result<()> {
+        let store = Arc::clone(&self.alert_rules);
+        tokio::task::spawn_blocking(move || store.put_topic_setting(&setting)).await?
+    }
+
     /// Drop the battery latch entry for a device (called when the device
     /// is deleted from the registry).
     pub async fn forget_battery(&self, device_id: &str) -> Result<()> {

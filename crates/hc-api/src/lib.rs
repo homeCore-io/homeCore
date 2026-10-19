@@ -588,6 +588,8 @@ pub fn spawn_plugin_registry_listener(
                     widgets,
                     config_schema,
                     config_descriptor,
+                    // Kept by the alert engine, which is what reads them.
+                    alert_kinds: _,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -1342,6 +1344,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/alerts/{id}/acknowledge",
             post(alert_handlers::acknowledge_alert),
         )
+        .route("/alerts/{id}/press", post(alert_handlers::press_alert))
+        .route("/alerts/kinds", get(alert_handlers::list_alert_kinds))
+        .route(
+            "/alerts/kinds/{plugin_id}/{topic}",
+            put(alert_handlers::put_alert_kind),
+        )
         .route(
             "/alert-ignores",
             get(alert_handlers::list_alert_ignores).post(alert_handlers::create_alert_ignore),
@@ -1540,6 +1548,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_plugin_config_descriptor),
         )
         .route("/plugins/{id}/command", post(handlers::post_plugin_command))
+        .route("/plugins/{id}/query", post(handlers::post_plugin_query))
         .route(
             "/plugins/{id}/capabilities",
             get(handlers::get_plugin_capabilities),

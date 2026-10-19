@@ -352,6 +352,30 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none", alias = "device")]
         device_id: Option<String>,
     },
+    /// Fires when an alert like `filter` is raised — homeCore's own (smoke,
+    /// offline, a time rule's) or a plugin's ("firmware 17.0.0 is out").
+    /// The alert is the rule's to act on: `{alert.message}` in a message, and
+    /// the alert steps act on it unless told otherwise.
+    AlertRaised {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+    },
+    /// Fires when an alert like `filter` clears.
+    AlertCleared {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+    },
+    /// Fires when someone marks an alert like `filter` seen.
+    AlertAcknowledged {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+    },
+    /// Fires once an alert like `filter` has been active for `minutes`.
+    AlertActiveFor {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+        minutes: u32,
+    },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -509,6 +533,29 @@ pub enum Condition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title_contains: Option<String>,
     },
+    /// Passes when at least `at_least` (1 unless said) alerts like `filter`
+    /// are active. Ignored alerts don't count: they were never raised.
+    AlertActive {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        at_least: u32,
+    },
+    /// Passes when no alert like `filter` is active — "don't start the show
+    /// while its firmware is being updated".
+    NoAlertActive {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+    },
+    /// Passes while the alert that started this rule is still active.
+    TriggerAlertActive,
+}
+
+fn one() -> u32 {
+    1
+}
+fn is_one(n: &u32) -> bool {
+    *n == 1
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1002,6 +1049,50 @@ pub enum Action {
         mode_id: String,
         /// Whether to turn the mode on, off, or toggle its current state.
         command: ModeCommand,
+    },
+    /// Run the steps once for each active alert like `filter`, one after
+    /// another; inside, "the alert" is that one.
+    ForEachAlert {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+        actions: Vec<Action>,
+    },
+    /// Press an alert's button ("Update…"). `alert_id` names one; left out,
+    /// it is the alert this rule is acting on — the one `ForEachAlert` is
+    /// on, else the one that started the rule.
+    PressAlert {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alert_id: Option<String>,
+    },
+    /// Wait until the alert clears, for at most `timeout_secs`. If it hasn't
+    /// by then, run `otherwise` (stop the rule there with `ExitRule`).
+    WaitAlertCleared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alert_id: Option<String>,
+        timeout_secs: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        otherwise: Vec<Action>,
+    },
+    /// Mark the alert seen.
+    AcknowledgeAlert {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alert_id: Option<String>,
+    },
+    /// Skip this one: don't show the alert about this again (a plugin's,
+    /// by its key — this version), while the next of its kind still shows.
+    SkipAlert {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alert_id: Option<String>,
+    },
+    /// Don't raise alerts like `filter` for `minutes` (for good when left
+    /// out) — quiet during maintenance.
+    IgnoreAlerts {
+        #[serde(default)]
+        filter: crate::alert::AlertFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minutes: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 

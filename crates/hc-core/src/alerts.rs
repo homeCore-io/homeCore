@@ -28,7 +28,10 @@ use std::time::Duration;
 use chrono::{DateTime, NaiveTime, Utc};
 use hc_notify::NotificationService;
 use hc_state::StateStore;
-use hc_types::alert::{Acknowledged, Alert, AlertIgnore, AlertKind, AlertOp, AlertRule};
+use hc_types::alert::{
+    plugin_severity, Acknowledged, Alert, AlertIgnore, AlertKind, AlertOp, AlertRule,
+    AlertTopicSetting, PluginAlert, PluginAlertKind,
+};
 use hc_types::device::DeviceState;
 use hc_types::event::{AlertSeverity, Event};
 use serde_json::Value;
@@ -55,7 +58,82 @@ pub struct AlertsHandle {
     active: Arc<RwLock<BTreeMap<String, Alert>>>,
     /// Acknowledgements, by alert id, while their alerts last.
     acks: Arc<RwLock<HashMap<String, Acknowledged>>>,
+    /// What plugins declared and reported, from their MQTT topics.
+    plugins: Arc<RwLock<PluginAlerts>>,
     wake: Arc<Notify>,
+}
+
+/// Plugins' side of alerts: the kinds each declared, and what each device's
+/// plugin last said is true of it.
+#[derive(Debug, Clone, Default)]
+pub struct PluginAlerts {
+    /// By plugin id, from its capability manifest.
+    pub kinds: BTreeMap<String, Vec<PluginAlertKind>>,
+    /// By device id (a plugin's own id for its alerts about itself).
+    pub reported: BTreeMap<String, Reported>,
+}
+
+/// One device's alerts, as its plugin last published them.
+#[derive(Debug, Clone)]
+pub struct Reported {
+    pub plugin_id: String,
+    pub alerts: Vec<PluginAlert>,
+}
+
+impl PluginAlerts {
+    /// Take in a plugin event. Whether it changed anything.
+    pub fn absorb(&mut self, e: &Event) -> bool {
+        match e {
+            Event::PluginCapabilities {
+                plugin_id,
+                alert_kinds,
+                ..
+            } => {
+                let before = self.kinds.get(plugin_id);
+                if before.map(Vec::as_slice).unwrap_or_default() == alert_kinds.as_slice() {
+                    return false;
+                }
+                if alert_kinds.is_empty() {
+                    self.kinds.remove(plugin_id);
+                } else {
+                    self.kinds.insert(plugin_id.clone(), alert_kinds.clone());
+                }
+                true
+            }
+            Event::PluginAlerts {
+                plugin_id,
+                device_id,
+                alerts,
+                ..
+            } => {
+                let same = self
+                    .reported
+                    .get(device_id)
+                    .is_some_and(|r| &r.plugin_id == plugin_id && &r.alerts == alerts);
+                if same {
+                    return false;
+                }
+                if alerts.is_empty() {
+                    self.reported.remove(device_id);
+                } else {
+                    self.reported.insert(
+                        device_id.clone(),
+                        Reported {
+                            plugin_id: plugin_id.clone(),
+                            alerts: alerts.clone(),
+                        },
+                    );
+                }
+                true
+            }
+            Event::DeviceRemoved { device_id, .. } => self.reported.remove(device_id).is_some(),
+            _ => false,
+        }
+    }
+
+    fn kind(&self, plugin_id: &str, topic: &str) -> Option<&PluginAlertKind> {
+        self.kinds.get(plugin_id)?.iter().find(|k| k.topic == topic)
+    }
 }
 
 impl AlertsHandle {
@@ -81,6 +159,33 @@ impl AlertsHandle {
     /// The time rules changed: work the alerts out again now.
     pub fn rules_changed(&self) {
         self.wake.notify_one();
+    }
+
+    /// The kinds of alert each plugin declared, by plugin id.
+    pub fn plugin_kinds(&self) -> BTreeMap<String, Vec<PluginAlertKind>> {
+        self.plugins
+            .read()
+            .map(|p| p.kinds.clone())
+            .unwrap_or_default()
+    }
+
+    /// Take in a plugin event; true when it changed what plugins say.
+    pub fn absorb(&self, e: &Event) -> bool {
+        self.plugins.write().is_ok_and(|mut p| p.absorb(e))
+    }
+
+    /// Put these alerts in place as the active set — for tests of what acts
+    /// on alerts, which have no engine to raise them.
+    #[doc(hidden)]
+    pub fn set_active_for_test(&self, alerts: impl IntoIterator<Item = Alert>) {
+        if let Ok(mut a) = self.active.write() {
+            *a = alerts.into_iter().map(|x| (x.id.clone(), x)).collect();
+        }
+    }
+
+    /// One active alert.
+    pub fn get(&self, id: &str) -> Option<Alert> {
+        self.active.read().ok()?.get(id).cloned()
     }
 
     /// Mark an active alert seen. The alert as it now is, or None when no
@@ -159,10 +264,13 @@ async fn run(
             _ = tick.tick() => {}
             _ = handle.wake.notified() => {}
             event = rx.recv() => match event {
-                Ok(e) if relevant(&e) => {
+                Ok(e) if handle.absorb(&e) || relevant(&e) => {
                     tokio::time::sleep(SETTLE).await;
-                    // Whatever else arrived meanwhile is covered by this pass.
-                    while rx.try_recv().is_ok() {}
+                    // Whatever else arrived meanwhile is covered by this pass
+                    // — but what plugins said must still be taken in.
+                    while let Ok(e) = rx.try_recv() {
+                        handle.absorb(&e);
+                    }
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -192,6 +300,10 @@ async fn run(
             warn!(error = %e, "Alert engine could not read what is ignored");
             Vec::new()
         });
+        let topics = state.list_alert_topic_settings().await.unwrap_or_else(|e| {
+            warn!(error = %e, "Alert engine could not read its plugin alert settings");
+            Vec::new()
+        });
         let before = handle.active.read().map(|a| a.clone()).unwrap_or_default();
         let now = Utc::now();
         let mut after = desired(
@@ -203,6 +315,8 @@ async fn run(
             &cfg,
             &mut memory,
         );
+        let plugins = handle.plugins.read().map(|p| p.clone()).unwrap_or_default();
+        after.extend(from_plugins(&devices, &plugins, &topics, &before, now));
         unignored(&mut after, &ignores, now);
         if let Ok(mut acks) = handle.acks.write() {
             acks.retain(|id, _| after.contains_key(id));
@@ -213,7 +327,7 @@ async fn run(
 
         if primed {
             for alert in after.values().filter(|a| !before.contains_key(&a.id)) {
-                send(&notify, &rules, alert).await;
+                send(&notify, &rules, &topics, alert).await;
             }
         }
         primed = true;
@@ -223,6 +337,7 @@ async fn run(
                 let _ = pub_bus.publish(Event::AlertRaised {
                     timestamp: now,
                     alert: alert.clone(),
+                    update: before.contains_key(id),
                 });
             }
         }
@@ -232,6 +347,7 @@ async fn run(
                     timestamp: now,
                     alert_id: id.clone(),
                     device_id: alert.device_id.clone(),
+                    alert: Some(Box::new(alert.clone())),
                 });
             }
         }
@@ -254,9 +370,19 @@ pub fn unignored(
 pub fn channel_for<'a>(
     alert: &Alert,
     rules: &'a [AlertRule],
+    topics: &'a [AlertTopicSetting],
     builtin: Option<&'a str>,
 ) -> Option<&'a str> {
     match alert.kind {
+        // Only where someone chose to send it: a plugin's news is not the
+        // house's `[alerts]` channel's business unless they said so.
+        AlertKind::Plugin => topics
+            .iter()
+            .find(|t| {
+                Some(t.plugin_id.as_str()) == alert.plugin_id.as_deref()
+                    && Some(t.topic.as_str()) == alert.topic.as_deref()
+            })
+            .and_then(|t| t.notify.as_deref()),
         AlertKind::Rule => rules
             .iter()
             .find(|r| Some(r.id.as_str()) == alert.rule_id.as_deref())
@@ -268,15 +394,21 @@ pub fn channel_for<'a>(
     .filter(|c| !c.trim().is_empty())
 }
 
-async fn send(notify: &AlertNotify, rules: &[AlertRule], alert: &Alert) {
+async fn send(
+    notify: &AlertNotify,
+    rules: &[AlertRule],
+    topics: &[AlertTopicSetting],
+    alert: &Alert,
+) {
     let Some(svc) = notify.service.as_ref() else {
         return;
     };
-    let Some(channel) = channel_for(alert, rules, notify.channel.as_deref()) else {
+    let Some(channel) = channel_for(alert, rules, topics, notify.channel.as_deref()) else {
         return;
     };
     let title = match alert.severity {
         AlertSeverity::Critical => "Alert",
+        AlertSeverity::Info => "For your information",
         _ => "Needs attention",
     };
     if let Err(e) = svc.notify(channel, title, &alert.message).await {
@@ -332,6 +464,10 @@ pub fn desired(
                 severity,
                 raised_at: at.unwrap_or(now),
                 acknowledged: None,
+                plugin_id: None,
+                topic: None,
+                key: None,
+                action: None,
             };
 
         // ---- offline ----
@@ -455,10 +591,100 @@ pub fn desired(
                 severity: rule.severity,
                 raised_at: from,
                 acknowledged: None,
+                plugin_id: None,
+                topic: None,
+                key: None,
+                action: None,
             });
         }
     }
     out
+}
+
+/// The alerts plugins say are true now, as the house chose to see them: a
+/// kind turned off (or off by default and never turned on) raises nothing,
+/// a severity is never above `error`, and an alert for a device that is gone
+/// is dropped. An alert still called for keeps when it was raised.
+pub fn from_plugins(
+    devices: &[DeviceState],
+    plugins: &PluginAlerts,
+    topics: &[AlertTopicSetting],
+    active: &BTreeMap<String, Alert>,
+    now: DateTime<Utc>,
+) -> BTreeMap<String, Alert> {
+    let by_id: HashMap<&str, &DeviceState> =
+        devices.iter().map(|d| (d.device_id.as_str(), d)).collect();
+    let mut out = BTreeMap::new();
+    for (device_id, reported) in &plugins.reported {
+        let plugin_id = &reported.plugin_id;
+        // A plugin speaks for its own devices, and for itself.
+        let name = match by_id.get(device_id.as_str()) {
+            Some(d) if &d.plugin_id == plugin_id => d.effective_name().to_string(),
+            None if device_id == plugin_id => plugin_name(plugin_id),
+            _ => continue,
+        };
+        for pa in &reported.alerts {
+            let kind = plugins.kind(plugin_id, &pa.topic);
+            let setting = topics
+                .iter()
+                .find(|t| &t.plugin_id == plugin_id && t.topic == pa.topic);
+            let on = setting
+                .and_then(|t| t.enabled)
+                .or(kind.map(|k| k.default_on))
+                .unwrap_or(true);
+            if !on {
+                continue;
+            }
+            let severity = plugin_severity(
+                pa.severity
+                    .or(kind.map(|k| k.severity))
+                    .unwrap_or(AlertSeverity::Warning),
+            );
+            let mut id = format!("plugin:{plugin_id}:{}:{device_id}", pa.topic);
+            if let Some(key) = &pa.key {
+                id.push(':');
+                id.push_str(key);
+            }
+            let raised_at = active
+                .get(&id)
+                .map(|a| a.raised_at)
+                .or(pa.since)
+                .unwrap_or(now);
+            out.insert(
+                id.clone(),
+                Alert {
+                    message: pa
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| format!("{name}: {}", lower_first(&pa.reason))),
+                    id,
+                    kind: AlertKind::Plugin,
+                    device_id: device_id.clone(),
+                    rule_id: None,
+                    reason: pa.reason.clone(),
+                    severity,
+                    raised_at,
+                    acknowledged: None,
+                    plugin_id: Some(plugin_id.clone()),
+                    topic: Some(pa.topic.clone()),
+                    key: pa.key.clone(),
+                    action: pa.action.clone(),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// A plugin's name for a person, from its id: `plugin.wled` → `WLED` would
+/// need a registry; `Wled` is what can be said without one.
+fn plugin_name(plugin_id: &str) -> String {
+    let bare = plugin_id.strip_prefix("plugin.").unwrap_or(plugin_id);
+    let mut c = bare.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => plugin_id.to_string(),
+    }
 }
 
 fn first_true<'a>(d: &DeviceState, attrs: &[&'a str]) -> Option<&'a str> {
@@ -489,6 +715,134 @@ mod tests {
         d.available = true;
         d
     }
+    fn wled(id: &str) -> DeviceState {
+        let mut d = DeviceState::new(id, "Eaves lights", "plugin.wled");
+        d.available = true;
+        d
+    }
+
+    fn plugins_saying(device: &str, plugin: &str, alerts: Vec<PluginAlert>) -> PluginAlerts {
+        let mut p = PluginAlerts::default();
+        p.kinds.insert(
+            "plugin.wled".into(),
+            vec![
+                PluginAlertKind {
+                    topic: "firmware_update".into(),
+                    label: "Firmware update available".into(),
+                    description: None,
+                    severity: AlertSeverity::Info,
+                    default_on: false,
+                },
+                PluginAlertKind {
+                    topic: "restarted".into(),
+                    label: "Restarted by itself".into(),
+                    description: None,
+                    severity: AlertSeverity::Critical,
+                    default_on: true,
+                },
+            ],
+        );
+        p.absorb(&Event::PluginAlerts {
+            timestamp: Utc::now(),
+            plugin_id: plugin.into(),
+            device_id: device.into(),
+            alerts,
+        });
+        p
+    }
+
+    #[test]
+    fn a_plugin_alert_is_shown_as_the_house_chose() {
+        let devices = [wled("wled_1")];
+        let p = plugins_saying(
+            "wled_1",
+            "plugin.wled",
+            vec![
+                PluginAlert::new("firmware_update", "Firmware 17.0.0 is out").key("17.0.0"),
+                PluginAlert::new("restarted", "Restarted by itself"),
+            ],
+        );
+        let now = Utc::now();
+        // The update is off by default; the restart is on, and capped at error.
+        let out = from_plugins(&devices, &p, &[], &BTreeMap::new(), now);
+        assert_eq!(out.len(), 1);
+        let restart = &out["plugin:plugin.wled:restarted:wled_1"];
+        assert_eq!(restart.severity, AlertSeverity::Error);
+        assert_eq!(restart.message, "Eaves lights: restarted by itself");
+        assert_eq!(restart.kind, AlertKind::Plugin);
+
+        // Turned on, the update shows, keyed by its version; turned off, the
+        // restart doesn't.
+        let topics = [
+            AlertTopicSetting {
+                plugin_id: "plugin.wled".into(),
+                topic: "firmware_update".into(),
+                enabled: Some(true),
+                notify: Some("phone".into()),
+            },
+            AlertTopicSetting {
+                plugin_id: "plugin.wled".into(),
+                topic: "restarted".into(),
+                enabled: Some(false),
+                notify: None,
+            },
+        ];
+        let out = from_plugins(&devices, &p, &topics, &BTreeMap::new(), now);
+        let update = &out["plugin:plugin.wled:firmware_update:wled_1:17.0.0"];
+        assert_eq!(update.key.as_deref(), Some("17.0.0"));
+        assert_eq!(update.severity, AlertSeverity::Info);
+        assert_eq!(out.len(), 1);
+        // It goes where it was told to, and nowhere by default.
+        assert_eq!(
+            channel_for(update, &[], &topics, Some("all")),
+            Some("phone")
+        );
+        assert_eq!(channel_for(update, &[], &[], Some("all")), None);
+    }
+
+    #[test]
+    fn a_plugin_speaks_only_for_its_own_devices_and_itself() {
+        let devices = [wled("wled_1"), device("lock", json!({}))];
+        let now = Utc::now();
+        let alert = || vec![PluginAlert::new("restarted", "Restarted")];
+        // Another plugin's device: nothing.
+        let p = plugins_saying("lock", "plugin.wled", alert());
+        assert!(from_plugins(&devices, &p, &[], &BTreeMap::new(), now).is_empty());
+        // A device that is gone: nothing.
+        let p = plugins_saying("wled_9", "plugin.wled", alert());
+        assert!(from_plugins(&devices, &p, &[], &BTreeMap::new(), now).is_empty());
+        // Itself: shown under its own name.
+        let p = plugins_saying("plugin.wled", "plugin.wled", alert());
+        let out = from_plugins(&devices, &p, &[], &BTreeMap::new(), now);
+        assert_eq!(
+            out["plugin:plugin.wled:restarted:plugin.wled"].message,
+            "Wled: restarted"
+        );
+        // An empty list clears what it said before.
+        let mut p = plugins_saying("wled_1", "plugin.wled", alert());
+        assert!(p.absorb(&Event::PluginAlerts {
+            timestamp: now,
+            plugin_id: "plugin.wled".into(),
+            device_id: "wled_1".into(),
+            alerts: vec![],
+        }));
+        assert!(from_plugins(&devices, &p, &[], &BTreeMap::new(), now).is_empty());
+    }
+
+    #[test]
+    fn a_plugin_alert_still_called_for_keeps_when_it_was_raised() {
+        let devices = [wled("wled_1")];
+        let p = plugins_saying(
+            "wled_1",
+            "plugin.wled",
+            vec![PluginAlert::new("restarted", "Restarted")],
+        );
+        let first = Utc::now() - chrono::Duration::hours(1);
+        let was = from_plugins(&devices, &p, &[], &BTreeMap::new(), first);
+        let again = from_plugins(&devices, &p, &[], &was, Utc::now());
+        assert_eq!(again.values().next().unwrap().raised_at, first);
+    }
+
     fn at(h: u32, m: u32) -> NaiveTime {
         NaiveTime::from_hms_opt(h, m, 0).unwrap()
     }
@@ -801,6 +1155,9 @@ mod tests {
             kind: Some(AlertKind::LowBattery),
             device_id: Some("lock".into()),
             rule_id: None,
+            plugin_id: None,
+            topic: None,
+            key: None,
             until: None,
             note: None,
             by: None,
@@ -830,7 +1187,7 @@ mod tests {
             at(23, 0),
             &mut Memory::default(),
         );
-        let ch = |id: &str, builtin| channel_for(&out[id], &rules, builtin);
+        let ch = |id: &str, builtin| channel_for(&out[id], &rules, &[], builtin);
         assert_eq!(ch("rule:r1:garage_door", Some("all")), Some("telegram"));
         assert_eq!(ch("wet:leak", Some("all")), Some("all"));
         assert_eq!(ch("wet:leak", None), None);
