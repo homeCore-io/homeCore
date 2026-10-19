@@ -447,6 +447,18 @@ pub fn apply_learned_bridges(targets: &mut Vec<BridgeTarget>, learned: &serde_js
     // (uppercase from the API vs lowercase in config.toml), so match
     // case-insensitively — same as `pairing::is_already_configured`.
     for t in targets.iter_mut() {
+        // An address changed on the plugin's page wins over the settings
+        // file's: it is the newer word, and the page cannot edit the file's
+        // list of bridges.
+        if let Some(address) = bridges
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(&t.bridge_id))
+            .and_then(|(_, r)| r.get("address"))
+            .and_then(|v| v.as_str())
+            .filter(|a| !a.is_empty())
+        {
+            t.host = address.to_string();
+        }
         if let Some(key) = bridges
             .iter()
             .find(|(id, _)| id.eq_ignore_ascii_case(&t.bridge_id))
@@ -464,7 +476,12 @@ pub fn apply_learned_bridges(targets: &mut Vec<BridgeTarget>, learned: &serde_js
         {
             continue;
         }
-        let host = rec.get("host").and_then(|v| v.as_str()).unwrap_or("");
+        let host = rec
+            .get("address")
+            .and_then(|v| v.as_str())
+            .filter(|a| !a.is_empty())
+            .or_else(|| rec.get("host").and_then(|v| v.as_str()))
+            .unwrap_or("");
         if host.is_empty() {
             continue;
         }
@@ -517,6 +534,31 @@ pub fn build_bridge_state_delta(
             "name": target.name,
         }),
     );
+    serde_json::json!({ "bridges": bridges })
+}
+
+/// The learned-state write that moves a bridge to a new address, keeping
+/// everything else it has (its key, its name).
+pub fn build_bridge_address_delta(
+    current: &serde_json::Value,
+    bridge_id: &str,
+    address: &str,
+) -> serde_json::Value {
+    let mut bridges = current
+        .get("bridges")
+        .and_then(|b| b.as_object().cloned())
+        .unwrap_or_default();
+    let key = bridges
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(bridge_id))
+        .cloned()
+        .unwrap_or_else(|| bridge_id.to_string());
+    let mut rec = bridges
+        .get(&key)
+        .and_then(|r| r.as_object().cloned())
+        .unwrap_or_default();
+    rec.insert("address".into(), serde_json::json!(address));
+    bridges.insert(key, serde_json::Value::Object(rec));
     serde_json::json!({ "bridges": bridges })
 }
 
@@ -903,5 +945,33 @@ skip_grouped_lights_for = ["room:garage"]
             cfg.hue.skip_grouped_lights_for,
             vec!["room:garage".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn target(id: &str, host: &str) -> BridgeTarget {
+        BridgeTarget {
+            name: "Upstairs".into(),
+            bridge_id: id.into(),
+            host: host.into(),
+            app_key: None,
+            verify_tls: true,
+            allow_self_signed: true,
+        }
+    }
+
+    #[test]
+    fn a_new_address_keeps_the_key_and_wins_over_the_file() {
+        let learned = json!({"bridges": {"001788FFFE6A14C2": {"app_key": "k", "host": "10.0.0.5", "name": "Upstairs"}}});
+        let moved = build_bridge_address_delta(&learned, "001788fffe6a14c2", "10.0.0.9");
+        assert_eq!(moved["bridges"]["001788FFFE6A14C2"]["app_key"], "k");
+        let mut targets = vec![target("001788fffe6a14c2", "10.0.0.5")];
+        apply_learned_bridges(&mut targets, &moved);
+        assert_eq!(targets[0].host, "10.0.0.9");
+        assert_eq!(targets[0].app_key.as_deref(), Some("k"));
     }
 }

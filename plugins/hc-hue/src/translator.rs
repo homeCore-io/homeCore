@@ -690,6 +690,11 @@ pub fn group_schema(group: &HueGroupedLight) -> Value {
                 .icon("light")
                 .sentence("pulse {device} once"),
             signal_action(),
+            Action::new("save_scene")
+                .label("Save how it is now as a scene")
+                .category("Scenes")
+                .param(Param::string("name").label("Its name").required())
+                .sentence("save {device} as the scene {name}"),
         ],
     )
 }
@@ -728,6 +733,9 @@ pub fn scene_state(scene: &HueScene) -> Value {
         state["status"] = json!(status);
     }
     state["palette"] = json!(scene.palette);
+    if scene.smart {
+        state["smart"] = json!(true);
+    }
     state["dynamic_capable"] = json!(scene.dynamic_capable);
 
     state
@@ -862,7 +870,24 @@ pub fn scene_schema_for(scene: &HueScene) -> Value {
         // hand-written half said.
         Err(_) => return declared,
     };
-    with_actions(&filled, vec![activate_action()])
+    let mut actions = vec![activate_action()];
+    if !scene.smart {
+        actions.push(
+            Action::new("rename")
+                .label("Rename the scene")
+                .category("Scenes")
+                .param(Param::string("name").label("New name").required())
+                .sentence("rename {device} to {name}"),
+        );
+        actions.push(
+            Action::new("delete")
+                .label("Delete the scene")
+                .category("Scenes")
+                .confirm("Delete this scene from the Hue bridge? The Hue app loses it too.")
+                .sentence("delete {device}"),
+        );
+    }
+    with_actions(&filled, actions)
 }
 
 pub fn scene_schema(reports_status: bool) -> Value {

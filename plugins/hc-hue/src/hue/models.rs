@@ -192,6 +192,9 @@ pub struct HueScene {
     pub status: Option<String>,
     /// Whether it can play its palette dynamically.
     pub dynamic_capable: bool,
+    /// A smart scene: one that changes through the day ("Natural light"),
+    /// recalled with `PUT /smart_scene/{id}`.
+    pub smart: bool,
 }
 
 #[derive(Debug, Clone)]

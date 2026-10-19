@@ -15,6 +15,8 @@ pub struct RegisteredLight {
 pub struct RegisteredGroup {
     pub bridge_id: String,
     pub group_rid: String,
+    /// The room or zone it is the grouped light of.
+    pub owner_rid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,7 @@ pub struct RegisteredScene {
     /// — a new scene, a bridge that gains the field — republishes its schema
     /// rather than declaring a state row that never fills in.
     pub reports_status: bool,
+    pub smart: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,9 @@ pub struct HueRegistry {
     alerts_said: HashMap<String, String>,
     /// bridge device id → its own `device_software_update` state.
     bridge_updates: HashMap<String, String>,
+    /// device id → the name and area it was last registered with, so a
+    /// rename or a move in the Hue app reaches homeCore.
+    registered_as: HashMap<String, (String, Option<String>)>,
 }
 
 impl HueRegistry {
@@ -75,6 +81,20 @@ impl HueRegistry {
                 .insert(device_id.to_string(), s.to_string()),
             None => self.bridge_updates.remove(device_id),
         };
+    }
+
+    /// Whether a device's name or area differs from what it was registered
+    /// with (recording the new one). A device not seen before is not a change:
+    /// its registration says it.
+    pub fn renamed(&mut self, device_id: &str, name: &str, area: Option<&str>) -> bool {
+        let now = (name.to_string(), area.map(str::to_string));
+        match self
+            .registered_as
+            .insert(device_id.to_string(), now.clone())
+        {
+            Some(before) => before != now,
+            None => false,
+        }
     }
 
     pub fn set_rooms(&mut self, bridge_id: &str, rooms: Vec<serde_json::Value>) {
@@ -196,6 +216,7 @@ impl HueRegistry {
             RegisteredGroup {
                 bridge_id: group.bridge_id.clone(),
                 group_rid: group.resource_id.clone(),
+                owner_rid: group.owner_rid.clone(),
             },
         );
         !existed
@@ -231,6 +252,7 @@ impl HueRegistry {
                 bridge_id: scene.bridge_id.clone(),
                 scene_rid: scene.resource_id.clone(),
                 reports_status: scene.active.is_some(),
+                smart: scene.smart,
             },
         );
         true
@@ -357,6 +379,7 @@ impl HueRegistry {
     /// the same maps, so they are rebuilt by that pass before anything reads
     /// them, and pruning still works: it runs on what the pass just saw.
     pub fn forget_publications(&mut self) {
+        self.registered_as.clear();
         self.lights_by_device_id.clear();
         self.groups_by_device_id.clear();
         self.scenes_by_device_id.clear();
@@ -579,6 +602,7 @@ mod tests {
             palette: vec![],
             status: None,
             dynamic_capable: false,
+            smart: false,
         }
     }
 

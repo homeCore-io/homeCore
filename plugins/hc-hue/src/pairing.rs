@@ -87,6 +87,21 @@ impl PairingHandle {
             .unwrap_or_else(|| json!({}))
     }
 
+    /// Save a bridge's new address in core's learned state.
+    pub(crate) async fn set_address(&self, bridge_id: &str, address: &str) -> anyhow::Result<()> {
+        let delta = {
+            let mut cell = self.learned_state.lock().unwrap();
+            let current = cell.clone().unwrap_or_else(|| json!({}));
+            let delta = crate::config::build_bridge_address_delta(&current, bridge_id, address);
+            *cell = Some(delta.clone());
+            delta
+        };
+        self.state_writer
+            .persist(&delta)
+            .await
+            .context("saving the bridge's address")
+    }
+
     /// Hand a paired bridge to the runtime, which starts reading it now.
     pub(crate) async fn add_bridge(&self, target: BridgeTarget) {
         if self.new_bridge_tx.send(target).await.is_err() {

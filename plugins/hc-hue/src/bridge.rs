@@ -18,7 +18,9 @@ use crate::translator;
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{DevicePublisher, PluginNotices};
 
-const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
+/// A refresh the event stream asks for waits at least this long after the
+/// last one; one asked for meanwhile runs when it is up, not never.
+const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 3;
 
 /// Prefix shared by every device_id this plugin publishes
 /// (`hue_{bridge_id}_{kind}_{rid}` — see `BridgeTarget` in `hue::models`).
@@ -160,6 +162,9 @@ pub struct Bridge {
     /// Paired bridges go to the runtime through here, from the device
     /// command's pairing as from the actions'.
     new_bridge_tx: mpsc::Sender<BridgeTarget>,
+    /// Bridges whose event stream asked for a refresh while one was too
+    /// recent: they are read once the cooldown is up.
+    refresh_owed: std::collections::HashSet<String>,
 }
 
 impl Bridge {
@@ -195,6 +200,7 @@ impl Bridge {
             notices,
             live: HashMap::new(),
             new_bridge_tx,
+            refresh_owed: Default::default(),
         }
     }
 
@@ -339,6 +345,8 @@ impl Bridge {
         ));
         let mut heartbeat_tick =
             tokio::time::interval(Duration::from_secs(self.cfg.hue.heartbeat_secs.max(5)));
+        let mut owed_tick =
+            tokio::time::interval(Duration::from_secs(FALLBACK_REFRESH_COOLDOWN_SECS));
 
         loop {
             tokio::select! {
@@ -414,6 +422,7 @@ impl Bridge {
                                             self.refresh_bridge_with_reason(&bridge_id, &reason, &api).await?;
                                         } else {
                                             self.metrics.fallback_refresh_skipped.record(&bridge_id, &reason);
+                                            self.refresh_owed.insert(bridge_id.clone());
                                         }
                                     }
                                 }
@@ -631,6 +640,17 @@ impl Bridge {
                     }
                     // Sender dropped → this arm just won't fire again.
                 }
+                _ = owed_tick.tick(), if !self.refresh_owed.is_empty() => {
+                    for bridge_id in self.refresh_owed.clone() {
+                        if !self.should_run_fallback_refresh(&bridge_id) {
+                            continue;
+                        }
+                        self.refresh_owed.remove(&bridge_id);
+                        if let Some(api) = self.apis.iter().find(|a| a.target().bridge_id == bridge_id).cloned() {
+                            self.refresh_bridge_with_reason(&bridge_id, "owed", &api).await?;
+                        }
+                    }
+                }
                 _ = heartbeat_tick.tick() => {
                     self.publisher.publish_plugin_status("active").await?;
                     let m = &self.metrics;
@@ -790,7 +810,10 @@ impl Bridge {
                         return self.finish(device_id, "activate_scene", r, None).await;
                     }
                 };
-                let r = api.activate_scene(&scene_rid, &recall).await;
+                let r = match &target {
+                    Target::Scene(b) if b.smart => api.activate_smart_scene(&scene_rid, true).await,
+                    _ => api.activate_scene(&scene_rid, &recall).await,
+                };
                 if r.is_ok() {
                     let source = match target {
                         Target::Scene(_) => "scene_device_command",
@@ -846,6 +869,21 @@ impl Bridge {
                 }
                 ("set_entertainment_active", r)
             }
+            (Target::Group(b), PluginCommand::SaveScene { name }) => {
+                let r = match &b.owner_rid {
+                    Some(owner) => api.save_scene(owner, &name).await,
+                    None => Err(anyhow::anyhow!(
+                        "this group has no room or zone to save a scene in"
+                    )),
+                };
+                ("save_scene", r)
+            }
+            (Target::Scene(b), PluginCommand::RenameScene { name }) if !b.smart => {
+                ("rename_scene", api.rename_scene(&b.scene_rid, &name).await)
+            }
+            (Target::Scene(b), PluginCommand::DeleteScene) if !b.smart => {
+                ("delete_scene", api.delete_scene(&b.scene_rid).await)
+            }
             (_, other) => {
                 warn!(device_id, command = ?other, "Command not supported by this kind of Hue device");
                 let operation = match other {
@@ -854,6 +892,9 @@ impl Bridge {
                     PluginCommand::SetAccessoryState(_) => "set_accessory_state",
                     PluginCommand::SetEntertainmentActive { .. } => "set_entertainment_active",
                     PluginCommand::PairBridge => "pair_bridge",
+                    PluginCommand::SaveScene { .. } => "save_scene",
+                    PluginCommand::RenameScene { .. } => "rename_scene",
+                    PluginCommand::DeleteScene => "delete_scene",
                     _ => "command",
                 };
                 let r = Err(anyhow::anyhow!("unsupported target type"));
