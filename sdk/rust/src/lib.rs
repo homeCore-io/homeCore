@@ -52,6 +52,11 @@ pub mod types {
         AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
     };
     pub use hc_types::{NoticeLevel, PluginNotice};
+    // Alerts about a plugin's devices (and itself): declared on the manifest
+    // with `ManagementHandle::with_alert_kinds`, published with
+    // `DevicePublisher::set_alerts`.
+    pub use hc_types::alert::{AlertAction, AlertActionTarget, PluginAlert, PluginAlertKind};
+    pub use hc_types::event::AlertSeverity;
 }
 
 /// Log rotation, compression, retention, and the plugin's tracing setup.
@@ -195,6 +200,11 @@ type DeviceTracker = Arc<Mutex<DeviceTrackerInner>>;
 /// a condition detected deep in a spawned task reaches core on the next beat.
 type NoticeTracker = Arc<Mutex<Vec<PluginNotice>>>;
 
+/// The alerts last published, by topic, so a reconnect can say them again:
+/// core's broker forgets retained messages when it restarts, and an alert the
+/// plugin set an hour ago must not vanish because core did.
+type AlertTracker = Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
+
 /// Handle for reporting what is wrong with this plugin.
 ///
 /// A plugin that starts cleanly but cannot do its job is the case this exists
@@ -307,6 +317,7 @@ pub struct DevicePublisher {
     plugin_id: String,
     subscriptions: SubscriptionTracker,
     devices: DeviceTracker,
+    alerts: AlertTracker,
 }
 
 pub fn change_from_command(command_payload: &Value, fallback_source: &str) -> DeviceChange {
@@ -413,6 +424,54 @@ impl DevicePublisher {
             .publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())
             .await
             .context("set_available failed")
+    }
+
+    // ── Alerts ───────────────────────────────────────────────────────────
+
+    /// Say which of the plugin's alerts are true of a device now — the whole
+    /// list; an empty one clears them. Each names a kind declared with
+    /// [`ManagementHandle::with_alert_kinds`]; homeCore decides whether it is
+    /// shown and where it is sent.
+    ///
+    /// Retained, and said again on every reconnect, so set it when something
+    /// changes, not on a timer.
+    pub async fn set_alerts(
+        &self,
+        device_id: &str,
+        alerts: &[hc_types::alert::PluginAlert],
+    ) -> Result<()> {
+        self.publish_alerts(format!("homecore/devices/{device_id}/alerts"), alerts)
+            .await
+    }
+
+    /// The same for the plugin's alerts about itself — a login that expired,
+    /// a bridge that needs its button pressed.
+    pub async fn set_plugin_alerts(&self, alerts: &[hc_types::alert::PluginAlert]) -> Result<()> {
+        self.publish_alerts(
+            format!("homecore/plugins/{}/alerts", self.plugin_id),
+            alerts,
+        )
+        .await
+    }
+
+    async fn publish_alerts(
+        &self,
+        topic: String,
+        alerts: &[hc_types::alert::PluginAlert],
+    ) -> Result<()> {
+        let payload = serde_json::to_vec(alerts)?;
+        {
+            let mut held = self.alerts.lock().unwrap();
+            if alerts.is_empty() {
+                held.remove(&topic);
+            } else {
+                held.insert(topic.clone(), payload.clone());
+            }
+        }
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .context("set_alerts failed")
     }
 
     /// Alias for [`set_available`] — matches the naming used by most plugins.
@@ -713,6 +772,7 @@ impl DevicePublisher {
             plugin_id: plugin_id.to_string(),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             devices: Arc::new(Mutex::new(DeviceTrackerInner::default())),
+            alerts: Arc::new(Mutex::new(Default::default())),
         }
     }
 }
@@ -745,6 +805,9 @@ pub struct ManagementHandle {
     /// instead of guessing a form from the schema. `None` → the client
     /// auto-derives a baseline descriptor from `config_schema`.
     config_descriptor: Option<Value>,
+    /// The kinds of alert the plugin can raise, injected into the published
+    /// manifest as `alert_kinds`.
+    alert_kinds: Vec<hc_types::alert::PluginAlertKind>,
     /// Callback invoked with the plugin's durable learned-state document
     /// (`homecore/plugins/{id}/state`, retained + owned by core) whenever it
     /// arrives — once shortly after connect, and again on any core-side change.
@@ -816,6 +879,18 @@ impl ManagementHandle {
     /// while the descriptor annotates *intent*.
     pub fn with_config_descriptor(mut self, descriptor: Value) -> Self {
         self.config_descriptor = Some(descriptor);
+        self
+    }
+
+    /// Declare the kinds of alert the plugin can raise. Rides on the
+    /// capability manifest as `alert_kinds`, so the settings screen can list
+    /// each — and let someone turn it on or off — before it ever happens.
+    /// Raise them with [`DevicePublisher::set_alerts`].
+    pub fn with_alert_kinds(
+        mut self,
+        kinds: impl IntoIterator<Item = hc_types::alert::PluginAlertKind>,
+    ) -> Self {
+        self.alert_kinds = kinds.into_iter().collect();
         self
     }
 
@@ -926,6 +1001,7 @@ pub struct PluginClient {
     subscriptions: SubscriptionTracker,
     devices: DeviceTracker,
     notices: NoticeTracker,
+    alerts: AlertTracker,
 }
 
 /// Cloneable handle for persisting plugin learned-state deltas without holding
@@ -995,6 +1071,7 @@ impl PluginClient {
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             devices: Arc::new(Mutex::new(DeviceTrackerInner::default())),
             notices: Arc::new(Mutex::new(Vec::new())),
+            alerts: Arc::new(Mutex::new(Default::default())),
         })
     }
 
@@ -1392,6 +1469,7 @@ impl PluginClient {
             plugin_id: self.config.plugin_id.clone(),
             subscriptions: Arc::clone(&self.subscriptions),
             devices: Arc::clone(&self.devices),
+            alerts: Arc::clone(&self.alerts),
         }
     }
 
@@ -1481,6 +1559,7 @@ impl PluginClient {
             capabilities: None,
             config_schema: None,
             config_descriptor: None,
+            alert_kinds: Vec::new(),
             state_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -1603,6 +1682,7 @@ impl PluginClient {
     {
         let plugin_id = self.config.plugin_id.clone();
         let subs = Arc::clone(&self.subscriptions);
+        let held_alerts = Arc::clone(&self.alerts);
         info!(plugin_id = %plugin_id, "Plugin event loop starting");
         loop {
             match self.eventloop.poll().await {
@@ -1640,6 +1720,23 @@ impl PluginClient {
                             topics.len()
                         );
                     }
+                    // Say the alerts again: a restarted core's broker has
+                    // forgotten them.
+                    let alerts: Vec<(String, Vec<u8>)> = held_alerts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(t, p)| (t.clone(), p.clone()))
+                        .collect();
+                    for (topic, payload) in alerts {
+                        if let Err(e) = self
+                            .client
+                            .publish(&topic, QoS::AtLeastOnce, true, payload)
+                            .await
+                        {
+                            warn!(topic, error = %e, "Failed to republish alerts on reconnect");
+                        }
+                    }
                     // Republish capability manifest retained, if declared.
                     // Retained so late-joining core instances still see it.
                     if let Some(ref mgmt) = mgmt {
@@ -1649,6 +1746,7 @@ impl PluginClient {
                         if mgmt.capabilities.is_some()
                             || mgmt.config_schema.is_some()
                             || mgmt.config_descriptor.is_some()
+                            || !mgmt.alert_kinds.is_empty()
                         {
                             let topic = format!("homecore/plugins/{}/capabilities", mgmt.plugin_id);
                             // Synthesize an empty manifest for a schema-only plugin.
@@ -1670,6 +1768,7 @@ impl PluginClient {
                                 caps,
                                 mgmt.config_schema.as_ref(),
                                 mgmt.config_descriptor.as_ref(),
+                                &mgmt.alert_kinds,
                             );
                             if !manifest.is_null() {
                                 let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
@@ -1803,18 +1902,27 @@ impl PluginClient {
                             && parts[4] == "cmd"
                         {
                             if let Ok(cmd) = serde_json::from_slice::<Value>(&p.payload) {
-                                let resp = dispatch_management_cmd(mgmt, &self.client, &cmd).await;
-                                let resp_topic =
-                                    format!("homecore/plugins/{}/manage/response", mgmt.plugin_id);
-                                let _ = self
-                                    .client
-                                    .publish(
-                                        &resp_topic,
-                                        QoS::AtLeastOnce,
-                                        false,
-                                        serde_json::to_vec(&resp).unwrap_or_default(),
-                                    )
-                                    .await;
+                                // On its own task: an action that takes a minute (a
+                                // firmware install waiting for its controller to come
+                                // back) must not stop this loop — while it ran inline,
+                                // nothing else was read, not even keep-alives.
+                                let mgmt = mgmt.clone();
+                                let client = self.client.clone();
+                                tokio::spawn(async move {
+                                    let resp = dispatch_management_cmd(&mgmt, &client, &cmd).await;
+                                    let resp_topic = format!(
+                                        "homecore/plugins/{}/manage/response",
+                                        mgmt.plugin_id
+                                    );
+                                    let _ = client
+                                        .publish(
+                                            &resp_topic,
+                                            QoS::AtLeastOnce,
+                                            false,
+                                            serde_json::to_vec(&resp).unwrap_or_default(),
+                                        )
+                                        .await;
+                                });
                             }
                         }
                     }
@@ -1836,10 +1944,17 @@ fn build_capability_manifest(
     caps: &hc_types::Capabilities,
     config_schema: Option<&Value>,
     config_descriptor: Option<&Value>,
+    alert_kinds: &[hc_types::alert::PluginAlertKind],
 ) -> Value {
     match serde_json::to_value(caps) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
+                if !alert_kinds.is_empty() {
+                    obj.insert(
+                        "alert_kinds".into(),
+                        serde_json::to_value(alert_kinds).unwrap_or_default(),
+                    );
+                }
                 if let Some(schema) = config_schema {
                     obj.insert("config_schema".into(), schema.clone());
                 }
@@ -2199,7 +2314,7 @@ mod config_schema_tests {
             "type": "object",
             "properties": { "poll_interval_secs": { "type": "integer" } }
         });
-        let m = build_capability_manifest(&caps(), Some(&schema), None);
+        let m = build_capability_manifest(&caps(), Some(&schema), None, &[]);
         assert_eq!(m["plugin_id"], "plugin.hue");
         assert_eq!(m["spec"], "1");
         assert_eq!(m["config_schema"], schema);
@@ -2207,7 +2322,7 @@ mod config_schema_tests {
 
     #[test]
     fn manifest_omits_config_schema_when_absent() {
-        let m = build_capability_manifest(&caps(), None, None);
+        let m = build_capability_manifest(&caps(), None, None, &[]);
         assert!(m.get("config_schema").is_none());
         // Base manifest still intact.
         assert_eq!(m["plugin_id"], "plugin.hue");

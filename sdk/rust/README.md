@@ -187,6 +187,42 @@ showing it after the user's devices arrive.
 Levels are `info`, `warning`, and `error`. `with_remedy` adds the sentence
 that tells the operator what to do about it.
 
+## Alerts
+
+Notices are about the plugin; **alerts** are about its devices, and live in
+the house's alert list (homeCore 0.1.85). Declare the kinds you can raise on
+the manifest, then say which are true of a device now — the whole list each
+time; an empty one clears them:
+
+```rust
+use plugin_sdk_rs::types::{AlertAction, AlertActionTarget, AlertSeverity, PluginAlert, PluginAlertKind};
+
+let mgmt = mgmt.with_alert_kinds([PluginAlertKind {
+    topic: "firmware_update".into(),
+    label: "Firmware update available".into(),
+    description: None,
+    severity: AlertSeverity::Info,
+    default_on: false, // news, not a problem: off until someone turns it on
+}]);
+
+publisher.set_alerts("wled_1", &[
+    PluginAlert::new("firmware_update", "Firmware 17.0.0 is out")
+        .key("17.0.0") // "skip this one" skips this version, not the kind
+        .action(AlertAction {
+            label: "Update…".into(),
+            id: "install_firmware".into(), // one of the device's actions
+            target: AlertActionTarget::Device,
+            params: serde_json::json!({ "version": "17.0.0" }),
+            confirm: true,
+        }),
+]).await?;
+```
+
+homeCore decides whether each is shown and where it is sent, never shows a
+plugin's alert as critical, and lets automations start on, check and act on
+them. `set_plugin_alerts` does the same for alerts about the plugin itself.
+Alerts are retained and said again on every reconnect.
+
 ## Secrets in log fields
 
 `MqttLogLayer` publishes log events to a topic anything can subscribe to,

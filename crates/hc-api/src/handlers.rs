@@ -598,7 +598,7 @@ pub async fn command_device(
     (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" })))
 }
 
-async fn publish_device_command(
+pub(crate) async fn publish_device_command(
     s: &AppState,
     device_id: &str,
     body: Value,
@@ -2780,6 +2780,10 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::ModeChanged { .. } => "mode_changed",
         Trigger::DeviceBatteryLow { .. } => "device_battery_low",
         Trigger::DeviceBatteryRecovered { .. } => "device_battery_recovered",
+        Trigger::AlertRaised { .. } => "alert_raised",
+        Trigger::AlertCleared { .. } => "alert_cleared",
+        Trigger::AlertAcknowledged { .. } => "alert_acknowledged",
+        Trigger::AlertActiveFor { .. } => "alert_active_for",
     }
 }
 
@@ -5792,6 +5796,28 @@ async fn eval_condition_dry_detail(
                 },
             }
         }
+        // The alerts as they are now: a test at another time can't know
+        // which would be active then.
+        Condition::AlertActive { .. } | Condition::NoAlertActive { .. } => {
+            let active = world.alerts.as_ref().map(|a| a.list()).unwrap_or_default();
+            let (passed, trace) = hc_core::engine::alert_check(condition, &active, None);
+            ConditionDetail {
+                condition: cond_json,
+                passed,
+                actual: trace.actual,
+                expected: None,
+                elapsed_ms: None,
+                reason: Some(trace.reason),
+            }
+        }
+        Condition::TriggerAlertActive => ConditionDetail {
+            condition: cond_json,
+            passed: true,
+            actual: None,
+            expected: None,
+            elapsed_ms: None,
+            reason: Some("a test has no alert that started it — taken as still active".into()),
+        },
         Condition::CalendarActive {
             calendar_id,
             title_contains,
@@ -7650,6 +7676,38 @@ pub async fn put_plugin_config(
     }
 }
 
+/// `POST /plugins/{id}/query` — run a plugin action that only reads: one
+/// its manifest declares `requires_role: read_only` (a catalogue, a status).
+/// For anyone who can read devices — a household member's screen needs a
+/// WLED's effect names as much as an admin's does. Anything the manifest
+/// doesn't declare read-only is refused, so this path fails closed: an
+/// unknown action is never run from it.
+pub async fn post_plugin_query(
+    State(s): State<AppState>,
+    crate::auth_middleware::DevicesRead(claims): crate::auth_middleware::DevicesRead,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let action = body["action"].as_str().unwrap_or("").to_string();
+    let read_only = {
+        let map = s.plugins.read().await;
+        map.get(&id)
+            .and_then(|rec| rec.capabilities.as_ref())
+            .and_then(|c| c.actions.iter().find(|a| a.id == action))
+            .is_some_and(|a| {
+                matches!(a.requires_role, hc_types::RequiresRole::ReadOnly) && !a.stream
+            })
+    };
+    if !read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "not a read-only action of this plugin — use /plugins/{id}/command" })),
+        )
+            .into_response();
+    }
+    run_plugin_action(s, claims, id, action, body).await
+}
+
 /// `POST /plugins/{id}/command` — send a plugin-specific management command.
 ///
 /// Body: `{ "action": "...", ...extra fields }`.  Forwarded verbatim (plus a
@@ -7730,6 +7788,24 @@ pub async fn post_plugin_command(
         )
             .into_response();
     }
+    run_plugin_action(s, claims, id, action, body).await
+}
+
+/// Send a plugin action, once whoever asked has been allowed it.
+async fn run_plugin_action(
+    s: AppState,
+    _claims: hc_auth::Claims,
+    id: String,
+    action: String,
+    body: Value,
+) -> axum::response::Response {
+    let action_meta = {
+        let map = s.plugins.read().await;
+        map.get(&id)
+            .and_then(|rec| rec.capabilities.as_ref())
+            .and_then(|c| c.actions.iter().find(|a| a.id == action))
+            .cloned()
+    };
 
     let Some(ref rpc) = s.management_rpc else {
         return (

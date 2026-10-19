@@ -3,15 +3,21 @@
 //! from device state — and active alerts are recomputed on start rather than
 //! stored, so a restart can never leave a stale one behind.
 //!
-//! Ignores live here too, one row each: what a person chose not to see.
+//! Ignores live here too, one row each: what a person chose not to see. So do
+//! the settings for plugins' kinds of alert, one row per `plugin_id/topic`.
 
 use anyhow::{Context, Result};
-use hc_types::alert::{AlertIgnore, AlertRule};
+use hc_types::alert::{AlertIgnore, AlertRule, AlertTopicSetting};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::sync::Arc;
 
 const ALERT_RULES: TableDefinition<&str, &str> = TableDefinition::new("alert_rules");
 const ALERT_IGNORES: TableDefinition<&str, &str> = TableDefinition::new("alert_ignores");
+const ALERT_TOPICS: TableDefinition<&str, &str> = TableDefinition::new("alert_topic_settings");
+
+fn topic_key(plugin_id: &str, topic: &str) -> String {
+    format!("{plugin_id}/{topic}")
+}
 
 pub struct AlertRuleStore {
     db: Arc<Database>,
@@ -23,6 +29,7 @@ impl AlertRuleStore {
         {
             write_txn.open_table(ALERT_RULES)?;
             write_txn.open_table(ALERT_IGNORES)?;
+            write_txn.open_table(ALERT_TOPICS)?;
         }
         write_txn.commit()?;
         Ok(Self { db })
@@ -121,12 +128,65 @@ impl AlertRuleStore {
         write_txn.commit()?;
         Ok(existed)
     }
+
+    // ---- plugins' kinds of alert ----
+
+    pub fn list_topic_settings(&self) -> Result<Vec<AlertTopicSetting>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(ALERT_TOPICS)?;
+        let mut out = Vec::new();
+        for row in table.iter()? {
+            let (_, value) = row?;
+            match serde_json::from_str::<AlertTopicSetting>(value.value()) {
+                Ok(t) => out.push(t),
+                Err(e) => tracing::warn!(error = %e, "skipping an unreadable alert topic setting"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Saves it; one that says nothing (both fields left out) is removed,
+    /// which is the plugin's defaults again.
+    pub fn put_topic_setting(&self, setting: &AlertTopicSetting) -> Result<()> {
+        let key = topic_key(&setting.plugin_id, &setting.topic);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(ALERT_TOPICS)?;
+            if setting.enabled.is_none() && setting.notify.is_none() {
+                table.remove(key.as_str())?;
+            } else {
+                let json = serde_json::to_string(setting)?;
+                table.insert(key.as_str(), json.as_str())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hc_types::alert::AlertKind;
+
+    #[test]
+    fn a_topic_setting_is_kept_and_an_empty_one_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+        let store = AlertRuleStore::new(db).unwrap();
+        let mut s = AlertTopicSetting {
+            plugin_id: "plugin.wled".into(),
+            topic: "firmware_update".into(),
+            enabled: Some(true),
+            notify: Some("phone".into()),
+        };
+        store.put_topic_setting(&s).unwrap();
+        assert_eq!(store.list_topic_settings().unwrap(), vec![s.clone()]);
+        s.enabled = None;
+        s.notify = None;
+        store.put_topic_setting(&s).unwrap();
+        assert!(store.list_topic_settings().unwrap().is_empty());
+    }
 
     #[test]
     fn ignores_are_kept_and_removed() {
@@ -138,6 +198,9 @@ mod tests {
             kind: Some(AlertKind::LowBattery),
             device_id: Some("lock".into()),
             rule_id: None,
+            plugin_id: None,
+            topic: None,
+            key: None,
             until: None,
             note: Some("spare batteries on order".into()),
             by: Some("sam".into()),

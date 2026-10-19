@@ -103,6 +103,8 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("POST", "/alert-ignores") => c("alert_ignore.created", "alert_ignore"),
         ("DELETE", "/alert-ignores/{id}") => c("alert_ignore.deleted", "alert_ignore"),
         ("POST", "/alerts/{id}/acknowledge") => c("alert.acknowledged", "alert"),
+        ("POST", "/alerts/{id}/press") => c("alert.pressed", "alert"),
+        ("PUT", "/alerts/kinds/{plugin_id}/{topic}") => c("alert_kind.updated", "alert_kind"),
         // Plugins
         ("POST", "/plugins/install") => c("plugin.installed", "plugin"),
         ("POST", "/plugins/{id}/start") => c("plugin.started", "plugin"),

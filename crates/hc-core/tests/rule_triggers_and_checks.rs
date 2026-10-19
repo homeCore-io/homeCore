@@ -76,3 +76,55 @@ fn rules_from_before_keep_their_shape() {
     assert!(!text.contains(" triggers:"), "{text}");
     assert!(text.contains(r#"condition: "device_state"#), "{text}");
 }
+
+/// The worked example from the design: install each waiting WLED update at
+/// night, one at a time, unless that controller has a problem — every alert
+/// trigger, check and step must survive JSON and RON.
+#[test]
+fn an_automation_that_uses_alerts_round_trips() {
+    let r = rule(serde_json::json!({
+        "id": "6f2f1a3e-6b1f-4f0c-9a7e-3b6b0a2d1c46",
+        "name": "Install WLED updates at night",
+        "enabled": true,
+        "priority": 0,
+        "trigger": { "TimeOfDay": { "time": "03:00:00", "days": [] } },
+        "triggers": [
+            { "AlertRaised": { "filter": { "plugin_id": "plugin.wled", "topic": "firmware_update" } } },
+            { "AlertActiveFor": { "filter": { "kind": "offline", "min_severity": "warning" }, "minutes": 30 } },
+            { "AlertCleared": {} },
+            { "AlertAcknowledged": { "filter": { "device_ids": ["wled_1"] } } }
+        ],
+        "conditions": [
+            { "AlertActive": { "filter": { "topic": "firmware_update" } } },
+            { "NoAlertActive": { "filter": { "device_ids": ["wled_1"], "min_severity": "warning" } } },
+            "TriggerAlertActive"
+        ],
+        "actions": [
+            { "enabled": true, "action": { "ForEachAlert": {
+                "filter": { "plugin_id": "plugin.wled", "topic": "firmware_update" },
+                "actions": [
+                    { "PressAlert": {} },
+                    { "WaitAlertCleared": { "timeout_secs": 600, "otherwise": [
+                        { "Notify": { "channel": "all", "message": "{alert.device} didn't come back on {alert.key}" } },
+                        "ExitRule"
+                    ] } }
+                ]
+            } } },
+            { "enabled": true, "action": { "AcknowledgeAlert": { "alert_id": "x" } } },
+            { "enabled": true, "action": { "SkipAlert": {} } },
+            { "enabled": true, "action": { "IgnoreAlerts": { "filter": { "kind": "offline" }, "minutes": 60 } } }
+        ]
+    }));
+    assert_eq!(r.all_triggers().count(), 5);
+    assert_eq!(ron_round_trip(&r), r);
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(rule(json.clone()), r);
+    // Defaults stay unwritten: one alert at least, an empty filter.
+    assert!(json["conditions"][0]["AlertActive"]
+        .get("at_least")
+        .is_none());
+    assert_eq!(
+        json["triggers"][2],
+        serde_json::json!({ "AlertCleared": { "filter": {} } })
+    );
+}

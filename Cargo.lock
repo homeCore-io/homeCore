@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "hc-wled"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1981,9 +1981,11 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
+ "toml_edit",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2071,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.84"
+version = "0.1.85"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3378,7 +3380,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3793,6 +3795,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

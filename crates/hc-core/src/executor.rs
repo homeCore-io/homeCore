@@ -106,6 +106,80 @@ fn rule_change(ctx: &ExecutorContext, source: &str) -> DeviceChange {
         .with_correlation_id(ctx.correlation_id.clone())
 }
 
+/// The alert an alert step acts on: the one it names, else the one a
+/// `ForEachAlert` is on, else the one that started the rule — as it is now
+/// if still active, else as it was.
+fn the_alert(ctx: &ExecutorContext, id: Option<&str>) -> Option<hc_types::alert::Alert> {
+    let live = |id: &str| ctx.alerts.as_ref().and_then(|a| a.get(id));
+    if let Some(id) = id {
+        return live(id);
+    }
+    if let Some(a) = ctx.current_alert.lock().unwrap().clone() {
+        return live(&a.id).or(Some(a));
+    }
+    let started: hc_types::alert::Alert = ctx
+        .trigger_ctx
+        .extra
+        .as_ref()
+        .and_then(|e| e.get("alert"))
+        .and_then(|a| serde_json::from_value(a.clone()).ok())?;
+    live(&started.id).or(Some(started))
+}
+
+/// Save an ignore an alert step made, and have the alerts worked out again.
+async fn save_ignore(ctx: &ExecutorContext, ignore: hc_types::alert::AlertIgnore) -> Result<()> {
+    let Some(store) = &ctx.state else {
+        warn!(rule = %ctx.rule_name, "alert step: no store, nothing saved");
+        return Ok(());
+    };
+    store.upsert_alert_ignore(ignore).await?;
+    if let Some(a) = &ctx.alerts {
+        a.rules_changed();
+    }
+    Ok(())
+}
+
+/// `{alert.message}` and the rest, filled in from the alert the rule is
+/// acting on. Text with none is returned as it came; with no alert, the
+/// placeholders are left as written.
+async fn fill_alert(text: &str, ctx: &ExecutorContext) -> String {
+    if !text.contains("{alert.") {
+        return text.to_string();
+    }
+    let Some(a) = the_alert(ctx, None) else {
+        return text.to_string();
+    };
+    // The name a person knows it by — not the log's canonical slug.
+    let device = match &ctx.state {
+        Some(store) => match store.get_device(&a.device_id).await {
+            Ok(Some(d)) => d.effective_name().to_string(),
+            _ => a.device_id.clone(),
+        },
+        None => a.device_id.clone(),
+    };
+    let sev = serde_json::to_value(a.severity)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let local = a.raised_at.with_timezone(&hc_time::configured_tz());
+    [
+        ("{alert.message}", a.message.clone()),
+        ("{alert.reason}", a.reason.clone()),
+        ("{alert.device}", device),
+        ("{alert.device_id}", a.device_id.clone()),
+        (
+            "{alert.kind}",
+            a.topic.clone().unwrap_or_else(|| a.kind.as_str().into()),
+        ),
+        ("{alert.key}", a.key.clone().unwrap_or_default()),
+        ("{alert.severity}", sev),
+        ("{alert.raised_at}", local.format("%H:%M").to_string()),
+        ("{alert.id}", a.id.clone()),
+    ]
+    .iter()
+    .fold(text.to_string(), |t, (k, v)| t.replace(k, v))
+}
+
 async fn publish_device_command(
     ctx: &ExecutorContext,
     device_id: &str,
@@ -217,6 +291,12 @@ pub struct ExecutorContext {
     /// The engine's judge, so an if/otherwise can ask anything a rule's own
     /// conditions can. `None` (tests) asks only devices, modes and the clock.
     pub judge: Option<Judge>,
+    /// The active alerts, for the alert steps.
+    pub alerts: Option<crate::alerts::AlertsHandle>,
+    /// The alert a `ForEachAlert` is on, while it runs its steps. An alert
+    /// step that names no alert acts on this one, else on the alert that
+    /// started the rule.
+    pub current_alert: Arc<Mutex<Option<hc_types::alert::Alert>>>,
 }
 
 impl ExecutorContext {
@@ -244,6 +324,8 @@ impl ExecutorContext {
             trace: None,
             correlation_id: None,
             judge: None,
+            alerts: None,
+            current_alert: Default::default(),
         })
     }
 }
@@ -996,6 +1078,11 @@ fn run_single_action(
                 message,
                 title,
             } => {
+                let message = fill_alert(&message, &ctx).await;
+                let title = match title {
+                    Some(t) => Some(fill_alert(&t, &ctx).await),
+                    None => None,
+                };
                 let title_str = title.as_deref().unwrap_or("HomeCore Alert");
                 debug!(channel, title = title_str, message = %message, "action: Notify");
                 match &ctx.notify {
@@ -1036,6 +1123,7 @@ fn run_single_action(
 
             // ── LogMessage ─────────────────────────────────────────────────────────
             Action::LogMessage { message, level } => {
+                let message = fill_alert(&message, &ctx).await;
                 let rule = ctx.rule_name.as_str();
                 match level.unwrap_or(LogLevel::Info) {
                     LogLevel::Trace => trace!(%rule, "{message}"),
@@ -1210,6 +1298,8 @@ fn run_single_action(
                             // The calling rule's judge: the called rule's
                             // private booleans are read as the caller's.
                             judge: ctx.judge.clone(),
+                            alerts: ctx.alerts.clone(),
+                            current_alert: Default::default(),
                         });
                         let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
                         // Use execute_actions so per-action enabled flags are respected.
@@ -1267,6 +1357,219 @@ fn run_single_action(
                         let _ = tokio::time::timeout(Duration::from_millis(ms), wait_fut).await;
                     }
                     None => wait_fut.await,
+                }
+            }
+
+            // ── Alerts ───────────────────────────────────────────────────────────
+            Action::ForEachAlert { filter, actions } => {
+                // Oldest first: the one waiting longest is done first.
+                let mut alerts: Vec<_> = ctx
+                    .alerts
+                    .as_ref()
+                    .map(|a| a.list())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| filter.matches(a))
+                    .collect();
+                alerts.sort_by_key(|a| a.raised_at);
+                debug!(rule = %ctx.rule_name, count = alerts.len(), "action: ForEachAlert");
+                let before = ctx.current_alert.lock().unwrap().clone();
+                for alert in alerts {
+                    if ctx.exit_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    *ctx.current_alert.lock().unwrap() = Some(alert);
+                    let run = execute_actions_inner(
+                        actions.clone(),
+                        Arc::clone(&ctx),
+                        snapshot.clone(),
+                        call_depth,
+                    )
+                    .await;
+                    if run.is_err() {
+                        *ctx.current_alert.lock().unwrap() = before;
+                        return run;
+                    }
+                }
+                *ctx.current_alert.lock().unwrap() = before;
+            }
+
+            Action::PressAlert { alert_id } => {
+                let Some(alert) = the_alert(&ctx, alert_id.as_deref()) else {
+                    warn!(rule = %ctx.rule_name, "action: PressAlert — no such alert active");
+                    return Ok(());
+                };
+                let Some(action) = alert.action.clone() else {
+                    warn!(rule = %ctx.rule_name, alert = %alert.id, "action: PressAlert — the alert has no button");
+                    return Ok(());
+                };
+                let mut body = match action.params {
+                    JsonValue::Object(m) => JsonValue::Object(m),
+                    _ => serde_json::json!({}),
+                };
+                body["action"] = JsonValue::String(action.id.clone());
+                match action.target {
+                    hc_types::alert::AlertActionTarget::Device => {
+                        info!(rule = %ctx.rule_name, alert = %alert.id, button = %action.label, "action: PressAlert");
+                        publish_device_command(
+                            &ctx,
+                            &alert.device_id,
+                            body,
+                            rule_change(&ctx, "rule"),
+                        )
+                        .await?;
+                    }
+                    hc_types::alert::AlertActionTarget::Plugin => {
+                        let Some(plugin_id) = alert.plugin_id.clone() else {
+                            warn!(rule = %ctx.rule_name, alert = %alert.id, "action: PressAlert — names no plugin");
+                            return Ok(());
+                        };
+                        let Some(ph) = &ctx.publish else {
+                            warn!(rule = %ctx.rule_name, "action: PressAlert — no publish handle");
+                            return Ok(());
+                        };
+                        // The management protocol, as the API's plugin command
+                        // sends it — without waiting for the reply: the alert
+                        // clearing is the answer an automation waits for.
+                        body["request_id"] = JsonValue::String(Uuid::new_v4().to_string());
+                        info!(rule = %ctx.rule_name, alert = %alert.id, plugin = %plugin_id, button = %action.label, "action: PressAlert (plugin)");
+                        ph.publish(
+                            &format!("homecore/plugins/{plugin_id}/manage/cmd"),
+                            serde_json::to_vec(&body)?,
+                        )
+                        .await?;
+                    }
+                }
+            }
+
+            Action::WaitAlertCleared {
+                alert_id,
+                timeout_secs,
+                otherwise,
+            } => {
+                let Some(alert) = the_alert(&ctx, alert_id.as_deref()) else {
+                    debug!(rule = %ctx.rule_name, "action: WaitAlertCleared — nothing to wait for");
+                    return Ok(());
+                };
+                let still = |id: &str| ctx.alerts.as_ref().is_some_and(|a| a.get(id).is_some());
+                let cleared = match ctx.event_bus.clone() {
+                    None => !still(&alert.id),
+                    Some(bus) => {
+                        let mut rx = bus.subscribe();
+                        // Subscribed first, then looked: no clearing can slip
+                        // between the two.
+                        if !still(&alert.id) {
+                            true
+                        } else {
+                            let id = alert.id.clone();
+                            let wait = async {
+                                while let Ok(e) = rx.recv().await {
+                                    if matches!(&e, Event::AlertCleared { alert_id, .. } if *alert_id == id)
+                                    {
+                                        return;
+                                    }
+                                }
+                            };
+                            tokio::time::timeout(Duration::from_secs(timeout_secs), wait)
+                                .await
+                                .is_ok()
+                        }
+                    }
+                };
+                debug!(rule = %ctx.rule_name, alert = %alert.id, cleared, "action: WaitAlertCleared");
+                if !cleared && !otherwise.is_empty() {
+                    execute_actions_inner(otherwise, Arc::clone(&ctx), snapshot, call_depth)
+                        .await?;
+                }
+            }
+
+            Action::AcknowledgeAlert { alert_id } => {
+                let Some(alert) = the_alert(&ctx, alert_id.as_deref()) else {
+                    return Ok(());
+                };
+                let by = format!("automation “{}”", ctx.rule_name);
+                if let Some(seen) = ctx
+                    .alerts
+                    .as_ref()
+                    .and_then(|a| a.acknowledge(&alert.id, &by))
+                {
+                    if let Some(bus) = &ctx.event_bus {
+                        let now = chrono::Utc::now();
+                        let _ = bus.publish(Event::AlertRaised {
+                            timestamp: now,
+                            alert: seen.clone(),
+                            update: true,
+                        });
+                        let _ = bus.publish(Event::AlertAcknowledged {
+                            timestamp: now,
+                            alert: seen,
+                        });
+                    }
+                }
+            }
+
+            Action::SkipAlert { alert_id } => {
+                let Some(alert) = the_alert(&ctx, alert_id.as_deref()) else {
+                    return Ok(());
+                };
+                if alert.key.is_none() || alert.plugin_id.is_none() {
+                    warn!(rule = %ctx.rule_name, alert = %alert.id,
+                        "action: SkipAlert — only a plugin's alert about one thing (a version) can be skipped");
+                    return Ok(());
+                }
+                let ignore = hc_types::alert::AlertIgnore {
+                    id: Uuid::new_v4().to_string(),
+                    kind: Some(alert.kind),
+                    device_id: Some(alert.device_id.clone()),
+                    rule_id: None,
+                    plugin_id: alert.plugin_id.clone(),
+                    topic: alert.topic.clone(),
+                    key: alert.key.clone(),
+                    until: None,
+                    note: Some(format!("skipped by automation “{}”", ctx.rule_name)),
+                    by: Some(ctx.rule_name.clone()),
+                    created_at: chrono::Utc::now(),
+                };
+                save_ignore(&ctx, ignore).await?;
+            }
+
+            Action::IgnoreAlerts {
+                filter,
+                minutes,
+                note,
+            } => {
+                if filter.min_severity.is_some() {
+                    warn!(rule = %ctx.rule_name,
+                        "action: IgnoreAlerts — ignoring by severity isn't possible; the rest of the filter applies");
+                }
+                let until =
+                    minutes.map(|m| chrono::Utc::now() + chrono::Duration::minutes(i64::from(m)));
+                let devices: Vec<Option<String>> = if filter.device_ids.is_empty() {
+                    vec![None]
+                } else {
+                    filter.device_ids.iter().cloned().map(Some).collect()
+                };
+                for device_id in devices {
+                    let ignore = hc_types::alert::AlertIgnore {
+                        id: Uuid::new_v4().to_string(),
+                        kind: filter.kind,
+                        device_id,
+                        rule_id: filter.rule_id.clone(),
+                        plugin_id: filter.plugin_id.clone(),
+                        topic: filter.topic.clone(),
+                        key: filter.key.clone(),
+                        until,
+                        note: note
+                            .clone()
+                            .or_else(|| Some(format!("by automation “{}”", ctx.rule_name))),
+                        by: Some(ctx.rule_name.clone()),
+                        created_at: chrono::Utc::now(),
+                    };
+                    if let Err(msg) = ignore.validate() {
+                        warn!(rule = %ctx.rule_name, error = %msg, "action: IgnoreAlerts — not saved");
+                        return Ok(());
+                    }
+                    save_ignore(&ctx, ignore).await?;
                 }
             }
 
@@ -1996,6 +2299,30 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
             }
         }
         Action::SetMode { mode_id, command } => format!("{} {:?}", mode_id, command),
+        Action::ForEachAlert { actions, .. } => {
+            format!("for each alert like that: {} steps", actions.len())
+        }
+        Action::PressAlert { alert_id } => {
+            format!("press {}", alert_id.as_deref().unwrap_or("the alert"))
+        }
+        Action::WaitAlertCleared {
+            alert_id,
+            timeout_secs,
+            ..
+        } => format!(
+            "until {} clears, at most {timeout_secs}s",
+            alert_id.as_deref().unwrap_or("the alert")
+        ),
+        Action::AcknowledgeAlert { alert_id } => {
+            format!("mark {} seen", alert_id.as_deref().unwrap_or("the alert"))
+        }
+        Action::SkipAlert { alert_id } => {
+            format!("skip {}", alert_id.as_deref().unwrap_or("the alert"))
+        }
+        Action::IgnoreAlerts { minutes, .. } => match minutes {
+            Some(m) => format!("ignore alerts like that for {m} min"),
+            None => "ignore alerts like that".into(),
+        },
     }
 }
 
@@ -2035,12 +2362,212 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::SetHubVariable { .. } => "SetHubVariable",
         Action::ActivateScenePerMode { .. } => "ActivateScenePerMode",
         Action::SetMode { .. } => "SetMode",
+        Action::ForEachAlert { .. } => "ForEachAlert",
+        Action::PressAlert { .. } => "PressAlert",
+        Action::WaitAlertCleared { .. } => "WaitAlertCleared",
+        Action::AcknowledgeAlert { .. } => "AcknowledgeAlert",
+        Action::SkipAlert { .. } => "SkipAlert",
+        Action::IgnoreAlerts { .. } => "IgnoreAlerts",
     }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod alert_step_tests {
+    use super::*;
+    use hc_types::alert::{Alert, AlertAction, AlertActionTarget, AlertFilter, AlertKind};
+    use hc_types::event::AlertSeverity;
+
+    fn update(id: &str, device: &str) -> Alert {
+        Alert {
+            id: id.into(),
+            kind: AlertKind::Plugin,
+            device_id: device.into(),
+            rule_id: None,
+            message: format!("{device}: firmware 17.0.0 is out"),
+            reason: "Firmware 17.0.0 is out".into(),
+            severity: AlertSeverity::Info,
+            raised_at: chrono::Utc::now(),
+            acknowledged: None,
+            plugin_id: Some("plugin.wled".into()),
+            topic: Some("firmware_update".into()),
+            key: Some("17.0.0".into()),
+            action: Some(AlertAction {
+                label: "Update…".into(),
+                id: "install_firmware".into(),
+                target: AlertActionTarget::Device,
+                params: serde_json::json!({ "version": "17.0.0" }),
+                confirm: true,
+            }),
+        }
+    }
+
+    fn ctx_with(
+        alerts: Vec<Alert>,
+        started_by: Option<&Alert>,
+    ) -> (Arc<ExecutorContext>, EventBus) {
+        let handle = crate::alerts::AlertsHandle::new();
+        handle.set_active_for_test(alerts);
+        let bus = EventBus::new(64);
+        let mut ctx = Arc::try_unwrap(ExecutorContext::for_test()).ok().unwrap();
+        ctx.alerts = Some(handle);
+        ctx.event_bus = Some(bus.clone());
+        ctx.rule_name = "Install WLED updates at night".into();
+        if let Some(a) = started_by {
+            ctx.trigger_ctx.extra = Some(serde_json::json!({ "alert": a }));
+        }
+        (Arc::new(ctx), bus)
+    }
+
+    fn commands(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<(String, JsonValue)> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Event::DeviceCommandSent {
+                device_id, command, ..
+            } = e
+            {
+                out.push((device_id, command));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn for_each_alert_presses_each_alert_s_own_button() {
+        let (ctx, bus) = ctx_with(vec![update("a", "wled_1"), update("b", "wled_2")], None);
+        let mut rx = bus.subscribe();
+        let step = Action::ForEachAlert {
+            filter: AlertFilter {
+                topic: Some("firmware_update".into()),
+                ..Default::default()
+            },
+            actions: vec![Action::PressAlert { alert_id: None }],
+        };
+        execute_actions_inner(vec![step], Arc::clone(&ctx), Arc::new(HashMap::new()), 0)
+            .await
+            .unwrap();
+        let sent = commands(&mut rx);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].0, "wled_1");
+        assert_eq!(sent[1].0, "wled_2");
+        assert_eq!(sent[0].1["action"], "install_firmware");
+        assert_eq!(sent[0].1["version"], "17.0.0");
+        // Afterwards, "the alert" is no longer the loop's.
+        assert!(ctx.current_alert.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_alert_step_acts_on_the_alert_that_started_the_rule() {
+        let a = update("a", "wled_1");
+        let (ctx, bus) = ctx_with(vec![a.clone()], Some(&a));
+        let mut rx = bus.subscribe();
+        execute_actions_inner(
+            vec![Action::PressAlert { alert_id: None }],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(commands(&mut rx).len(), 1);
+        let text = fill_alert(
+            "{alert.device_id} didn't come back on {alert.key} ({alert.severity})",
+            &ctx,
+        )
+        .await;
+        assert_eq!(text, "wled_1 didn't come back on 17.0.0 (info)");
+        assert_eq!(fill_alert("no placeholders", &ctx).await, "no placeholders");
+    }
+
+    #[tokio::test]
+    async fn waiting_for_an_alert_to_clear_runs_otherwise_when_it_doesn_t() {
+        let a = update("a", "wled_1");
+        let (ctx, _bus) = ctx_with(vec![a.clone()], Some(&a));
+        let step = Action::WaitAlertCleared {
+            alert_id: None,
+            timeout_secs: 0,
+            otherwise: vec![Action::ExitRule],
+        };
+        execute_actions_inner(vec![step], Arc::clone(&ctx), Arc::new(HashMap::new()), 0)
+            .await
+            .unwrap();
+        assert!(
+            ctx.exit_flag.load(Ordering::SeqCst),
+            "it didn't clear: otherwise ran"
+        );
+
+        // Already cleared: nothing to wait for, and otherwise doesn't run.
+        let (ctx, _bus) = ctx_with(vec![], Some(&a));
+        let step = Action::WaitAlertCleared {
+            alert_id: None,
+            timeout_secs: 5,
+            otherwise: vec![Action::ExitRule],
+        };
+        execute_actions_inner(vec![step], Arc::clone(&ctx), Arc::new(HashMap::new()), 0)
+            .await
+            .unwrap();
+        assert!(!ctx.exit_flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn waiting_ends_when_the_alert_clears() {
+        let a = update("a", "wled_1");
+        let (ctx, bus) = ctx_with(vec![a.clone()], Some(&a));
+        let step = Action::WaitAlertCleared {
+            alert_id: None,
+            timeout_secs: 30,
+            otherwise: vec![Action::ExitRule],
+        };
+        let run = tokio::spawn(execute_actions_inner(
+            vec![step],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bus.publish(Event::AlertCleared {
+            timestamp: chrono::Utc::now(),
+            alert_id: "a".into(),
+            device_id: "wled_1".into(),
+            alert: None,
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!ctx.exit_flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn acknowledging_marks_it_seen_and_says_so() {
+        let a = update("a", "wled_1");
+        let (ctx, bus) = ctx_with(vec![a.clone()], Some(&a));
+        let mut rx = bus.subscribe();
+        execute_actions_inner(
+            vec![Action::AcknowledgeAlert { alert_id: None }],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+        let seen = ctx.alerts.as_ref().unwrap().get("a").unwrap();
+        assert_eq!(
+            seen.acknowledged.unwrap().by,
+            "automation “Install WLED updates at night”"
+        );
+        let mut acked = false;
+        while let Ok(e) = rx.try_recv() {
+            acked |= matches!(e, Event::AlertAcknowledged { .. });
+        }
+        assert!(acked);
+    }
+}
 
 #[cfg(test)]
 mod tests {

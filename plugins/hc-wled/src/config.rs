@@ -44,7 +44,40 @@ pub fn config_descriptor() -> serde_json::Value {
                         .unit("secs")
                         .default(30)
                         .min(1)
-                        .help("How often to poll each WLED device for state. WLED has no push API, so state is read on this cadence."),
+                        .help("WLED pushes changes over its WebSocket as they happen. This is how long to wait before reconnecting when that drops, and how often to read the state of a WLED that has no WebSocket."),
+                )
+                .field(
+                    Field::enumeration("wled.firmware_channel")
+                        .label("Firmware updates")
+                        .render("segmented")
+                        .default("stable")
+                        .help("Which releases count as an update. Betas and nightly builds are for trying what's next.")
+                        .option("stable", "Stable")
+                        .option("beta", "Stable and betas")
+                        .option("nightly", "Nightly builds too"),
+                )
+                .field(
+                    Field::int("wled.firmware_check_hours")
+                        .label("Look for firmware every")
+                        .unit("hours")
+                        .default(24)
+                        .min(0)
+                        .help("0 never looks. Each look is one request to GitHub per firmware source."),
+                )
+                .field(
+                    Field::enumeration("wled.catalog")
+                        .label("Effect and palette catalogue")
+                        .render("segmented")
+                        .default("controller")
+                        .help("For new controllers. Read from the controller is always current; a copy in the app works while a controller is offline.")
+                        .option("controller", "Read from the controller")
+                        .option("app", "Keep a copy in the app"),
+                )
+                .field(
+                    Field::text("wled.backups_dir")
+                        .label("Backups folder")
+                        .default("backups")
+                        .help("Where controller backups are kept — taken before every firmware install, and on request. Relative to this plugin's config folder."),
                 )
                 .field(
                     Field::list("wled.discovery_hosts", "host")
@@ -216,10 +249,37 @@ pub struct WledGlobalConfig {
     /// peer list is merged into the result. Leave empty on a flat network.
     #[serde(default)]
     pub discovery_hosts: Vec<String>,
+    /// Which firmware releases count as an update: `stable`, `beta`
+    /// (pre-releases too) or `nightly`.
+    #[serde(default = "default_channel")]
+    pub firmware_channel: String,
+    /// How often to look for new firmware, in hours. 0 never looks.
+    #[serde(default = "default_check_hours")]
+    pub firmware_check_hours: u64,
+    /// Where a client keeps a controller's effect and palette catalogue:
+    /// `controller` (read from it when needed) or `app` (a copy, refreshed
+    /// when its firmware changes). Per controller, `devices[].catalog`.
+    #[serde(default = "default_catalog")]
+    pub catalog: String,
+    /// Where backups go, relative to this file's folder unless absolute.
+    #[serde(default = "default_backups")]
+    pub backups_dir: String,
 }
 
 fn default_poll() -> u64 {
     30
+}
+fn default_channel() -> String {
+    "stable".into()
+}
+fn default_check_hours() -> u64 {
+    24
+}
+fn default_catalog() -> String {
+    "controller".into()
+}
+fn default_backups() -> String {
+    "backups".into()
 }
 
 impl Default for WledGlobalConfig {
@@ -227,6 +287,28 @@ impl Default for WledGlobalConfig {
         Self {
             poll_interval_secs: default_poll(),
             discovery_hosts: Vec::new(),
+            firmware_channel: default_channel(),
+            firmware_check_hours: default_check_hours(),
+            catalog: default_catalog(),
+            backups_dir: default_backups(),
+        }
+    }
+}
+
+impl WledGlobalConfig {
+    pub fn firmware_channel(&self) -> crate::firmware::Channel {
+        crate::firmware::Channel::parse(&self.firmware_channel)
+    }
+
+    pub fn backups_path(&self, config_path: &str) -> std::path::PathBuf {
+        let p = std::path::Path::new(&self.backups_dir);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::path::Path::new(config_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(p)
         }
     }
 }
@@ -245,6 +327,10 @@ pub struct DeviceConfig {
     /// Per-device polling interval override (seconds).
     #[serde(default)]
     pub poll_interval_secs: Option<u64>,
+    /// This controller's catalogue: `controller` or `app` (see
+    /// `[wled].catalog`, the default).
+    #[serde(default)]
+    pub catalog: Option<String>,
 }
 
 impl WledConfig {
@@ -308,11 +394,180 @@ mod tests {
                 "devices[].host",
                 "devices[].hc_id",
                 "devices[].poll_interval_secs",
+                // Set per controller by the `update_device` action, from its
+                // page; the default is `wled.catalog`.
+                "devices[].catalog",
             ],
         );
         assert!(
             missing.is_empty(),
             "config fields missing from the descriptor: {missing:?}"
         );
+    }
+}
+
+/// Changing the `[[devices]]` this file lists — adding a controller, moving
+/// one to a new address, removing one — with the rest of the file left as it
+/// was written. The plugin reads its devices when it starts, so each change
+/// takes effect once it is restarted.
+pub mod devices {
+    use anyhow::{bail, Context, Result};
+    use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+
+    fn load(path: &str) -> Result<DocumentMut> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        text.parse::<DocumentMut>()
+            .with_context(|| format!("parsing {path}"))
+    }
+
+    fn save(path: &str, doc: &DocumentMut) -> Result<()> {
+        let tmp = format!("{path}.tmp");
+        std::fs::write(&tmp, doc.to_string())?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    fn list(doc: &mut DocumentMut) -> &mut ArrayOfTables {
+        if !doc.contains_key("devices") {
+            doc.insert("devices", Item::ArrayOfTables(ArrayOfTables::new()));
+        }
+        doc["devices"]
+            .as_array_of_tables_mut()
+            .expect("devices is an array of tables")
+    }
+
+    fn find(list: &ArrayOfTables, hc_id: &str) -> Option<usize> {
+        list.iter()
+            .position(|t| t.get("hc_id").and_then(|v| v.as_str()) == Some(hc_id))
+    }
+
+    /// Add a controller. Its id is fixed from here on; adding one that is
+    /// there already (by id or address) is refused.
+    pub fn add(path: &str, hc_id: &str, host: &str, name: &str, area: Option<&str>) -> Result<()> {
+        let mut doc = load(path)?;
+        let l = list(&mut doc);
+        if find(l, hc_id).is_some() {
+            bail!("{hc_id} is already one of this plugin's controllers");
+        }
+        if l.iter()
+            .any(|t| t.get("host").and_then(|v| v.as_str()) == Some(host))
+        {
+            bail!("{host} is already one of this plugin's controllers");
+        }
+        let mut t = Table::new();
+        t.insert("host", value(host));
+        t.insert("hc_id", value(hc_id));
+        t.insert("name", value(name));
+        if let Some(a) = area.filter(|a| !a.is_empty()) {
+            t.insert("area", value(a));
+        }
+        l.push(t);
+        save(path, &doc)
+    }
+
+    /// Change what can be changed about a controller from its page: where it
+    /// is, how often it is polled without a WebSocket, where its catalogue is
+    /// kept. `Some(None)` clears a setting.
+    pub fn update(
+        path: &str,
+        hc_id: &str,
+        host: Option<&str>,
+        poll_interval_secs: Option<Option<u64>>,
+        catalog: Option<Option<&str>>,
+    ) -> Result<()> {
+        let mut doc = load(path)?;
+        let l = list(&mut doc);
+        let i = find(l, hc_id).with_context(|| format!("no controller is {hc_id}"))?;
+        let t = l.get_mut(i).expect("found");
+        if let Some(h) = host {
+            let h = h.trim();
+            if h.is_empty() || h.contains(char::is_whitespace) {
+                bail!("`{h}` isn't an address");
+            }
+            t.insert("host", value(h));
+        }
+        match poll_interval_secs {
+            Some(Some(s)) => {
+                t.insert("poll_interval_secs", value(s as i64));
+            }
+            Some(None) => {
+                t.remove("poll_interval_secs");
+            }
+            None => {}
+        }
+        match catalog {
+            Some(Some(c)) if c == "controller" || c == "app" => {
+                t.insert("catalog", value(c));
+            }
+            Some(Some(c)) => {
+                bail!("the catalogue is kept on the `controller` or in the `app`, not `{c}`")
+            }
+            Some(None) => {
+                t.remove("catalog");
+            }
+            None => {}
+        }
+        save(path, &doc)
+    }
+
+    /// Stop looking after a controller. Whether it was there.
+    pub fn remove(path: &str, hc_id: &str) -> Result<bool> {
+        let mut doc = load(path)?;
+        let l = list(&mut doc);
+        let Some(i) = find(l, hc_id) else {
+            return Ok(false);
+        };
+        l.remove(i);
+        save(path, &doc)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_controller_is_added_moved_and_removed_and_the_rest_is_kept() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let path = path.to_str().unwrap();
+            std::fs::write(
+                path,
+                "# my WLEDs\n[wled]\npoll_interval_secs = 30 # half a minute\n\n[[devices]]\nhost = \"10.0.10.74\"\nhc_id = \"wled_6ace04\"\nname = \"wled-6ace04\"\n",
+            )
+            .unwrap();
+            add(
+                path,
+                "wled_garage",
+                "10.0.10.80",
+                "Garage strip",
+                Some("garage"),
+            )
+            .unwrap();
+            assert!(add(path, "wled_x", "10.0.10.80", "Again", None).is_err());
+            update(
+                path,
+                "wled_garage",
+                Some("10.0.10.81"),
+                Some(Some(15)),
+                Some(Some("app")),
+            )
+            .unwrap();
+            assert!(update(path, "wled_garage", None, None, Some(Some("cloud"))).is_err());
+            let cfg: crate::config::WledConfig =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(cfg.devices.len(), 2);
+            assert_eq!(cfg.devices[1].host, "10.0.10.81");
+            assert_eq!(cfg.devices[1].poll_interval_secs, Some(15));
+            assert_eq!(cfg.devices[1].catalog.as_deref(), Some("app"));
+            assert_eq!(cfg.devices[1].area.as_deref(), Some("garage"));
+            assert!(remove(path, "wled_garage").unwrap());
+            assert!(!remove(path, "wled_garage").unwrap());
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(
+                text.contains("# my WLEDs") && text.contains("# half a minute"),
+                "{text}"
+            );
+        }
     }
 }

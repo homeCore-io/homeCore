@@ -190,6 +190,31 @@ impl StateBridge {
         // `/manage/cmd` need parts[4] to match correctly.
         let parts: Vec<&str> = topic.split('/').collect();
 
+        // homecore/devices/{id}/alerts — an empty payload clears them, so it
+        // is handled before the empty-payload guard below.
+        if parts.len() == 4
+            && parts[0] == "homecore"
+            && parts[1] == "devices"
+            && parts[3] == "alerts"
+        {
+            return self.handle_device_alerts(parts[2], payload).await;
+        }
+        // homecore/plugins/{id}/alerts — the plugin's alerts about itself.
+        if parts.len() == 4
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "alerts"
+        {
+            let plugin_id = parts[2];
+            let _ = self.pub_bus.publish(Event::PluginAlerts {
+                timestamp: Utc::now(),
+                plugin_id: plugin_id.to_string(),
+                device_id: plugin_id.to_string(),
+                alerts: parse_plugin_alerts(payload, plugin_id),
+            });
+            return Ok(());
+        }
+
         // homecore/devices/{id}/state | state/partial | availability | schema | cmd
         if parts.len() >= 4 && parts[0] == "homecore" && parts[1] == "devices" {
             let device_id = parts[2];
@@ -308,6 +333,10 @@ impl StateBridge {
                         raw.as_ref().and_then(|v| v.get("widgets")),
                         plugin_id,
                     );
+                    let alert_kinds = parse_alert_kinds(
+                        raw.as_ref().and_then(|v| v.get("alert_kinds")),
+                        plugin_id,
+                    );
                     let _ = self.pub_bus.publish(Event::PluginCapabilities {
                         timestamp: Utc::now(),
                         plugin_id: plugin_id.to_string(),
@@ -315,6 +344,7 @@ impl StateBridge {
                         widgets,
                         config_schema,
                         config_descriptor,
+                        alert_kinds,
                     });
                 }
                 Err(e) => warn!(
@@ -845,6 +875,23 @@ impl StateBridge {
         Ok(())
     }
 
+    /// A device's alerts from its plugin. Only a registered device's, and
+    /// credited to the plugin that registered it — the topic names the
+    /// device, not who sent it, so a plugin can't speak for another's.
+    async fn handle_device_alerts(&self, device_id: &str, payload: &[u8]) -> Result<()> {
+        let Some(device) = self.store.get_device(device_id).await? else {
+            debug!(device_id, "Alerts for an unknown device — ignored");
+            return Ok(());
+        };
+        let _ = self.pub_bus.publish(Event::PluginAlerts {
+            timestamp: Utc::now(),
+            alerts: parse_plugin_alerts(payload, &device.plugin_id),
+            plugin_id: device.plugin_id,
+            device_id: device_id.to_string(),
+        });
+        Ok(())
+    }
+
     async fn handle_availability(&self, device_id: &str, available: bool) -> Result<()> {
         let mut device = match self.store.get_device(device_id).await? {
             Some(d) => d,
@@ -935,6 +982,52 @@ fn is_generic_plugin_external_change(change: &DeviceChange) -> bool {
         && change.correlation_id.is_none()
         && change.actor_id.is_none()
         && change.actor_name.is_none()
+}
+
+/// Decode a published alert list. Empty or `null` is no alerts; an entry that
+/// doesn't parse is dropped on its own, so one bad alert can't hide the rest.
+fn parse_plugin_alerts(payload: &[u8], plugin_id: &str) -> Vec<hc_types::alert::PluginAlert> {
+    if payload.iter().all(u8::is_ascii_whitespace) {
+        return Vec::new();
+    }
+    match serde_json::from_slice::<serde_json::Value>(payload) {
+        Ok(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| {
+                serde_json::from_value(v)
+                    .map_err(
+                        |e| warn!(plugin_id, error = %e, "Discarding an unparseable plugin alert"),
+                    )
+                    .ok()
+            })
+            .collect(),
+        Ok(serde_json::Value::Null) => Vec::new(),
+        Ok(_) | Err(_) => {
+            warn!(plugin_id, "Plugin alerts must be a JSON array — ignored");
+            Vec::new()
+        }
+    }
+}
+
+/// Decode the manifest's `alert_kinds`, dropping what doesn't parse.
+fn parse_alert_kinds(
+    raw: Option<&serde_json::Value>,
+    plugin_id: &str,
+) -> Vec<hc_types::alert::PluginAlertKind> {
+    raw.and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| {
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| {
+                            warn!(plugin_id, error = %e, "Discarding an unparseable alert kind")
+                        })
+                        .ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Decode the `notices` array from a plugin heartbeat.
@@ -1511,5 +1604,91 @@ mod hardware_tests {
     fn a_non_string_is_silence() {
         let payload = json!({ "sw_version": 2 });
         assert!(hardware_field(&payload, "sw_version").is_none());
+    }
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+    use hc_types::device::DeviceState;
+    use serde_json::json;
+
+    #[test]
+    fn a_published_alert_list_is_read_entry_by_entry() {
+        let p = br#"[{"topic":"firmware_update","key":"17.0.0","reason":"Firmware 17.0.0 is out"},
+                     {"topic":"broken"},
+                     {"topic":"restarted","reason":"Restarted","severity":"error"}]"#;
+        let alerts = parse_plugin_alerts(p, "plugin.wled");
+        // The one with no reason is dropped; the others stand.
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].key.as_deref(), Some("17.0.0"));
+        assert!(parse_plugin_alerts(b"", "p").is_empty());
+        assert!(parse_plugin_alerts(b"null", "p").is_empty());
+        assert!(parse_plugin_alerts(b"{\"topic\":\"x\"}", "p").is_empty());
+    }
+
+    #[test]
+    fn a_manifest_s_alert_kinds_are_read_and_a_bad_one_dropped() {
+        let raw = json!([
+            {"topic":"firmware_update","label":"Firmware update available","severity":"info","default_on":false},
+            {"label":"no topic"}
+        ]);
+        let kinds = parse_alert_kinds(Some(&raw), "plugin.wled");
+        assert_eq!(kinds.len(), 1);
+        assert!(!kinds[0].default_on);
+        assert!(parse_alert_kinds(None, "p").is_empty());
+    }
+
+    /// The topic names a device, not its sender: the alerts are credited to
+    /// the plugin that registered it, and an unknown device's are dropped.
+    #[tokio::test]
+    async fn device_alerts_are_credited_to_the_device_s_own_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        store
+            .upsert_device(&DeviceState::new("wled_1", "Eaves", "plugin.wled"))
+            .await
+            .unwrap();
+        let bus = EventBus::new(16);
+        let pub_bus = EventBus::new(16);
+        let mut rx = pub_bus.subscribe();
+        let bridge = StateBridge::new(bus, pub_bus, store);
+        let body = br#"[{"topic":"restarted","reason":"Restarted"}]"#;
+        bridge
+            .handle_mqtt("homecore/devices/wled_1/alerts", body)
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            Event::PluginAlerts {
+                plugin_id,
+                device_id,
+                alerts,
+                ..
+            } => {
+                assert_eq!(plugin_id, "plugin.wled");
+                assert_eq!(device_id, "wled_1");
+                assert_eq!(alerts.len(), 1);
+            }
+            e => panic!("unexpected {e:?}"),
+        }
+        bridge
+            .handle_mqtt("homecore/devices/nobody/alerts", body)
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        // An empty payload is "none now", not ignored.
+        bridge
+            .handle_mqtt("homecore/devices/wled_1/alerts", b"")
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::PluginAlerts { alerts, .. } if alerts.is_empty()
+        ));
     }
 }

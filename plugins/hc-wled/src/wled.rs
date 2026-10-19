@@ -10,14 +10,24 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
+///
+/// Only `leds.count` is required. Everything else defaults, because a field
+/// that changed type in a firmware release must not make a working controller
+/// look unreachable — which is what newer firmware's numeric `leds.cct` did: the
+/// whole `/json/info` failed to parse, startup took the device for offline,
+/// and the plugin fell back to polling for good.
 pub struct WledInfo {
+    #[serde(default)]
     pub ver: String,
+    #[serde(default)]
     pub name: String,
     pub leds: LedInfo,
     /// Number of connected WebSocket clients; -1 = WS not supported.
     #[serde(default = "neg_one")]
     pub ws: i32,
+    #[serde(default)]
     pub fxcount: u32,
+    #[serde(default)]
     pub palcount: u32,
 }
 
@@ -29,55 +39,13 @@ pub struct LedInfo {
     pub pwr: u32,
     #[serde(default)]
     pub rgbw: bool,
+    /// A bool on older firmware; a capability bitmask on newer (4 = CCT).
     #[serde(default)]
-    pub cct: bool,
-}
-
-// ── State response ────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WledState {
-    pub on: bool,
-    pub bri: u8,
-    #[serde(default = "neg_one")]
-    pub ps: i32,
-    #[serde(default)]
-    pub seg: Vec<Segment>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct Segment {
-    #[serde(default)]
-    pub id: u32,
-    /// [[r,g,b], [r,g,b], [r,g,b]] — primary, secondary, tertiary.
-    #[serde(default)]
-    pub col: Vec<Value>,
-    #[serde(default)]
-    pub fx: u32,
-    #[serde(default = "mid_u8")]
-    pub sx: u8,
-    #[serde(default = "mid_u8")]
-    pub ix: u8,
-    #[serde(default)]
-    pub pal: u32,
-    #[serde(default = "yes")]
-    pub on: bool,
-    #[serde(default = "max_u8")]
-    pub bri: u8,
+    pub cct: Value,
 }
 
 fn neg_one() -> i32 {
     -1
-}
-fn mid_u8() -> u8 {
-    128
-}
-fn max_u8() -> u8 {
-    255
-}
-fn yes() -> bool {
-    true
 }
 
 // ── HTTP client ───────────────────────────────────────────────────────────
@@ -115,7 +83,8 @@ impl WledClient {
             .context("parse /json/info")
     }
 
-    pub async fn get_state(&self) -> Result<WledState> {
+    /// `/json/state`, as WLED says it.
+    pub async fn get_state(&self) -> Result<Value> {
         self.http
             .get(format!("{}/json/state", self.base))
             .send()
@@ -124,6 +93,23 @@ impl WledClient {
             .json()
             .await
             .context("parse /json/state")
+    }
+
+    /// `/json/si`: the state and the info in one request.
+    pub async fn get_state_info(&self) -> Result<(Value, Option<Value>)> {
+        let v: Value = self
+            .http
+            .get(format!("{}/json/si", self.base))
+            .send()
+            .await
+            .context("GET /json/si")?
+            .json()
+            .await
+            .context("parse /json/si")?;
+        match v.get("state") {
+            Some(st) if st.is_object() => Ok((st.clone(), v.get("info").cloned())),
+            _ => anyhow::bail!("/json/si carried no state"),
+        }
     }
 
     pub async fn post_state(&self, body: &Value) -> Result<()> {
@@ -140,6 +126,20 @@ impl WledClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         anyhow::bail!("WLED {status}: {text}");
+    }
+
+    /// Any JSON the controller serves, by path.
+    pub async fn get_json(&self, path: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("{path}: {}", resp.status());
+        }
+        resp.json().await.with_context(|| format!("parse {path}"))
     }
 
     pub async fn get_effect_names(&self) -> Result<Vec<String>> {
@@ -207,5 +207,21 @@ impl WledClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         anyhow::bail!("WLED reboot failed: {status}: {text}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_parses_whether_cct_is_a_bool_or_a_bitmask() {
+        let new = r#"{"ver":"16.0.1","name":"wled-6ace04","ws":0,"fxcount":220,"palcount":72,
+                      "leds":{"count":400,"pwr":120,"rgbw":false,"cct":4}}"#;
+        let i: WledInfo = serde_json::from_str(new).expect("numeric cct parses");
+        assert_eq!((i.leds.count, i.ws, i.fxcount), (400, 0, 220));
+        let old = r#"{"ver":"0.13.3","name":"x","leds":{"count":30,"cct":false}}"#;
+        let i: WledInfo = serde_json::from_str(old).expect("bool cct parses");
+        assert_eq!(i.ws, -1);
     }
 }
