@@ -124,6 +124,8 @@ export interface Preset {
   brightness_pct?: number;
   segments?: number;
   playlist?: PlaylistView;
+  /** What applying it does to power; absent, it leaves power as it is. */
+  on?: boolean | string;
 }
 
 const arr = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
@@ -502,12 +504,16 @@ export function stepSentence(
   switch (s.kind) {
     case "preset": {
       const n = names.preset?.(s.preset_id ?? 0) ?? `preset ${s.preset_id}`;
-      return `Apply ${n} on ${who}${bri}${fade}`;
+      return s.on
+        ? `Turn ${who} on with ${n}${bri}${fade}`
+        : `Apply ${n} on ${who}${bri}${fade}`;
     }
     case "playlist": {
       const n =
         names.preset?.(s.playlist_id ?? 0) ?? `playlist ${s.playlist_id}`;
-      return `Start the playlist ${n} on ${who}`;
+      return s.on
+        ? `Turn ${who} on and start the playlist ${n}`
+        : `Start the playlist ${n} on ${who}`;
     }
     case "look": {
       const l = s.look ?? {};
@@ -523,7 +529,7 @@ export function stepSentence(
           : s.segment === "selected"
             ? " (selected segments)"
             : ` (segment ${s.segment})`;
-      return `Set ${who}${where} to ${bits.join(", ") || "a new look"}${bri}${fade}`;
+      return `${s.on ? "Turn on " : "Set "}${who}${where}${s.on ? " with" : " to"} ${bits.join(", ") || "a new look"}${bri}${fade}`;
     }
     case "nightlight": {
       const n = s.nightlight;

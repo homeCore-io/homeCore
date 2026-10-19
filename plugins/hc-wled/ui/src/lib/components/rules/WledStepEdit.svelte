@@ -106,6 +106,20 @@
 					)
 			: []
 	);
+	/** What leaving power alone means for this step: what its preset does. */
+	const powerAsIs = $derived(
+		step.kind === 'look' ? 'Leave it as it is' : step.kind === 'playlist' ? 'As its presets have it' : 'As the preset has it'
+	);
+	/** Said under the choices: whether the chosen preset turns it on itself. */
+	const powerNote = $derived.by(() => {
+		if (step.kind !== 'preset' || step.on || !first) return '';
+		const p = presetsOf(first).find((x) => x.id === step.preset_id);
+		if (!p) return '';
+		if (p.on === true) return `${p.name} turns it on by itself.`;
+		if (p.on === false) return `${p.name} turns it off.`;
+		if (p.on !== undefined) return `${p.name} switches it on or off, whichever it isn't.`;
+		return `${p.name} doesn't turn it on — if it may be off, choose Power: Turn it on.`;
+	});
 	const presetName = (id?: number) =>
 		first ? presetsOf(first).find((p) => p.id === id)?.name : undefined;
 
@@ -483,7 +497,18 @@
 						>{/if}
 				</select></label
 			>
+			<label class="field"
+				><span class="label">Power</span>
+				<select
+					value={step.on ? 'on' : ''}
+					onchange={(e) => patch({ on: e.currentTarget.value === 'on' ? true : undefined })}
+				>
+					<option value="">{powerAsIs}</option>
+					<option value="on">Turn it on</option>
+				</select></label
+			>
 		</div>
+		{#if powerNote}<p class="note">{powerNote}</p>{/if}
 	{/if}
 
 	<details class="stored">
@@ -493,6 +518,11 @@
 </div>
 
 <style>
+	.note {
+		margin: 0;
+		font-size: 13px;
+		color: var(--ink-muted);
+	}
 	.wled-step {
 		display: flex;
 		flex-direction: column;
