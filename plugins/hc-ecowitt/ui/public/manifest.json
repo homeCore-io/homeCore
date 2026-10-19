@@ -3,6 +3,14 @@
 	"entry": "index.js",
 	"slots": [
 		{ "slot": "plugin.page", "element": "hc-ecowitt-page" },
-		{ "slot": "device.panel", "element": "hc-ecowitt-station", "device_types": ["weather_station"] }
+		{ "slot": "device.panel", "element": "hc-ecowitt-station", "device_types": ["weather_station"] },
+		{ "slot": "device.card", "element": "hc-ecowitt-card", "device_types": ["weather_station"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-ecowitt-weather",
+			"label": "Weather now",
+			"description": "outside, the wind and the rain, from your station",
+			"forms": ["large", "standard"]
+		}
 	]
 }

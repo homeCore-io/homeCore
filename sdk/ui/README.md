@@ -4,7 +4,9 @@ Types for a homeCore plugin's own screens.
 
 A plugin can carry web components — a page for itself (`plugin.page`), a panel
 for its devices (`device.panel`), the automation editor's form for a step on its
-devices (`rule.step`) — and serve them itself. The plugin and its UI
+devices (`rule.step`), its devices' cards on Home and the rooms (`device.card`),
+and cards of its own a household adds to a page (`dashboard.card`) — and serve
+them itself. The plugin and its UI
 are one thing: the built UI folder travels in whatever package installs the
 plugin, beside its program, and the plugin hands out its files when asked.
 homeCore passes them through to the web app and keeps none, so a screen is
@@ -56,10 +58,35 @@ package installs it), then `<crate>/ui/dist` for a plugin run from its source
 tree. The SDK declares the UI on the plugin's manifest with a hash of its files
 as its `build`, and answers homeCore's `ui_file` requests from the folder.
 
+## Cards
+
+A card is drawn at one of three sizes — `compact` (one row), `standard`, `large`
+(two columns) — given as `form`; list the ones it can be in its slot's `forms`
+(the first is its size when first added). Draw it in the app's own card frame
+with the `hc-tile` class (`compact`, `lit`), so it sits among the app's cards.
+
+```json
+{ "slot": "device.card", "element": "hc-yours-card", "device_types": ["weather_station"] },
+{ "slot": "dashboard.card", "element": "hc-yours-weather", "label": "Weather now",
+  "description": "outside, the wind and the rain", "forms": ["large", "standard"],
+  "settings": "hc-yours-weather-settings" }
+```
+
+- A `device.card` replaces the generic card for its devices wherever they
+  appear, at the sizes it lists (the generic card stands in at the others).
+- A `dashboard.card` is offered in Edit → "Add a card" by its `label`; each one
+  added is its own card, with its own settings on that page (`config`). Its
+  `settings` element edits them in a dialog from the card's tools, answering
+  with `change` events whose `detail` is `{ config }` — keep a working copy
+  of them, so changes in quick succession build on each other.
+- The app keeps a card's settings with the page, in its own server; homeCore
+  never holds them.
+
 ## Examples
 
-`plugins/hc-ecowitt/ui` (a page and a panel) and `plugins/hc-wled/ui` (a page,
-a panel and a step form, with files sent to an action).
+`plugins/hc-ecowitt/ui` (a page, a panel, a station card and "Weather now") and
+`plugins/hc-wled/ui` (a page, a panel, a step form with files sent to an
+action, a controller card and "Quick presets" with its settings).
 
 ## Developing
 

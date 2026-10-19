@@ -4,6 +4,15 @@
 	"slots": [
 		{ "slot": "plugin.page", "element": "hc-wled-page" },
 		{ "slot": "device.panel", "element": "hc-wled-panel" },
-		{ "slot": "rule.step", "element": "hc-wled-step" }
+		{ "slot": "rule.step", "element": "hc-wled-step" },
+		{ "slot": "device.card", "element": "hc-wled-card" },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-wled-presets",
+			"label": "Quick presets",
+			"description": "presets to tap, on one controller or several",
+			"forms": ["large", "standard"],
+			"settings": "hc-wled-presets-settings"
+		}
 	]
 }

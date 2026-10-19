@@ -16,6 +16,19 @@
  *   `Parallel` of them for several devices (each may be set differently) —
  *   on the plugin's own devices only.
  *
+ * - `form` — on a `device.card` or `dashboard.card` element: the size it is
+ *   drawn at, `compact` | `standard` | `large` (two columns), one of the
+ *   sizes its slot declares (the first is its size when first added); it may
+ *   change while shown;
+ * - `deviceId` — on a `device.card` element, too: the device it is the card of;
+ * - `config` — on a `dashboard.card` element: this card's settings, as its
+ *   settings element last made them (`{}` until then). The same card can be
+ *   on several pages, each with its own settings.
+ *
+ * A `dashboard.card` slot may name a `settings` element (in the same
+ * module): it is given `host` and `config`, and answers with a `change`
+ * event whose `detail` is `{ config }` — saved with the page, by the app.
+ *
  * A `rule.step` element's class may also have, as statics:
  * - `accepts(value)` — whether it can edit that step; when it says no, the
  *   editor's generic form is shown instead;
@@ -152,7 +165,9 @@ export interface Host {
 	 *
 	 * Classes: `hc-card`, `hc-head`, `hc-label`, `hc-num`, `hc-quiet`,
 	 * `hc-pill` (+ `go`, `danger`), `hc-field`, `hc-row`, `hc-grid`,
-	 * `hc-table`, `hc-tag` (+ `good`, `warn`, `bad`), `hc-dot` (+ the same).
+	 * `hc-table`, `hc-tag` (+ `good`, `warn`, `bad`), `hc-dot` (+ the same);
+	 * for a card, `hc-tile` (+ `compact`, `lit`) with `hc-tile-name` and
+	 * `hc-tile-state` — the app's own card frame.
 	 */
 	readonly theme: {
 		readonly sheet: CSSStyleSheet;
@@ -168,6 +183,10 @@ export interface PluginElement extends HTMLElement {
 	/** On a `rule.step` element. */
 	deviceIds?: string[];
 	value?: Record<string, unknown>;
+	/** On a card element. */
+	form?: 'compact' | 'standard' | 'large';
+	/** On a `dashboard.card` element, and its settings element. */
+	config?: Record<string, unknown>;
 }
 
 /** What a `rule.step` element's class may offer the editor. */
