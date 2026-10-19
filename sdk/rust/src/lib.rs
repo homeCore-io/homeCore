@@ -32,6 +32,7 @@ pub mod conformance;
 pub mod device_actions;
 pub mod mqtt_log_layer;
 pub mod streaming;
+pub mod ui;
 
 /// Re-exports of the `hc-types` surface plugins use directly. Plugins
 /// should `use plugin_sdk_rs::types::X;` rather than depending on
@@ -57,6 +58,8 @@ pub mod types {
     // `DevicePublisher::set_alerts`.
     pub use hc_types::alert::{AlertAction, AlertActionTarget, PluginAlert, PluginAlertKind};
     pub use hc_types::event::AlertSeverity;
+    // A plugin's own screens, declared with `ManagementHandle::with_ui`.
+    pub use hc_types::plugin_ui::{PluginUi, UiSlot, HOST_API};
 }
 
 /// Log rotation, compression, retention, and the plugin's tracing setup.
@@ -808,6 +811,9 @@ pub struct ManagementHandle {
     /// The kinds of alert the plugin can raise, injected into the published
     /// manifest as `alert_kinds`.
     alert_kinds: Vec<hc_types::alert::PluginAlertKind>,
+    ui: Option<hc_types::plugin_ui::PluginUi>,
+    /// Where the UI's files are, when the plugin serves them.
+    ui_dir: Option<std::path::PathBuf>,
     /// Callback invoked with the plugin's durable learned-state document
     /// (`homecore/plugins/{id}/state`, retained + owned by core) whenever it
     /// arrives — once shortly after connect, and again on any core-side change.
@@ -891,6 +897,33 @@ impl ManagementHandle {
         kinds: impl IntoIterator<Item = hc_types::alert::PluginAlertKind>,
     ) -> Self {
         self.alert_kinds = kinds.into_iter().collect();
+        self
+    }
+
+    /// Carry and serve the plugin's own screens: the built UI folder `dir`
+    /// (its `manifest.json` says where each component goes). They are
+    /// declared on the manifest under `version` — the plugin's — with a hash
+    /// of the files as their `build`, and served from `dir` when homeCore
+    /// asks; homeCore passes them through to the app and keeps none.
+    ///
+    /// A folder that isn't there, or offers nothing, is said in the log and
+    /// skipped — the app then shows its generic screens.
+    ///
+    /// ```ignore
+    /// if let Some(dir) = plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+    ///     mgmt = mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION"));
+    /// }
+    /// ```
+    pub fn with_ui_dir(mut self, dir: impl Into<std::path::PathBuf>, version: &str) -> Self {
+        let dir = dir.into();
+        match ui::load(&dir, version) {
+            Ok(u) => {
+                tracing::info!(dir = %dir.display(), build = %u.build, "Serving the plugin's own UI");
+                self.ui = Some(u);
+                self.ui_dir = Some(dir);
+            }
+            Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "No plugin UI offered"),
+        }
         self
     }
 
@@ -1560,6 +1593,8 @@ impl PluginClient {
             config_schema: None,
             config_descriptor: None,
             alert_kinds: Vec::new(),
+            ui: None,
+            ui_dir: None,
             state_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -1747,6 +1782,7 @@ impl PluginClient {
                             || mgmt.config_schema.is_some()
                             || mgmt.config_descriptor.is_some()
                             || !mgmt.alert_kinds.is_empty()
+                            || mgmt.ui.is_some()
                         {
                             let topic = format!("homecore/plugins/{}/capabilities", mgmt.plugin_id);
                             // Synthesize an empty manifest for a schema-only plugin.
@@ -1769,6 +1805,7 @@ impl PluginClient {
                                 mgmt.config_schema.as_ref(),
                                 mgmt.config_descriptor.as_ref(),
                                 &mgmt.alert_kinds,
+                                mgmt.ui.as_ref(),
                             );
                             if !manifest.is_null() {
                                 let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
@@ -1945,10 +1982,14 @@ fn build_capability_manifest(
     config_schema: Option<&Value>,
     config_descriptor: Option<&Value>,
     alert_kinds: &[hc_types::alert::PluginAlertKind],
+    ui: Option<&hc_types::plugin_ui::PluginUi>,
 ) -> Value {
     match serde_json::to_value(caps) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
+                if let Some(ui) = ui {
+                    obj.insert("ui".into(), serde_json::to_value(ui).unwrap_or_default());
+                }
                 if !alert_kinds.is_empty() {
                     obj.insert(
                         "alert_kinds".into(),
@@ -2146,6 +2187,32 @@ fn handle_management_cmd(mgmt: &ManagementHandle, cmd: &Value) -> Value {
             "request_id": request_id,
             "status": "ok",
         }),
+        // A piece of one of the UI's files, for homeCore to pass on.
+        "ui_file" => {
+            use base64::Engine;
+            let Some(ref dir) = mgmt.ui_dir else {
+                return serde_json::json!({
+                    "request_id": request_id, "status": "error", "error": "no such file: this plugin serves no UI",
+                });
+            };
+            let file = cmd["file"].as_str().unwrap_or("");
+            let offset = cmd["offset"].as_u64().unwrap_or(0);
+            let max = cmd["max"]
+                .as_u64()
+                .unwrap_or(128 * 1024)
+                .clamp(1, 160 * 1024) as usize;
+            match ui::piece(dir, file, offset, max) {
+                Ok((bytes, done)) => serde_json::json!({
+                    "request_id": request_id,
+                    "status": "ok",
+                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "done": done,
+                }),
+                Err(e) => {
+                    serde_json::json!({ "request_id": request_id, "status": "error", "error": e })
+                }
+            }
+        }
         "get_config" => {
             if let Some(ref path) = mgmt.config_path {
                 match std::fs::read_to_string(path) {
@@ -2314,7 +2381,7 @@ mod config_schema_tests {
             "type": "object",
             "properties": { "poll_interval_secs": { "type": "integer" } }
         });
-        let m = build_capability_manifest(&caps(), Some(&schema), None, &[]);
+        let m = build_capability_manifest(&caps(), Some(&schema), None, &[], None);
         assert_eq!(m["plugin_id"], "plugin.hue");
         assert_eq!(m["spec"], "1");
         assert_eq!(m["config_schema"], schema);
@@ -2322,7 +2389,7 @@ mod config_schema_tests {
 
     #[test]
     fn manifest_omits_config_schema_when_absent() {
-        let m = build_capability_manifest(&caps(), None, None, &[]);
+        let m = build_capability_manifest(&caps(), None, None, &[], None);
         assert!(m.get("config_schema").is_none());
         // Base manifest still intact.
         assert_eq!(m["plugin_id"], "plugin.hue");

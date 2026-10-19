@@ -170,6 +170,11 @@ pub struct PluginRecord {
     /// `config_schema`. Served at `GET /plugins/:id/config/descriptor`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_descriptor: Option<serde_json::Value>,
+    /// The plugin's own screens, from the same manifest: which UI build the
+    /// running plugin carries and where it goes. Served to anyone who can see
+    /// devices at `GET /plugins/ui`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<hc_types::plugin_ui::PluginUi>,
     /// Installed artifact version, for plugins added from the registry/managed
     /// store (distinct from the SDK-reported `version`). Drives "update available".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +281,7 @@ impl PluginRecord {
             widgets: Vec::new(),
             config_schema: None,
             config_descriptor: None,
+            ui: None,
             installed_version,
         }
     }
@@ -511,6 +517,7 @@ pub fn spawn_plugin_registry_listener(
                             widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
+                            ui: None,
                             notices: Vec::new(),
                             installed_version: None,
                         });
@@ -558,6 +565,7 @@ pub fn spawn_plugin_registry_listener(
                             widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
+                            ui: None,
                             notices: Vec::new(),
                             installed_version: None,
                         });
@@ -590,6 +598,7 @@ pub fn spawn_plugin_registry_listener(
                     config_descriptor,
                     // Kept by the alert engine, which is what reads them.
                     alert_kinds: _,
+                    ui,
                 }) => {
                     let mut map = plugins.write().await;
                     let rec = map
@@ -614,6 +623,7 @@ pub fn spawn_plugin_registry_listener(
                             widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
+                            ui: None,
                             notices: Vec::new(),
                             installed_version: None,
                         });
@@ -628,6 +638,8 @@ pub fn spawn_plugin_registry_listener(
                     if config_descriptor.is_some() {
                         rec.config_descriptor = config_descriptor;
                     }
+                    // Wholesale: a plugin that stopped carrying a UI has none.
+                    rec.ui = ui;
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -1501,6 +1513,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // Static, so it wins over `/plugins/:id` — a plugin literally named
         // "status" would be unreachable here, but ids are `plugin.*`.
         .route("/plugins/status", get(handlers::list_plugin_status))
+        .route("/plugins/ui", get(handlers::list_plugin_uis))
+        .route(
+            "/plugins/{id}/ui/{build}/{*file}",
+            get(handlers::get_plugin_ui_file),
+        )
         .route("/plugins/install", post(handlers::install_plugin))
         .route(
             "/plugin-runtimes",

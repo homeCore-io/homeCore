@@ -40,3 +40,29 @@ jobs:
     # compiler we never ship with, and turned CI red on Rust release day with
     # no code change. Bump the pin in hc-scripts deliberately.
     uses: homeCore-io/hc-scripts/.github/workflows/rust-ci.yml@main
+
+  # A plugin that carries its own screens (`plugins/*/ui`) has them built by
+  # the release when it is tagged; building them here too means a UI that
+  # doesn't build is found on the commit, before the tag, not after it.
+  plugin-ui:
+    name: Plugin screens build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build every plugin's UI
+        run: |
+          set -euo pipefail
+          found=0
+          for pkg in plugins/*/ui/package.json; do
+            [ -f "$pkg" ] || continue
+            dir="$(dirname "$pkg")"
+            found=1
+            echo "::group::$dir"
+            ( cd "$dir" && npm ci --no-audit --no-fund && npm run build )
+            [ -f "$dir/dist/manifest.json" ] || { echo "::error::$dir built no dist/manifest.json"; exit 1; }
+            echo "::endgroup::"
+          done
+          [ "$found" = 1 ] || echo "No plugin carries its own screens."

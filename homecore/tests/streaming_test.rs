@@ -608,6 +608,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
                 widgets: Vec::new(),
                 config_schema: None,
                 config_descriptor: None,
+                ui: None,
                 notices: Vec::new(),
                 installed_version: None,
             },

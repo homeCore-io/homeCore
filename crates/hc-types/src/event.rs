@@ -137,6 +137,10 @@ pub enum Event {
         /// manifest), carried alongside for the same reason as `widgets`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         alert_kinds: Vec<crate::alert::PluginAlertKind>,
+        /// The plugin's own screens (`ui` on the manifest), already
+        /// validated; carried alongside for the same reason as `widgets`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui: Option<crate::plugin_ui::PluginUi>,
     },
     /// A plugin said which of its alerts are true now for one device — or,
     /// when `device_id` is the plugin's own id, for itself. The whole list:

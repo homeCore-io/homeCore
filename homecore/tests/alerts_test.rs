@@ -194,6 +194,7 @@ async fn a_plugin_alert_is_raised_and_cleared_from_what_the_plugin_says() -> Res
         widgets: vec![],
         config_schema: None,
         config_descriptor: None,
+        ui: None,
         alert_kinds: vec![PluginAlertKind {
             topic: "firmware_update".into(),
             label: "Firmware update available".into(),

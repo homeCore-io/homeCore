@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.85"
+  version: "0.1.86"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -3153,6 +3153,73 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/PluginStatus"
+
+  /plugins/ui:
+    get:
+      operationId: listPluginUis
+      summary: Which running plugins carry their own screens
+      description: |
+        A plugin can carry web components — a page for itself, a panel for its
+        devices — and serve them itself; its capability manifest (`ui`) says
+        which build it carries and where each component goes. This lists those
+        declarations for the plugins that are running. The files are at
+        `GET /plugins/{id}/ui/{build}/{file}`; homeCore keeps no UI.
+
+        Needs only `devices:read`: a plugin's device panel is shown to anyone
+        who can open one of its devices.
+
+        Added in core 0.1.86. Older cores answer `404`.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: One entry per running plugin with a UI
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [plugin_id, ui]
+                  properties:
+                    plugin_id:
+                      type: string
+                    ui:
+                      $ref: "#/components/schemas/PluginUi"
+
+  /plugins/{id}/ui/{build}/{file}:
+    get:
+      operationId: getPluginUiFile
+      summary: One file of a plugin's own UI, from the running plugin
+      description: |
+        Asked of the plugin, which carries its UI and serves it over the
+        management channel (`ui_file`, in pieces), and passed through —
+        homeCore keeps nothing. `build` must be the one the plugin declares
+        now (`GET /plugins/ui`), which is what lets the file be cached for
+        good: a rebuilt UI has a new `build`.
+
+        Needs only `devices:read`. Added in core 0.1.86.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+        - name: file
+          in: path
+          required: true
+          description: A path inside the UI folder (`index.js`, `assets/a.css`).
+          schema: { type: string }
+      responses:
+        "200":
+          description: The file, with its content type; cacheable for good
+        "404":
+          description: The plugin isn't running, carries no UI, or has no such file
+        "410":
+          description: The plugin carries another build now (its `build` is in the body)
+        "502":
+          description: The plugin didn't answer, or sent a bad piece
 
   /plugins/install:
     post:
@@ -10448,6 +10515,46 @@ components:
           type: object
           additionalProperties: true
 
+    PluginUi:
+      type: object
+      description: |
+        A plugin's own screens (the `ui` section of its manifest): the `host`
+        interface version they were built against, the plugin version they
+        came with, their build, the module to load, and where each component
+        goes.
+      required: [host_api, version, build, entry, slots]
+      properties:
+        host_api:
+          type: integer
+          example: 1
+        version:
+          type: string
+          example: "0.1.18"
+        build:
+          type: string
+          description: A hash of the UI's files; part of each file's address.
+          example: 2f2e5b0c97ac0a40
+        entry:
+          type: string
+          example: index.js
+        slots:
+          type: array
+          items:
+            type: object
+            required: [slot, element]
+            properties:
+              slot:
+                type: string
+                enum: [plugin.page, device.panel]
+              element:
+                type: string
+                description: The custom element the module defines.
+                example: hc-ecowitt-page
+              device_types:
+                type: array
+                items:
+                  type: string
+                description: For `device.panel`, only these device types (all when absent).
     PluginStatus:
       type: object
       description: |

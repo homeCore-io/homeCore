@@ -6039,6 +6039,133 @@ pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl Int
     (StatusCode::OK, Json(json!(list)))
 }
 
+/// `GET /plugins/ui` — which plugins carry their own screens, and where they
+/// go: for anyone who can see devices, since a plugin's device panel is shown
+/// to everyone who opens one of its devices. Only active plugins: a UI is
+/// offered only while the plugin it talks to is running.
+pub async fn list_plugin_uis(State(s): State<AppState>, _: DevicesRead) -> impl IntoResponse {
+    let map = s.plugins.read().await;
+    let mut out: Vec<_> = map
+        .values()
+        .filter(|r| r.status == "active")
+        .filter_map(|r| {
+            r.ui.as_ref()
+                .map(|ui| json!({ "plugin_id": r.plugin_id, "ui": ui }))
+        })
+        .collect();
+    out.sort_by(|a, b| a["plugin_id"].as_str().cmp(&b["plugin_id"].as_str()));
+    Json(out)
+}
+
+/// The largest UI file passed through, and the size of each piece asked for:
+/// a piece goes over MQTT as base64 in JSON, under the broker's 256 KiB.
+const UI_FILE_MAX: usize = 20 * 1024 * 1024;
+const UI_CHUNK: usize = 128 * 1024;
+
+/// `GET /plugins/{id}/ui/{build}/{file}` — one file of a plugin's own UI,
+/// asked of the running plugin (which carries it) and passed through. Nothing
+/// is kept here. `build` must be the one the plugin declares now, which is
+/// what lets a file be cached for good: a rebuilt UI has a new address.
+pub async fn get_plugin_ui_file(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path((id, build, file)): Path<(String, String, String)>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use base64::Engine;
+    let not_found =
+        |why: &str| (StatusCode::NOT_FOUND, Json(json!({ "error": why }))).into_response();
+    let ui = {
+        let map = s.plugins.read().await;
+        match map.get(&id) {
+            Some(r) if r.status == "active" => r.ui.clone(),
+            _ => None,
+        }
+    };
+    let Some(ui) = ui else {
+        return not_found("that plugin isn't running, or has no UI");
+    };
+    if ui.build != build {
+        return (
+            StatusCode::GONE,
+            Json(json!({ "error": "the plugin carries another build now", "build": ui.build })),
+        )
+            .into_response();
+    }
+    if !hc_types::plugin_ui::relative_path(&file) {
+        return not_found("no such file");
+    }
+    let Some(ref rpc) = s.management_rpc else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "plugins can't be asked" })),
+        )
+            .into_response();
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let reply = match rpc
+            .request(
+                &id,
+                "ui_file",
+                Some(json!({ "file": file, "offset": bytes.len(), "max": UI_CHUNK })),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.contains("not found") || e.contains("no such") => return not_found(&e),
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response()
+            }
+        };
+        let piece = reply["data"].as_str().unwrap_or("");
+        match base64::engine::general_purpose::STANDARD.decode(piece) {
+            Ok(b) => bytes.extend_from_slice(&b),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "the plugin sent a bad piece" })),
+                )
+                    .into_response()
+            }
+        }
+        if bytes.len() > UI_FILE_MAX {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "the file is too large" })),
+            )
+                .into_response();
+        }
+        if reply["done"].as_bool() != Some(false) || piece.is_empty() {
+            break;
+        }
+    }
+    let ext = file.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let content_type = match ext.as_str() {
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "woff2" => "font/woff2",
+        _ => return not_found("not a kind of file a UI serves"),
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// `GET /plugins/status` — the same list, minus the parts that never change.
 ///
 /// For clients that poll to keep a view current. See [`crate::PluginStatus`]

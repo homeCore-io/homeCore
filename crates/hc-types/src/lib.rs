@@ -37,6 +37,7 @@ pub mod log_line;
 pub mod mqtt;
 pub mod plugin_capabilities;
 pub mod plugin_notice;
+pub mod plugin_ui;
 pub mod rule;
 pub mod schema;
 pub mod skin;
