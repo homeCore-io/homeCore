@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.86"
+  version: "0.1.87"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -3220,6 +3220,47 @@ paths:
           description: The plugin carries another build now (its `build` is in the body)
         "502":
           description: The plugin didn't answer, or sent a bad piece
+
+  /plugins/{id}/upload/{action}:
+    post:
+      operationId: uploadToPluginAction
+      summary: Run one of a plugin's actions with a file
+      description: |
+        The body is the file (up to 32 MiB). It is sent to the plugin in pieces
+        over the management channel, then the action runs as
+        `POST /plugins/{id}/command` would run it, with
+        `upload: {id, size, name}` among its params — the SDK hands the action
+        a local `file_path` instead and removes the file once it has replied.
+        Other query parameters are passed as params (as strings). The same
+        role checks as `command`; the action must be on the plugin's manifest.
+
+        Added in core 0.1.87.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: action, in: path, required: true, schema: { type: string } }
+        - name: name
+          in: query
+          description: The file's name, passed on as `upload.name`.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: The action's reply, as from `command`
+        "403":
+          description: The action needs a role the caller hasn't got
+        "404":
+          description: The plugin declares no such action
+        "413":
+          description: Empty, or larger than 32 MiB
+        "502":
+          description: The plugin didn't take a piece
 
   /plugins/install:
     post:
@@ -10545,7 +10586,7 @@ components:
             properties:
               slot:
                 type: string
-                enum: [plugin.page, device.panel]
+                enum: [plugin.page, device.panel, rule.step]
               element:
                 type: string
                 description: The custom element the module defines.

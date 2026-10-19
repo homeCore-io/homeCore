@@ -101,7 +101,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
 /// Up to `max` bytes of `file` from `offset`, and whether that is the end.
 pub fn piece(dir: &Path, file: &str, offset: u64, max: usize) -> Result<(Vec<u8>, bool), String> {
     use std::io::{Read, Seek, SeekFrom};
-    if !relative_path(file) {
+    if !relative_path(file) || !dir.join(file).is_file() {
         return Err("no such file".into());
     }
     let mut f = std::fs::File::open(dir.join(file)).map_err(|_| "no such file".to_string())?;
@@ -187,5 +187,7 @@ mod tests {
         );
         assert!(piece(&d.0, "../etc/passwd", 0, 4).is_err());
         assert!(piece(&d.0, "missing.js", 0, 4).is_err());
+        std::fs::create_dir(d.0.join("assets")).unwrap();
+        assert_eq!(piece(&d.0, "assets", 0, 4).unwrap_err(), "no such file");
     }
 }

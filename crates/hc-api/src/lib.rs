@@ -1565,6 +1565,11 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(handlers::get_plugin_config_descriptor),
         )
         .route("/plugins/{id}/command", post(handlers::post_plugin_command))
+        .route(
+            "/plugins/{id}/upload/{action}",
+            post(handlers::post_plugin_upload)
+                .layer(DefaultBodyLimit::max(handlers::PLUGIN_UPLOAD_MAX)),
+        )
         .route("/plugins/{id}/query", post(handlers::post_plugin_query))
         .route(
             "/plugins/{id}/capabilities",

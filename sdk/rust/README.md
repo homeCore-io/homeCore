@@ -242,6 +242,14 @@ the web app and keeps none. Each element is handed the app's `host` — the
 plugin's devices, commands, actions, settings and the app's look; its types are
 `core/sdk/ui` (`@homecore/plugin-ui`). `plugins/hc-ecowitt/ui` is a complete one.
 
+## Files sent to an action
+
+`POST /plugins/{id}/upload/{action}` sends a file to one of your manifest
+actions (up to 32 MiB). The SDK receives it in pieces and runs the action as
+usual with a `file_path` param — a local file, removed once the action has
+replied (copy it first if the action keeps working after replying). A page of
+yours sends one with `host.upload(action, file, params)`.
+
 ## Secrets in log fields
 
 `MqttLogLayer` publishes log events to a topic anything can subscribe to,

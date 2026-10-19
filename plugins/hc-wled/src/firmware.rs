@@ -331,6 +331,23 @@ pub async fn download(url: &str) -> Result<Vec<u8>> {
 }
 
 /// Post an image to the controller's `/update`, as its own update page does.
+/// Whether it could be a firmware image: an ESP application image (0xE9) or
+/// a gzipped one (an ESP8266 `.bin.gz`), of a plausible size. A stray file
+/// sent by mistake is turned away before the controller is backed up and
+/// darkened for it.
+pub fn looks_like_image(image: &[u8]) -> std::result::Result<(), String> {
+    if image.len() < 64 * 1024 || image.len() > 16 * 1024 * 1024 {
+        return Err(format!(
+            "that's {} KB — not the size of a WLED firmware file",
+            image.len() / 1024
+        ));
+    }
+    match image {
+        [0xE9, ..] | [0x1F, 0x8B, ..] => Ok(()),
+        _ => Err("that isn't a firmware file (.bin) for an ESP32 or ESP8266".into()),
+    }
+}
+
 pub async fn upload(host: &str, name: &str, image: Vec<u8>) -> Result<()> {
     let part = reqwest::multipart::Part::bytes(image)
         .file_name(name.to_string())
@@ -472,5 +489,18 @@ mod tests {
         };
         assert_eq!(s.attributes()["firmware_status"], "no_releases");
         assert!(s.alerts().is_empty());
+    }
+
+    #[test]
+    fn only_what_could_be_a_firmware_image_is_sent() {
+        let mut esp = vec![0u8; 900 * 1024];
+        esp[0] = 0xE9;
+        assert!(looks_like_image(&esp).is_ok());
+        let mut gz = vec![0u8; 600 * 1024];
+        gz[0] = 0x1F;
+        gz[1] = 0x8B;
+        assert!(looks_like_image(&gz).is_ok());
+        assert!(looks_like_image(&vec![0u8; 900 * 1024]).is_err());
+        assert!(looks_like_image(&[0xE9, 0, 0]).is_err(), "far too small");
     }
 }

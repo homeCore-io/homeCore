@@ -168,6 +168,13 @@ async fn try_start(
     // guessing a form from the schema. Rides the same manifest.
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
 
+    // Its own screens — its page, a controller's panel, the automation
+    // editor's WLED step: the built `ui/` folder it carries, served from here.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
+
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.  Without this, queued publishes block forever once
     // the rumqttc internal buffer (64) fills up.

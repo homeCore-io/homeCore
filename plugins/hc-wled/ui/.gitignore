@@ -1,0 +1,6 @@
+node_modules/
+dist/
+# npm ci needs it (CI and the release build); the repo ignores lockfiles elsewhere.
+!package-lock.json
+# The repo ignores `rules/` (its live automations); this one is source.
+!src/lib/components/rules/

@@ -479,6 +479,46 @@ pub fn schema_json() -> serde_json::Value {
     plugin_sdk_rs::device_actions::with_actions(&device_schema(), actions())
 }
 
+/// The schema for one controller, with its own names: its presets,
+/// playlists, effects and palettes as the options of `preset_id`,
+/// `playlist_id`, `effect_id` and `palette_id` — so every screen and
+/// automation sentence says "Halloween 1", not 14, with nothing of WLED's in
+/// the app. `attrs` are the controller's published lists (`presets`,
+/// `playlists`, `effects`, `palettes`, each `[{id, name}]`); a list it hasn't
+/// said leaves that attribute as plain numbers.
+pub fn schema_named(attrs: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    let mut schema = schema_json();
+    for (list, attr) in [
+        ("presets", "preset_id"),
+        ("playlists", "playlist_id"),
+        ("effects", "effect_id"),
+        ("palettes", "palette_id"),
+    ] {
+        let Some(items) = attrs.get(list).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let options: Vec<serde_json::Value> = items
+            .iter()
+            .filter_map(|e| {
+                let id = e.get("id").and_then(serde_json::Value::as_u64)?;
+                let name = e.get("name").and_then(serde_json::Value::as_str)?;
+                Some(json!({ "value": id.to_string(), "label": name }))
+            })
+            .collect();
+        if options.is_empty() {
+            continue;
+        }
+        if let Some(a) = schema
+            .get_mut("attributes")
+            .and_then(|a| a.get_mut(attr))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            a.insert("options".into(), json!(options));
+        }
+    }
+    schema
+}
+
 /// The kinds of alert this plugin raises (see `firmware.rs`, `bridge_info.rs`).
 pub fn alert_kinds() -> Vec<PluginAlertKind> {
     vec![
@@ -671,5 +711,35 @@ mod tests {
         topics.dedup();
         assert_eq!(topics.len(), kinds.len());
         assert!(kinds.iter().all(|k| k.severity != AlertSeverity::Critical));
+    }
+
+    #[test]
+    fn a_controller_s_schema_names_its_presets_effects_and_palettes() {
+        let attrs = json!({
+            "presets": [{"id": 14, "name": "Halloween 1"}, {"id": 20, "name": "Halloween night"}],
+            "playlists": [{"id": 20, "name": "Halloween night"}],
+            "effects": [{"id": 0, "name": "Solid"}, {"id": 51, "name": "Fairytwinkle"}],
+        });
+        let s = schema_named(attrs.as_object().unwrap());
+        assert_eq!(
+            s["attributes"]["preset_id"]["options"][0],
+            json!({"value": "14", "label": "Halloween 1"})
+        );
+        assert_eq!(
+            s["attributes"]["playlist_id"]["options"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            s["attributes"]["effect_id"]["options"][1]["label"],
+            "Fairytwinkle"
+        );
+        // Not said: left as plain numbers.
+        assert!(s["attributes"]["palette_id"].get("options").is_none());
+        // Still a schema homeCore reads.
+        let parsed: DeviceSchema = serde_json::from_value(s).unwrap();
+        assert!(parsed.attributes["preset_id"].options.is_some());
     }
 }

@@ -42,19 +42,21 @@ fn index_js() -> String {
 /// One place in the app a plugin's component fills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiSlot {
-    /// `plugin.page` (its page, in place of the generic action list) or
-    /// `device.panel` (its devices' panel, in place of the generic controls).
+    /// `plugin.page` (its page, in place of the generic action list),
+    /// `device.panel` (its devices' panel, in place of the generic controls),
+    /// or `rule.step` (the automation editor's form for a step that sets one
+    /// of its devices, in place of the generic one).
     pub slot: String,
     /// The custom element the module defines for it (`hc-ecowitt-page`).
     pub element: String,
-    /// For `device.panel`: only devices of these types; every one of its
-    /// devices when empty.
+    /// For `device.panel` and `rule.step`: only devices of these types; every
+    /// one of its devices when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_types: Vec<String>,
 }
 
 /// The slots the app knows.
-pub const SLOTS: &[&str] = &["plugin.page", "device.panel"];
+pub const SLOTS: &[&str] = &["plugin.page", "device.panel", "rule.step"];
 
 impl PluginUi {
     /// Whether it can be offered at all: a version, a module inside the

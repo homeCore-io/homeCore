@@ -7918,6 +7918,100 @@ pub async fn post_plugin_command(
     run_plugin_action(s, claims, id, action, body).await
 }
 
+/// The largest file a plugin action can be sent (`POST .../upload/...`).
+pub const PLUGIN_UPLOAD_MAX: usize = 32 * 1024 * 1024;
+
+/// `POST /plugins/{id}/upload/{action}?name=…&<param>=…` — run one of the
+/// plugin's actions with a file: the body, sent to the plugin in pieces over
+/// the management channel (`upload_chunk`), then the action as
+/// `POST /plugins/{id}/command` runs it, with
+/// `upload: {id, size, name}` among its params — the SDK turns that into a
+/// local `file_path` for the plugin, and removes the file afterwards. The
+/// same role checks as `command`; the action must be on the manifest.
+pub async fn post_plugin_upload(
+    State(s): State<AppState>,
+    PluginsWrite(claims): PluginsWrite,
+    Path((id, action)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use base64::Engine;
+    let action_meta = {
+        let map = s.plugins.read().await;
+        map.get(&id)
+            .and_then(|rec| rec.capabilities.as_ref())
+            .and_then(|c| c.actions.iter().find(|a| a.id == action))
+            .cloned()
+    };
+    let Some(meta) = action_meta else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "the plugin declares no such action" })),
+        )
+            .into_response();
+    };
+    if matches!(meta.requires_role, hc_types::RequiresRole::Admin)
+        && !matches!(claims.role, hc_auth::user::Role::Admin)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "action requires admin role", "requires_role": "admin" })),
+        )
+            .into_response();
+    }
+    if body.is_empty() || body.len() > PLUGIN_UPLOAD_MAX {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "a file of 1 byte to 32 MiB" })),
+        )
+            .into_response();
+    }
+    let Some(ref rpc) = s.management_rpc else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "management RPC not configured" })),
+        )
+            .into_response();
+    };
+    let upload_id = uuid::Uuid::new_v4().simple().to_string();
+    for (n, piece) in body.chunks(UI_CHUNK).enumerate() {
+        let sent = rpc
+            .request(
+                &id,
+                "upload_chunk",
+                Some(json!({
+                    "upload_id": upload_id,
+                    "offset": n * UI_CHUNK,
+                    "data": base64::engine::general_purpose::STANDARD.encode(piece),
+                })),
+            )
+            .await;
+        if let Err(e) = sent {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("sending the file to the plugin: {e}") })),
+            )
+                .into_response();
+        }
+    }
+    let name = query.get("name").cloned();
+    let mut params: serde_json::Map<String, Value> = query
+        .into_iter()
+        .filter(|(k, _)| k != "action" && k != "upload" && k != "name")
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+    params.insert("action".into(), json!(action));
+    params.insert(
+        "upload".into(),
+        json!({
+            "id": upload_id,
+            "size": body.len(),
+            "name": name,
+        }),
+    );
+    run_plugin_action(s, claims, id, action, Value::Object(params)).await
+}
+
 /// Send a plugin action, once whoever asked has been allowed it.
 async fn run_plugin_action(
     s: AppState,
