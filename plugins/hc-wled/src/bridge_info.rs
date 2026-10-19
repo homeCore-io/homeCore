@@ -43,6 +43,7 @@ pub fn spawn_per_device(rt: crate::runtime::Runtime) {
             let wake = rt.refresh.get(&dev.hc_id).cloned();
             let mut last_uptime: Option<u64> = None;
             let mut last_check: Option<std::time::Instant> = None;
+            let mut last_schema: Option<Value> = None;
             loop {
                 match build_attrs(&http, &base).await {
                     Ok((mut attrs, hardware, info)) => {
@@ -79,6 +80,26 @@ pub fn spawn_per_device(rt: crate::runtime::Runtime) {
                         );
                         if let Some(v) = settings_attrs(&http, &base).await {
                             attrs.extend(v);
+                        }
+                        // Its own names in its schema, when they changed.
+                        let named = crate::schema::schema_named(&attrs);
+                        if last_schema.as_ref() != Some(&named) {
+                            match rt
+                                .publisher
+                                .register_device_schema_json(&dev.hc_id, &named)
+                                .await
+                            {
+                                Ok(()) => {
+                                    rt.schemas
+                                        .lock()
+                                        .unwrap()
+                                        .insert(dev.hc_id.clone(), named.clone());
+                                    last_schema = Some(named);
+                                }
+                                Err(e) => {
+                                    debug!(hc_id = %dev.hc_id, error = %e, "schema publish failed")
+                                }
+                            }
                         }
                         if let Err(e) = rt
                             .publisher

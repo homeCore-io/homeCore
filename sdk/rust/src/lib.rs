@@ -33,6 +33,7 @@ pub mod device_actions;
 pub mod mqtt_log_layer;
 pub mod streaming;
 pub mod ui;
+pub mod upload;
 
 /// Re-exports of the `hc-types` surface plugins use directly. Plugins
 /// should `use plugin_sdk_rs::types::X;` rather than depending on
@@ -2017,6 +2018,25 @@ async fn dispatch_management_cmd(
     client: &AsyncClient,
     cmd: &Value,
 ) -> Value {
+    // A piece of a file on its way to an action (`POST /plugins/{id}/upload`).
+    if cmd["action"].as_str() == Some("upload_chunk") {
+        return upload::chunk(cmd);
+    }
+    // An action sent a file: it gets a local `file_path`, removed when it
+    // has replied.
+    if let Some(path) = upload::path_for(cmd) {
+        let mut with_file = cmd.clone();
+        if let Some(o) = with_file.as_object_mut() {
+            o.insert("file_path".into(), json!(path.display().to_string()));
+        }
+        let reply = Box::pin(dispatch_action(mgmt, client, &with_file)).await;
+        let _ = std::fs::remove_file(&path);
+        return reply;
+    }
+    dispatch_action(mgmt, client, cmd).await
+}
+
+async fn dispatch_action(mgmt: &ManagementHandle, client: &AsyncClient, cmd: &Value) -> Value {
     let action = cmd["action"].as_str().unwrap_or("").to_string();
     let request_id = cmd["request_id"].as_str().unwrap_or("").to_string();
 

@@ -129,6 +129,10 @@ pub fn manifest() -> Capabilities {
                 "error": { "type": "string" },
                 "version": { "type": "string" }
             }))), Admin, 200_000, false),
+        act("install_firmware_file", "Install firmware from a file",
+            "Install a firmware file sent with this action (`POST /plugins/plugin.wled/upload/install_firmware_file`): the controller is backed up first, sent the file, and waited for; it says what it runs then. `version`, if given, is what the file says it is, and checked afterwards.",
+            Some(with_device(json!({ "version": { "type": "string" } }))),
+            Admin, 240_000, true),
         act("add_device", "Add a controller",
             "Add the WLED at `host`. Its name and id come from the controller. The plugin restarts to take it on.",
             Some(json!({
@@ -256,7 +260,6 @@ pub async fn run(rt: &Runtime, action: &str, params: &Value) -> Option<Value> {
         // it when nothing is wrong costs one publish per device and changes
         // nothing.
         "republish_devices" => {
-            let schema = crate::schema::schema_json();
             let mut republished = 0usize;
             for dev in &rt.cfg.devices {
                 if rt
@@ -275,7 +278,7 @@ pub async fn run(rt: &Runtime, action: &str, params: &Value) -> Option<Value> {
                 }
                 let _ = rt
                     .publisher
-                    .register_device_schema_json(&dev.hc_id, &schema)
+                    .register_device_schema_json(&dev.hc_id, &rt.schema_for(&dev.hc_id))
                     .await;
                 rt.wake(&dev.hc_id);
                 republished += 1;
@@ -738,6 +741,42 @@ pub async fn run(rt: &Runtime, action: &str, params: &Value) -> Option<Value> {
             rt.expect_restart(&dev.hc_id);
             rt.publish_firmware(&dev.hc_id).await;
             ok(json!({ "host": dev.host }))
+        }
+        // A file sent through homeCore (the SDK's `file_path`): begin, send it,
+        // end — the same steps the app used to take one by one.
+        "install_firmware_file" => {
+            let Some(path) = params.get("file_path").and_then(Value::as_str) else {
+                return error("send the file with this action (no `file_path`)");
+            };
+            let image = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => return error(format!("reading the file: {e}")),
+            };
+            if let Err(e) = firmware::looks_like_image(&image) {
+                return error(e);
+            }
+            let name = params
+                .pointer("/upload/name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+                .unwrap_or("firmware.bin")
+                .to_string();
+            let begun = Box::pin(run(rt, "firmware_file_begin", params)).await?;
+            if begun["status"] == "error" {
+                return Some(begun);
+            }
+            let sent = match target(rt, params) {
+                Ok(d) => firmware::upload(&d.host, &name, image).await,
+                Err(e) => return e,
+            };
+            let mut end = params.clone();
+            if let Some(o) = end.as_object_mut() {
+                o.insert("ok".into(), json!(sent.is_ok()));
+                if let Err(e) = &sent {
+                    o.insert("error".into(), json!(e.to_string()));
+                }
+            }
+            Box::pin(run(rt, "firmware_file_end", &end)).await
         }
         "firmware_file_end" => {
             let dev = match target(rt, params) {

@@ -8,7 +8,24 @@
  * the manifest says it goes, then sets:
  *
  * - `host` — this object, on every element;
- * - `deviceId` — on a `device.panel` element: the device being shown.
+ * - `deviceId` — on a `device.panel` element: the device being shown;
+ * - `deviceIds` and `value` — on a `rule.step` element: the devices the step
+ *   sets (one, or several at once) and what it sets the first to (its
+ *   `state`). It answers with a `change` event whose `detail` is
+ *   `{ action }`: the step as homeCore keeps it — a `SetDeviceState`, or a
+ *   `Parallel` of them for several devices (each may be set differently) —
+ *   on the plugin's own devices only.
+ *
+ * A `rule.step` element's class may also have, as statics:
+ * - `accepts(value)` — whether it can edit that step; when it says no, the
+ *   editor's generic form is shown instead;
+ * - `describe(host, deviceIds, value)` — the step in words, for the
+ *   automation's sentence, with `{devices}` where the devices' names go
+ *   ("apply “Halloween 1” on {devices}"); the app fills them in.
+ *
+ * Added after the first release of version 1 (app 0.1.18): `fetch`,
+ * `upload`, `store`, `Device.sw_version` and the `rule.step` slot. Check for
+ * them (`typeof host.upload === 'function'`) to run on an older app.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -32,6 +49,8 @@ export interface Device {
 	room: string | null;
 	attributes: Record<string, unknown>;
 	last_seen?: string | null;
+	/** Its firmware or software version, as the plugin reports it. */
+	sw_version?: string | null;
 }
 
 export interface Question {
@@ -83,6 +102,34 @@ export interface Host {
 	/** A read-only manifest action — for anyone who can see devices. */
 	query(id: string, params?: Record<string, unknown>): Promise<Result<Record<string, unknown>>>;
 
+	/**
+	 * homeCore's API as the person using it: `path` is under `/api/v1`
+	 * (`/automations`). For what the rest of `host` doesn't cover.
+	 */
+	fetch(path: string, init?: RequestInit): Promise<Response>;
+
+	/**
+	 * One of the plugin's manifest actions, sent a file (up to 32 MiB) — the
+	 * plugin gets a local `file_path`. `params` arrive as strings.
+	 */
+	upload(
+		action: string,
+		file: Blob,
+		params?: Record<string, string>,
+		name?: string
+	): Promise<Result<Record<string, unknown>>>;
+
+	/**
+	 * Documents the app's server keeps for the plugin's screens — a copy of a
+	 * catalogue, a remembered choice; up to 2 MiB each. Shared by everyone in
+	 * the house who can see devices. Keys: letters, digits, `-` and `_`.
+	 */
+	readonly store: {
+		get<T = unknown>(key: string): Promise<Result<T | undefined>>;
+		put(key: string, value: unknown): Promise<Result<void>>;
+		remove(key: string): Promise<Result<void>>;
+	};
+
 	/** The plugin's own settings file (admins). */
 	readonly config: {
 		get(): Promise<Result<Record<string, unknown>>>;
@@ -118,4 +165,13 @@ export interface PluginElement extends HTMLElement {
 	host: Host;
 	/** On a `device.panel` element. */
 	deviceId?: string;
+	/** On a `rule.step` element. */
+	deviceIds?: string[];
+	value?: Record<string, unknown>;
+}
+
+/** What a `rule.step` element's class may offer the editor. */
+export interface StepElementClass {
+	accepts?(value: Record<string, unknown>): boolean;
+	describe?(host: Host, deviceIds: string[], value: Record<string, unknown>): string | undefined;
 }

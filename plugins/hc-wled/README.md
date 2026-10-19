@@ -59,11 +59,23 @@ sound, identify, restart, install firmware.
   `get_catalog` — each effect with the sliders, options, colours and palette it
   uses, named as WLED names them, and each palette's colours; `firmware_status`;
   `nodes` (WLED-Sync peers).
-- **Admins:** `get_settings` / `apply_settings` (the controller's `cfg.json`,
+- **Admins:** `install_firmware_file` (a firmware file sent with the action:
+  `POST /plugins/plugin.wled/upload/install_firmware_file`), `get_settings` /
+  `apply_settings` (the controller's `cfg.json`,
   secrets hidden), `backup` / `list_backups` / `get_backup` / `restore`,
   `copy_presets`, `copy_preset` (one, or a duplicate), `check_firmware`,
   `add_device` / `update_device` / `remove_device`, `discover_devices`,
   `reboot`.
+
+## Its own screens
+
+`ui/` is WLED's page, a controller's panel and the automation editor's WLED
+step — web components the plugin carries and serves (`with_ui_dir`), which the
+app loads; `npm run build` in `ui/` makes `ui/dist`, which the release packs
+beside the program. Each controller's schema also names its presets,
+playlists, effects and palettes (`options` on `preset_id`, `playlist_id`,
+`effect_id`, `palette_id`), so every automation sentence and picker says
+“Halloween 1”, not 14.
 
 ## Firmware
 

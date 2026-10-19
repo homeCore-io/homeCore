@@ -31,6 +31,9 @@ pub struct Runtime {
     pub restarted: Arc<Mutex<HashMap<String, (Instant, String)>>>,
     /// Wakes a device's refresher early — after its presets change, say.
     pub refresh: Arc<HashMap<String, Arc<Notify>>>,
+    /// Each controller's schema as last published, with its own names
+    /// (`schema::schema_named`) — what a republish sends again.
+    pub schemas: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 impl Runtime {
@@ -48,6 +51,7 @@ impl Runtime {
             expected_restart: Arc::default(),
             restarted: Arc::default(),
             refresh: Arc::new(refresh),
+            schemas: Arc::default(),
         }
     }
 
@@ -74,6 +78,17 @@ impl Runtime {
             None if self.cfg.devices.len() == 1 => Ok(&self.cfg.devices[0]),
             None => Err("say which controller: `device_id`".into()),
         }
+    }
+
+    /// The schema to (re)publish for a controller: its named one, once the
+    /// refresher has made it.
+    pub fn schema_for(&self, hc_id: &str) -> Value {
+        self.schemas
+            .lock()
+            .unwrap()
+            .get(hc_id)
+            .cloned()
+            .unwrap_or_else(crate::schema::schema_json)
     }
 
     pub fn wake(&self, hc_id: &str) {

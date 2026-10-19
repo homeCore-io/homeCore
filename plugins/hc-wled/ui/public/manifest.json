@@ -1,0 +1,9 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-wled-page" },
+		{ "slot": "device.panel", "element": "hc-wled-panel" },
+		{ "slot": "rule.step", "element": "hc-wled-step" }
+	]
+}

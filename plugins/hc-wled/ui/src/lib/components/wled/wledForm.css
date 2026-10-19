@@ -1,0 +1,150 @@
+/*
+	The look the WLED setup editors share (WledSound, WledTimers, WledSetup):
+	scoped by `.wf` on each one's root, so nothing leaks out.
+*/
+.wf {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--card-line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-width: 0;
+}
+.wf h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.wf h4 {
+  margin: 6px 0 0;
+  font-size: 14px;
+}
+.wf .head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wf .label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+.wf .num {
+  font-family: var(--font-num);
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+.wf .quiet {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+.wf .warn {
+  margin: 0;
+  color: var(--alert);
+  font-size: 14px;
+}
+.wf label.f,
+.wf div.f {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.wf label.c {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+.wf .cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 12px;
+}
+.wf input[type="number"],
+.wf input[type="text"],
+.wf input[type="time"],
+.wf input[type="password"],
+.wf select {
+  font: inherit;
+  min-height: 38px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 8px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.wf input[type="range"] {
+  width: 100%;
+  accent-color: var(--track-on);
+}
+.wf input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.wf .item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--card-line);
+}
+.wf .days {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.wf .days button {
+  font: inherit;
+  font-size: 13px;
+  min-width: 38px;
+  min-height: 34px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+.wf .days button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--lit-bg);
+  color: var(--lit-ink);
+  font-weight: 600;
+}
+.wf .buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.wf .pill {
+  font: inherit;
+  font-size: 14px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+.wf .pill.go {
+  border: none;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.wf .pill.danger {
+  color: var(--alert);
+  border-color: var(--alert-line);
+}
+.wf button:disabled {
+  opacity: 0.55;
+}
