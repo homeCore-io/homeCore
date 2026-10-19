@@ -51,9 +51,87 @@ pub struct HueRegistry {
     aux_by_device_id: HashMap<String, RegisteredAux>,
     /// publish device id → the attribute names its published schema covers.
     aux_schema_attrs: HashMap<String, Vec<String>>,
+    /// bridge id → its rooms and zones, for the plugin page.
+    rooms: HashMap<String, Vec<serde_json::Value>>,
+    /// button rid → what the button is called ("Brighter").
+    button_labels: HashMap<String, String>,
+    /// device id → the alerts last said for it, as JSON, so an unchanged list
+    /// is not said again every resync.
+    alerts_said: HashMap<String, String>,
+    /// bridge device id → its own `device_software_update` state.
+    bridge_updates: HashMap<String, String>,
 }
 
 impl HueRegistry {
+    /// A bridge's `update_state`, from its last summary.
+    pub fn bridge_update_state(&self, device_id: &str) -> Option<&str> {
+        self.bridge_updates.get(device_id).map(String::as_str)
+    }
+
+    pub fn set_bridge_update_state(&mut self, device_id: &str, state: Option<&str>) {
+        match state {
+            Some(s) => self
+                .bridge_updates
+                .insert(device_id.to_string(), s.to_string()),
+            None => self.bridge_updates.remove(device_id),
+        };
+    }
+
+    pub fn set_rooms(&mut self, bridge_id: &str, rooms: Vec<serde_json::Value>) {
+        self.rooms.insert(bridge_id.to_string(), rooms);
+    }
+
+    /// Every bridge's rooms and zones.
+    pub fn rooms(&self) -> Vec<serde_json::Value> {
+        let mut out: Vec<_> = self.rooms.values().flatten().cloned().collect();
+        // A room is a device only when it is published as one.
+        for r in &mut out {
+            let published = r
+                .get("device_id")
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| self.groups_by_device_id.contains_key(d));
+            if !published {
+                r["device_id"] = serde_json::Value::Null;
+            }
+        }
+        out.sort_by(|a, b| {
+            let k = |v: &serde_json::Value, f: &str| {
+                v.get(f).and_then(|x| x.as_str()).unwrap_or("").to_string()
+            };
+            (k(a, "kind"), k(a, "name")).cmp(&(k(b, "kind"), k(b, "name")))
+        });
+        out
+    }
+
+    pub fn set_button_labels(&mut self, labels: HashMap<String, String>) {
+        self.button_labels.extend(labels);
+    }
+
+    pub fn button_label(&self, rid: &str) -> Option<&str> {
+        self.button_labels.get(rid).map(String::as_str)
+    }
+
+    /// Say a device's alerts when they differ from what was last said.
+    pub async fn set_alerts_if_changed(
+        &mut self,
+        publisher: &plugin_sdk_rs::DevicePublisher,
+        device_id: &str,
+        alerts: Vec<plugin_sdk_rs::types::PluginAlert>,
+    ) {
+        let said = serde_json::to_string(&alerts).unwrap_or_default();
+        if self.alerts_said.get(device_id) == Some(&said) {
+            return;
+        }
+        // An empty list is said once too: alerts are retained, and one left
+        // from before a restart (a battery changed meanwhile) must clear.
+        match publisher.set_alerts(device_id, &alerts).await {
+            Ok(()) => {
+                self.alerts_said.insert(device_id.to_string(), said);
+            }
+            Err(e) => tracing::warn!(device_id, error = %e, "Failed to publish Hue alerts"),
+        }
+    }
+
     pub fn upsert_bridge(&mut self, device_id: String, snapshot: BridgeSnapshot) {
         self.by_device_id.insert(device_id, snapshot);
     }
@@ -301,12 +379,17 @@ impl HueRegistry {
 
     pub fn prune_groups_not_in(
         &mut self,
+        bridge_id: &str,
         keep_device_ids: &std::collections::HashSet<String>,
     ) -> Vec<String> {
+        // Only this bridge's: another bridge's devices are not in its read.
         let stale = self
             .groups_by_device_id
-            .keys()
-            .filter(|device_id| !keep_device_ids.contains(*device_id))
+            .iter()
+            .filter(|(device_id, b)| {
+                b.bridge_id.eq_ignore_ascii_case(bridge_id) && !keep_device_ids.contains(*device_id)
+            })
+            .map(|(device_id, _)| device_id)
             .cloned()
             .collect::<Vec<_>>();
         for device_id in &stale {
@@ -320,12 +403,17 @@ impl HueRegistry {
     /// `unregister_device` for each.
     pub fn prune_lights_not_in(
         &mut self,
+        bridge_id: &str,
         keep_device_ids: &std::collections::HashSet<String>,
     ) -> Vec<String> {
+        // Only this bridge's: another bridge's devices are not in its read.
         let stale = self
             .lights_by_device_id
-            .keys()
-            .filter(|device_id| !keep_device_ids.contains(*device_id))
+            .iter()
+            .filter(|(device_id, b)| {
+                b.bridge_id.eq_ignore_ascii_case(bridge_id) && !keep_device_ids.contains(*device_id)
+            })
+            .map(|(device_id, _)| device_id)
             .cloned()
             .collect::<Vec<_>>();
         for device_id in &stale {
@@ -339,12 +427,17 @@ impl HueRegistry {
     /// `unregister_device` for each.
     pub fn prune_scenes_not_in(
         &mut self,
+        bridge_id: &str,
         keep_device_ids: &std::collections::HashSet<String>,
     ) -> Vec<String> {
+        // Only this bridge's: another bridge's devices are not in its read.
         let stale = self
             .scenes_by_device_id
-            .keys()
-            .filter(|device_id| !keep_device_ids.contains(*device_id))
+            .iter()
+            .filter(|(device_id, b)| {
+                b.bridge_id.eq_ignore_ascii_case(bridge_id) && !keep_device_ids.contains(*device_id)
+            })
+            .map(|(device_id, _)| device_id)
             .cloned()
             .collect::<Vec<_>>();
         for device_id in &stale {
@@ -355,12 +448,17 @@ impl HueRegistry {
 
     pub fn prune_aux_not_in(
         &mut self,
+        bridge_id: &str,
         keep_raw_device_ids: &std::collections::HashSet<String>,
     ) -> Vec<RegisteredAux> {
         let stale_keys = self
             .aux_by_device_id
-            .keys()
-            .filter(|device_id| !keep_raw_device_ids.contains(*device_id))
+            .iter()
+            .filter(|(device_id, b)| {
+                b.bridge_id.eq_ignore_ascii_case(bridge_id)
+                    && !keep_raw_device_ids.contains(*device_id)
+            })
+            .map(|(device_id, _)| device_id)
             .cloned()
             .collect::<Vec<_>>();
 
@@ -478,6 +576,9 @@ mod tests {
             active,
             group_rid: None,
             group_name: None,
+            palette: vec![],
+            status: None,
+            dynamic_capable: false,
         }
     }
 
@@ -568,11 +669,31 @@ mod tests {
         registry.upsert_aux(&aux2, &publish2);
 
         let keep = HashSet::from([String::from("aux-2")]);
-        let removed = registry.prune_aux_not_in(&keep);
+        let removed = registry.prune_aux_not_in("bridge-1", &keep);
 
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].publish_device_id, "publish-1");
         assert_eq!(registry.aux_count(), 1);
+    }
+
+    /// With two bridges, reading one must not drop the other's devices: it
+    /// used to, so every device of a second bridge was unregistered and
+    /// registered again on every resync.
+    #[test]
+    fn pruning_one_bridge_leaves_the_other_alone() {
+        let mut registry = HueRegistry::default();
+        let mut a = crate::hue::models::HueLight::sample();
+        a.bridge_id = "AAAA".into();
+        a.device_id = "hue_aaaa_light_1".into();
+        let mut b = crate::hue::models::HueLight::sample();
+        b.bridge_id = "bbbb".into();
+        b.device_id = "hue_bbbb_light_1".into();
+        registry.ensure_light(&a);
+        registry.ensure_light(&b);
+
+        let removed = registry.prune_lights_not_in("bbbb", &HashSet::new());
+        assert_eq!(removed, vec!["hue_bbbb_light_1".to_string()]);
+        assert!(registry.get_light_binding("hue_aaaa_light_1").is_some());
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-hue-page" },
+		{ "slot": "device.panel", "element": "hc-hue-light", "device_types": ["light"] },
+		{ "slot": "device.panel", "element": "hc-hue-room", "device_types": ["group"] },
+		{ "slot": "device.panel", "element": "hc-hue-sensor", "device_types": ["motion_sensor", "button", "contact_sensor"] },
+		{ "slot": "device.card", "element": "hc-hue-card", "device_types": ["light", "group", "motion_sensor"] },
+		{ "slot": "rule.step", "element": "hc-hue-step", "device_types": ["light", "group", "scene"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-hue-scenes",
+			"label": "Hue scenes",
+			"description": "the scenes of the rooms you choose, to tap",
+			"forms": ["large", "standard"],
+			"settings": "hc-hue-scenes-settings"
+		}
+	]
+}

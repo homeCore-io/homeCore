@@ -63,7 +63,7 @@ pub fn config_descriptor() -> serde_json::Value {
                         .label("Cloud fallback")
                         .default(true)
                         .visible_when(discovery_on())
-                        .help("If mDNS finds nothing, ask Philips' discovery endpoint. The lookup returns only your bridge's LAN IP; no control traffic leaves the network."),
+                        .help("If looking on the network finds nothing, ask Philips' discovery endpoint. The lookup returns only your bridge's LAN IP; no control traffic leaves the network."),
                 )
                 .field(
                     Field::duration("hue.discovery_timeout_secs")

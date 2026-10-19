@@ -1,0 +1,10 @@
+{
+	"name": "hc-plugin-template-ui",
+	"private": true,
+	"version": "0.0.0",
+	"description": "The template plugin's own screens: its page and its lights' card, as plain custom elements — no framework, no build tools.",
+	"type": "module",
+	"scripts": {
+		"build": "node build.mjs"
+	}
+}

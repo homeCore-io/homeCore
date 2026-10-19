@@ -74,6 +74,25 @@ impl PairingHandle {
             state_writer,
         }
     }
+
+    pub(crate) async fn config(&self) -> HuePluginConfig {
+        self.plugin_cfg.lock().await.clone()
+    }
+
+    pub(crate) fn learned(&self) -> Value {
+        self.learned_state
+            .lock()
+            .ok()
+            .and_then(|l| l.clone())
+            .unwrap_or_else(|| json!({}))
+    }
+
+    /// Hand a paired bridge to the runtime, which starts reading it now.
+    pub(crate) async fn add_bridge(&self, target: BridgeTarget) {
+        if self.new_bridge_tx.send(target).await.is_err() {
+            warn!("The Hue runtime has stopped; the paired bridge starts on the next restart");
+        }
+    }
 }
 
 /// Register the `pair_bridge` streaming action on a `ManagementHandle`.
@@ -305,7 +324,7 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
             return ctx
                 .error(
                     "no Hue bridges found on the network. Check that the \
-                     bridge is powered + reachable, that SSDP/mDNS isn't \
+                     bridge is powered + reachable, that SSDP discovery isn't \
                      blocked between this host and the bridge, and that \
                      [hue].discovery_enabled is true."
                         .to_string(),
@@ -411,7 +430,7 @@ pub enum TargetResolution {
 
 /// Walk the params (or run discovery) to settle on a single
 /// `BridgeTarget` to attempt pairing against.
-async fn resolve_target(
+pub(crate) async fn resolve_target(
     handle: &PairingHandle,
     host_param: Option<String>,
     name_override: Option<String>,
@@ -564,7 +583,11 @@ async fn prompt_for_choice(
     }
 }
 
-fn is_already_configured(cfg: &HuePluginConfig, learned: &Value, d: &DiscoveredBridge) -> bool {
+pub(crate) fn is_already_configured(
+    cfg: &HuePluginConfig,
+    learned: &Value,
+    d: &DiscoveredBridge,
+) -> bool {
     use crate::config::same_bridge;
     let in_config = cfg
         .bridges
@@ -630,7 +653,7 @@ async fn poll_for_app_key(ctx: &StreamContext, api: &HueApiClient) -> Result<Opt
 /// `pair_bridge` is `Concurrency::Single`, so no two pairings run at once; the
 /// brief non-async lock on the shared learned-state view is just to keep it
 /// consistent with the SDK state handler.
-async fn persist_app_key(
+pub(crate) async fn persist_app_key(
     handle: &PairingHandle,
     target: &BridgeTarget,
     app_key: &str,

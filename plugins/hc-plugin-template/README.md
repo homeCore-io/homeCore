@@ -11,7 +11,13 @@ device-talking with your protocol and the shape stays the same.
 src/
 ├── main.rs      connect → logs → manage → describe → run → register → consume
 └── config.rs    the config file core hands you as argv[1], and how it renders
+ui/              its own screens: a page and its lights' card (plain JS)
+├── src/index.js the custom elements
+└── public/manifest.json   where each goes
 ```
+
+The whole process — devices, actions, settings, alerts, screens and cards,
+testing, releasing — is in `docs/plugin-development.md`.
 
 ## Use it
 
@@ -201,13 +207,30 @@ and why `publish_state_for_command` is worth using: it attaches provenance, so
 the UI and the audit log can say what caused a change rather than showing an
 anonymous update.
 
+## Its own screens
+
+`ui/` is the plugin's own page (in place of the generic action list) and its
+lights' card (on Home and the rooms) — plain custom elements, no framework, no
+dependencies. `npm run build` in `ui/` copies them to `ui/dist`, which the
+plugin serves (`with_ui_dir` in `main.rs`) and the release packs beside the
+program. Rebuild and restart the plugin to see a change.
+
+Each element is handed a `host` — the plugin's devices live, commands, its
+actions, the app's confirm and its look (`core/sdk/ui/index.d.ts`). Add slots
+in `public/manifest.json`: `device.panel`, `rule.step`, `dashboard.card`. When
+the screens outgrow plain JS, switch to Svelte or Lit with Vite, as
+`plugins/hc-ecowitt/ui` does. Don't want screens? Delete `ui/` and the
+`with_ui_dir` lines.
+
 ## Where to go next
 
 All of these are directories in this repository, not separate repos.
 
 | Read | For |
 |---|---|
-| `plugins/hc-wled` | The smallest complete plugin — real HTTP device, config schema, notices |
+| `docs/plugin-development.md` | The whole process, end to end — start here |
+| `plugins/hc-wled` | Everything at once: a real HTTP device, schema with named numbers, alerts, files sent to actions, and screens, a step form and cards in `ui/` |
+| `plugins/hc-ecowitt` | A page, a panel and cards in Svelte (`ui/`) |
 | `plugins/hc-roku` | Discovery, durable device identity, streaming capability actions |
 | `plugins/hc-thermostat` | A cross-device consumer: reads devices it does not own |
 | `plugins/hc-captest` | Six minimal demos of the capability-action conventions |
@@ -215,16 +238,17 @@ All of these are directories in this repository, not separate repos.
 | [Plugin development](https://homecore.io/docs/plugins/developing-plugins) | The protocol itself, in prose |
 
 Python, Node.js, and .NET SDKs exist too — see
-[Plugins](https://homecore.io/docs/plugins/overview). They cover registration,
-state, and the management protocol, but notices and capability actions are
-Rust-only today.
+[Plugins](https://homecore.io/docs/plugins/overview). They cover everything
+here — registration, state, management, notices, capability actions, alerts and
+their own screens — except files sent to actions, which is Rust-only today.
 
 ## Releasing
 
 Bump the version in your plugin's `Cargo.toml` on `develop`, merge to `main`,
 and push one tag — `hc-mything-v0.1.0`. The shared workflow in
 [hc-scripts](https://github.com/homeCore-io/hc-scripts) builds a static musl
-binary, packages the signed `.tar.zst`, attaches it to the GitHub Release, and
+binary, builds `ui/` (when it has a `package.json`), packages both in the signed
+`.tar.zst`, attaches it to the GitHub Release, and
 notifies the [registry](https://homecore.io/registry/), which is how homeCore
 installs plugins. No per-plugin workflow, no SDK tag first.
 

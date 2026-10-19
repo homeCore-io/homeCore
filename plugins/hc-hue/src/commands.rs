@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::hue::models::{AccessoryCommand, LightCommand};
+use crate::hue::models::{AccessoryCommand, LightCommand, SceneRecall, Signal};
 
 #[derive(Debug, Clone)]
 pub enum PluginCommand {
@@ -11,12 +11,52 @@ pub enum PluginCommand {
     SetAccessoryState(AccessoryCommand),
     ActivateScene {
         scene_id: Option<String>,
+        recall: SceneRecall,
     },
     SetEntertainmentActive {
         config_id: Option<String>,
         active: bool,
     },
     Raw(Value),
+}
+
+/// How long a change takes: `transition_ms`, or `duration_ms`, in
+/// milliseconds; Hue takes at most a little under two hours.
+fn duration_ms(payload: &Value) -> Option<u32> {
+    payload
+        .get("transition_ms")
+        .or_else(|| payload.get("duration_ms"))
+        .and_then(Value::as_f64)
+        .map(|ms| ms.clamp(0.0, 6_000_000.0) as u32)
+}
+
+fn recall_of(payload: &Value) -> SceneRecall {
+    SceneRecall {
+        dynamic: payload
+            .get("dynamic")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        duration_ms: duration_ms(payload),
+        brightness_pct: payload
+            .get("brightness_pct")
+            .and_then(Value::as_f64)
+            .map(|b| b.clamp(1.0, 100.0)),
+    }
+}
+
+fn xy_list(v: Option<&Value>) -> Vec<(f64, f64)> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    Some((
+                        p.get("x")?.as_f64()?.clamp(0.0, 1.0),
+                        p.get("y")?.as_f64()?.clamp(0.0, 1.0),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn parse_homecore_command(payload: Value) -> PluginCommand {
@@ -36,7 +76,31 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
                 .get("scene_id")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
-            return PluginCommand::ActivateScene { scene_id };
+            return PluginCommand::ActivateScene {
+                scene_id,
+                recall: recall_of(&payload),
+            };
+        }
+        if action == "breathe" {
+            return PluginCommand::SetLightState(LightCommand {
+                breathe: true,
+                ..Default::default()
+            });
+        }
+        if action == "signal" {
+            let kind = payload
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("on_off")
+                .to_string();
+            return PluginCommand::SetLightState(LightCommand {
+                signal: Some(Signal {
+                    duration_ms: duration_ms(&payload).unwrap_or(5_000),
+                    colors: xy_list(payload.get("colors")),
+                    kind,
+                }),
+                ..Default::default()
+            });
         }
         if action == "identify" {
             let light = LightCommand {
@@ -88,7 +152,10 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
             .get("scene_id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        return PluginCommand::ActivateScene { scene_id };
+        return PluginCommand::ActivateScene {
+            scene_id,
+            recall: recall_of(&payload),
+        };
     }
 
     let mut light = LightCommand::default();
@@ -164,6 +231,16 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
     if let Some(identify) = payload.get("identify").and_then(Value::as_bool) {
         light.identify = Some(identify);
         found_light_field = true;
+    }
+
+    if let Some(step) = payload.get("brightness_step").and_then(Value::as_f64) {
+        light.brightness_step = Some(step.clamp(-100.0, 100.0));
+        found_light_field = true;
+    }
+
+    // A fade goes with a change, never alone.
+    if found_light_field {
+        light.transition_ms = duration_ms(&payload);
     }
 
     if found_light_field {
