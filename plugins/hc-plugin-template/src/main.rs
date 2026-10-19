@@ -146,6 +146,15 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
     };
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
 
+    // Its own screens — a page and its lights' card (`ui/`, built to
+    // `ui/dist`). The plugin carries and serves them; the web app loads them,
+    // and falls back to its generic screens without them. Delete `ui/` and
+    // this, and the plugin simply has none.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
+
     // Commands arrive on the SDK's callback, which is synchronous. Hand them to
     // this channel so slow device I/O never stalls the MQTT event loop.
     let (tx, mut rx) = mpsc::channel::<(String, Value)>(64);

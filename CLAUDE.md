@@ -290,6 +290,16 @@ Event types: `device_state_changed`, `device_availability_changed`, `rule_fired`
 
 ---
 
+## Plugins
+
+**Read `docs/plugin-development.md` before building or changing a plugin** —
+the whole process, including a plugin's own screens and cards (which ship with
+the plugin; the web app holds no plugin-specific code) and how to test on a
+sandbox, never the real house. `plugins/hc-plugin-template` is the starting
+point; `sdk/ui` holds the `host` types a plugin's screens are given.
+
+---
+
 ## Repository layout
 
 The workspace root (`/home/john/Github/homeCore/`) is **not** a git repo.
@@ -354,7 +364,7 @@ homeCore/                          # container dir (no git)
 │   │   ├── hc-caseta/             # Lutron Caseta
 │   │   ├── hc-sonos/              # Sonos UPnP bridge
 │   │   ├── hc-hue/                # Philips Hue bridge
-│   │   ├── hc-wled/               # WLED LED controller — smallest complete plugin
+│   │   ├── hc-wled/               # WLED controllers — the fullest example (ui/: page, panel, step, cards)
 │   │   ├── hc-isy/                # ISY/IoX controller bridge (Insteon, Z-Wave)
 │   │   ├── hc-zwave/              # Z-Wave JS WebSocket bridge
 │   │   ├── hc-thermostat/         # virtual thermostat (cross-device consumer)

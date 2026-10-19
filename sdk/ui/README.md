@@ -1,6 +1,7 @@
 # @homecore/plugin-ui
 
-Types for a homeCore plugin's own screens.
+Types for a homeCore plugin's own screens. The whole process of building a
+plugin — screens and cards included — is in `docs/plugin-development.md`.
 
 A plugin can carry web components — a page for itself (`plugin.page`), a panel
 for its devices (`device.panel`), the automation editor's form for a step on its

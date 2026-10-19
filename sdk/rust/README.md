@@ -2,9 +2,14 @@
 
 The Rust plugin SDK for [homeCore](https://github.com/homeCore-io/homeCore).
 Async MQTT client, device registration, state publishing, the management
-protocol, capability actions, and notices.
+protocol, capability actions, notices, alerts, files sent to actions, and a
+plugin's own screens.
 
 The crate is named **`plugin-sdk-rs`**.
+
+The whole process of building a plugin — devices, actions, settings, alerts,
+its own screens and cards, testing and releasing — is in
+`docs/plugin-development.md`; this page is the SDK's reference.
 
 ## Installing
 
