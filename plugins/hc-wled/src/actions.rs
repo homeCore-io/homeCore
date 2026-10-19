@@ -104,6 +104,14 @@ pub fn manifest() -> Capabilities {
                 "from_device_id": { "type": "string" },
                 "to_device_id": { "type": "string" }
             })), Admin, 30_000, true),
+        act("copy_preset", "Copy one preset",
+            "Put one preset on another controller — or the same one, as a duplicate. It keeps its number there when that is free, else takes the first free slot; `to_preset_id` chooses (and replaces what is there).",
+            Some(json!({
+                "from_device_id": { "type": "string" },
+                "to_device_id": { "type": "string" },
+                "preset_id": { "type": "integer" },
+                "to_preset_id": { "type": "integer" }
+            })), Admin, 30_000, true),
         act("firmware_status", "Firmware",
             "What each controller runs, its build and source, what is on offer for it, and any install under way or failed.",
             None, ReadOnly, 15_000, false),
@@ -618,6 +626,55 @@ pub async fn run(rt: &Runtime, action: &str, params: &Value) -> Option<Value> {
                 Ok(()) => {
                     rt.wake(&to.hc_id);
                     ok(json!({ "copied": crate::presets::list(&file).len() }))
+                }
+                Err(e) => error(format!("{}: {e}", to.name)),
+            }
+        }
+        "copy_preset" => {
+            let name = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("");
+            let (Some(from), Some(to)) = (
+                rt.device(name("from_device_id")).cloned(),
+                rt.device(name("to_device_id")).cloned(),
+            ) else {
+                return error("`from_device_id` and `to_device_id`: this plugin's controllers");
+            };
+            let Some(id) = params.get("preset_id").and_then(Value::as_u64) else {
+                return error("`preset_id`: which preset");
+            };
+            let slot = params.get("to_preset_id").and_then(Value::as_u64);
+            let source = match controller::presets_file(&from.host).await {
+                Ok(f) => f,
+                Err(e) => return error(format!("{}: {e}", from.name)),
+            };
+            let target = if from.hc_id == to.hc_id {
+                source.clone()
+            } else {
+                match controller::presets_file(&to.host).await {
+                    Ok(f) => f,
+                    Err(e) => return error(format!("{}: {e}", to.name)),
+                }
+            };
+            let (file, at) = match crate::presets::copy_one(
+                &source,
+                &target,
+                id,
+                slot,
+                from.hc_id == to.hc_id,
+            ) {
+                Ok(x) => x,
+                Err(e) => return error(e),
+            };
+            let _ = bridge::save_backup(rt, &to, "before-copy").await;
+            match controller::upload_file(
+                &to.host,
+                "presets.json",
+                serde_json::to_vec(&file).unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    rt.wake(&to.hc_id);
+                    ok(json!({ "preset_id": at }))
                 }
                 Err(e) => error(format!("{}: {e}", to.name)),
             }

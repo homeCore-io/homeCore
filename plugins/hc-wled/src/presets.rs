@@ -212,9 +212,70 @@ pub fn free_slot(file: &Value) -> Option<u64> {
     (1..=250).find(|i| !used.contains(i))
 }
 
+/// `to` with `from`'s preset `id` put in a slot: `slot` when given (what is
+/// there is replaced), else the same number when that is free on `to`, else
+/// the first free one (`same`: one controller, so a duplicate). Returns the new file and the slot used.
+///
+/// A playlist is copied as it is: its steps name presets by number, which on
+/// the other controller may be other presets.
+pub fn copy_one(
+    from: &Value,
+    to: &Value,
+    id: u64,
+    slot: Option<u64>,
+    same: bool,
+) -> Result<(Value, u64), String> {
+    let entry = from
+        .get(id.to_string())
+        .filter(|p| p.as_object().is_some_and(|m| !m.is_empty()))
+        .ok_or_else(|| format!("there is no preset {id}"))?;
+    let free = |n: u64| {
+        to.get(n.to_string())
+            .and_then(Value::as_object)
+            .is_none_or(|m| m.is_empty())
+    };
+    let slot = match slot {
+        Some(s) if (1..=250).contains(&s) => s,
+        Some(s) => return Err(format!("{s} isn't a preset slot (1–250)")),
+        None if free(id) && !same => id,
+        None => free_slot(to).ok_or("the other controller has no free slot")?,
+    };
+    let mut out = to.as_object().cloned().unwrap_or_default();
+    out.insert(slot.to_string(), entry.clone());
+    Ok((Value::Object(out), slot))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_preset_is_copied_into_a_free_slot_or_the_one_asked_for() {
+        let from = house();
+        let to = json!({"0": {}, "1": {"n": "Theirs"}, "2": {"n": "Two"}});
+        // Slot 14 is free there: it keeps its number.
+        let (f, at) = copy_one(&from, &to, 14, None, false).unwrap();
+        assert_eq!(at, 14);
+        assert_eq!(f["14"]["n"], "Halloween 1");
+        assert_eq!(f["1"]["n"], "Theirs");
+        // Slot 1 is taken there: the first free one.
+        let (f, at) = copy_one(&from, &to, 1, None, false).unwrap();
+        assert_eq!(at, 3);
+        assert_eq!(f["3"]["n"], "Christmas");
+        assert_eq!(f["1"]["n"], "Theirs");
+        // Asked for: replaced.
+        let (f, at) = copy_one(&from, &to, 1, Some(1), false).unwrap();
+        assert_eq!((at, f["1"]["n"].as_str()), (1, Some("Christmas")));
+        // Within one controller (a duplicate), never onto itself.
+        let (_, at) = copy_one(&from, &from, 14, None, true).unwrap();
+        assert_eq!(at, 2);
+        assert!(
+            copy_one(&from, &to, 5, None, false).is_err(),
+            "an empty slot isn't a preset"
+        );
+        assert!(copy_one(&from, &to, 99, None, false).is_err());
+        assert!(copy_one(&from, &to, 1, Some(300), false).is_err());
+    }
 
     fn house() -> Value {
         // Shapes from the house controller's presets.json: `seg` as an object

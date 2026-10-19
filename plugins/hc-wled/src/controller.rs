@@ -25,12 +25,14 @@ fn client(timeout: Duration) -> reqwest::Client {
         .expect("reqwest client")
 }
 
-/// Keys that hold a secret, wherever they are.
+/// Keys that hold a secret, wherever they are. Not `pin`: in `cfg.json`
+/// that is always a GPIO number (the settings PIN lives in `wsec.json`, which
+/// WLED never serves).
 fn secret(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     matches!(
         k.as_str(),
-        "psk" | "pwd" | "pass" | "password" | "pin" | "key" | "token" | "apikey" | "api_key"
+        "psk" | "pwd" | "pass" | "password" | "key" | "token" | "apikey" | "api_key"
     ) || k.ends_with("_pass")
         || k.ends_with("_psk")
         || k.ends_with("_pwd")
@@ -264,6 +266,9 @@ mod tests {
         assert_eq!(r["if"]["mqtt"]["pass"], HIDDEN);
         assert_eq!(r["if"]["hue"]["key"], HIDDEN);
         assert!(!r.to_string().contains("hunter2"));
+        // A pin is a GPIO number, shown and editable.
+        let ir = redact(&json!({"hw": {"ir": {"pin": 4, "type": 1}}}));
+        assert_eq!(ir["hw"]["ir"]["pin"], 4);
         // Posting the masked document back leaves every secret out.
         let back = without_hidden(&r);
         assert!(back["nw"]["ins"][0].get("psk").is_none());
