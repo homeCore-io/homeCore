@@ -47,6 +47,10 @@ pub struct PluginManifest {
     /// Optional seed operator-config filename within the archive.
     #[serde(default)]
     pub default_config: Option<String>,
+    /// The plugin's own screens: a folder within the archive, installed
+    /// beside the binary as `ui/`, where the SDK serves them from.
+    #[serde(default)]
+    pub ui: Option<String>,
 }
 
 /// Where + how core installs plugins. Built once from config in `main.rs` and
@@ -113,6 +117,21 @@ pub fn install_from_archive(archive: &Path, ctx: &InstallContext) -> Result<Inst
     make_executable(&tmp_bin)?;
     std::fs::rename(&tmp_bin, &dst_bin).context("installing plugin binary")?;
 
+    // 3b. Its screens, beside it — staged, then swapped in whole, so a
+    //     reinstall never leaves a mix of two builds' files.
+    if let Some(ui) = manifest.ui.as_deref().filter(|u| !u.trim().is_empty()) {
+        let src_ui = tmp.path().join(ui);
+        if !src_ui.is_dir() {
+            bail!("artifact is missing its UI folder `{ui}`");
+        }
+        let staged = install_dir.join(".ui.new");
+        let _ = std::fs::remove_dir_all(&staged);
+        copy_dir(&src_ui, &staged).context("staging the plugin's UI")?;
+        let dst_ui = install_dir.join("ui");
+        let _ = std::fs::remove_dir_all(&dst_ui);
+        std::fs::rename(&staged, &dst_ui).context("installing the plugin's UI")?;
+    }
+
     // 4. Seed operator config — only when none exists, so a reinstall never
     //    clobbers operator edits. Injects the [homecore] bootstrap + a freshly
     //    minted MQTT password ("generate the API key on install").
@@ -177,6 +196,22 @@ fn unpack_tar_zst(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copy a folder's regular files and folders (never a link) into `to`.
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let kind = e.file_type()?;
+        let dst = to.join(e.file_name());
+        if kind.is_dir() {
+            copy_dir(&e.path(), &dst)?;
+        } else if kind.is_file() {
+            std::fs::copy(e.path(), &dst)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn make_executable(p: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -227,6 +262,40 @@ mod tests {
             broker_host: "127.0.0.1".into(),
             broker_port: 1883,
         }
+    }
+
+    #[test]
+    fn a_plugin_s_ui_folder_is_installed_beside_it_and_replaced_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("ui/assets")).unwrap();
+        std::fs::write(
+            src.join("plugin.toml"),
+            "id = \"plugin.demo\"\nversion = \"1.2.3\"\nbinary = \"hc-demo\"\nui = \"ui\"\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("hc-demo"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(src.join("ui/manifest.json"), "{}").unwrap();
+        std::fs::write(src.join("ui/assets/a.css"), "a{}").unwrap();
+        let archive = tmp.path().join("demo.tar.zst");
+        let f = std::fs::File::create(&archive).unwrap();
+        let mut tar = tar::Builder::new(zstd::stream::write::Encoder::new(f, 0).unwrap());
+        tar.append_dir_all(".", &src).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+        let ctx = ctx(tmp.path());
+        let dir = ctx.plugins_dir.join("plugin.demo").join("1.2.3");
+        // Something left from before: gone after the install.
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(dir.join("ui/old.js"), "x").unwrap();
+
+        install_from_archive(&archive, &ctx).unwrap();
+        assert!(dir.join("ui/manifest.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ui/assets/a.css")).unwrap(),
+            "a{}"
+        );
+        assert!(!dir.join("ui/old.js").exists());
+        assert!(!dir.join(".ui.new").exists());
     }
 
     #[test]

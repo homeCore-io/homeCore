@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.85"
+version = "0.1.86"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3380,9 +3380,10 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.0",
  "chrono",
  "flate2",
  "hc-logging",
@@ -3392,6 +3393,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",

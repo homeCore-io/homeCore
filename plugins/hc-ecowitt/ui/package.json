@@ -1,0 +1,16 @@
+{
+	"name": "hc-ecowitt-ui",
+	"private": true,
+	"version": "0.0.0",
+	"description": "hc-ecowitt's own screens: its plugin page and a weather-station panel, as web components the homeCore app loads.",
+	"type": "module",
+	"scripts": {
+		"build": "vite build",
+		"dev": "vite build --watch"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"svelte": "^5.57.2",
+		"vite": "^8.3.4"
+	}
+}

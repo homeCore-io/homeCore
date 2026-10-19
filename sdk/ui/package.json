@@ -1,0 +1,8 @@
+{
+	"name": "@homecore/plugin-ui",
+	"version": "0.1.0",
+	"description": "Types for a homeCore plugin's own screens: the host interface (version 1) the web app hands each component.",
+	"types": "index.d.ts",
+	"files": ["index.d.ts", "README.md"],
+	"license": "MIT OR Apache-2.0"
+}

@@ -37,6 +37,10 @@ pub struct Manifest {
     /// adapter that asks for them fails with the placeholder named.
     #[serde(default)]
     pub package: Option<String>,
+    /// The plugin's own screens: a folder in the package, which the plugin
+    /// serves itself. Its path is handed to the plugin as `HC_PLUGIN_UI_DIR`.
+    #[serde(default)]
+    pub ui: Option<String>,
 }
 
 /// A plugin installed and ready to launch.
@@ -47,6 +51,8 @@ pub struct Installed {
     pub env: PathBuf,
     pub entrypoint: String,
     pub config: PathBuf,
+    /// The unpacked UI folder, when the package carries one.
+    pub ui_dir: Option<PathBuf>,
 }
 
 impl Installed {
@@ -58,6 +64,23 @@ impl Installed {
             ("config", self.config.display().to_string()),
         ])
     }
+
+    /// The environment the plugin is started with: where its UI folder is.
+    pub fn launch_env(&self) -> Vec<(String, String)> {
+        self.ui_dir
+            .iter()
+            .map(|d| ("HC_PLUGIN_UI_DIR".to_string(), d.display().to_string()))
+            .collect()
+    }
+}
+
+/// The UI folder a manifest names, if it is in the package.
+fn ui_dir(pkg: &Path, manifest: &Manifest) -> Option<PathBuf> {
+    let ui = manifest.ui.as_deref()?.trim();
+    if ui.is_empty() || ui.contains("..") || ui.starts_with('/') {
+        return None;
+    }
+    Some(pkg.join(ui)).filter(|d| d.is_dir())
 }
 
 /// Everything belonging to one plugin, across versions.
@@ -180,6 +203,7 @@ async fn install_into(
         plugin_id: plugin_id.to_string(),
         version: version.to_string(),
         env,
+        ui_dir: ui_dir(&pkg, &manifest),
         entrypoint: manifest.entrypoint,
         config: config_path,
     })
@@ -192,11 +216,13 @@ async fn install_into(
 /// thing that can disagree with what is actually there.
 pub fn existing(root: &Path, plugin_id: &str, version: &str) -> Result<Installed> {
     let dir = version_dir(root, plugin_id, version)?;
-    let manifest = read_manifest(&dir.join("pkg"))?;
+    let pkg = dir.join("pkg");
+    let manifest = read_manifest(&pkg)?;
     Ok(Installed {
         plugin_id: plugin_id.to_string(),
         version: version.to_string(),
         env: dir.join("env"),
+        ui_dir: ui_dir(&pkg, &manifest),
         entrypoint: manifest.entrypoint,
         config: dir.join("config.toml"),
     })
@@ -517,6 +543,39 @@ package    = "hc-foo"
         std::fs::write(dir.path().join("aiohttp-3.9.5-py3-none-any.whl"), b"w").unwrap();
         let err = find_wheel(dir.path(), "hc-foo").unwrap_err();
         assert!(err.to_string().contains("aiohttp"), "{err}");
+    }
+
+    #[test]
+    fn a_plugin_is_told_where_the_ui_folder_in_its_package_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        std::fs::create_dir_all(pkg.join("ui")).unwrap();
+        let m = |ui: Option<&str>| Manifest {
+            id: "plugin.foo".into(),
+            version: "1.0.0".into(),
+            entrypoint: "hc_foo.main".into(),
+            package: None,
+            ui: ui.map(str::to_string),
+        };
+        assert_eq!(ui_dir(pkg, &m(Some("ui"))), Some(pkg.join("ui")));
+        assert_eq!(ui_dir(pkg, &m(None)), None);
+        assert_eq!(ui_dir(pkg, &m(Some("missing"))), None);
+        assert_eq!(ui_dir(pkg, &m(Some("../ui"))), None);
+        let installed = Installed {
+            plugin_id: "plugin.foo".into(),
+            version: "1.0.0".into(),
+            env: pkg.join("env"),
+            entrypoint: "hc_foo.main".into(),
+            config: pkg.join("config.toml"),
+            ui_dir: Some(pkg.join("ui")),
+        };
+        assert_eq!(
+            installed.launch_env(),
+            vec![(
+                "HC_PLUGIN_UI_DIR".to_string(),
+                pkg.join("ui").display().to_string()
+            )]
+        );
     }
 
     #[test]

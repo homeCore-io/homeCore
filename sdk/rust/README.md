@@ -223,6 +223,25 @@ plugin's alert as critical, and lets automations start on, check and act on
 them. `set_plugin_alerts` does the same for alerts about the plugin itself.
 Alerts are retained and said again on every reconnect.
 
+## Your own screens
+
+A plugin can carry web components — a page for itself, a panel for its devices
+— and serve them itself. Build them into a folder with one ES module and a
+`manifest.json` saying where each goes, ship the folder beside the program as
+`ui/`, and:
+
+```rust
+if let Some(dir) = plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+    mgmt = mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION"));
+}
+```
+
+The SDK declares them on the manifest (`ui`, with a hash of the files as their
+`build`) and answers homeCore's requests for the files; homeCore passes them to
+the web app and keeps none. Each element is handed the app's `host` — the
+plugin's devices, commands, actions, settings and the app's look; its types are
+`core/sdk/ui` (`@homecore/plugin-ui`). `plugins/hc-ecowitt/ui` is a complete one.
+
 ## Secrets in log fields
 
 `MqttLogLayer` publishes log events to a topic anything can subscribe to,

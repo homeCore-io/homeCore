@@ -42,6 +42,8 @@ pub struct Supervised {
     pub plugin_id: String,
     /// Fully rendered argv — program first, config path last.
     pub argv: Vec<String>,
+    /// Extra environment: where its UI folder is (`HC_PLUGIN_UI_DIR`).
+    pub env: Vec<(String, String)>,
 }
 
 /// Run one plugin until shutdown, restarting it with backoff.
@@ -73,6 +75,7 @@ pub async fn supervise<F>(
         let started = std::time::Instant::now();
         let mut child = match Command::new(program)
             .args(args)
+            .envs(entry.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn()
@@ -229,6 +232,7 @@ mod tests {
                     plugin_id: "plugin.flaky".into(),
                     // Exits immediately, every time.
                     argv: vec!["false".to_string(), "/tmp/ignored.toml".to_string()],
+                    env: Vec::new(),
                 },
                 rx,
                 move |id, looping| sink.lock().unwrap().push((id.to_string(), looping)),
@@ -271,6 +275,7 @@ mod tests {
                 Supervised {
                     plugin_id: "plugin.sleeper".into(),
                     argv: vec!["sleep".to_string(), "30".to_string()],
+                    env: Vec::new(),
                 },
                 rx,
                 |_, _| {},

@@ -1,0 +1,8 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-ecowitt-page" },
+		{ "slot": "device.panel", "element": "hc-ecowitt-station", "device_types": ["weather_station"] }
+	]
+}

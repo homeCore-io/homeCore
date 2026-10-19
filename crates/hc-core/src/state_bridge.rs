@@ -337,6 +337,7 @@ impl StateBridge {
                         raw.as_ref().and_then(|v| v.get("alert_kinds")),
                         plugin_id,
                     );
+                    let ui = parse_plugin_ui(raw.as_ref().and_then(|v| v.get("ui")), plugin_id);
                     let _ = self.pub_bus.publish(Event::PluginCapabilities {
                         timestamp: Utc::now(),
                         plugin_id: plugin_id.to_string(),
@@ -345,6 +346,7 @@ impl StateBridge {
                         config_schema,
                         config_descriptor,
                         alert_kinds,
+                        ui,
                     });
                 }
                 Err(e) => warn!(
@@ -1005,6 +1007,31 @@ fn parse_plugin_alerts(payload: &[u8], plugin_id: &str) -> Vec<hc_types::alert::
         Ok(_) | Err(_) => {
             warn!(plugin_id, "Plugin alerts must be a JSON array — ignored");
             Vec::new()
+        }
+    }
+}
+
+/// Decode the manifest's `ui`: `None` when absent, or when nothing in it can
+/// be offered (said in the log, so a plugin author sees why).
+fn parse_plugin_ui(
+    raw: Option<&serde_json::Value>,
+    plugin_id: &str,
+) -> Option<hc_types::plugin_ui::PluginUi> {
+    let raw = raw.filter(|v| !v.is_null())?;
+    match serde_json::from_value::<hc_types::plugin_ui::PluginUi>(raw.clone()) {
+        Ok(ui) => {
+            let ui = ui.validated();
+            if ui.is_none() {
+                warn!(
+                    plugin_id,
+                    "Plugin UI declares nothing the app can load; ignored"
+                );
+            }
+            ui
+        }
+        Err(e) => {
+            warn!(plugin_id, error = %e, "Malformed plugin UI declaration; ignored");
+            None
         }
     }
 }

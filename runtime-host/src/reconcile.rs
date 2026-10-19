@@ -151,7 +151,7 @@ impl Reconciler {
         if replacing {
             self.stop(&d.plugin_id).await;
         }
-        self.start(d, argv);
+        self.start(d, argv, installed.launch_env());
 
         Ok(if replacing {
             Outcome::Restarted
@@ -184,7 +184,7 @@ impl Reconciler {
         .await
     }
 
-    fn start(&mut self, d: &Desired, argv: Vec<String>) {
+    fn start(&mut self, d: &Desired, argv: Vec<String>, env: Vec<(String, String)>) {
         let (tx, rx) = watch::channel(false);
         let plugin_id = d.plugin_id.clone();
         let notify = self.on_crash_loop.clone();
@@ -193,6 +193,7 @@ impl Reconciler {
                 Supervised {
                     plugin_id: plugin_id.clone(),
                     argv,
+                    env,
                 },
                 rx,
                 move |id, looping| notify(id, looping),
