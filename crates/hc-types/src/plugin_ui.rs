@@ -44,19 +44,45 @@ fn index_js() -> String {
 pub struct UiSlot {
     /// `plugin.page` (its page, in place of the generic action list),
     /// `device.panel` (its devices' panel, in place of the generic controls),
-    /// or `rule.step` (the automation editor's form for a step that sets one
-    /// of its devices, in place of the generic one).
+    /// `rule.step` (the automation editor's form for a step that sets one of
+    /// its devices, in place of the generic one), `device.card` (its devices'
+    /// card on Home and the rooms, in place of the generic one), or
+    /// `dashboard.card` (a card of its own a person adds to a page).
     pub slot: String,
     /// The custom element the module defines for it (`hc-ecowitt-page`).
     pub element: String,
-    /// For `device.panel` and `rule.step`: only devices of these types; every
-    /// one of its devices when empty.
+    /// For `device.panel`, `rule.step` and `device.card`: only devices of
+    /// these types; every one of its devices when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_types: Vec<String>,
+    /// For `dashboard.card`: what "Add a card" calls it ("Quick presets").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// For `dashboard.card`: a line under it in "Add a card".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// For the cards: the sizes it can be — `compact`, `standard`, `large`
+    /// (two columns), the first being its size when first added; every size
+    /// when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forms: Vec<String>,
+    /// For `dashboard.card`: the element that edits a card's settings, shown
+    /// from the page's edit tools; a card with none has no settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
 }
 
 /// The slots the app knows.
-pub const SLOTS: &[&str] = &["plugin.page", "device.panel", "rule.step"];
+pub const SLOTS: &[&str] = &[
+    "plugin.page",
+    "device.panel",
+    "rule.step",
+    "device.card",
+    "dashboard.card",
+];
+
+/// The sizes a card can be.
+pub const FORMS: &[&str] = &["compact", "standard", "large"];
 
 impl PluginUi {
     /// Whether it can be offered at all: a version, a module inside the
@@ -70,8 +96,14 @@ impl PluginUi {
         {
             return None;
         }
-        self.slots
-            .retain(|s| SLOTS.contains(&s.slot.as_str()) && custom_element(&s.element));
+        self.slots.retain(|s| {
+            SLOTS.contains(&s.slot.as_str())
+                && custom_element(&s.element)
+                && s.forms.iter().all(|f| FORMS.contains(&f.as_str()))
+                && s.settings.as_deref().is_none_or(custom_element)
+                && (s.slot != "dashboard.card"
+                    || s.label.as_deref().is_some_and(|l| !l.trim().is_empty()))
+        });
         (!self.slots.is_empty()).then_some(self)
     }
 }
@@ -106,7 +138,7 @@ mod tests {
             "slots": [
                 {"slot": "plugin.page", "element": "hc-ecowitt-page"},
                 {"slot": "device.panel", "element": "hc-ecowitt-station", "device_types": ["weather_station"]},
-                {"slot": "dashboard.card", "element": "hc-ecowitt-card"},
+                {"slot": "dashboard.widget", "element": "hc-ecowitt-card"},
                 {"slot": "plugin.page", "element": "NoHyphen"}
             ]
         }))
@@ -115,6 +147,27 @@ mod tests {
         let ui = ui.validated().unwrap();
         assert_eq!(ui.slots.len(), 2);
         assert_eq!(ui.slots[1].device_types, vec!["weather_station"]);
+    }
+
+    #[test]
+    fn cards_say_their_sizes_and_a_dashboard_card_its_name() {
+        let ui: PluginUi = serde_json::from_value(json!({
+            "host_api": 1,
+            "version": "1.0.0",
+            "slots": [
+                {"slot": "device.card", "element": "hc-x-card", "forms": ["standard", "large"]},
+                {"slot": "dashboard.card", "element": "hc-x-presets", "label": "Quick presets",
+                 "settings": "hc-x-presets-settings"},
+                {"slot": "dashboard.card", "element": "hc-x-nameless"},
+                {"slot": "device.card", "element": "hc-x-huge", "forms": ["huge"]},
+                {"slot": "dashboard.card", "element": "hc-x-bad", "label": "Bad", "settings": "Nope"}
+            ]
+        }))
+        .unwrap();
+        let ui = ui.validated().unwrap();
+        let kept: Vec<_> = ui.slots.iter().map(|s| s.element.as_str()).collect();
+        assert_eq!(kept, vec!["hc-x-card", "hc-x-presets"]);
+        assert_eq!(ui.slots[1].label.as_deref(), Some("Quick presets"));
     }
 
     #[test]

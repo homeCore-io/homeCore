@@ -57,15 +57,22 @@ pub fn load(dir: &Path, version: &str) -> Result<PluginUi, String> {
     if !dir.join(&m.entry).is_file() {
         return Err(format!("its entry {} isn't there", m.entry));
     }
-    PluginUi {
+    // Which slots exist is homeCore's to say, not this SDK's: an SDK older
+    // than a slot would otherwise keep a plugin from ever offering it. Only
+    // what is wrong whatever the slot is refused here.
+    if m.slots.is_empty() {
+        return Err("it declares nowhere the app can put it".into());
+    }
+    if version.trim().is_empty() || !relative_path(&m.entry) {
+        return Err("its version or entry isn't usable".into());
+    }
+    Ok(PluginUi {
         host_api: m.host_api,
         version: version.to_string(),
         build: build_of(dir)?,
         entry: m.entry,
         slots: m.slots,
-    }
-    .validated()
-    .ok_or_else(|| "it declares nowhere the app can put it".into())
+    })
 }
 
 /// A hash of every file's name and contents: what changes when the UI does.
@@ -171,6 +178,14 @@ mod tests {
         assert!(load(&d.0, "1").is_err());
         std::fs::write(d.0.join("manifest.json"), r#"{"host_api":1,"slots":[]}"#).unwrap();
         assert!(load(&d.0, "1").is_err());
+        // A slot this SDK doesn't know is passed on: homeCore decides.
+        std::fs::write(
+            d.0.join("manifest.json"),
+            r#"{"host_api":1,"slots":[{"slot":"future.slot","element":"hc-x-later"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(d.0.join("index.js"), "export {}").unwrap();
+        assert_eq!(load(&d.0, "1").unwrap().slots[0].slot, "future.slot");
     }
 
     #[test]

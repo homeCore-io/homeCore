@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.87"
+  version: "0.1.88"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -10586,7 +10586,7 @@ components:
             properties:
               slot:
                 type: string
-                enum: [plugin.page, device.panel, rule.step]
+                enum: [plugin.page, device.panel, rule.step, device.card, dashboard.card]
               element:
                 type: string
                 description: The custom element the module defines.
@@ -10595,7 +10595,21 @@ components:
                 type: array
                 items:
                   type: string
-                description: For `device.panel`, only these device types (all when absent).
+                description: For the device slots, only these device types (all when absent).
+              label:
+                type: string
+                description: For `dashboard.card`, its name in "Add a card" (required there).
+              description:
+                type: string
+              forms:
+                type: array
+                items:
+                  type: string
+                  enum: [compact, standard, large]
+                description: For the cards, the sizes it can be (all when absent).
+              settings:
+                type: string
+                description: For `dashboard.card`, the element that edits a card's settings.
     PluginStatus:
       type: object
       description: |

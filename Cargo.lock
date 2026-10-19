@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "hc-wled"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.87"
+version = "0.1.88"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3380,7 +3380,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
