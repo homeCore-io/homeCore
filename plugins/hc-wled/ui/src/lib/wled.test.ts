@@ -216,9 +216,26 @@ describe("an automation’s WLED step", () => {
       look: { effect_id: 9, palette_id: 1 },
     });
   });
+  it('an older step\'s "on" beside a preset or look is kept', () => {
+    expect(stepOf({ on: true, preset: 14 })).toEqual({
+      kind: "preset",
+      preset_id: 14,
+      on: true,
+    });
+    expect(stepState(stepOf({ on: true, preset: 14 })!)).toEqual({
+      preset_id: 14,
+      on: true,
+    });
+    expect(stepOf({ effect_id: 2, on: true })).toEqual({
+      kind: "look",
+      segment: 0,
+      look: { effect_id: 2 },
+      on: true,
+    });
+  });
   it("what no step says stays JSON", () => {
     expect(stepOf({ raw: { lor: 2 } })).toBeNull();
-    expect(stepOf({ effect_id: 2, on: true })).toBeNull();
+    expect(stepOf({ effect_id: 2, on: false })).toBeNull();
     expect(stepOf("not an object")).toBeNull();
   });
   it("reads as a sentence, with names", () => {
