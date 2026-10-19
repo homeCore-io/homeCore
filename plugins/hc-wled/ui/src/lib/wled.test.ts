@@ -233,6 +233,13 @@ describe("an automation’s WLED step", () => {
       on: true,
     });
   });
+  it("a step that turns it on says so", () => {
+    expect(
+      stepSentence({ kind: "preset", preset_id: 14, on: true }, "the deck", {
+        preset: () => "Halloween Solid",
+      }),
+    ).toBe("Turn the deck on with Halloween Solid");
+  });
   it("what no step says stays JSON", () => {
     expect(stepOf({ raw: { lor: 2 } })).toBeNull();
     expect(stepOf({ effect_id: 2, on: false })).toBeNull();

@@ -82,6 +82,12 @@ pub fn entry(id: u64, p: &Map<String, Value>) -> Value {
     if kind == "playlist" {
         e["playlist"] = playlist_view(&p["playlist"]);
     }
+    // What applying it does to power: saved with "Include brightness" it
+    // carries `on` (true, false or "t" to toggle); without, it leaves power
+    // as it is — a step then has to turn the strip on itself.
+    if let Some(on) = p.get("on").filter(|v| v.is_boolean() || v.is_string()) {
+        e["on"] = on.clone();
+    }
     e
 }
 
@@ -301,6 +307,8 @@ mod tests {
         assert_eq!(l[0]["effect_id"], 84);
         assert_eq!(l[0]["segments"], 1);
         assert_eq!(l[1]["quick_label"], "H1");
+        assert_eq!(l[1]["on"], true);
+        assert!(l[0].get("on").is_none());
         assert_eq!(l[1]["brightness_pct"], 50.0);
         assert_eq!(l[1]["segments"], 1);
         assert_eq!(l[2]["kind"], "playlist");
