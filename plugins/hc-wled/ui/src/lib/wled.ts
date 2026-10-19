@@ -292,6 +292,8 @@ export interface WledStep {
   brightness_pct?: number;
   /** Its fade, ms; left out, the controller's own. */
   transition?: number;
+  /** "Turn it on" said beside a preset, playlist or look, as older steps do. */
+  on?: true;
 }
 
 const LOOK_KEYS = new Set([
@@ -364,6 +366,11 @@ export function stepState(s: WledStep): Record<string, unknown> {
     s.kind !== "nightlight"
   )
     out.transition = s.transition;
+  if (
+    s.on &&
+    (s.kind === "preset" || s.kind === "playlist" || s.kind === "look")
+  )
+    out.on = true;
   return out;
 }
 
@@ -386,6 +393,8 @@ export function stepOf(state: unknown): WledStep | null {
     ...(num("transition") !== undefined
       ? { transition: num("transition") }
       : {}),
+    // Older steps say "on" beside a preset or a look; keep it, say it.
+    ...(state.on === true ? { on: true as const } : {}),
   };
   const only = (allowed: Set<string>) => keys.every((k) => allowed.has(k));
   const preset = num("preset_id") ?? num("preset") ?? num("apply_preset");
@@ -398,13 +407,14 @@ export function stepOf(state: unknown): WledStep | null {
         "apply_preset",
         "brightness_pct",
         "transition",
+        "on",
       ]),
     )
   )
     return { kind: "preset", preset_id: preset, ...shared };
   if (
     num("playlist_id") !== undefined &&
-    only(new Set(["playlist_id", "brightness_pct", "transition"]))
+    only(new Set(["playlist_id", "brightness_pct", "transition", "on"]))
   )
     return { kind: "playlist", playlist_id: num("playlist_id"), ...shared };
   if (isObj(state.nightlight) && keys.length === 1) {
@@ -442,7 +452,7 @@ export function stepOf(state: unknown): WledStep | null {
     keys.some((k) => LOOK_KEYS.has(k)) &&
     keys.every((k) => LOOK_KEYS.has(k) || SHARED.has(k) || k === "segment")
   ) {
-    if (keys.includes("on")) return null;
+    if (keys.includes("on") && state.on !== true) return null;
     const look: Record<string, unknown> = {};
     for (const k of keys)
       if (LOOK_KEYS.has(k))
