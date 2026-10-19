@@ -27,6 +27,7 @@
 				{#each paletteOf(s) as c, i (i)}<span style:background={c}></span>{/each}
 			</span>
 			<b>{hc.devices.label(s)}</b>
+			{#if s.attributes.smart}<span class="where">changes through the day</span>{/if}
 			{#if where}<span class="where">{s.attributes.group_name}</span>{/if}
 		</button>
 	{/each}

@@ -13,6 +13,14 @@ pub enum PluginCommand {
         scene_id: Option<String>,
         recall: SceneRecall,
     },
+    /// Save a room's or zone's lights as they are as a new scene.
+    SaveScene {
+        name: String,
+    },
+    RenameScene {
+        name: String,
+    },
+    DeleteScene,
     SetEntertainmentActive {
         config_id: Option<String>,
         active: bool,
@@ -80,6 +88,27 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
                 scene_id,
                 recall: recall_of(&payload),
             };
+        }
+        let name = || {
+            payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+        };
+        if action == "save_scene" {
+            if let Some(name) = name() {
+                return PluginCommand::SaveScene { name };
+            }
+        }
+        if action == "rename" {
+            if let Some(name) = name() {
+                return PluginCommand::RenameScene { name };
+            }
+        }
+        if action == "delete" {
+            return PluginCommand::DeleteScene;
         }
         if action == "breathe" {
             return PluginCommand::SetLightState(LightCommand {

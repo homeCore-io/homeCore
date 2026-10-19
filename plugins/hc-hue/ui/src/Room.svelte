@@ -29,6 +29,44 @@
 	const scenes = $derived(scenesOf(devices, a.group_rid));
 	const running = $derived(runningIn(devices, a.group_rid));
 
+	// The zones its lights are also in (and, for a zone, the rooms), from
+	// the plugin: a zone need not be a device to be worth naming.
+	let groups = $state([]);
+	$effect(() => {
+		if (hc) void hc.query('rooms').then((r) => (groups = r.ok ? (r.data.rooms ?? []) : []));
+	});
+	const mine = $derived(new Set(Array.isArray(a.light_ids) ? a.light_ids : []));
+	const overlapping = $derived(
+		groups.filter((g) => g.id !== a.group_rid && (g.light_ids ?? []).some((id) => mine.has(id)))
+	);
+
+	// Scenes of its own: save how it is now, rename one, delete one.
+	let saving = $state(false);
+	let newName = $state('');
+	let editing = $state(false);
+	async function saveScene() {
+		const name = newName.trim();
+		if (!name) return;
+		await send(deviceId, { action: 'save_scene', name });
+		if (!error) {
+			newName = '';
+			saving = false;
+		}
+	}
+	async function rename(s, name) {
+		name = name.trim();
+		if (name && name !== s.name) await send(s.device_id, { action: 'rename', name });
+	}
+	async function remove(s) {
+		const ok = await hc.ui.confirm({
+			title: `Delete “${hc.devices.label(s)}”?`,
+			body: 'It goes from the Hue bridge, so the Hue app loses it too. Automations that apply it stop doing so.',
+			go: 'Delete',
+			danger: true
+		});
+		if (ok) await send(s.device_id, { action: 'delete' });
+	}
+
 	let dynamic = $state(false);
 	let fade = $state(400);
 
@@ -56,8 +94,46 @@
 			<div class="main">
 				{#if scenes.length}
 					<section class="hc-card">
-						<div class="hc-head"><h3>Scenes</h3><span class="hc-quiet">tap to apply</span></div>
-						<Scenes {hc} {scenes} columns={4} options={{ dynamic, duration_ms: fade || undefined }} onerror={(e) => (error = e)} />
+						<div class="hc-head">
+							<h3>Scenes</h3>
+							<span class="hc-row">
+								<button class="hc-pill small" onclick={() => (saving = !saving)}>Save as a scene…</button>
+								<button class="hc-pill small" class:go={editing} onclick={() => (editing = !editing)}>{editing ? 'Done' : 'Rename or delete'}</button>
+							</span>
+						</div>
+						{#if saving}
+							<form
+								class="hc-row"
+								onsubmit={(e) => {
+									e.preventDefault();
+									void saveScene();
+								}}
+							>
+								<input class="name-in" bind:value={newName} placeholder="Its name" aria-label="Name of the new scene" />
+								<button class="hc-pill go" type="submit">Save how it is now</button>
+							</form>
+						{/if}
+						{#if editing}
+							<ul class="edit">
+								{#each scenes as s (s.device_id)}
+									<li>
+										{#if s.attributes.smart}
+											<b>{hc.devices.label(s)}</b><span class="hc-quiet">a smart scene — change it in the Hue app</span>
+										{:else}
+											<input
+												class="name-in"
+												value={s.name}
+												aria-label={`Name of ${s.name}`}
+												onchange={(e) => rename(s, e.currentTarget.value)}
+											/>
+											<button class="hc-pill danger small" onclick={() => remove(s)}>Delete</button>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{:else}
+							<Scenes {hc} {scenes} columns={4} options={{ dynamic, duration_ms: fade || undefined }} onerror={(e) => (error = e)} />
+						{/if}
 						<span class="hc-row">
 							<label class="check"><input type="checkbox" bind:checked={dynamic} />Keep their colours moving</label>
 							<label class="check"
@@ -113,6 +189,20 @@
 						{/each}
 					</ul>
 				</section>
+				{#if overlapping.length}
+					<section class="hc-card">
+						<h3>{a.group_kind === 'zone' ? 'Its lights are in' : 'Also in zones'}</h3>
+						<ul class="also">
+							{#each overlapping as g (g.id)}
+								<li>
+									{#if g.device_id}<button class="name" onclick={() => hc.ui.openDevice(g.device_id)}><b>{g.name}</b></button>{:else}<b>{g.name}</b>{/if}
+									<span class="hc-quiet">{g.kind} · {(g.light_ids ?? []).filter((id) => mine.has(id)).length} of these lights</span>
+								</li>
+							{/each}
+						</ul>
+						<p class="hc-quiet">A Hue zone groups lights across rooms; each has its own scenes.</p>
+					</section>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -220,6 +310,26 @@
 		padding: 8px 10px;
 		border: 1px solid var(--card-line);
 		border-radius: 12px;
+	}
+	.small {
+		min-height: 32px;
+		font-size: 13px;
+	}
+	.name-in {
+		flex: 1;
+		min-width: 0;
+		min-height: 36px;
+		border-radius: 9px;
+		border: 1px solid var(--line);
+		background: var(--surface);
+		padding: 0 10px;
+	}
+	.edit li {
+		border: none;
+		padding: 0;
+	}
+	.also li {
+		justify-content: space-between;
 	}
 	.sw {
 		width: 32px;

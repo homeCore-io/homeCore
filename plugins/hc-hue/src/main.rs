@@ -425,6 +425,16 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 RequiresRole::ReadOnly,
             ),
             quick("pair_cancel", "Stop adding a bridge", "Stop waiting for the link button.", None, RequiresRole::Admin),
+            quick(
+                "set_bridge_address",
+                "Change a bridge's address",
+                "Point a bridge at a new address (after checking it answers as the same bridge); takes effect when the plugin restarts.",
+                Some(serde_json::json!({
+                    "bridge_id": { "type": "string" },
+                    "host": { "type": "string", "description": "Its new address" },
+                })),
+                RequiresRole::Admin,
+            ),
             Action {
                 id: "refresh_devices".into(),
                 label: "Refresh devices".into(),

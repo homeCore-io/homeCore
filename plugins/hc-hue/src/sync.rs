@@ -130,7 +130,8 @@ pub async fn refresh_bridge_state(
         let mut published_light_ids: HashSet<String> = HashSet::new();
         for light in &lights {
             published_light_ids.insert(light.device_id.clone());
-            if registry.ensure_light(light) {
+            let renamed = registry.renamed(&light.device_id, &light.name, light.area.as_deref());
+            if registry.ensure_light(light) || renamed {
                 publisher
                     .register_device_full(
                         &light.device_id,
@@ -245,7 +246,8 @@ pub async fn refresh_bridge_state(
         let mut published_scene_ids: HashSet<String> = HashSet::new();
         for scene in scenes {
             published_scene_ids.insert(scene.device_id.clone());
-            if registry.ensure_scene(&scene) {
+            let renamed = registry.renamed(&scene.device_id, &scene.name, scene.area.as_deref());
+            if registry.ensure_scene(&scene) || renamed {
                 publisher
                     .register_device_full(
                         &scene.device_id,
@@ -598,6 +600,12 @@ async fn apply_event_item(
             continue;
         };
 
+        // A rename, or anything else about what a resource is called or is:
+        // its registration says that, and a refresh is one request.
+        if item.get("metadata").is_some() {
+            alerts_stale = true;
+        }
+
         match resource_type {
             "light" => {
                 saw_known_type = true;
@@ -768,6 +776,20 @@ async fn apply_event_item(
                             )
                             .await?;
                         applied = true;
+                    }
+                }
+            }
+            "smart_scene" => {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_scene_device_id(bridge_id, rid) {
+                    applied = true;
+                    if let Some(state) = item.get("state").and_then(|v| v.as_str()) {
+                        publisher
+                            .publish_state_partial(
+                                &device_id,
+                                &json!({ "active": state == "active", "status": state }),
+                            )
+                            .await?;
                     }
                 }
             }

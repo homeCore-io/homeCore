@@ -86,6 +86,24 @@
 		if (!r.ok) error = r.error;
 	}
 
+	// A new address: the plugin checks it answers as the same bridge, keeps
+	// it, and connects there once restarted.
+	let moving = $state('');
+	async function move(b, host) {
+		host = host.trim();
+		if (!host || host === b.attributes.host) return;
+		moving = b.device_id;
+		error = '';
+		const r = await hc.action('set_bridge_address', { bridge_id: b.attributes.bridge_id, host });
+		if (!r.ok) error = r.error;
+		else if (r.data.status === 'error') error = String(r.data.error);
+		else {
+			const back = await hc.config.restartPlugin();
+			if (!back.ok) error = back.error;
+		}
+		moving = '';
+	}
+
 	let adding = $state(false);
 	const attention = $derived(
 		devices
@@ -145,7 +163,21 @@
 										>{b.attributes.model_id === 'BSB002' ? 'Bridge v2' : b.attributes.model_id === 'BSB003' ? 'Bridge Pro' : (b.attributes.model_id ?? 'Bridge')} · {b.attributes.bridge_id}</span
 									></td
 								>
-								<td class="hc-num">{b.attributes.host}</td>
+								<td>
+									{#if admin}
+										<form
+											class="addr"
+											onsubmit={(e) => {
+												e.preventDefault();
+												const v = new FormData(e.currentTarget).get('host');
+												void move(b, String(v ?? ''));
+											}}
+										>
+											<input name="host" value={b.attributes.host} aria-label={`Address of ${hc.devices.label(b)}`} />
+											{#if moving === b.device_id}<span class="hc-quiet">Checking…</span>{:else}<button class="hc-pill" type="submit">Save</button>{/if}
+										</form>
+									{:else}<span class="hc-num">{b.attributes.host}</span>{/if}
+								</td>
 								<td><span class="hc-dot {c.tone}"></span> {c.word}</td>
 								<td class="hc-quiet hc-num"
 									>{num(b.attributes.light_count) ?? '—'} lights · {num(b.attributes.sensor_count) ?? '—'} sensors · {num(b.attributes.scene_count) ?? '—'} scenes{b.attributes
@@ -303,6 +335,23 @@
 	}
 	td {
 		vertical-align: middle;
+	}
+	.addr {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+	}
+	.addr input {
+		width: 150px;
+		min-height: 34px;
+		border-radius: 9px;
+		border: 1px solid var(--line);
+		background: var(--surface);
+		padding: 0 8px;
+		font-family: var(--font-num, monospace);
+	}
+	.addr .hc-pill {
+		min-height: 34px;
 	}
 	.actions {
 		white-space: nowrap;

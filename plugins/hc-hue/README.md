@@ -16,6 +16,10 @@ Bridges Philips Hue devices into HomeCore via the CLIP v2 API with real-time eve
   and the automation step. Built with `npm run build` into `ui/dist`, which
   the plugin serves.
 - Alerts: bridge not answering, light not answering, software update waiting.
+- Smart scenes; saving a room's lights as a scene, renaming and deleting
+  scenes; renames and moves made in the Hue app follow within seconds; a
+  bridge's address can be changed from its page (kept in learned state as
+  `address`, which wins over the config file's `host`).
 
 ## Setup
 

@@ -61,6 +61,7 @@ pub async fn run(
         "find_bridges" => find_bridges(handle).await,
         "pair_start" => pair_start(params, handle, rt),
         "pair_status" => status(),
+        "set_bridge_address" => set_address(params, handle).await,
         "pair_cancel" => {
             if let Ok(mut p) = PAIRING.lock() {
                 p.run += 1;
@@ -201,6 +202,50 @@ async fn pair(
     }
     handle.add_bridge(paired).await;
     Ok(())
+}
+
+/// Move a bridge to a new address — after checking the address answers as
+/// that same bridge, so a typo cannot point it at a stranger. The plugin
+/// connects there when it restarts, which the page asks for next.
+async fn set_address(params: &Value, handle: &PairingHandle) -> Value {
+    let get = |k: &str| {
+        params
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+    };
+    let (bridge_id, host) = (get("bridge_id"), get("host"));
+    if bridge_id.is_empty() || host.is_empty() {
+        return json!({ "status": "error", "error": "Say which bridge and its new address." });
+    }
+    let probe = HueApiClient::new(BridgeTarget {
+        name: String::new(),
+        bridge_id: String::new(),
+        host: host.to_string(),
+        app_key: None,
+        verify_tls: false,
+        allow_self_signed: true,
+    });
+    let answered = match probe.fetch_bridge_summary().await {
+        Ok(summary) => summary
+            .get("bridge_config")
+            .and_then(|c| c.get("bridgeid"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Err(_) => None,
+    };
+    match answered {
+        None => json!({ "status": "error", "error": format!("No Hue bridge answered at {host}.") }),
+        Some(id) if !id.eq_ignore_ascii_case(bridge_id) => json!({
+            "status": "error",
+            "error": format!("{host} answers as a different bridge ({id})."),
+        }),
+        Some(_) => match handle.set_address(bridge_id, host).await {
+            Ok(()) => json!({ "status": "ok", "restart": true }),
+            Err(e) => json!({ "status": "error", "error": format!("{e:#}") }),
+        },
+    }
 }
 
 fn status() -> Value {

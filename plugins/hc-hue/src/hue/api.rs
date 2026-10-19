@@ -527,9 +527,171 @@ impl HueApiClient {
                     .and_then(|p| p.get("color"))
                     .and_then(|c| c.as_array())
                     .is_some_and(|c| c.len() > 1),
+                smart: false,
+            });
+        }
+        // Smart scenes: a scene per time of day. Their colours are the first
+        // of each scene they move through.
+        for item in r.of("smart_scene") {
+            let Some(rid) = id_of(item) else { continue };
+            let group_rid = item
+                .get("group")
+                .and_then(|g| g.get("rid"))
+                .and_then(|v| v.as_str());
+            let group = group_rid.and_then(|g| r.get(g));
+            let group_name = group.and_then(name_of).map(str::to_string);
+            let mut palette: Vec<String> = Vec::new();
+            for slot in item
+                .get("week_timeslots")
+                .and_then(|w| w.as_array())
+                .and_then(|w| w.first())
+                .and_then(|w| w.get("timeslots"))
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let target = slot
+                    .get("target")
+                    .and_then(|t| t.get("rid"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|t| r.get(t));
+                if let Some(first) = target.map(scene_palette).and_then(|p| p.into_iter().next()) {
+                    if !palette.contains(&first) {
+                        palette.push(first);
+                    }
+                }
+            }
+            let state = item
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            scenes.push(HueScene {
+                bridge_id: self.target.bridge_id.clone(),
+                resource_id: rid.to_string(),
+                device_id: self.target.scene_device_id(rid),
+                name: name_of(item).unwrap_or("Smart scene").to_string(),
+                area: group_name.as_deref().map(Self::slugify),
+                group_kind: group.and_then(kind_of).map(str::to_string),
+                active: state.as_deref().map(|s| s == "active"),
+                group_rid: group_rid.map(str::to_string),
+                group_name,
+                palette,
+                status: state,
+                dynamic_capable: false,
+                smart: true,
             });
         }
         scenes
+    }
+
+    pub async fn activate_smart_scene(&self, rid: &str, on: bool) -> Result<()> {
+        let action = if on { "activate" } else { "deactivate" };
+        self.put(
+            &format!("smart_scene/{rid}"),
+            json!({ "recall": { "action": action } }),
+        )
+        .await
+        .context("Hue smart scene failed")
+    }
+
+    pub async fn rename_scene(&self, rid: &str, name: &str) -> Result<()> {
+        self.put(
+            &format!("scene/{rid}"),
+            json!({ "metadata": { "name": name } }),
+        )
+        .await
+        .context("renaming the Hue scene failed")
+    }
+
+    pub async fn delete_scene(&self, rid: &str) -> Result<()> {
+        self.send_clip(reqwest::Method::DELETE, &format!("scene/{rid}"), None)
+            .await
+            .context("deleting the Hue scene failed")
+    }
+
+    /// Save how a room's or zone's lights are now as a new scene in it.
+    pub async fn save_scene(&self, group_rid: &str, name: &str) -> Result<()> {
+        let r = self.fetch_all().await?;
+        let group = r
+            .get(group_rid)
+            .ok_or_else(|| anyhow::anyhow!("that room or zone is no longer on the bridge"))?;
+        let kind = kind_of(group).unwrap_or("room").to_string();
+        let actions: Vec<_> = r
+            .lights_in(group)
+            .iter()
+            .filter_map(|rid| r.get(rid))
+            .map(|l| {
+                let mut a = serde_json::Map::new();
+                let on = l
+                    .get("on")
+                    .and_then(|o| o.get("on"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                a.insert("on".into(), json!({ "on": on }));
+                if on {
+                    if let Some(b) = l.get("dimming").and_then(|d| d.get("brightness")) {
+                        a.insert("dimming".into(), json!({ "brightness": b }));
+                    }
+                    let ct_valid = l
+                        .get("color_temperature")
+                        .and_then(|c| c.get("mirek_valid"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if let Some(points) = l
+                        .get("gradient")
+                        .and_then(|g| g.get("points"))
+                        .filter(|p| p.as_array().is_some_and(|a| a.len() > 1))
+                    {
+                        a.insert("gradient".into(), json!({ "points": points }));
+                    } else if ct_valid {
+                        if let Some(m) = l.get("color_temperature").and_then(|c| c.get("mirek")) {
+                            a.insert("color_temperature".into(), json!({ "mirek": m }));
+                        }
+                    } else if let Some(xy) = l.get("color").and_then(|c| c.get("xy")) {
+                        a.insert("color".into(), json!({ "xy": xy }));
+                    }
+                }
+                json!({ "target": { "rid": id_of(l), "rtype": "light" }, "action": a })
+            })
+            .collect();
+        if actions.is_empty() {
+            bail!("that room or zone has no lights to save");
+        }
+        let body = json!({
+            "type": "scene",
+            "metadata": { "name": name },
+            "group": { "rid": group_rid, "rtype": kind },
+            "actions": actions,
+        });
+        self.send_clip(reqwest::Method::POST, "scene", Some(body))
+            .await
+            .context("saving the Hue scene failed")
+    }
+
+    async fn send_clip(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let Some(app_key) = self.current_app_key() else {
+            bail!("cannot control the Hue bridge without app_key configured");
+        };
+        let url = format!("https://{}/clip/v2/resource/{path}", self.target.host);
+        let mut req = self
+            .http_client()
+            .request(method, url)
+            .header("hue-application-key", &app_key);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let response = req.send().await.context("request failed")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            bail!("status={status} body={text}");
+        }
+        Ok(())
     }
 
     pub fn aux_devices(&self, r: &Resources) -> Vec<HueAuxDevice> {
@@ -629,6 +791,7 @@ impl HueApiClient {
                     "name": name_of(g).unwrap_or(rid),
                     "bridge_id": self.target.bridge_id,
                     "lights": r.lights_in(g).len(),
+                    "light_ids": r.lights_in(g).iter().map(|l| self.target.light_device_id(l)).collect::<Vec<_>>(),
                     "scenes": r.of("scene").iter().filter(|s| {
                         s.get("group").and_then(|g| g.get("rid")).and_then(|v| v.as_str()) == Some(rid)
                     }).count(),
