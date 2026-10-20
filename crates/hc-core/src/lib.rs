@@ -24,6 +24,7 @@ pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
 pub mod timer_manager;
+pub mod vocabulary_check;
 
 pub use calendar_store::CalendarHandle;
 pub use engine::{ConditionTrace, FireHistoryHandle, FireOutcome, RuleFiring};

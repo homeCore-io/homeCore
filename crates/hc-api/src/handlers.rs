@@ -210,6 +210,58 @@ pub async fn battery_settings(State(s): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+/// `GET /system/vocabulary-check` — automations, scenes and devices checked
+/// against what the devices take and the shared vocabulary. Report only:
+/// it changes nothing. See `hc_core::vocabulary_check`.
+pub async fn vocabulary_check(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    let fail = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response()
+    };
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => return fail(e),
+    };
+    let schemas: HashMap<String, hc_types::DeviceSchema> = match s.store.list_device_schemas().await
+    {
+        Ok(list) => list.into_iter().collect(),
+        Err(e) => return fail(e),
+    };
+    let scenes = match s.store.list_scenes().await {
+        Ok(sc) => sc,
+        Err(e) => return fail(e),
+    };
+    let rules = match &s.source_rules_handle {
+        Some(rh) => rh.read().await.clone(),
+        None => Vec::new(),
+    };
+    let findings = hc_core::vocabulary_check::check(&hc_core::vocabulary_check::Inputs {
+        devices: &devices,
+        schemas: &schemas,
+        rules: &rules,
+        scenes: &scenes,
+    });
+    let count = |sev| findings.iter().filter(|f| f.severity == sev).count();
+    use hc_core::vocabulary_check::Severity;
+    Json(json!({
+        "summary": {
+            "broken": count(Severity::Broken),
+            "undeclared": count(Severity::Undeclared),
+            "rename": count(Severity::Rename),
+            "unit": count(Severity::Unit),
+        },
+        "findings": findings,
+    }))
+    .into_response()
+}
+
 pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
     let uptime_secs = (chrono::Utc::now() - s.started_at).num_seconds().max(0);
 
