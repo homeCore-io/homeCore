@@ -54,33 +54,35 @@ fn rw(kind: AttributeKind, display: &str, unit: Option<&str>) -> AttributeSchema
 /// Only the kinds that really take one. A Switch is on or off, a Pico accepts
 /// nothing at all, and declaring a level for either would be the opposite
 /// mistake.
+/// A percentage the zone reports to a tenth: `brightness_pct`, `speed_pct`,
+/// `position` — decimals, 0–100, as the shared vocabulary has them.
+fn pct(display: &str) -> AttributeSchema {
+    AttributeSchema {
+        min: Some(0.0),
+        max: Some(100.0),
+        ..rw(AttributeKind::Float, display, Some("%"))
+    }
+}
+
+/// `transition_ms`: the fade for the level change it is sent with. Written
+/// alongside a level or `on`, never on its own; it is not published.
+fn transition_ms() -> AttributeSchema {
+    AttributeSchema {
+        min: Some(0.0),
+        category: Some(AttributeCategory::Config),
+        ..rw(AttributeKind::Integer, "Fade", Some("ms"))
+    }
+}
+
 fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>> {
     match kind {
+        // One brightness, in percent. The 0–255 `brightness` twin is gone:
+        // the shared name is `brightness_pct`, and a second scale for the
+        // same fact was one a reader had to guess at.
         DeviceKind::Dimmer => Some(vec![
             ("on".into(), rw(AttributeKind::Bool, "Power", None)),
-            // `translate_output_state` publishes the 0-255 twin beside the
-            // percentage and always has. Declared diagnostic: it is the same
-            // fact in the units the protocol happens to use, and a client
-            // offering two brightness rows is offering one too many.
-            (
-                "brightness".into(),
-                AttributeSchema {
-                    min: Some(0.0),
-                    max: Some(255.0),
-                    step: Some(1.0),
-                    category: Some(AttributeCategory::Diagnostic),
-                    ..ro(AttributeKind::Integer, "Brightness (raw)")
-                },
-            ),
-            (
-                "brightness_pct".into(),
-                AttributeSchema {
-                    min: Some(0.0),
-                    max: Some(100.0),
-                    step: Some(1.0),
-                    ..rw(AttributeKind::Integer, "Brightness", Some("%"))
-                },
-            ),
+            ("brightness_pct".into(), pct("Brightness")),
+            ("transition_ms".into(), transition_ms()),
         ]),
         DeviceKind::Switch => Some(vec![("on".into(), rw(AttributeKind::Bool, "Power", None))]),
         // The ladder `translate_output_state` reports and `translate_command`
@@ -101,27 +103,12 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
                     ..rw(AttributeKind::Enum, "Speed", None)
                 },
             ),
-            (
-                "speed_pct".into(),
-                AttributeSchema {
-                    min: Some(0.0),
-                    max: Some(100.0),
-                    step: Some(1.0),
-                    ..rw(AttributeKind::Integer, "Speed", Some("%"))
-                },
-            ),
+            ("speed_pct".into(), pct("Speed")),
+            ("transition_ms".into(), transition_ms()),
         ]),
         // A shade reports where it is; raising, lowering and stopping are
         // verbs, and are declared as actions rather than invented attributes.
-        DeviceKind::Shade => Some(vec![(
-            "position".into(),
-            AttributeSchema {
-                min: Some(0.0),
-                max: Some(100.0),
-                step: Some(1.0),
-                ..rw(AttributeKind::Integer, "Position", Some("%"))
-            },
-        )]),
+        DeviceKind::Shade => Some(vec![("position".into(), pct("Position"))]),
         _ => None,
     }
 }
@@ -184,25 +171,18 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
         };
     }
 
-    // An occupancy group publishes the same reading under two names, and has
-    // since before this schema existed. Both are declared: a client that hides
-    // what a plugin never mentioned would otherwise show one and drop the
-    // other.
+    // `occupied`, the shared name. The group used to publish the same
+    // reading a second time as `occupancy`; one name is enough.
     if cfg.kind == DeviceKind::OccupancyGroup {
-        let occupancy = |display: &str| AttributeSchema {
+        let occupied = AttributeSchema {
             states: Some(BoolStates {
                 when_true: StateLabel::verbed("occupied", "detects occupancy"),
                 when_false: StateLabel::verbed("vacant", "becomes vacant"),
             }),
-            ..ro(AttributeKind::Bool, display)
+            ..ro(AttributeKind::Bool, "Occupied")
         };
         let schema = DeviceSchema {
-            attributes: [
-                ("occupied".to_string(), occupancy("Occupied")),
-                ("occupancy".to_string(), occupancy("Occupancy")),
-            ]
-            .into_iter()
-            .collect(),
+            attributes: [("occupied".to_string(), occupied)].into_iter().collect(),
             ..Default::default()
         };
         return serde_json::to_value(&schema).ok();
@@ -263,6 +243,22 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
                 max: Some(3.0),
                 category: Some(AttributeCategory::Diagnostic),
                 ..ro(AttributeKind::Integer, &format!("Button {b} LED"))
+            },
+        );
+    }
+
+    // A contact-closure input is a contact: `open`, true when open. A VCRX
+    // has several on the one device, so each is `cci_{N}_open` — the shared
+    // meaning, numbered — rather than the `"open"`/`"closed"` strings it was.
+    for c in &cfg.ccis {
+        attrs.insert(
+            cci_attribute(*c),
+            AttributeSchema {
+                states: Some(BoolStates {
+                    when_true: StateLabel::verbed("open", "opens"),
+                    when_false: StateLabel::verbed("closed", "closes"),
+                }),
+                ..ro(AttributeKind::Bool, &format!("Input {c} open"))
             },
         );
     }
@@ -356,15 +352,15 @@ pub fn scene_schema_json(reports_state: bool) -> Value {
         },
     );
     if !reports_state {
-        // **The scene still publishes an `on`, and it is not a reading.**
-        // `publish_scene_initial_states` writes `on: false` and an activation
-        // optimistically writes `on: true`; for a scene with no LED nothing
-        // ever confirms either. Declaring it primary would hand a client a
+        // **The scene still publishes an `active`, and it is not a reading.**
+        // `publish_scene_initial_states` writes `active: false` and an
+        // activation optimistically writes `active: true`; for a scene with no
+        // LED nothing ever confirms either. Declaring it primary would hand a client a
         // confident toggle over a value nothing checks — but leaving it
         // undeclared leaves a value on the device that nothing can label at
         // all. Diagnostic says both: it is there, and it is not the answer.
         attrs.insert(
-            "on".to_string(),
+            "active".to_string(),
             AttributeSchema {
                 category: Some(AttributeCategory::Diagnostic),
                 states: Some(BoolStates {
@@ -384,12 +380,12 @@ pub fn scene_schema_json(reports_state: bool) -> Value {
             },
         );
         attrs.insert(
-            "on".to_string(),
+            "active".to_string(),
             AttributeSchema {
-                // Written by pressing the button, never by assigning to `on` —
-                // `handle_homecore_command` dispatches a scene on `activate`
-                // alone, so a writable `on` would be a control that does
-                // nothing.
+                // Written by pressing the button, never by assigning to
+                // `active` — `handle_homecore_command` dispatches a scene on
+                // `activate` alone, so a writable one would be a control that
+                // does nothing.
                 states: Some(BoolStates {
                     when_true: StateLabel::verbed("active", "activates"),
                     when_false: StateLabel::verbed("inactive", "deactivates"),
@@ -457,6 +453,36 @@ pub fn scene_plumbing_state(cfg: &SceneConfig, include_led: bool) -> Value {
             serde_json::json!(led_component_for_phantom_button(cfg.button_component));
     }
     state
+}
+
+/// The attribute a contact-closure input publishes: `cci_{N}_open`.
+pub fn cci_attribute(component: u32) -> String {
+    format!("cci_{component}_open")
+}
+
+/// What a contact-closure event means for its `open` attribute. The repeater
+/// reports a closed contact as a press (3) and an open one as a release (4).
+pub fn cci_open(closed: bool) -> bool {
+    !closed
+}
+
+/// Keys this device used to publish under names it no longer uses, as a
+/// partial-state patch of `null`s — which removes them. Published once at
+/// registration so a retained state does not carry a stale `brightness`,
+/// `occupancy` or `cci_N` string after the plugin moved on.
+pub fn retired_state(cfg: &DeviceConfig) -> Option<Value> {
+    let mut keys: Vec<String> = match cfg.kind {
+        DeviceKind::Dimmer => vec!["brightness".into()],
+        DeviceKind::OccupancyGroup => vec!["occupancy".into()],
+        _ => vec![],
+    };
+    keys.extend(cfg.ccis.iter().map(|c| format!("cci_{c}")));
+    if keys.is_empty() {
+        return None;
+    }
+    Some(Value::Object(
+        keys.into_iter().map(|k| (k, Value::Null)).collect(),
+    ))
 }
 
 /// Number and engraving for every button, with a sensible name where Lutron
@@ -736,26 +762,72 @@ mod output_schema_tests {
         }
     }
 
-    /// An occupancy group reports the same thing twice, and always has.
-    /// Declaring only one of the two would leave a client hiding a reading the
-    /// device publishes.
+    /// `occupied`, once. The old `occupancy` twin is neither declared nor
+    /// published.
     #[test]
-    fn an_occupancy_group_declares_both_names_it_publishes() {
+    fn an_occupancy_group_declares_occupied_only() {
         let v = device_schema_json(&cfg(DeviceKind::OccupancyGroup)).expect("a schema");
         let attrs = v["attributes"].as_object().expect("attributes");
-        for name in ["occupied", "occupancy"] {
-            assert_eq!(attrs[name]["writable"], false);
-            assert_eq!(attrs[name]["states"]["when_false"]["label"], "vacant");
-        }
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs["occupied"]["writable"], false);
+        assert_eq!(attrs["occupied"]["states"]["when_false"]["label"], "vacant");
 
         let dev = DeviceEntry::new(cfg(DeviceKind::OccupancyGroup));
         let state = dev.translate_occupancy_state(true);
-        for name in ["occupied", "occupancy"] {
-            assert!(
-                state.get(name).is_some(),
-                "{name} is declared but not published"
-            );
+        assert_eq!(state, json!({"occupied": true}));
+    }
+
+    /// The shared names, in the shared kinds: decimals for the percentages,
+    /// `transition_ms` writable alongside a level, and no raw `brightness`.
+    #[test]
+    fn levels_are_declared_as_the_vocabulary_has_them() {
+        let d = device_schema_json(&cfg(DeviceKind::Dimmer)).expect("a schema");
+        let attrs = d["attributes"].as_object().expect("attributes");
+        assert!(!attrs.contains_key("brightness"));
+        assert_eq!(attrs["brightness_pct"]["kind"], "float");
+        assert_eq!(attrs["transition_ms"]["unit"], "ms");
+        assert_eq!(attrs["transition_ms"]["kind"], "integer");
+        assert_eq!(attrs["transition_ms"]["writable"], true);
+
+        let f = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        assert_eq!(f["attributes"]["speed_pct"]["kind"], "float");
+        let s = device_schema_json(&cfg(DeviceKind::Shade)).expect("a schema");
+        assert_eq!(s["attributes"]["position"]["kind"], "float");
+
+        // And every name a dimmer publishes is one it declares.
+        let dev = DeviceEntry::new(cfg(DeviceKind::Dimmer));
+        let state = dev.translate_output_state(42.0).unwrap();
+        for k in state.as_object().unwrap().keys() {
+            assert!(attrs.contains_key(k), "{k} is published but not declared");
         }
+    }
+
+    /// A VCRX's contact inputs are `open` bools, numbered.
+    #[test]
+    fn contact_inputs_are_declared_as_open_bools() {
+        let mut c = cfg(DeviceKind::Vcrx);
+        c.ccis = vec![30, 32];
+        let v = device_schema_json(&c).expect("a schema");
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert_eq!(attrs["cci_30_open"]["kind"], "bool");
+        assert_eq!(attrs["cci_32_open"]["states"]["when_true"]["label"], "open");
+        assert!(!attrs.contains_key("cci_30"));
+        // Closed is a press, open a release.
+        assert!(!cci_open(true));
+        assert!(cci_open(false));
+    }
+
+    /// Old names are removed from the retained state, not left to linger.
+    #[test]
+    fn retired_names_are_cleared() {
+        let d = retired_state(&cfg(DeviceKind::Dimmer)).unwrap();
+        assert_eq!(d, json!({"brightness": null}));
+        let g = retired_state(&cfg(DeviceKind::OccupancyGroup)).unwrap();
+        assert_eq!(g, json!({"occupancy": null}));
+        let mut v = cfg(DeviceKind::Vcrx);
+        v.ccis = vec![30];
+        assert_eq!(retired_state(&v).unwrap(), json!({"cci_30": null}));
+        assert!(retired_state(&cfg(DeviceKind::Switch)).is_none());
     }
 
     /// A momentary output has nothing to read — the Integration Guide forbids
@@ -808,7 +880,7 @@ mod scene_schema_tests {
     #[test]
     fn a_scene_that_cannot_report_says_so_rather_than_claiming_to() {
         let v = scene_schema_json(false);
-        let on = &v["attributes"]["on"];
+        let on = &v["attributes"]["active"];
         // The scene publishes one — optimistically, on activation — so
         // leaving it undeclared would leave a value nothing can label. What
         // it must not be is a reading: `diagnostic` keeps it off the headline
@@ -820,7 +892,8 @@ mod scene_schema_tests {
 
         // The scene that really reports declares it as a reading.
         let reporting = scene_schema_json(true);
-        assert!(reporting["attributes"]["on"]["category"].is_null());
+        assert!(reporting["attributes"]["active"]["category"].is_null());
+        assert!(reporting["attributes"].get("on").is_none());
     }
 
     fn cfg() -> SceneConfig {
@@ -875,7 +948,7 @@ mod scene_schema_tests {
     #[test]
     fn a_scene_with_an_led_declares_what_it_reports() {
         let v = scene_schema_json(true);
-        let on = &v["attributes"]["on"];
+        let on = &v["attributes"]["active"];
         // Activation goes through the action; assigning to `on` is not a
         // command this plugin dispatches.
         assert_eq!(on["writable"], false);

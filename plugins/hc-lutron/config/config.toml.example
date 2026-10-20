@@ -26,8 +26,9 @@ port = 23                  # default — do not change unless redirected
 username = ""
 password = ""
 
-# Global fade time for dimmers and switches (seconds, 0.0 = instant).
-# Can be overridden per device with fade_secs in [[devices]].
+# Global fade time for dimmers and fans (seconds, 0.0 = instant).
+# Can be overridden per device with fade_secs in [[devices]], and per command
+# with `transition_ms` sent beside the level.
 default_fade_secs = 1.0
 
 # How long a button must be held (ms) before a "hold" event fires.
@@ -45,7 +46,7 @@ reconnect_delay_secs = 5
 # software and are visible in the XML database at http://{repeater_ip}/DbXmlInfo.xml
 #
 # Kinds:
-#   dimmer          — dimmable load (on, brightness 0–100)
+#   dimmer          — dimmable load (on, brightness_pct 0–100)
 #   switch          — non-dimmable load (on/off only)
 #   shade           — motorized shade (published as HomeCore `cover`) [STUB — phase 2]
 #   keypad          — wall keypad or Pico remote (button events, read-only)
@@ -97,8 +98,9 @@ area           = "office"
 # Scenes (Phantom Buttons)
 #
 # Each [[scenes]] entry maps a Lutron phantom button on the Main Repeater to
-# a HomeCore device.  Sending {"activate": true} to the device triggers the
-# phantom button press+release, activating the scene.
+# a HomeCore device.  Sending {"action": "activate"} to the device triggers the
+# phantom button press+release, activating the scene. Its LED is published
+# as `active` (true/false).
 #
 # main_repeater_id is almost always 1 — verify in RadioStar programming software.
 # button_component is the phantom button number assigned in RadioStar.
