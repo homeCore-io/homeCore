@@ -66,7 +66,7 @@ homecore/devices/{device_id}/state            # full state JSON, retained=true
 homecore/devices/{device_id}/state/partial    # partial update (JSON merge patch)
 
 # Commands  (core → broker → adapter)
-homecore/devices/{device_id}/cmd              # {"action":"set","brightness":128}
+homecore/devices/{device_id}/cmd              # {"brightness_pct":50} or {"action":"start",…}
 
 # Availability  (adapter heartbeat, retained)
 homecore/devices/{device_id}/availability     # "online" | "offline"
@@ -197,12 +197,17 @@ Each plugin registers its devices with a JSON Schema document describing attribu
   "area": "living_room",
   "capabilities": {
     "on":           { "type": "boolean" },
-    "brightness":   { "type": "integer", "minimum": 0, "maximum": 255 },
+    "brightness_pct": { "type": "number", "minimum": 0, "maximum": 100, "unit": "%" },
     "color_temp":   { "type": "integer", "minimum": 2700, "maximum": 6500, "unit": "K" },
     "color_xy":     { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } }
   }
 }
 ```
+
+**Shared names and units** — `brightness_pct` 0–100, `color_temp` kelvin,
+`transition_ms`, temperatures in °C and the rest — are defined once in
+`crates/hc-types/src/device_vocabulary.rs`. Plugins convert to them; nothing
+downstream converts.
 
 ---
 
@@ -282,7 +287,7 @@ GET    /api/v1/openapi.json
   "timestamp": "2025-11-14T10:32:00Z",
   "device_id": "light.living_room_main",
   "previous": { "on": false },
-  "current":  { "on": true, "brightness": 180 }
+  "current":  { "on": true, "brightness_pct": 70 }
 }
 ```
 

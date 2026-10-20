@@ -32,6 +32,8 @@ pub mod dashboard_vocabulary;
 /// hc-web's grid engine from scratch and hope it agrees.
 pub mod dashboard_layout;
 pub mod device;
+/// The names devices report and take: one name, one meaning, one unit.
+pub mod device_vocabulary;
 pub mod event;
 pub mod log_line;
 pub mod mqtt;
