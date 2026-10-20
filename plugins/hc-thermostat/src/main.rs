@@ -276,6 +276,7 @@ async fn run(
     // Conditions for the plugin page, not only the log.
     let notices = client.notices();
     let mqtt_client = client.mqtt_client();
+    let state_writer = client.state_writer();
     // Whether this plugin has anything to drive, said on the plugin page.
     // Read from the live set every time rather than decided at startup:
     // thermostats can be added, removed and reloaded over the management
@@ -307,6 +308,7 @@ async fn run(
         mqtt_client,
         &config_path,
         snapshot.clone(),
+        state_writer,
     )
     .await?;
     refresh_thermostat_notice(&bridge, &notices).await;
@@ -406,11 +408,33 @@ async fn run(
     // guessing a form from the schema. Rides the same manifest.
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
 
+    // Setpoints and modes changed at runtime live in core's learned state
+    // (`BridgeHandle::apply_learned`): retained, so it arrives shortly after
+    // the loop starts.
+    let learned: Arc<std::sync::Mutex<Option<serde_json::Value>>> = Arc::default();
+    let mgmt = {
+        let cell = Arc::clone(&learned);
+        mgmt.with_state_handler(move |doc| *cell.lock().unwrap() = Some(doc))
+    };
+
     let run_handle = tokio::spawn(async move {
         if let Err(e) = client.run_managed_with_state(cmd_cb, state_cb, mgmt).await {
             error!(error = %e, "PluginClient run loop exited");
         }
     });
+
+    // 7a. Apply what learned state kept, before the first control pass. A
+    //     plugin with nothing kept has no retained doc, so this waits briefly.
+    for _ in 0..20 {
+        if learned.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let kept = learned.lock().unwrap().clone();
+    if let Some(doc) = kept {
+        bridge.apply_learned(&doc).await;
+    }
 
     // 8. Wait for retained state on every subscribed topic, or a bounded
     //    timeout if some devices don't publish retained state. This ensures

@@ -786,6 +786,7 @@ impl Bridge {
             warn!(hc_id, "Ignoring command — speaker is offline");
             return;
         }
+        let cmd = coordinator_as_uuid(cmd, &self.hc_to_uuid);
         if let Err(e) = speaker::execute_command(&speaker, &cmd, &uuid_to_room).await {
             warn!(hc_id, error = %e, ?cmd, "Command failed");
         } else {
@@ -795,6 +796,18 @@ impl Bridge {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// "Group with…" names its leader as a homeCore device — the form offers
+/// speakers, and `group_coordinator` is published the same way — while the
+/// speaker joins by Sonos UUID. A UUID given directly still works.
+fn coordinator_as_uuid(mut cmd: Value, hc_to_uuid: &HashMap<String, String>) -> Value {
+    if cmd["action"] == "join" {
+        if let Some(uuid) = cmd["coordinator"].as_str().and_then(|c| hc_to_uuid.get(c)) {
+            cmd["coordinator"] = Value::String(uuid.clone());
+        }
+    }
+    cmd
+}
 
 /// Extract `"host:1400"` from a Speaker's device URL.
 fn speaker_host_port(speaker: &Speaker) -> String {
@@ -833,4 +846,24 @@ fn catalog_items_with_art(speaker: &Speaker, items: &[Value]) -> Vec<Value> {
             Some(summary)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod coordinator_tests {
+    use super::coordinator_as_uuid;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn group_with_a_homecore_speaker_joins_by_its_uuid() {
+        let map = HashMap::from([("sonos_kitchen".to_string(), "RINCON_1".to_string())]);
+        let join = |c: &str| coordinator_as_uuid(json!({"action": "join", "coordinator": c}), &map);
+        assert_eq!(join("sonos_kitchen")["coordinator"], "RINCON_1");
+        assert_eq!(join("RINCON_2")["coordinator"], "RINCON_2");
+        let play = coordinator_as_uuid(
+            json!({"action": "play", "coordinator": "sonos_kitchen"}),
+            &map,
+        );
+        assert_eq!(play["coordinator"], "sonos_kitchen");
+    }
 }

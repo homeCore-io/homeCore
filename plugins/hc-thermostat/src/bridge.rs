@@ -6,7 +6,7 @@ use crate::control::{aggregate, compute_call_for, lockout_remaining};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use plugin_sdk_rs::types::{with_command_change_metadata, DeviceChange};
-use plugin_sdk_rs::DevicePublisher;
+use plugin_sdk_rs::{DevicePublisher, PluginStateWriter};
 use rumqttc::{AsyncClient, QoS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -39,6 +39,44 @@ pub(crate) fn interpret_actuator_on(payload: &Value) -> Option<bool> {
         }
     }
     None
+}
+
+/// Which of the thermostat's commands a payload asks for.
+///
+/// A declared action arrives as `{"action": "set_setpoint", "value": 21.5}` —
+/// the shape the app, automations and the SDK use. `command` is the older
+/// spelling, still read so a payload written by hand keeps working.
+pub(crate) fn command_of(payload: &Value) -> &str {
+    ["action", "command"]
+        .iter()
+        .find_map(|k| payload.get(*k).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+/// The runtime changes to keep for one thermostat, or `None` when it is as the
+/// config file has it.
+///
+/// A setpoint or mode changed from the app is kept in core's learned state for
+/// the plugin, not written to the config file: core restarts a plugin whose
+/// file changes, and a restart on every change dropped the commands sent
+/// while it came back. `based_on` is the file's entry the change was made
+/// over, so an edit to the file afterwards wins (see [`learned_entry`]).
+pub(crate) fn runtime_change(file: &ThermostatEntry, now: &ThermostatEntry) -> Option<Value> {
+    let (file, now) = (
+        serde_json::to_value(file).ok()?,
+        serde_json::to_value(now).ok()?,
+    );
+    (file != now).then(|| json!({ "based_on": file, "entry": now }))
+}
+
+/// A thermostat as learned state left it: its kept entry, if the config file
+/// still says what it said when the change was made.
+pub(crate) fn learned_entry(file: &ThermostatEntry, kept: &Value) -> Option<ThermostatEntry> {
+    if kept.get("based_on")? != &serde_json::to_value(file).ok()? {
+        return None;
+    }
+    let entry: ThermostatEntry = serde_json::from_value(kept.get("entry")?.clone()).ok()?;
+    (entry.id == file.id).then_some(entry)
 }
 
 /// Per-thermostat runtime state — what we've last published.
@@ -148,6 +186,26 @@ pub fn sample_state_payload() -> Value {
     Runtime::new(cfg).state_payload()
 }
 
+type Ids = std::collections::HashSet<String>;
+
+impl Bridge {
+    /// Every sensor and every actuator any thermostat uses.
+    fn unions(&self) -> (Ids, Ids) {
+        let sensors = self
+            .thermostats
+            .values()
+            .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
+            .collect();
+        let actuators = self
+            .thermostats
+            .values()
+            .filter(|r| !r.cfg.actuator_device_id.is_empty())
+            .map(|r| r.cfg.actuator_device_id.clone())
+            .collect();
+        (sensors, actuators)
+    }
+}
+
 /// Shared plugin state. Wrapped in Arc<Mutex<...>> because commands and state
 /// messages arrive via separate callback threads.
 pub struct Bridge {
@@ -157,6 +215,9 @@ pub struct Bridge {
     /// `sensor_attribute`).
     sensor_cache: HashMap<String, f64>,
     config_path: String,
+    /// Each thermostat as the config file had it at startup — what a runtime
+    /// change is kept relative to.
+    file_entries: HashMap<String, ThermostatEntry>,
     /// Device IDs we're still waiting on for their first post-subscribe state
     /// message during startup sync. `None` after initial sync completes or
     /// times out.
@@ -168,6 +229,8 @@ pub struct BridgeHandle {
     publisher: DevicePublisher,
     mqtt: AsyncClient,
     plugin_id: String,
+    /// Writes runtime changes to core's learned state for this plugin.
+    state_writer: PluginStateWriter,
     /// Sync-readable snapshot of thermostat configs — updated whenever the
     /// bridge mutates thermostats. Used by management custom handlers
     /// (`get_thermostats`) which must answer synchronously without blocking
@@ -186,6 +249,7 @@ impl BridgeHandle {
         mqtt: AsyncClient,
         config_path: &str,
         snapshot: Arc<std::sync::Mutex<Vec<Value>>>,
+        state_writer: PluginStateWriter,
     ) -> Result<Self> {
         let thermostats = cfg
             .thermostats
@@ -197,6 +261,11 @@ impl BridgeHandle {
             thermostats,
             sensor_cache: HashMap::new(),
             config_path: config_path.to_string(),
+            file_entries: cfg
+                .thermostats
+                .iter()
+                .map(|t| (t.id.clone(), t.clone()))
+                .collect(),
             sync_pending: None,
         };
         let handle = Self {
@@ -204,6 +273,7 @@ impl BridgeHandle {
             publisher,
             mqtt,
             plugin_id: cfg.homecore.plugin_id.clone(),
+            state_writer,
             snapshot,
             sync_notify: Arc::new(tokio::sync::Notify::new()),
         };
@@ -510,10 +580,7 @@ impl BridgeHandle {
         let Some(therm_id) = device_id.strip_prefix("thermostat_") else {
             return;
         };
-        let cmd = payload
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let cmd = command_of(&payload);
         debug!(device_id, cmd, "Thermostat command");
 
         // Sensor and actuator set changes need a sub/unsub diff against the
@@ -682,11 +749,70 @@ impl BridgeHandle {
         }
 
         if changed {
-            if let Err(e) = self.persist_config().await {
-                warn!(error = %e, "Failed to persist config");
+            if let Err(e) = self.keep_runtime_changes().await {
+                warn!(error = %e, "Failed to keep the change");
             }
         }
         self.recalculate(therm_id).await;
+    }
+
+    /// Keep every thermostat's runtime changes in core's learned state.
+    async fn keep_runtime_changes(&self) -> Result<()> {
+        let kept: serde_json::Map<String, Value> = {
+            let b = self.inner.lock().await;
+            b.thermostats
+                .iter()
+                .filter_map(|(id, rt)| {
+                    let file = b.file_entries.get(id)?;
+                    Some((id.clone(), runtime_change(file, &rt.cfg)?))
+                })
+                .collect()
+        };
+        // Learned state merges at the top level, so the whole set is sent.
+        self.state_writer
+            .persist(&json!({ "thermostats": kept }))
+            .await?;
+        self.refresh_snapshot().await;
+        Ok(())
+    }
+
+    /// Apply the runtime changes learned state kept, where the config file
+    /// has not been edited since. Sensors and actuators that change are
+    /// subscribed to, as a command would.
+    pub async fn apply_learned(&self, doc: &Value) {
+        let Some(kept) = doc.get("thermostats").and_then(Value::as_object) else {
+            return;
+        };
+        let (old_s, old_a, new_s, new_a) = {
+            let mut b = self.inner.lock().await;
+            let (old_s, old_a) = b.unions();
+            let entries: Vec<(String, ThermostatEntry)> = kept
+                .iter()
+                .filter_map(|(id, k)| {
+                    let file = b.file_entries.get(id)?;
+                    Some((id.clone(), learned_entry(file, k)?))
+                })
+                .collect();
+            for (id, entry) in entries {
+                if let Some(rt) = b.thermostats.get_mut(&id) {
+                    info!(thermostat = %id, "Applied the setpoint and settings changed at runtime");
+                    rt.cfg = entry;
+                }
+            }
+            let (new_s, new_a) = b.unions();
+            (old_s, old_a, new_s, new_a)
+        };
+        for id in new_s.difference(&old_s).chain(new_a.difference(&old_a)) {
+            if let Err(e) = self.publisher.subscribe_state(id).await {
+                warn!(device = %id, error = %e, "apply_learned: subscribe failed");
+            }
+        }
+        for id in old_s.difference(&new_s).chain(old_a.difference(&new_a)) {
+            if !new_s.contains(id) && !new_a.contains(id) {
+                let _ = self.publisher.unsubscribe_state(id).await;
+            }
+        }
+        self.refresh_snapshot().await;
     }
 
     /// Recalculate a single thermostat and publish updated state / actuator
@@ -1332,8 +1458,46 @@ pub fn bridge_task_channel() -> (mpsc::Sender<BridgeTask>, mpsc::Receiver<Bridge
 
 #[cfg(test)]
 mod tests {
-    use super::interpret_actuator_on;
+    use super::{command_of, interpret_actuator_on, learned_entry, runtime_change};
+    use crate::config::ThermostatEntry;
     use serde_json::json;
+
+    fn office(setpoint: f64) -> ThermostatEntry {
+        serde_json::from_value(json!({
+            "id": "office", "name": "Office", "sensor_device_ids": ["t1"], "setpoint": setpoint
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_change_made_at_runtime_is_kept_and_comes_back() {
+        assert!(runtime_change(&office(70.0), &office(70.0)).is_none());
+        let kept = runtime_change(&office(70.0), &office(68.5)).unwrap();
+        assert_eq!(learned_entry(&office(70.0), &kept).unwrap().setpoint, 68.5);
+    }
+
+    #[test]
+    fn an_edit_to_the_config_file_afterwards_wins() {
+        let kept = runtime_change(&office(70.0), &office(68.5)).unwrap();
+        assert!(learned_entry(&office(72.0), &kept).is_none());
+    }
+
+    #[test]
+    fn a_declared_action_is_read_as_its_command() {
+        assert_eq!(
+            command_of(&json!({"action": "set_setpoint", "value": 21.5})),
+            "set_setpoint"
+        );
+        assert_eq!(
+            command_of(&json!({"command": "set_mode", "value": "heat"})),
+            "set_mode"
+        );
+        assert_eq!(
+            command_of(&json!({"action": "set_mode", "command": "set_setpoint"})),
+            "set_mode"
+        );
+        assert_eq!(command_of(&json!({"setpoint": 20})), "");
+    }
 
     #[test]
     fn interprets_on_bool() {

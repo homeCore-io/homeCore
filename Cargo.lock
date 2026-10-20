@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "hc-caseta"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "hc-sonos"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "hc-thermostat"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "hc-zwave"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",

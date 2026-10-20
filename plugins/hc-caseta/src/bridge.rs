@@ -240,6 +240,7 @@ impl Bridge {
         payload: &serde_json::Value,
         writer: &mpsc::Sender<String>,
     ) {
+        let payload = &normalise_action_style(payload);
         // Scenes first — a phantom button is pressed, not levelled.
         if let Some(&scene_idx) = self.hc_to_scene.get(hc_id) {
             if payload["activate"].as_bool() == Some(true) {
@@ -339,5 +340,52 @@ fn optimistic_state(cmd: &serde_json::Value, dev: &DeviceEntry) -> Option<serde_
             }
         }
         _ => None,
+    }
+}
+
+/// A declared action, rewritten into the key the translator reads.
+///
+/// The app and automations send a declared action as `{"action": "activate"}`
+/// — the shape the SDK defines — while scenes read `{"activate": true}` and
+/// shades `{"raise": true}`. The verbs take no parameters, so each becomes its
+/// boolean, and the command's other keys (its change metadata) stay; anything
+/// else passes through untouched.
+fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
+    let mut out = cmd.clone();
+    if let Some(map) = out.as_object_mut() {
+        if let Some(verb @ ("activate" | "raise" | "lower" | "stop")) =
+            map.get("action").and_then(serde_json::Value::as_str)
+        {
+            let verb = verb.to_string();
+            map.remove("action");
+            map.insert(verb, serde_json::Value::Bool(true));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::normalise_action_style;
+    use serde_json::json;
+
+    #[test]
+    fn a_declared_action_becomes_the_key_the_translator_reads() {
+        assert_eq!(
+            normalise_action_style(&json!({"action": "activate"})),
+            json!({"activate": true})
+        );
+        assert_eq!(
+            normalise_action_style(&json!({"action": "lower"})),
+            json!({"lower": true})
+        );
+        assert_eq!(
+            normalise_action_style(&json!({"brightness_pct": 40})),
+            json!({"brightness_pct": 40})
+        );
+        assert_eq!(
+            normalise_action_style(&json!({"action": "unknown"})),
+            json!({"action": "unknown"})
+        );
     }
 }

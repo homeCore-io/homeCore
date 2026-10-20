@@ -469,9 +469,10 @@ static ALIAS_TABLE: &[AliasEntry] = &[
         transform: Transform::Identity,
         is_write: true,
     },
-    // Thermostat Setpoint (CC 67) — endpoint 1 = heating setpoint
+    // Thermostat Setpoint (CC 67). zwave-js names the setpoint `setpoint` on
+    // the root endpoint, keyed by setpoint type: 1 = heating.
     AliasEntry {
-        key: "67/1/value",
+        key: "67/0/setpoint/1",
         attribute: "target_temp",
         transform: Transform::Identity,
         is_write: true,
@@ -563,7 +564,17 @@ pub struct WriteTarget {
     pub command_class: u32,
     pub endpoint: u32,
     pub property: String,
+    /// The value's `propertyKey`, where it has one (a setpoint's type).
+    pub property_key: Option<Value>,
     pub transform: Transform,
+}
+
+/// A value that must never leave the plugin: a lock's door codes (User Code,
+/// CC 99). zwave-js reports every slot's code in the clear; published, each
+/// would sit in homeCore's state, its history and on the bus for anyone who
+/// can read a device.
+pub fn is_secret(cc: u32, property: &str) -> bool {
+    cc == 99 && matches!(property, "userCode" | "adminCode" | "masterCode")
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +584,10 @@ pub struct WriteTarget {
 pub struct Translator {
     /// Forward map: alias_key → (attribute, transform)
     forward: HashMap<String, (String, Transform)>,
+    /// Write-only keys: a target (`targetValue`, `targetMode`, …) whose
+    /// attribute is read from another value. A target is what was asked
+    /// for, not what the device did, so it is never published.
+    write_only: std::collections::HashSet<String>,
     /// Reverse map: attribute → write target (cc/endpoint/property + inverse transform)
     reverse: HashMap<String, WriteTarget>,
 }
@@ -581,12 +596,21 @@ impl Translator {
     pub fn new() -> Self {
         let mut forward: HashMap<String, (String, Transform)> = HashMap::new();
         let mut reverse: HashMap<String, WriteTarget> = HashMap::new();
+        let mut write_only = std::collections::HashSet::new();
+        let read_from_elsewhere = |e: &AliasEntry| {
+            ALIAS_TABLE
+                .iter()
+                .any(|o| !o.is_write && o.attribute == e.attribute && o.key != e.key)
+        };
 
         for entry in ALIAS_TABLE {
-            // Split key to extract cc and endpoint for the reverse target
-            forward
-                .entry(entry.key.to_string())
-                .or_insert_with(|| (entry.attribute.to_string(), entry.transform.clone()));
+            if entry.is_write && read_from_elsewhere(entry) {
+                write_only.insert(entry.key.to_string());
+            } else {
+                forward
+                    .entry(entry.key.to_string())
+                    .or_insert_with(|| (entry.attribute.to_string(), entry.transform.clone()));
+            }
 
             if entry.is_write {
                 let parts: Vec<&str> = entry.key.splitn(4, '/').collect();
@@ -594,12 +618,19 @@ impl Translator {
                     let cc: u32 = parts[0].parse().unwrap_or(0);
                     let ep: u32 = parts[1].parse().unwrap_or(0);
                     let prop = parts[2].to_string();
+                    // As zwave-js gives it: a number where it is one.
+                    let property_key = parts.get(3).map(|k| {
+                        k.parse::<u64>()
+                            .map(Value::from)
+                            .unwrap_or_else(|_| Value::String(k.to_string()))
+                    });
                     reverse.insert(
                         entry.attribute.to_string(),
                         WriteTarget {
                             command_class: cc,
                             endpoint: ep,
                             property: prop,
+                            property_key,
                             transform: entry.transform.clone(),
                         },
                     );
@@ -607,7 +638,26 @@ impl Translator {
             }
         }
 
-        Self { forward, reverse }
+        Self {
+            forward,
+            reverse,
+            write_only,
+        }
+    }
+
+    /// Whether a value is left out of what is published: a secret, or a
+    /// write target whose attribute comes from the device's current value.
+    pub fn is_unpublished(
+        &self,
+        cc: u32,
+        endpoint: u32,
+        property: &str,
+        property_key: Option<&str>,
+    ) -> bool {
+        is_secret(cc, property)
+            || self
+                .write_only
+                .contains(&Self::alias_key(cc, endpoint, property, property_key))
     }
 
     /// Build the alias key from a ValueID's components.
@@ -695,6 +745,48 @@ pub fn property_key_str(pk: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_s_codes_are_never_published() {
+        let t = Translator::new();
+        assert!(t.is_unpublished(99, 0, "userCode", Some("1")));
+        assert!(t.is_unpublished(99, 0, "adminCode", None));
+        assert!(!t.is_unpublished(99, 0, "userIdStatus", Some("1")));
+    }
+
+    #[test]
+    fn a_target_is_not_published_as_the_device_s_state() {
+        let t = Translator::new();
+        for (cc, prop) in [
+            (37, "targetValue"),
+            (38, "targetValue"),
+            (98, "targetMode"),
+            (51, "targetColor"),
+        ] {
+            assert!(t.is_unpublished(cc, 0, prop, None), "{cc}/{prop}");
+            assert!(t.translate(cc, 0, prop, None, &Value::Bool(true)).is_none());
+        }
+        // Still where commands go.
+        assert_eq!(t.write_target("on").unwrap().property, "targetValue");
+        assert_eq!(t.write_target("locked").unwrap().property, "targetMode");
+        // A value that is both read and written stays published.
+        assert!(!t.is_unpublished(64, 0, "mode", None));
+    }
+
+    #[test]
+    fn a_setpoint_is_read_and_written_with_its_type() {
+        let t = Translator::new();
+        let (attr, v) = t
+            .translate(67, 0, "setpoint", Some("1"), &serde_json::json!(68))
+            .unwrap();
+        assert_eq!((attr.as_str(), v), ("target_temp", serde_json::json!(68)));
+        let w = t.write_target("target_temp").unwrap();
+        assert_eq!(
+            (w.command_class, w.endpoint, w.property.as_str()),
+            (67, 0, "setpoint")
+        );
+        assert_eq!(w.property_key, Some(serde_json::json!(1)));
+    }
 
     #[test]
     fn binary_switch_forward() {
