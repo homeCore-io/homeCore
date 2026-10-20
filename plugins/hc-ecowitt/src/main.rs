@@ -9,6 +9,7 @@ mod registry;
 mod schema;
 mod server;
 mod udp_discovery;
+mod units;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::PluginNotice;

@@ -9,7 +9,7 @@
      with UV, lightning and the sensors that need a battery. "Details" opens
      the station's panel. -->
 <script>
-	import { adopt, compass, fmt, num, trend, uvWords } from './lib/weather.js';
+	import { DEG as deg, adopt, compass, fmt, num, rainGauge, trend, uvWords } from './lib/weather.js';
 
 	let { host: hc, form = 'standard' } = $props();
 	const me = $host();
@@ -21,21 +21,17 @@
 	const sensors = $derived(devices.filter((d) => d.device_type !== 'gateway'));
 	const low = $derived(sensors.filter((d) => d.attributes.battery_low === true));
 	const s = $derived(station?.attributes ?? {});
-	const rain = $derived(
-		devices.find((d) => d.device_type === 'rain_sensor' && d.attributes.rain_day_piezo !== undefined) ??
-			devices.find((d) => d.device_type === 'rain_sensor')
-	);
+	const rain = $derived(rainGauge(devices));
 	const r = $derived(rain?.attributes ?? {});
 	const indoor = $derived(devices.find((d) => d.device_id.endsWith('_indoor')));
 	const lightning = $derived(devices.find((d) => d.device_type === 'lightning_sensor'));
-	const deg = $derived(s.temperature_unit ?? '°F');
 	// Which way the pressure is going: the last three hours of it.
 	let pressure = $state([]);
 	$effect(() => {
 		if (!hc || !station) return;
 		const from = new Date(Date.now() - 3 * 3600_000).toISOString();
 		void hc.devices
-			.history(station.device_id, 'barometric_rel', { from, limit: 500 })
+			.history(station.device_id, 'pressure', { from, limit: 500 })
 			.then((x) => (pressure = x.ok ? x.data : []));
 	});
 </script>
@@ -53,14 +49,14 @@
 				<dt>Wind</dt>
 				<dd>
 					<span class="arrow" style:transform={`rotate(${(num(s.wind_direction) ?? 0) + 180}deg)`}>↑</span>
-					{fmt(s.wind_speed)} mph {compass(s.wind_direction)}
+					{fmt(s.wind_speed)} m/s {compass(s.wind_direction)}
 				</dd>
-				<dt>Rain</dt><dd>{fmt(r.rain_day_piezo ?? r.rain_day, 2)} in today</dd>
-				<dt>Pressure</dt><dd>{fmt(s.barometric_rel, 2)} inHg{trend(pressure) ? ` · ${trend(pressure)}` : ''}</dd>
+				<dt>Rain</dt><dd>{fmt(r.rain_daily_mm)} mm today</dd>
+				<dt>Pressure</dt><dd>{fmt(s.pressure, 0)} hPa{trend(pressure) ? ` · ${trend(pressure)}` : ''}</dd>
 				{#if indoor}<dt>Inside</dt><dd>{fmt(indoor.attributes.temperature)}{deg}</dd>{/if}
 				{#if form === 'large'}
 					<dt>UV</dt><dd>{fmt(s.uvi, 0)} {uvWords(s.uvi)}</dd>
-					{#if lightning}<dt>Lightning</dt><dd>{fmt(lightning.attributes.strike_count, 0)} strikes today, nearest {fmt(lightning.attributes.distance, 0)} mi</dd>{/if}
+					{#if lightning}<dt>Lightning</dt><dd>{fmt(lightning.attributes.strike_count, 0)} strikes today, nearest {fmt(lightning.attributes.distance_km, 0)} km</dd>{/if}
 				{/if}
 			</dl>
 		</div>

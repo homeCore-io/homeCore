@@ -31,7 +31,7 @@
 			hc.devices.history(deviceId, attr, { from, limit: 3000 }).then((r) => (r.ok ? r.data : []));
 		void get('temperature').then((x) => (temp = x));
 		void get('wind_speed').then((x) => (wind = x));
-		void get('barometric_rel').then((x) => (pressure = x));
+		void get('pressure').then((x) => (pressure = x));
 	});
 	const pressureTrend = $derived(trend(pressure.filter((p) => Date.parse(p.at) > Date.now() - 3 * 3600_000)));
 	const others = $derived(
@@ -45,9 +45,9 @@
 	<section class="hc-card">
 		<span class="hc-label">The last day</span>
 		<div class="days">
-			<Spark points={temp} label="Temperature" unit="°" />
-			<Spark points={wind} label="Wind" unit=" mph" />
-			<Spark points={pressure} label="Pressure" unit=" inHg" digits={2} />
+			<Spark points={temp} label="Temperature" unit="°C" />
+			<Spark points={wind} label="Wind" unit=" m/s" />
+			<Spark points={pressure} label="Pressure" unit=" hPa" digits={0} />
 		</div>
 	</section>
 

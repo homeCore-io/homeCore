@@ -6,7 +6,7 @@
 	const at = (deg) => `rotate(${num(deg) ?? 0} 50 50)`;
 </script>
 
-<figure class="compass" aria-label={`Wind from ${compass(dir)} at ${fmt(speed)} mph, gusting ${fmt(gust)}`}>
+<figure class="compass" aria-label={`Wind from ${compass(dir)} at ${fmt(speed)} m/s, gusting ${fmt(gust)}`}>
 	<svg viewBox="0 0 100 100" aria-hidden="true">
 		<circle cx="50" cy="50" r="44" class="ring" />
 		{#each Array.from({ length: 36 }, (_, i) => i * 10) as d (d)}
@@ -24,7 +24,7 @@
 		{/if}
 	</svg>
 	<figcaption>
-		<b class="hc-num">{fmt(speed)}</b><span>mph</span>
+		<b class="hc-num">{fmt(speed)}</b><span>m/s</span>
 		<small>{compass(dir)} · gust {fmt(gust)}</small>
 	</figcaption>
 </figure>
