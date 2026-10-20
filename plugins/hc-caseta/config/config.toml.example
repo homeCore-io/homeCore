@@ -19,7 +19,8 @@ username = "lutron"                # Factory default
 password = "integration"           # Factory default
 
 # Optional: global fade time for dimmers (seconds).
-# Individual devices can override with fade_secs.
+# Individual devices can override with fade_secs, and a single command with
+# `transition_ms` sent beside the level.
 # default_fade_secs = 1.0
 
 # Optional: delay between reconnection attempts (seconds).

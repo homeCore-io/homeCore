@@ -15,7 +15,8 @@ use std::collections::HashMap;
 
 use plugin_sdk_rs::device_actions::{with_actions, Action};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use serde_json::Value;
 
@@ -41,12 +42,23 @@ fn rw(kind: AttributeKind, display: &str, unit: Option<&str>) -> AttributeSchema
     }
 }
 
-fn pct(kind: AttributeKind, display: &str) -> AttributeSchema {
+/// A percentage the zone reports to a tenth: `brightness_pct`, `speed_pct`,
+/// `position` — decimals, 0–100, as the shared vocabulary has them.
+fn pct(display: &str) -> AttributeSchema {
     AttributeSchema {
         min: Some(0.0),
         max: Some(100.0),
-        step: Some(1.0),
-        ..rw(kind, display, Some("%"))
+        ..rw(AttributeKind::Float, display, Some("%"))
+    }
+}
+
+/// `transition_ms`: the fade for the level change it is sent with. Written
+/// alongside a level or `on`, never on its own; it is not published.
+fn transition_ms() -> AttributeSchema {
+    AttributeSchema {
+        min: Some(0.0),
+        category: Some(AttributeCategory::Config),
+        ..rw(AttributeKind::Integer, "Fade", Some("ms"))
     }
 }
 
@@ -61,10 +73,8 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
     match kind {
         DeviceKind::Dimmer => Some(vec![
             ("on".into(), rw(AttributeKind::Bool, "Power", None)),
-            (
-                "brightness_pct".into(),
-                pct(AttributeKind::Integer, "Brightness"),
-            ),
+            ("brightness_pct".into(), pct("Brightness")),
+            ("transition_ms".into(), transition_ms()),
         ]),
         DeviceKind::Switch => Some(vec![("on".into(), rw(AttributeKind::Bool, "Power", None))]),
         DeviceKind::FanControl => Some(vec![
@@ -82,29 +92,21 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
                     ..rw(AttributeKind::Enum, "Speed", None)
                 },
             ),
-            ("speed_pct".into(), pct(AttributeKind::Integer, "Speed")),
+            ("speed_pct".into(), pct("Speed")),
         ]),
-        DeviceKind::Shade => Some(vec![(
-            "position".into(),
-            pct(AttributeKind::Integer, "Position"),
-        )]),
-        // An occupancy sensor publishes the same reading under two names, and
-        // has since before this schema existed. Both are declared: a client
-        // that hides what a plugin never mentioned would otherwise show one
-        // and silently drop the other.
-        DeviceKind::OccupancySensor => {
-            let occupancy = |display: &str| AttributeSchema {
+        DeviceKind::Shade => Some(vec![("position".into(), pct("Position"))]),
+        // `occupied`, the shared name. The sensor used to publish the same
+        // reading a second time as `occupancy`; one name is enough.
+        DeviceKind::OccupancySensor => Some(vec![(
+            "occupied".into(),
+            AttributeSchema {
                 states: Some(BoolStates {
                     when_true: StateLabel::verbed("occupied", "detects occupancy"),
                     when_false: StateLabel::verbed("vacant", "becomes vacant"),
                 }),
-                ..ro(AttributeKind::Bool, display)
-            };
-            Some(vec![
-                ("occupied".into(), occupancy("Occupied")),
-                ("occupancy".into(), occupancy("Occupancy")),
-            ])
-        }
+                ..ro(AttributeKind::Bool, "Occupied")
+            },
+        )]),
         DeviceKind::Pico => None,
     }
 }
@@ -187,6 +189,19 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
         },
         vec![],
     ))
+}
+
+/// Keys this device used to publish under names it no longer uses, as a
+/// partial-state patch of `null`s — which removes them. Published at
+/// registration so a retained state does not carry a stale `brightness` or
+/// `occupancy` after the plugin moved on.
+pub fn retired_state(cfg: &DeviceConfig) -> Option<Value> {
+    let key = match cfg.kind.as_ref()? {
+        DeviceKind::Dimmer => "brightness",
+        DeviceKind::OccupancySensor => "occupancy",
+        _ => return None,
+    };
+    Some(serde_json::json!({ key: null }))
 }
 
 /// The button catalogue a Pico publishes about itself.
@@ -281,24 +296,61 @@ mod output_schema_tests {
         }
     }
 
-    /// An occupancy sensor reports the same thing twice, and always has.
+    /// `occupied`, once. The old `occupancy` twin is neither declared nor
+    /// published.
     #[test]
-    fn an_occupancy_sensor_declares_both_names_it_publishes() {
+    fn an_occupancy_sensor_declares_occupied_only() {
         let v = device_schema_json(&cfg(DeviceKind::OccupancySensor)).expect("a schema");
         let attrs = v["attributes"].as_object().expect("attributes");
-        for name in ["occupied", "occupancy"] {
-            assert_eq!(attrs[name]["writable"], false);
-            assert_eq!(attrs[name]["states"]["when_false"]["label"], "vacant");
-        }
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs["occupied"]["writable"], false);
+        assert_eq!(attrs["occupied"]["states"]["when_false"]["label"], "vacant");
 
         let dev = DeviceEntry::new(cfg(DeviceKind::OccupancySensor)).expect("a device");
-        let state = dev.translate_occupancy_state(true);
-        for name in ["occupied", "occupancy"] {
-            assert!(
-                state.get(name).is_some(),
-                "{name} is declared but not published"
-            );
+        assert_eq!(
+            dev.translate_occupancy_state(true),
+            json!({"occupied": true})
+        );
+    }
+
+    /// The shared names, in the shared kinds: decimals for the percentages,
+    /// `transition_ms` writable beside a dimmer's level, no raw `brightness`.
+    #[test]
+    fn levels_are_declared_as_the_vocabulary_has_them() {
+        let d = device_schema_json(&cfg(DeviceKind::Dimmer)).expect("a schema");
+        let attrs = d["attributes"].as_object().expect("attributes");
+        assert!(!attrs.contains_key("brightness"));
+        assert_eq!(attrs["brightness_pct"]["kind"], "float");
+        assert_eq!(attrs["transition_ms"]["unit"], "ms");
+        assert_eq!(attrs["transition_ms"]["writable"], true);
+        let dev = DeviceEntry::new(cfg(DeviceKind::Dimmer)).expect("a device");
+        for k in dev
+            .translate_output_state(42.0)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert!(attrs.contains_key(k), "{k} is published but not declared");
         }
+
+        let f = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        assert_eq!(f["attributes"]["speed_pct"]["kind"], "float");
+        let s = device_schema_json(&cfg(DeviceKind::Shade)).expect("a schema");
+        assert_eq!(s["attributes"]["position"]["kind"], "float");
+    }
+
+    #[test]
+    fn retired_names_are_cleared() {
+        assert_eq!(
+            retired_state(&cfg(DeviceKind::Dimmer)),
+            Some(json!({"brightness": null}))
+        );
+        assert_eq!(
+            retired_state(&cfg(DeviceKind::OccupancySensor)),
+            Some(json!({"occupancy": null}))
+        );
+        assert_eq!(retired_state(&cfg(DeviceKind::Switch)), None);
     }
 
     /// Caséta has no LED reporting, so a scene is a trigger and nothing more.

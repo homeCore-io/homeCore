@@ -258,6 +258,13 @@ async fn try_start(
                 warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish device schema");
             }
         }
+        // Names this device no longer publishes (`brightness`, `occupancy`),
+        // removed from the retained state.
+        if let Some(gone) = crate::schema::retired_state(&dev.config) {
+            if let Err(e) = publisher.publish_state_partial(&dev.hc_id, &gone).await {
+                warn!(hc_id = %dev.hc_id, error = %e, "Failed to clear retired state");
+            }
+        }
         if let Some(cat) = crate::schema::button_catalogue(&dev.config) {
             if let Err(e) = publisher.publish_state_partial(&dev.hc_id, &cat).await {
                 warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish button catalogue");
@@ -292,6 +299,14 @@ async fn try_start(
             .await
         {
             warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
+        }
+        // Activation used to leave an unconfirmed `on: true` that nothing
+        // ever reset; a scene here reports nothing, so it is removed.
+        if let Err(e) = publisher
+            .publish_state_partial(&scene.hc_id, &serde_json::json!({ "on": null }))
+            .await
+        {
+            warn!(hc_id = %scene.hc_id, error = %e, "Failed to clear scene state");
         }
     }
 

@@ -196,12 +196,25 @@ pub fn cmd_device_action(integration_id: u32, component: u32, action: u8) -> Str
     format!("#DEVICE,{integration_id},{component},{action}")
 }
 
-/// Format fade seconds as `H:MM:SS`.  Returns empty string for 0 or negative.
+/// Format a fade for the wire. Empty for 0 or negative (no fade parameter).
+///
+/// The Integration Guide takes `SS.ss`, `MM:SS` or `HH:MM:SS`, and rounds to
+/// the nearest quarter second. Under a minute it is sent as seconds with their
+/// fraction — `0.5`, `1.25`, `2` — so a `transition_ms` of 500 is a half-second
+/// fade rather than none at all. A minute or more is `H:MM:SS`, whole seconds.
 fn format_fade(secs: f64) -> String {
-    if secs <= 0.0 {
+    if !secs.is_finite() || secs <= 0.0 {
         return String::new();
     }
-    let total = secs as u64;
+    let hundredths = (secs * 100.0).round() as u64;
+    if hundredths == 0 {
+        return String::new();
+    }
+    if hundredths < 6000 {
+        let s = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+        return s.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    let total = secs.round() as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
     let s = total % 60;
@@ -269,7 +282,18 @@ mod tests {
 
     #[test]
     fn cmd_level_with_fade() {
-        assert_eq!(cmd_set_level(7, 75.0, 2.0), "#OUTPUT,7,1,75.00,0:00:02");
+        assert_eq!(cmd_set_level(7, 75.0, 2.0), "#OUTPUT,7,1,75.00,2");
+        assert_eq!(cmd_set_level(7, 75.0, 120.0), "#OUTPUT,7,1,75.00,0:02:00");
+    }
+
+    /// `transition_ms` is milliseconds; the wire was whole seconds, so a
+    /// half-second fade used to be truncated to none at all.
+    #[test]
+    fn fractional_fades_reach_the_wire() {
+        assert_eq!(cmd_set_level(1, 100.0, 0.5), "#OUTPUT,1,1,100.00,0.5");
+        assert_eq!(cmd_set_level(1, 100.0, 1.25), "#OUTPUT,1,1,100.00,1.25");
+        assert_eq!(cmd_set_level(1, 100.0, 60.0), "#OUTPUT,1,1,100.00,0:01:00");
+        assert_eq!(cmd_set_level(1, 100.0, 0.001), "#OUTPUT,1,1,100.00");
     }
 
     #[test]
