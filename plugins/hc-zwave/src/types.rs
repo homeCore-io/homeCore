@@ -184,6 +184,10 @@ pub struct NodeValue {
     #[serde(rename = "propertyKey")]
     pub property_key: Option<Value>,
     pub value: Option<Value>,
+    /// The value's metadata: its `unit` (a sensor's scale, a setpoint's °F
+    /// or °C) and, for a mode, the `states` the device supports.
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 impl NodeState {

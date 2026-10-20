@@ -13,6 +13,7 @@
 
 mod bridge;
 mod config;
+mod convert;
 mod inclusion;
 mod schema;
 mod translator;

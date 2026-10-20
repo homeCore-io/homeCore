@@ -13,13 +13,19 @@
 //! drift by construction.
 //!
 //! **Writability comes from the translator, not from a guess.**
-//! [`Translator::write_target`] is the only thing that turns an attribute write
-//! into a Z-Wave `setValue`, so an attribute it has no reverse entry for cannot
-//! be written — and declaring it writable would render a control that silently
-//! does nothing. The schema asks it directly.
+//! [`Translator::commands`] is the only thing that turns an attribute write
+//! into a Z-Wave `setValue`, and whether it can depends on the node (a
+//! contact sensor's `open` is read-only, a garage door's is not) — declaring
+//! an attribute writable that it cannot route would render a control that
+//! silently does nothing. The schema asks it directly.
+//!
+//! **Shared names are declared as `hc_types::device_vocabulary` defines
+//! them** — kind, unit and range — whatever JSON number the value happened to
+//! be: `brightness_pct` is a float 0–100 even when it reads `50`.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -29,15 +35,18 @@ use crate::translator::Translator;
 /// The unit for a canonical attribute, where the alias table fixes one.
 fn unit_for(name: &str) -> Option<&'static str> {
     match name {
-        "battery" | "humidity" | "brightness" | "position" => Some("%"),
-        "temperature" | "target_temp" => Some("°"),
+        "battery_pct" | "humidity" | "brightness_pct" | "position" | "tilt_pct"
+        | "light_level_pct" => Some("%"),
+        "temperature" | "heat_setpoint" | "cool_setpoint" => Some("°C"),
         "power_w" | "power_w_exported" => Some("W"),
         "energy_kwh" | "energy_kwh_exported" => Some("kWh"),
         "voltage" => Some("V"),
         "current_a" => Some("A"),
         "illuminance" => Some("lux"),
-        "co2_ppm" => Some("ppm"),
-        "pressure" => Some("kPa"),
+        "co2" => Some("ppm"),
+        "pressure" => Some("hPa"),
+        "absolute_humidity" => Some("g/m³"),
+        "color_temp" => Some("K"),
         "reactive_power_kvar" => Some("kVAr"),
         "reactive_energy_kvarh" => Some("kVArh"),
         "apparent_energy_kvah" => Some("kVAh"),
@@ -46,6 +55,35 @@ fn unit_for(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The kind and range a shared name is declared with, where it is not simply
+/// what the value looks like.
+fn declared_kind(name: &str) -> Option<(AttributeKind, Option<(f64, f64)>)> {
+    use AttributeKind::*;
+    Some(match name {
+        "brightness_pct" | "position" | "tilt_pct" | "battery_pct" | "humidity"
+        | "light_level_pct" => (Float, Some((0.0, 100.0))),
+        "temperature" | "heat_setpoint" | "cool_setpoint" | "illuminance" | "pressure"
+        | "power_w" | "energy_kwh" | "voltage" | "current_a" | "co2" => (Float, None),
+        "color_rgb" => (ColorRgb, None),
+        "color_temp" => (
+            ColorTemp,
+            Some((
+                f64::from(crate::convert::WARM_WHITE_K),
+                f64::from(crate::convert::COLD_WHITE_K),
+            )),
+        ),
+        "hvac_mode" | "hvac_action" => (Enum, None),
+        "fan_mode" => (String, None),
+        _ => return None,
+    })
+}
+
+/// `hvac_action`'s values, as the vocabulary lists them.
+const HVAC_ACTIONS: &[&str] = &["idle", "heating", "cooling", "fan", "drying", "off"];
+
+/// `hvac_mode`'s values when the node has not said which it supports.
+const HVAC_MODES_FALLBACK: &[&str] = &["off", "heat", "cool", "auto"];
 
 /// Both state names for a boolean attribute.
 ///
@@ -59,9 +97,8 @@ fn states_for(name: &str) -> BoolStates {
     };
     match name {
         "on" => pair(("on", "turns on"), ("off", "turns off")),
-        // Named for what it measures, not for a convention: the alias table
-        // maps CC 48 "Door/Window" straight through, and TRUE means OPEN.
-        "contact_open" => pair(("open", "opens"), ("closed", "closes")),
+        // TRUE means OPEN — a door sensor, or a garage door.
+        "open" => pair(("open", "opens"), ("closed", "closes")),
         "locked" => pair(("locked", "locks"), ("unlocked", "unlocks")),
         "motion" => pair(
             ("detecting motion", "detects motion"),
@@ -73,7 +110,7 @@ fn states_for(name: &str) -> BoolStates {
         "heat_alarm" => pair(("alarming", "alarms"), ("clear", "clears")),
         "freeze" => pair(("freezing", "starts freezing"), ("clear", "clears")),
         "glass_break" => pair(("triggered", "triggers"), ("clear", "clears")),
-        "tamper" => pair(("tampered", "is tampered"), ("clear", "clears")),
+        "tampered" => pair(("tampered", "is tampered"), ("clear", "clears")),
         "battery_low" => pair(("low", "goes low"), ("healthy", "recovers")),
         "sensor_active" => pair(("active", "activates"), ("idle", "goes idle")),
         "tilt" => pair(("tilted", "tilts"), ("level", "levels out")),
@@ -112,18 +149,25 @@ fn is_synthetic_cc_name(name: &str) -> bool {
 }
 
 /// Describe one attribute from its reported value and the translator.
-pub fn describe(name: &str, value: &Value, translator: &Translator) -> AttributeSchema {
-    let kind = match value {
-        Value::Bool(_) => AttributeKind::Bool,
-        Value::Number(n) if n.is_i64() || n.is_u64() => AttributeKind::Integer,
-        Value::Number(_) => AttributeKind::Float,
-        Value::String(_) => AttributeKind::String,
+pub fn describe(
+    node_id: u32,
+    name: &str,
+    value: &Value,
+    translator: &Translator,
+) -> AttributeSchema {
+    let declared = declared_kind(name);
+    let kind = match (&declared, value) {
+        (Some((kind, _)), _) => *kind,
+        (_, Value::Bool(_)) => AttributeKind::Bool,
+        (_, Value::Number(n)) if n.is_i64() || n.is_u64() => AttributeKind::Integer,
+        (_, Value::Number(_)) => AttributeKind::Float,
+        (_, Value::String(_)) => AttributeKind::String,
         _ => AttributeKind::Json,
     };
 
-    // The translator's reverse map is the authority on whether a write can
-    // reach the device at all.
-    let writable = translator.write_target(name).is_some();
+    // The translator is the authority on whether a write can reach the
+    // device at all.
+    let writable = translator.writable(node_id, name);
 
     let mut a = if writable {
         AttributeSchema::new(kind)
@@ -132,6 +176,19 @@ pub fn describe(name: &str, value: &Value, translator: &Translator) -> Attribute
     };
     a = a.labelled(humanise(name));
     a.unit = unit_for(name).map(|u| u.to_string());
+    if let Some((_, Some((min, max)))) = declared {
+        a.min = Some(min);
+        a.max = Some(max);
+    }
+    let options: Option<Vec<std::string::String>> = match name {
+        "hvac_action" => Some(HVAC_ACTIONS.iter().map(|s| s.to_string()).collect()),
+        "hvac_mode" => translator
+            .options(node_id, name)
+            .or_else(|| Some(HVAC_MODES_FALLBACK.iter().map(|s| s.to_string()).collect())),
+        "fan_mode" => translator.options(node_id, name),
+        _ => None,
+    };
+    a.options = options.map(|o| o.into_iter().map(AttributeOption::new).collect());
     // A node reports its battery and its name alongside whether it is locked.
     // Saying which of those is the point of the device is the difference
     // between a client leading with the lock and leading with the battery.
@@ -151,10 +208,14 @@ pub fn describe(name: &str, value: &Value, translator: &Translator) -> Attribute
 }
 
 /// The schema for a node that reported [`state`].
-pub fn schema_for_state(state: &Map<String, Value>, translator: &Translator) -> DeviceSchema {
+pub fn schema_for_state(
+    node_id: u32,
+    state: &Map<String, Value>,
+    translator: &Translator,
+) -> DeviceSchema {
     let mut attributes: HashMap<String, AttributeSchema> = HashMap::new();
     for (name, value) in state {
-        attributes.insert(name.clone(), describe(name, value, translator));
+        attributes.insert(name.clone(), describe(node_id, name, value, translator));
     }
     DeviceSchema {
         attributes,
@@ -168,17 +229,18 @@ pub fn schema_for_state(state: &Map<String, Value>, translator: &Translator) -> 
 /// An empty schema is a claim ("this device has no attributes"); silence is
 /// not, and a freshly-included node whose interview has not finished reports
 /// nothing at all.
-pub fn schema_json(state: &Value, translator: &Translator) -> Option<Value> {
+pub fn schema_json(node_id: u32, state: &Value, translator: &Translator) -> Option<Value> {
     let obj = state.as_object()?;
     if obj.is_empty() {
         return None;
     }
-    serde_json::to_value(schema_for_state(obj, translator)).ok()
+    serde_json::to_value(schema_for_state(node_id, obj, translator)).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::NodeState;
     use serde_json::json;
 
     /// A lock reports whether it is locked; it also reports battery, and its
@@ -187,11 +249,11 @@ mod tests {
     fn housekeeping_is_declared_and_the_reading_is_left_primary() {
         let s = schema(json!({
             "locked": true,
-            "battery": 80,
+            "battery_pct": 80,
             "name": "Front Door",
         }));
         assert_eq!(s.attributes["locked"].category, None);
-        for name in ["battery", "name"] {
+        for name in ["battery_pct", "name"] {
             assert_eq!(
                 s.attributes[name].category,
                 Some(AttributeCategory::Diagnostic),
@@ -231,9 +293,30 @@ mod tests {
         assert!(!is_synthetic_cc_name("current_a"));
     }
 
-    fn schema(v: Value) -> DeviceSchema {
+    const NODE: u32 = 7;
+
+    /// A dimmer with a lock, a barrier and colour — enough that every
+    /// writable shared name has somewhere to go.
+    fn translator() -> Translator {
         let t = Translator::new();
-        schema_for_state(v.as_object().unwrap(), &t)
+        let node: NodeState = serde_json::from_value(json!({
+            "nodeId": NODE,
+            "values": [
+                { "commandClass": 38, "endpoint": 0, "property": "currentValue", "value": 10 },
+                { "commandClass": 98, "endpoint": 0, "property": "currentMode", "value": 0 },
+                { "commandClass": 51, "endpoint": 0, "property": "currentColor",
+                  "value": { "warmWhite": 0, "coldWhite": 0, "red": 0, "green": 0, "blue": 0 } },
+                { "commandClass": 64, "endpoint": 0, "property": "mode", "value": 1,
+                  "metadata": { "states": { "0": "Off", "1": "Heat" } } }
+            ]
+        }))
+        .unwrap();
+        t.learn_node(&node);
+        t
+    }
+
+    fn schema(v: Value) -> DeviceSchema {
+        schema_for_state(NODE, v.as_object().unwrap(), &translator())
     }
 
     /// Every boolean names both of its states, mapped or not.
@@ -241,11 +324,11 @@ mod tests {
     fn every_boolean_names_both_of_its_states() {
         let s = schema(json!({
             "on": true,
-            "contact_open": false,
+            "open": false,
             "motion": true,
             "water_detected": false,
             "smoke": false,
-            "tamper": false,
+            "tampered": false,
             "battery_low": false,
             "cc113_some_future_flag": true,
             "temperature": 21.5,
@@ -268,46 +351,94 @@ mod tests {
             .unwrap();
         assert!(f.get(true).transition().starts_with("becomes"));
         assert!(f.get(false).transition().starts_with("stops being"));
+        assert_eq!(
+            s.attributes["tampered"]
+                .states
+                .as_ref()
+                .unwrap()
+                .get(true)
+                .label,
+            "tampered"
+        );
     }
 
-    /// `contact_open` is TRUE when the door is OPEN.
-    ///
-    /// The alias table maps CC 48 "Door/Window" straight through, so this is
-    /// the opposite of what a client lexicon keyed on the word "contact"
-    /// assumes — a closed contact circuit conventionally means shut.
+    /// `open` is TRUE when the door is OPEN.
     #[test]
-    fn contact_open_is_declared_the_way_the_alias_table_maps_it() {
-        let s = schema(json!({ "contact_open": true }));
-        let st = s.attributes["contact_open"].states.as_ref().unwrap();
+    fn open_means_open() {
+        let s = schema(json!({ "open": true }));
+        let st = s.attributes["open"].states.as_ref().unwrap();
         assert_eq!(st.get(true).label, "open");
         assert_eq!(st.get(false).label, "closed");
     }
 
-    /// Writability is exactly what the translator can act on.
-    ///
-    /// Declaring an attribute writable that `write_target` does not map renders
-    /// a control whose every use is silently dropped.
+    /// Writability is exactly what the translator can route on this node.
     #[test]
-    fn writability_matches_the_translators_reverse_map() {
-        let t = Translator::new();
+    fn writability_matches_the_translator() {
+        let t = translator();
         let s = schema(json!({
             "on": true,
-            "brightness": 50,
+            "brightness_pct": 50,
             "motion": true,
-            "battery": 90,
+            "battery_pct": 90,
             "temperature": 21.5,
+            "open": false,
         }));
         for (name, attr) in &s.attributes {
-            assert_eq!(
-                attr.writable,
-                t.write_target(name).is_some(),
-                "{name} writability disagrees with the translator"
-            );
+            assert_eq!(attr.writable, t.writable(NODE, name), "{name}");
         }
-        // And the reverse map really does distinguish them: a sensor reading
-        // is not writable, while a switch is.
+        assert!(s.attributes["on"].writable);
+        assert!(s.attributes["brightness_pct"].writable);
         assert!(!s.attributes["motion"].writable);
-        assert!(!s.attributes["battery"].writable);
+        assert!(!s.attributes["battery_pct"].writable);
+        // A contact reading, not a garage door: nothing to write.
+        assert!(!s.attributes["open"].writable);
+    }
+
+    /// Shared names carry the vocabulary's kind, unit and range, whatever
+    /// JSON number the reading happened to be.
+    #[test]
+    fn shared_names_are_declared_in_their_units() {
+        let s = schema(json!({
+            "brightness_pct": 50,
+            "battery_pct": 90,
+            "temperature": 21,
+            "heat_setpoint": 20,
+            "pressure": 1013,
+            "illuminance": 300,
+            "color_rgb": { "r": 1, "g": 2, "b": 3 },
+            "color_temp": 2700,
+            "hvac_mode": "heat",
+            "hvac_action": "idle",
+        }));
+        let a = |n: &str| &s.attributes[n];
+        assert_eq!(a("brightness_pct").kind, AttributeKind::Float);
+        assert_eq!(a("brightness_pct").unit.as_deref(), Some("%"));
+        assert_eq!(
+            (a("brightness_pct").min, a("brightness_pct").max),
+            (Some(0.0), Some(100.0))
+        );
+        assert_eq!(a("battery_pct").unit.as_deref(), Some("%"));
+        assert_eq!(a("temperature").kind, AttributeKind::Float);
+        assert_eq!(a("temperature").unit.as_deref(), Some("°C"));
+        assert_eq!(a("heat_setpoint").unit.as_deref(), Some("°C"));
+        assert!(a("heat_setpoint").writable);
+        assert_eq!(a("pressure").unit.as_deref(), Some("hPa"));
+        assert_eq!(a("illuminance").unit.as_deref(), Some("lux"));
+        assert_eq!(a("color_rgb").kind, AttributeKind::ColorRgb);
+        assert!(a("color_rgb").writable);
+        assert_eq!(a("color_temp").kind, AttributeKind::ColorTemp);
+        assert_eq!(a("color_temp").unit.as_deref(), Some("K"));
+        assert_eq!(a("hvac_mode").kind, AttributeKind::Enum);
+        let modes: Vec<&str> = a("hvac_mode")
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(modes, vec!["off", "heat"]);
+        assert!(!a("hvac_action").writable);
+        assert_eq!(a("hvac_action").options.as_ref().unwrap().len(), 6);
     }
 
     /// The declared set is exactly what the node reported.
@@ -331,7 +462,7 @@ mod tests {
     #[test]
     fn an_empty_state_publishes_no_schema() {
         let t = Translator::new();
-        assert!(schema_json(&json!({}), &t).is_none());
-        assert!(schema_json(&Value::Null, &t).is_none());
+        assert!(schema_json(1, &json!({}), &t).is_none());
+        assert!(schema_json(1, &Value::Null, &t).is_none());
     }
 }
