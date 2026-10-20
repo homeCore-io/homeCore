@@ -332,6 +332,15 @@ async fn try_start(
         if let Err(e) = schema::publish(&publisher, &hc_id, &kind).await {
             warn!(hc_id, error = %e, "Failed to publish device schema");
         }
+        // Names this kind no longer publishes (`battery`, `humidity_pct`, …),
+        // removed from homeCore's stored state. MQTT reports arrive as
+        // partials, which merge, so without this an old name would keep its
+        // last value until the next full poll — an hour away by default.
+        if let Some(gone) = schema::retired_state(&kind) {
+            if let Err(e) = publisher.publish_state_partial(&hc_id, &gone).await {
+                warn!(hc_id, error = %e, "Failed to clear retired state");
+            }
+        }
         if let Err(e) = publisher.subscribe_commands(&hc_id).await {
             warn!(hc_id, error = %e, "Failed to subscribe commands");
         }
@@ -358,7 +367,6 @@ async fn try_start(
         publisher,
         rescan,
         bridge::BridgeOptions {
-            temp_unit: cfg.yolink.temperature_unit.clone(),
             poll_interval_secs: cfg.yolink.poll_interval_secs,
             inventory_interval_secs,
             poll_device_delay_ms: cfg.yolink.poll_device_delay_ms,
