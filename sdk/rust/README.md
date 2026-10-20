@@ -126,6 +126,20 @@ Nothing is lost by starting early: a command for a device you have not
 registered cannot arrive, because the subscription that would carry it does not
 exist until you make it.
 
+## Names and units
+
+A shared idea has one name and one unit, for everything a device reports or
+takes: `on`, `brightness_pct` (0–100), `color_temp` (kelvin), `transition_ms`,
+`open` (`true` = open), `occupied`, `battery_pct`, `humidity`, `illuminance`
+(lux), temperatures in **°C**, and the rest of
+`hc_types::device_vocabulary::TERMS`. Convert from the device's own scale
+inside the plugin, both ways — `plugins/hc-plugin-template` shows it with
+`pct_from_level` / `level_from_pct` and a test at each end of the scale.
+Commands arrive as an attribute write, `{"on": true}`, or a declared action,
+`{"action": "toggle"}` — never `{"command": …}`; `{"on": true}` restores the
+last level. The whole of it is "Names and units" in
+`docs/plugin-development.md`.
+
 ## What it gives you
 
 - **`PluginClient`** — async MQTT connection with automatic reconnect and

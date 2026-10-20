@@ -415,9 +415,9 @@ fn apply_field_map(
         for (src_key, dst_key) in field_map {
             if let Some(raw_val) = extract_path(payload, src_key) {
                 let coerced = if let Some(coercion) = coerce_map.get(dst_key) {
-                    coerce::apply(coercion, raw_val).unwrap_or_else(|e| {
+                    coerce::apply(coercion, raw_val.clone()).unwrap_or_else(|e| {
                         warn!(coercion, error = %e, "Coercion failed; using raw value");
-                        payload.clone()
+                        raw_val
                     })
                 } else {
                     raw_val
@@ -450,7 +450,11 @@ fn apply_field_map_cmd(
             .get(hc_key)
             .cloned()
             .unwrap_or_else(|| hc_key.clone());
-        let coerced = if let Some(coercion) = coerce_map.get(&eco_key) {
+        // A coercion is looked up by homeCore's name first, so two attributes
+        // sent to the same key (`on` and `locked` both become Z2M's `state`)
+        // can be converted differently; then by the ecosystem's key.
+        let coercion = coerce_map.get(hc_key).or_else(|| coerce_map.get(&eco_key));
+        let coerced = if let Some(coercion) = coercion {
             coerce::apply(coercion, v.clone()).unwrap_or_else(|e| {
                 warn!(coercion, error = %e, "Cmd coercion failed; using raw value");
                 v.clone()
@@ -559,9 +563,10 @@ prefix = "zigbee_"
 pattern = "zigbee2mqtt/{device}"
   [ecosystem.state_topics.field_map]
   state      = "on"
-  brightness = "brightness"
+  brightness = "brightness_pct"
   [ecosystem.state_topics.coerce]
-  on = "onoff_to_bool"
+  on             = "onoff_to_bool"
+  brightness_pct = "pct254_to_100"
 
 [[ecosystem.availability_topics]]
 pattern    = "zigbee2mqtt/{device}/availability"
@@ -624,7 +629,7 @@ attribute = "on"
             } => {
                 assert_eq!(device_id, "zigbee_living_room_light");
                 assert_eq!(payload["on"], true);
-                assert_eq!(payload["brightness"], 128);
+                assert_eq!(payload["brightness_pct"], 50.4);
             }
             _ => panic!("Expected State"),
         }
@@ -807,5 +812,106 @@ attribute = "on"
             .route_outbound("homecore/devices/unknown/cmd", b"{}")
             .unwrap()
             .is_none());
+    }
+
+    // --- The example profiles speak the device vocabulary ---
+
+    fn example(name: &str) -> EcosystemRouter {
+        let path = format!(
+            "{}/../../config/profiles/examples/{name}.toml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        make_router(&std::fs::read_to_string(path).unwrap())
+    }
+
+    fn inbound(router: &EcosystemRouter, topic: &str, payload: &[u8]) -> Value {
+        match router.route_inbound(topic, payload).unwrap().unwrap() {
+            InboundResult::State { payload, .. } => payload,
+            _ => panic!("Expected State"),
+        }
+    }
+
+    fn outbound(router: &EcosystemRouter, topic: &str, payload: &[u8]) -> Value {
+        let out = router.route_outbound(topic, payload).unwrap().unwrap();
+        serde_json::from_slice(&out[0].payload).unwrap()
+    }
+
+    #[test]
+    fn every_example_profile_loads() {
+        for name in ["zigbee2mqtt", "shelly-gen1", "shelly-gen2", "tasmota"] {
+            example(name);
+        }
+    }
+
+    #[test]
+    fn z2m_example_reports_shared_names() {
+        let z2m = example("zigbee2mqtt");
+        let light = inbound(
+            &z2m,
+            "zigbee2mqtt/lamp",
+            br#"{"state":"ON","brightness":254,"color_temp":370,"linkquality":80}"#,
+        );
+        assert_eq!(light["on"], true);
+        assert_eq!(light["brightness_pct"], 100);
+        assert_eq!(light["color_temp"], 2703);
+
+        let door = inbound(
+            &z2m,
+            "zigbee2mqtt/door",
+            br#"{"contact":true,"battery":91,"tamper":false}"#,
+        );
+        assert_eq!(door["open"], false);
+        assert_eq!(door["battery_pct"], 91);
+        assert_eq!(door["tampered"], false);
+
+        let stat = inbound(
+            &z2m,
+            "zigbee2mqtt/stat",
+            br#"{"local_temperature":20.5,"occupied_heating_setpoint":21,
+                "system_mode":"heat","running_state":"heat","occupancy":true}"#,
+        );
+        assert_eq!(stat["temperature"], 20.5);
+        assert_eq!(stat["heat_setpoint"], 21);
+        assert_eq!(stat["hvac_mode"], "heat");
+        assert_eq!(stat["hvac_action"], "heating");
+        assert_eq!(stat["occupied"], true);
+
+        let lock = inbound(&z2m, "zigbee2mqtt/lock", br#"{"lock_state":"locked"}"#);
+        assert_eq!(lock["locked"], true);
+    }
+
+    #[test]
+    fn z2m_example_takes_shared_names() {
+        let z2m = example("zigbee2mqtt");
+        let cmd = "homecore/devices/zigbee_lamp/cmd";
+        let out = outbound(
+            &z2m,
+            cmd,
+            br#"{"on":true,"brightness_pct":50,"color_temp":2700,"transition_ms":1500}"#,
+        );
+        assert_eq!(out["state"], "ON");
+        assert_eq!(out["brightness"], 127);
+        assert_eq!(out["color_temp"], 370);
+        assert_eq!(out["transition"], 1.5);
+
+        assert_eq!(
+            outbound(&z2m, cmd, br#"{"action":"toggle"}"#)["state"],
+            "TOGGLE"
+        );
+        assert_eq!(outbound(&z2m, cmd, br#"{"locked":true}"#)["state"], "LOCK");
+        let rgb = outbound(&z2m, cmd, br#"{"color_rgb":{"r":255,"g":0,"b":0}}"#);
+        assert_eq!(rgb["color"]["r"], 255);
+        let heat = outbound(&z2m, cmd, br#"{"heat_setpoint":21,"hvac_mode":"heat"}"#);
+        assert_eq!(heat["occupied_heating_setpoint"], 21);
+        assert_eq!(heat["system_mode"], "heat");
+    }
+
+    #[test]
+    fn shelly_example_reports_open_the_right_way_round() {
+        let shelly = example("shelly-gen1");
+        let door = inbound(&shelly, "shellies/dw1/sensor/state", b"open");
+        assert_eq!(door["open"], true);
+        let door = inbound(&shelly, "shellies/dw1/sensor/state", b"closed");
+        assert_eq!(door["open"], false);
     }
 }

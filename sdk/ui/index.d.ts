@@ -38,7 +38,8 @@
  *
  * Added after the first release of version 1 (app 0.1.18): `fetch`,
  * `upload`, `store`, `Device.sw_version` and the `rule.step` slot. Check for
- * them (`typeof host.upload === 'function'`) to run on an older app.
+ * them (`typeof host.upload === 'function'`) to run on an older app. Later
+ * (app 0.1.21): `units` — without it, show the schema's own units.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -151,6 +152,15 @@ export interface Host {
 		restartPlugin(): Promise<Result<void>>;
 	};
 
+	/**
+	 * The units the person reads in, as they chose them in the app: °F or °C,
+	 * and US (inHg, mph, in, in/h) or metric (hPa, m/s, mm, mm/h) for the
+	 * rest. homeCore's readings are °C and metric (the schema's `unit`); show
+	 * them with `show`, and turn a number the person typed back with `toCore`.
+	 * Absent on an app before 0.1.21 — show the schema's unit there.
+	 */
+	readonly units?: Units;
+
 	/** The app's own ways of asking and going. */
 	readonly ui: {
 		confirm(q: Question): Promise<boolean>;
@@ -173,6 +183,26 @@ export interface Host {
 		readonly sheet: CSSStyleSheet;
 		dark(): boolean;
 	};
+}
+
+/** The person's units (`host.units`). */
+export interface Units {
+	readonly temperature: 'F' | 'C';
+	readonly measures: 'us' | 'metric';
+	/**
+	 * A reading in `unit` — the schema's: `°C`, `hPa`, `m/s`, `mm`, `mm/h`,
+	 * `km` — as the person reads it: `{ value: 70.7, unit: '°F', text:
+	 * '70.7 °F' }`, rounded as that unit reads. Any other unit (`%`, `lux`)
+	 * comes back as it was, the value untouched.
+	 */
+	show(
+		value: number,
+		unit: string | undefined
+	): { value: number; unit: string | undefined; text: string };
+	/** A number the person gave in their unit, back in `unit`: 70 (°F) → 21.111 for `°C`. */
+	toCore(value: number, unit: string | undefined): number;
+	/** Called now, and again whenever the person changes them; returns the way to stop. */
+	subscribe(f: (units: { temperature: 'F' | 'C'; measures: 'us' | 'metric' }) => void): () => void;
 }
 
 /** The properties the app sets on a plugin's element. */

@@ -167,7 +167,7 @@ fn gen1_door_window_closed() {
         .unwrap()
         .unwrap();
     match res {
-        InboundResult::State { payload, .. } => assert_eq!(payload["contact"], true),
+        InboundResult::State { payload, .. } => assert_eq!(payload["open"], false),
         _ => panic!("expected State"),
     }
 }
@@ -180,7 +180,7 @@ fn gen1_door_window_open() {
         .unwrap()
         .unwrap();
     match res {
-        InboundResult::State { payload, .. } => assert_eq!(payload["contact"], false),
+        InboundResult::State { payload, .. } => assert_eq!(payload["open"], true),
         _ => panic!("expected State"),
     }
 }
@@ -193,7 +193,7 @@ fn gen1_flood_true() {
         .unwrap()
         .unwrap();
     match res {
-        InboundResult::State { payload, .. } => assert_eq!(payload["flood"], true),
+        InboundResult::State { payload, .. } => assert_eq!(payload["water_detected"], true),
         _ => panic!("expected State"),
     }
 }
@@ -214,7 +214,7 @@ fn gen1_dimmer_status() {
         } => {
             assert_eq!(device_id, "shelly_shellydimmer-AABBCC_light0");
             assert_eq!(payload["on"], true);
-            assert_eq!(payload["brightness"], 75);
+            assert_eq!(payload["brightness_pct"], 75);
         }
         _ => panic!("expected State"),
     }
@@ -226,7 +226,7 @@ fn gen1_dimmer_cmd() {
     let res = r
         .route_outbound(
             "homecore/devices/shelly_shellydimmer-AABBCC_light0/cmd",
-            br#"{"on":false,"brightness":50}"#,
+            br#"{"on":false,"brightness_pct":50}"#,
         )
         .unwrap()
         .unwrap()
@@ -243,7 +243,7 @@ fn gen1_dimmer_on_with_brightness_cmd() {
     let res = r
         .route_outbound(
             "homecore/devices/shelly_shellydimmer-AABBCC_light0/cmd",
-            br#"{"on":true,"brightness":80}"#,
+            br#"{"on":true,"brightness_pct":80}"#,
         )
         .unwrap()
         .unwrap()
@@ -462,7 +462,7 @@ fn gen2_light_status() {
         } => {
             assert_eq!(device_id, "shelly_shellyplusdimmer-AABBCC_light_0");
             assert_eq!(payload["on"], true);
-            assert_eq!(payload["brightness"], 75.0);
+            assert_eq!(payload["brightness_pct"], 75.0);
         }
         _ => panic!("expected State"),
     }
@@ -474,7 +474,7 @@ fn gen2_light_cmd_brightness() {
     let res = r
         .route_outbound(
             "homecore/devices/shelly_shellyplusdimmer-AABBCC_light_0/cmd",
-            br#"{"on":true,"brightness":60}"#,
+            br#"{"on":true,"brightness_pct":60}"#,
         )
         .unwrap()
         .unwrap()

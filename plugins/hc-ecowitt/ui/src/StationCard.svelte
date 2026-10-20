@@ -14,11 +14,13 @@
      wind on a compass beside the rest. Tap for its panel. -->
 <script>
 	import Compass from './lib/Compass.svelte';
-	import { DEG as deg, adopt, ago, compass, fmt, isRaining, num, rainGauge, stale } from './lib/weather.js';
+	import { adopt, ago, compass, fmt, isRaining, n, num, rainGauge, stale, u } from './lib/weather.js';
+	import { follow } from './lib/units.svelte.js';
 
 	let { host: hc, deviceId, form = 'standard' } = $props();
 	const me = $host();
 	$effect(() => adopt(me, hc));
+	$effect(() => follow(hc));
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
@@ -28,6 +30,7 @@
 	const r = $derived(rain?.attributes ?? {});
 	const today = $derived(r.rain_daily_mm);
 	const raining = $derived(isRaining(r));
+	const deg = $derived(u('°C'));
 	const name = $derived(station ? hc.devices.label(station) : 'Weather');
 	const open = () => station && hc.ui.openDevice(station.device_id);
 </script>
@@ -37,10 +40,10 @@
 		{#if form === 'compact'}
 			<span class="row">
 				<span class="hc-tile-name">{name}</span>
-				<span class="hc-num big-c">{fmt(s.temperature)}{deg}</span>
+				<span class="hc-num big-c">{n(s.temperature, '°C')}{deg}</span>
 			</span>
 			<span class="hc-tile-state"
-				>{fmt(s.humidity, 0)}% · wind {fmt(s.wind_speed)} m/s {compass(s.wind_direction)}{raining
+				>{fmt(s.humidity, 0)}% · wind {n(s.wind_speed, 'm/s')} {u('m/s')} {compass(s.wind_direction)}{raining
 					? ' · raining'
 					: ''}</span
 			>
@@ -51,7 +54,7 @@
 			</span>
 			<span class="body" class:wide={form === 'large'}>
 				<span class="now">
-					<span class="temp"><b class="hc-num">{fmt(s.temperature)}</b><i>{deg}</i></span>
+					<span class="temp"><b class="hc-num">{n(s.temperature, '°C')}</b><i>{deg}</i></span>
 					<span class="hc-tile-state">{fmt(s.humidity, 0)}% humidity</span>
 				</span>
 				{#if form === 'large'}
@@ -63,14 +66,14 @@
 					{#if form !== 'large'}
 						<span
 							><span class="arrow" style:transform={`rotate(${(num(s.wind_direction) ?? 0) + 180}deg)`}>↑</span>
-							<span class="hc-num">{fmt(s.wind_speed)}</span> m/s {compass(s.wind_direction)}</span
+							<span class="hc-num">{n(s.wind_speed, 'm/s')}</span> {u('m/s')} {compass(s.wind_direction)}</span
 						>
 					{/if}
 					<span class:wet={raining}
-						>{raining ? 'Raining · ' : ''}<span class="hc-num">{fmt(today)}</span> mm today</span
+						>{raining ? 'Raining · ' : ''}<span class="hc-num">{n(today, 'mm')}</span> {u('mm')} today</span
 					>
 					{#if form === 'large'}
-						<span>UV <span class="hc-num">{fmt(s.uvi, 0)}</span> · <span class="hc-num">{fmt(s.pressure, 0)}</span> hPa</span>
+						<span>UV <span class="hc-num">{fmt(s.uvi, 0)}</span> · <span class="hc-num">{n(s.pressure, 'hPa', 0)}</span> {u('hPa')}</span>
 					{/if}
 				</span>
 			</span>

@@ -158,8 +158,10 @@ fn actions() -> Vec<Action> {
             .writes("setpoint")
             .sentence("set {device} to {value}")
             .param(
+                // °C, said as the unit so an app shows it in the person's own.
                 Param::float("value")
-                    .label("Target temperature (°C)")
+                    .label("Target temperature")
+                    .unit("°C")
                     .required(),
             ),
         Action::new("set_mode")

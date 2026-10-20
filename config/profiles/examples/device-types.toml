@@ -19,6 +19,11 @@
 #
 # Type inheritance:
 #   extends  — copies all attributes from the named type, then adds/overrides
+#
+# Attribute names and units follow homeCore's shared device vocabulary
+# (crates/hc-types/src/device_vocabulary.rs): brightness_pct 0–100, color_temp
+# in kelvin, open / occupied / tampered, battery_pct, temperatures in °C,
+# hvac_mode and hvac_action. A profile converts a device's own scale to these.
 
 
 # ---------------------------------------------------------------------------
@@ -52,17 +57,17 @@ description = "Dimmable light (on/off + brightness)"
   type   = "boolean"
   access = "rw"
 
-  [types.light.attributes.brightness]
-  type    = "integer"
-  minimum = 0
-  maximum = 255
-  access  = "rw"
-
   [types.light.attributes.brightness_pct]
   type    = "number"
   minimum = 0
   maximum = 100
   unit    = "%"
+  access  = "rw"
+
+  [types.light.attributes.transition_ms]
+  type    = "integer"
+  minimum = 0
+  unit    = "ms"
   access  = "rw"
 
 [types.dimmer_light]
@@ -75,9 +80,9 @@ extends     = "light"
 
   [types.light_color.attributes.color_temp]
   type    = "integer"
-  minimum = 150
-  maximum = 500
-  unit    = "mired"
+  minimum = 2000
+  maximum = 6500
+  unit    = "K"
   access  = "rw"
 
   [types.light_color.attributes.color_xy]
@@ -125,13 +130,6 @@ description = "Temperature (and optional humidity) sensor"
   maximum = 100
   access  = "r"
 
-  [types.temperature_sensor.attributes.humidity_pct]
-  type    = "number"
-  unit    = "%"
-  minimum = 0
-  maximum = 100
-  access  = "r"
-
 [types.temp_sensor]
 description = "Legacy alias for temperature_sensor"
 extends     = "temperature_sensor"
@@ -146,13 +144,6 @@ description = "Humidity sensor"
   maximum = 100
   access  = "r"
 
-  [types.humidity_sensor.attributes.humidity_pct]
-  type    = "number"
-  unit    = "%"
-  minimum = 0
-  maximum = 100
-  access  = "r"
-
 [types.contact_sensor]
 description = "Door/window contact sensor"
 
@@ -160,11 +151,7 @@ description = "Door/window contact sensor"
   type   = "boolean"
   access = "r"
 
-  [types.contact_sensor.attributes.contact]
-  type   = "boolean"
-  access = "r"
-
-  [types.contact_sensor.attributes.tamper]
+  [types.contact_sensor.attributes.tampered]
   type   = "boolean"
   access = "r"
 
@@ -175,12 +162,12 @@ description = "PIR or radar motion sensor"
   type   = "boolean"
   access = "r"
 
-  [types.motion_sensor.attributes.occupancy]
+  [types.motion_sensor.attributes.occupied]
   type   = "boolean"
   access = "r"
 
   [types.motion_sensor.attributes.illuminance]
-  type   = "integer"
+  type   = "number"
   unit   = "lux"
   access = "r"
 
@@ -195,18 +182,14 @@ description = "Occupancy / presence sensor"
   type   = "boolean"
   access = "r"
 
-  [types.occupancy_sensor.attributes.occupancy]
-  type   = "boolean"
-  access = "r"
-
 [types.binary_sensor]
 description = "Legacy generic binary sensor"
 
-  [types.binary_sensor.attributes.motion]
+  [types.binary_sensor.attributes.open]
   type   = "boolean"
   access = "r"
 
-  [types.binary_sensor.attributes.contact]
+  [types.binary_sensor.attributes.motion]
   type   = "boolean"
   access = "r"
 
@@ -222,11 +205,7 @@ description = "Legacy generic binary sensor"
   type   = "boolean"
   access = "r"
 
-  [types.binary_sensor.attributes.occupancy]
-  type   = "boolean"
-  access = "r"
-
-  [types.binary_sensor.attributes.tamper]
+  [types.binary_sensor.attributes.tampered]
   type   = "boolean"
   access = "r"
 
@@ -243,10 +222,6 @@ description = "Smoke / CO alarm sensor"
 
 [types.water_sensor]
 description = "Water / flood sensor"
-
-  [types.water_sensor.attributes.leak]
-  type   = "boolean"
-  access = "r"
 
   [types.water_sensor.attributes.water_detected]
   type   = "boolean"
@@ -268,7 +243,7 @@ description = "Vibration / tilt sensor"
 description = "Standalone light level sensor"
 
   [types.illuminance_sensor.attributes.illuminance]
-  type   = "integer"
+  type   = "number"
   unit   = "lux"
   access = "r"
 
@@ -331,7 +306,7 @@ description = "Motorised cover — roller blind, curtain, garage door"
   unit    = "%"
   access  = "rw"
 
-  [types.cover.attributes.tilt]
+  [types.cover.attributes.tilt_pct]
   type    = "integer"
   minimum = 0
   maximum = 100
@@ -366,29 +341,33 @@ description = "Electronic door lock"
 [types.climate]
 description = "Thermostat or HVAC controller"
 
-  [types.climate.attributes.current_temp]
+  [types.climate.attributes.temperature]
   type   = "number"
   unit   = "°C"
   access = "r"
 
-  [types.climate.attributes.target_temp]
+  [types.climate.attributes.heat_setpoint]
   type   = "number"
   unit   = "°C"
   access = "rw"
 
-  [types.climate.attributes.mode]
+  [types.climate.attributes.cool_setpoint]
+  type   = "number"
+  unit   = "°C"
+  access = "rw"
+
+  [types.climate.attributes.hvac_mode]
   type   = "string"
-  enum   = ["off", "heat", "cool", "auto", "dry", "fan_only"]
+  enum   = ["off", "heat", "cool", "auto", "fan_only", "dry"]
   access = "rw"
 
   [types.climate.attributes.hvac_action]
   type   = "string"
-  enum   = ["off", "heating", "cooling", "idle", "fan"]
+  enum   = ["idle", "heating", "cooling", "fan", "drying", "off"]
   access = "r"
 
   [types.climate.attributes.fan_mode]
   type   = "string"
-  enum   = ["auto", "low", "medium", "high"]
   access = "rw"
 
 
@@ -526,8 +505,8 @@ description = "Wireless button or remote (read-only — triggers events)"
   type   = "string"
   access = "r"
 
-  [types.button.attributes.battery]
-  type    = "integer"
+  [types.button.attributes.battery_pct]
+  type    = "number"
   minimum = 0
   maximum = 100
   unit    = "%"

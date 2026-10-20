@@ -55,7 +55,7 @@ Fires when a device's state is updated via MQTT.
 [trigger]
 type      = "device_state_changed"
 device_id = "yolink_abc123"          # required — device to watch
-attribute = "humidity_pct"           # optional — only fire when this attribute changes
+attribute = "humidity"           # optional — only fire when this attribute changes
                                      # omit to fire on any attribute change
 ```
 
@@ -157,7 +157,7 @@ Compares a device attribute to a value.
 [[conditions]]
 type      = "device_state"
 device_id = "yolink_abc123"
-attribute = "humidity_pct"
+attribute = "humidity"
 op        = "lt"
 value     = 35.0
 ```
@@ -245,10 +245,10 @@ The `state` object is the command payload — content is device-specific.
 [actions.state]
 on = true
 
-# Dimmer brightness (0–100)
+# Dimmer brightness (brightness_pct, 0–100)
 [actions.state]
-on         = true
-brightness = 80.0
+on             = true
+brightness_pct = 80.0
 
 # Lock
 [actions.state]
@@ -256,20 +256,20 @@ locked = true
 
 # Timer helper (core.glue, device_type = "timer")
 [actions.state]
-command       = "start"
+action        = "start"
 duration_secs = 300
 label         = "optional label"
 
 [actions.state]
-command = "cancel"
+action = "cancel"
 
 # Switch helper (core.glue, device_type = "switch")
 [actions.state]
-command = "on"      # or "off" or "toggle"
+on = true           # or false; or action = "toggle"
 
 # Sonos (via hc-sonos)
 [actions.state]
-command = "play"
+action = "play"
 
 # Lutron scene
 [actions.state]
@@ -415,7 +415,7 @@ type   = "run_script"
 script = """
   let light = device_state("lutron_63");
   if light["on"] == true {
-      set_device_state("lutron_63", #{ brightness: 50.0 });
+      set_device_state("lutron_63", #{ brightness_pct: 50.0 });
   } else {
       notify("pushover", "Office light is already off");
   }
@@ -480,7 +480,7 @@ Used in `script_expression` conditions, `run_script` actions, and `conditional`/
 // Device state — returns a map of attributes, or empty map if device not found
 let plug = device_state("yolink_abc123");
 plug["on"]          // bool
-plug["humidity_pct"] // float
+plug["humidity"] // float
 plug["locked"]      // bool
 
 // Time — local clock
@@ -496,7 +496,7 @@ These are only available inside `run_script` actions, not in conditions or
 
 ```rhai
 // Send a command to a device
-set_device_state("device_id", #{ on: true, brightness: 80.0 });
+set_device_state("device_id", #{ on: true, brightness_pct: 80.0 });
 
 // Send a notification
 notify("pushover", "message text");
@@ -536,12 +536,12 @@ priority = 10
 [trigger]
 type      = "device_state_changed"
 device_id = "yolink_sensor"
-attribute = "humidity_pct"
+attribute = "humidity"
 
 [[conditions]]
 type      = "device_state"
 device_id = "yolink_sensor"
-attribute = "humidity_pct"
+attribute = "humidity"
 op        = "lt"
 value     = 35.0
 
@@ -577,8 +577,8 @@ offset_minutes = 0
 [[actions]]
 type = "parallel"
 actions = [
-  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness = 60.0 } },
-  { type = "set_device_state", device_id = "lutron_27", state = { on = true, brightness = 60.0 } },
+  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness_pct = 60.0 } },
+  { type = "set_device_state", device_id = "lutron_27", state = { on = true, brightness_pct = 60.0 } },
 ]
 
 [[actions]]
@@ -618,7 +618,7 @@ method = "GET"
 type      = "set_device_state"
 device_id = "timer_bathroom"
 [actions.state]
-command       = "start"
+action        = "start"
 duration_secs = 300
 ```
 
@@ -670,11 +670,11 @@ type      = "conditional"
 condition = "current_hour() >= 6 && current_hour() < 22"
 
 then_actions = [
-  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness = 80.0 } },
+  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness_pct = 80.0 } },
 ]
 
 else_actions = [
-  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness = 20.0 } },
+  { type = "set_device_state", device_id = "lutron_24", state = { on = true, brightness_pct = 20.0 } },
 ]
 ```
 
@@ -744,11 +744,11 @@ curl http://localhost:8080/api/v1/glue   # every helper; timers have device_type
 
 | Command | Payload | Description |
 |---|---|---|
-| `start` | `{"command":"start","duration_secs":600}` | Start or restart the countdown |
-| `pause` | `{"command":"pause"}` | Pause, preserving remaining time |
-| `resume` | `{"command":"resume"}` | Resume from where it paused |
-| `cancel` | `{"command":"cancel"}` | Stop and set state to `cancelled` |
-| `restart` | `{"command":"restart"}` | Reset to original duration and start again |
+| `start` | `{"action":"start","duration_secs":600}` | Start or restart the countdown |
+| `pause` | `{"action":"pause"}` | Pause, preserving remaining time |
+| `resume` | `{"action":"resume"}` | Resume from where it paused |
+| `cancel` | `{"action":"cancel"}` | Stop and set state to `cancelled` |
+| `restart` | `{"action":"restart"}` | Reset to original duration and start again |
 
 `start` also accepts optional fields: `"label": "..."` and `"repeat": true` (loops indefinitely).
 
@@ -756,12 +756,12 @@ curl http://localhost:8080/api/v1/glue   # every helper; timers have device_type
 # Start a 10-minute timer
 curl -X PATCH http://localhost:8080/api/v1/devices/timer_garage_close/state \
   -H 'Content-Type: application/json' \
-  -d '{"command": "start", "duration_secs": 600}'
+  -d '{"action": "start", "duration_secs": 600}'
 
 # Cancel
 curl -X PATCH http://localhost:8080/api/v1/devices/timer_garage_close/state \
   -H 'Content-Type: application/json' \
-  -d '{"command": "cancel"}'
+  -d '{"action": "cancel"}'
 ```
 
 #### State attributes
@@ -801,7 +801,7 @@ type      = "set_device_state"
 device_id = "timer_garage_close"
 
 [actions.state]
-command       = "start"
+action        = "start"
 duration_secs = 600
 label         = "Garage OH1 auto-close"
 ```
@@ -835,20 +835,20 @@ curl http://localhost:8080/api/v1/glue   # every helper; switches have device_ty
 
 | Command | Payload | Description |
 |---|---|---|
-| `on` | `{"command":"on"}` | Turn the switch on |
-| `off` | `{"command":"off"}` | Turn the switch off |
-| `toggle` | `{"command":"toggle"}` | Flip current state |
+| on | `{"on":true}` | Turn the switch on |
+| off | `{"on":false}` | Turn the switch off |
+| `toggle` | `{"action":"toggle"}` | Flip current state |
 
 ```bash
 # Turn on
 curl -X PATCH http://localhost:8080/api/v1/devices/switch_auto_garage_door/state \
   -H 'Content-Type: application/json' \
-  -d '{"command": "on"}'
+  -d '{"on": true}'
 
 # Turn off
 curl -X PATCH http://localhost:8080/api/v1/devices/switch_auto_garage_door/state \
   -H 'Content-Type: application/json' \
-  -d '{"command": "off"}'
+  -d '{"on": false}'
 ```
 
 #### State attributes
@@ -880,7 +880,7 @@ type      = "set_device_state"
 device_id = "switch_auto_garage_door"
 
 [actions.state]
-command = "on"
+on = true
 ```
 
 ---

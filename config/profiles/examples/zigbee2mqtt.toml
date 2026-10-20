@@ -37,7 +37,13 @@ prefix      = "zigbee_"
 # coerce: type conversions applied after renaming.
 #   Format:  homecore_attribute = "coercion_name"
 #   Available coercions: onoff_to_bool, scalar_bool, scalar_int, scalar_float,
-#                        pct255_to_100, mired_to_kelvin (see docs for full list)
+#                        pct254_to_100, mired_to_kelvin, invert_bool,
+#                        lock_to_bool, hvac_action_words (see docs for full list)
+#
+# The names on the right are homeCore's shared device vocabulary
+# (crates/hc-types/src/device_vocabulary.rs): brightness_pct 0–100, color_temp
+# in kelvin, open/occupied/tampered, battery_pct, temperatures in °C, hvac_mode
+# and hvac_action. Zigbee2MQTT already reports °C, hPa and lux.
 # ---------------------------------------------------------------------------
 
 [[ecosystem.state_topics]]
@@ -46,26 +52,28 @@ pattern = "zigbee2mqtt/{device}"
   [ecosystem.state_topics.field_map]
   # Lights
   state        = "on"
-  brightness   = "brightness"
+  brightness   = "brightness_pct"
   color_temp   = "color_temp"
   color_mode   = "color_mode"
   color        = "color_xy"
 
   # Sensors
-  temperature  = "temperature"
-  humidity     = "humidity"
-  pressure     = "pressure"
-  illuminance  = "illuminance"
-  occupancy    = "occupancy"
-  contact      = "contact"
-  smoke        = "smoke"
-  water_leak   = "water_detected"
-  vibration    = "vibration"
-  action       = "action"
-  battery      = "battery"
-  battery_low  = "battery_low"
-  tamper       = "tamper"
-  tilt_angle   = "tilt_angle"
+  temperature     = "temperature"
+  humidity        = "humidity"
+  pressure        = "pressure"
+  illuminance     = "illuminance"
+  illuminance_lux = "illuminance"
+  occupancy       = "occupied"
+  contact         = "open"
+  smoke           = "smoke"
+  water_leak      = "water_detected"
+  vibration       = "vibration"
+  action          = "action"
+  battery         = "battery_pct"
+  battery_low     = "battery_low"
+  tamper          = "tampered"
+  co2             = "co2"
+  tilt_angle      = "tilt_angle"
 
   # Power monitoring
   power        = "power_w"
@@ -76,24 +84,34 @@ pattern = "zigbee2mqtt/{device}"
 
   # Cover
   position     = "position"
-  tilt         = "tilt"
+  tilt         = "tilt_pct"
 
   # Lock
-  state_l1     = "locked"
+  lock_state   = "locked"
 
   # Climate
-  local_temperature        = "current_temp"
-  occupied_heating_setpoint = "target_temp"
-  system_mode              = "mode"
-  running_state            = "hvac_action"
-  fan_mode                 = "fan_mode"
+  local_temperature         = "temperature"
+  occupied_heating_setpoint = "heat_setpoint"
+  occupied_cooling_setpoint = "cool_setpoint"
+  system_mode               = "hvac_mode"
+  running_state             = "hvac_action"
+  fan_mode                  = "fan_mode"
 
   # Signal quality (informational)
   linkquality  = "link_quality"
 
   [ecosystem.state_topics.coerce]
   # Z2M represents on/off as the string "ON" or "OFF"
-  on = "onoff_to_bool"
+  on             = "onoff_to_bool"
+  # Z2M's 0–254 level and mireds
+  brightness_pct = "pct254_to_100"
+  color_temp     = "mired_to_kelvin"
+  # Z2M's contact is true when closed
+  open           = "invert_bool"
+  # "locked" / "unlocked" / "not_fully_locked"
+  locked         = "lock_to_bool"
+  # "heat" / "cool" / "idle" → "heating" / "cooling" / "idle"
+  hvac_action    = "hvac_action_words"
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +133,13 @@ json_field = "state"
 # ---------------------------------------------------------------------------
 # Outbound — commands from HomeCore to Zigbee2MQTT
 #
-# HomeCore sends {"on": true, "brightness": 200} to homecore/devices/{id}/cmd.
-# The mapper renames attributes back to Z2M keys and coerces types, then
-# publishes to zigbee2mqtt/{device}/set.
+# HomeCore sends {"on": true, "brightness_pct": 80} or {"action": "toggle"} to
+# homecore/devices/{id}/cmd. The mapper renames attributes back to Z2M keys and
+# converts them, then publishes to zigbee2mqtt/{device}/set.
 #
-# Z2M accepts the same JSON schema it publishes, so most attributes pass through.
-# The main coercion needed is bool → "ON"/"OFF" for the state field.
+# A coercion here is looked up by homeCore's name first, then by the Z2M key —
+# `on` and `locked` both become Z2M's `state` but convert differently.
+# Z2M takes `color` as {"r", "g", "b"} as well as {"x", "y"}.
 # ---------------------------------------------------------------------------
 
 [[ecosystem.cmd_topics]]
@@ -129,12 +148,25 @@ target = "zigbee2mqtt/{device}/set"
 
   [ecosystem.cmd_topics.field_map]
   # Rename HomeCore canonical names back to Z2M keys for the fields that differ
-  on           = "state"
-  current_temp = "local_temperature"
-  target_temp  = "occupied_heating_setpoint"
-  mode         = "system_mode"
-  hvac_action  = "running_state"
+  on             = "state"
+  action         = "state"
+  brightness_pct = "brightness"
+  color_rgb      = "color"
+  color_xy       = "color"
+  transition_ms  = "transition"
+  locked         = "state"
+  tilt_pct       = "tilt"
+  heat_setpoint  = "occupied_heating_setpoint"
+  cool_setpoint  = "occupied_cooling_setpoint"
+  hvac_mode      = "system_mode"
 
   [ecosystem.cmd_topics.coerce]
   # HomeCore stores on/off as bool; Z2M set expects "ON"/"OFF"
-  state = "bool_to_onoff"
+  on             = "bool_to_onoff"
+  # {"action": "toggle"} → {"state": "TOGGLE"}
+  action         = "uppercase"
+  locked         = "bool_to_lock"
+  brightness_pct = "pct100_to_254"
+  color_temp     = "kelvin_to_mired"
+  # Z2M's transition is in seconds
+  transition_ms  = "ms_to_secs"

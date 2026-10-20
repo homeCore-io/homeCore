@@ -282,6 +282,11 @@ Gotchas, each learnt the hard way:
   imported from JS lands nowhere — import it `?inline` and adopt it.
 - A `@container` override must come **after** the rules it overrides.
 - Don't assume `/api/v1` is proxied: use `host.query/fetch/...`.
+- **Show readings in the person's units** with `host.units.show(value,
+  schemaUnit)` (°F, inHg, mph, in) and send what they type back with
+  `host.units.toCore`; `host.units.subscribe` hears them change it. It is
+  absent before app 0.1.21 — fall back to the schema's unit, as
+  `hc-ecowitt/ui/src/lib/units.svelte.js` does.
 - WLED's screens were the app's own and moved into the plugin with a small
   adapter layer (`hc-wled/ui/src/lib/*` gives the old `#lib/...` names over
   `host`, via Vite aliases) — a pattern for porting existing Svelte screens.

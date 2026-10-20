@@ -107,6 +107,74 @@ pub fn apply(name: &str, value: Value) -> Result<Value> {
             Ok(Value::Number(raw.into()))
         }
 
+        // Zigbee's 0–254 level  ↔  0–100 %. A light that is on at the lowest
+        // level never reads 0 %, and 1 % never sends 0 (off).
+        "pct254_to_100" => {
+            let n = as_f64(&value, name)?;
+            let pct = (n / 254.0 * 1000.0).round() / 10.0;
+            let pct = if n > 0.0 { pct.max(0.1) } else { 0.0 };
+            Ok(number(pct))
+        }
+        "pct100_to_254" => {
+            let n = as_f64(&value, name)?;
+            let raw = (n / 100.0 * 254.0).round();
+            let raw = if n > 0.0 { raw.max(1.0) } else { 0.0 };
+            Ok(Value::Number((raw as i64).into()))
+        }
+
+        // true  ↔  false (a contact reports `true` when closed; `open` is the
+        // other way round)
+        "invert_bool" => {
+            let b = as_bool(&value, name)?;
+            Ok(Value::Bool(!b))
+        }
+
+        // "LOCK" / "locked"  ↔  true / false
+        "lock_to_bool" => {
+            let s = as_str(&value, name)?;
+            Ok(Value::Bool(
+                s.eq_ignore_ascii_case("lock") || s.eq_ignore_ascii_case("locked"),
+            ))
+        }
+        "bool_to_lock" => {
+            let b = as_bool(&value, name)?;
+            Ok(Value::String(if b {
+                "LOCK".into()
+            } else {
+                "UNLOCK".into()
+            }))
+        }
+
+        // A thermostat's running state in the vocabulary's words:
+        // "heat" → "heating", "cool" → "cooling", "fan_only" → "fan".
+        "hvac_action_words" => {
+            let s = as_str(&value, name)?.to_ascii_lowercase();
+            let word = match s.as_str() {
+                "heat" | "pending_heat" | "preheating" => "heating",
+                "cool" | "pending_cool" => "cooling",
+                "fan_only" | "fan" => "fan",
+                "dry" => "drying",
+                other => return Ok(Value::String(other.to_string())),
+            };
+            Ok(Value::String(word.into()))
+        }
+
+        // "toggle"  →  "TOGGLE"
+        "uppercase" => {
+            let s = as_str(&value, name)?;
+            Ok(Value::String(s.to_ascii_uppercase()))
+        }
+
+        // Milliseconds  ↔  seconds
+        "ms_to_secs" => {
+            let n = as_f64(&value, name)?;
+            Ok(number(n / 1000.0))
+        }
+        "secs_to_ms" => {
+            let n = as_f64(&value, name)?;
+            Ok(Value::Number(((n * 1000.0).round() as i64).into()))
+        }
+
         // Mired  ↔  Kelvin
         "mired_to_kelvin" => {
             let n = as_f64(&value, name)?;
@@ -157,6 +225,16 @@ pub fn coerce_scalar_auto(value: Value) -> Value {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// A float as JSON, whole numbers without a fraction.
+fn number(f: f64) -> Value {
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        return Value::Number((f as i64).into());
+    }
+    serde_json::Number::from_f64(f)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
 
 fn as_str<'a>(v: &'a Value, coercion: &str) -> Result<&'a str> {
     v.as_str()
@@ -252,6 +330,49 @@ mod tests {
     #[test]
     fn scalar_auto_passthrough_string() {
         assert_eq!(coerce_scalar_auto(json!("hello")), json!("hello"));
+    }
+
+    #[test]
+    fn pct254_both_ways() {
+        assert_eq!(apply("pct254_to_100", json!(254)).unwrap(), json!(100));
+        assert_eq!(apply("pct254_to_100", json!(127)).unwrap(), json!(50));
+        assert_eq!(apply("pct254_to_100", json!(0)).unwrap(), json!(0));
+        // On at the lowest level is not off.
+        assert_eq!(apply("pct254_to_100", json!(1)).unwrap(), json!(0.4));
+        assert_eq!(apply("pct100_to_254", json!(100)).unwrap(), json!(254));
+        assert_eq!(apply("pct100_to_254", json!(50)).unwrap(), json!(127));
+        assert_eq!(apply("pct100_to_254", json!(0.1)).unwrap(), json!(1));
+        assert_eq!(apply("pct100_to_254", json!(0)).unwrap(), json!(0));
+    }
+
+    #[test]
+    fn invert_lock_and_hvac_words() {
+        assert_eq!(apply("invert_bool", json!(true)).unwrap(), json!(false));
+        assert_eq!(apply("lock_to_bool", json!("locked")).unwrap(), json!(true));
+        assert_eq!(
+            apply("lock_to_bool", json!("UNLOCK")).unwrap(),
+            json!(false)
+        );
+        assert_eq!(apply("bool_to_lock", json!(true)).unwrap(), json!("LOCK"));
+        assert_eq!(
+            apply("hvac_action_words", json!("heat")).unwrap(),
+            json!("heating")
+        );
+        assert_eq!(
+            apply("hvac_action_words", json!("cool")).unwrap(),
+            json!("cooling")
+        );
+        assert_eq!(
+            apply("hvac_action_words", json!("idle")).unwrap(),
+            json!("idle")
+        );
+        assert_eq!(
+            apply("uppercase", json!("toggle")).unwrap(),
+            json!("TOGGLE")
+        );
+        assert_eq!(apply("ms_to_secs", json!(1500)).unwrap(), json!(1.5));
+        assert_eq!(apply("ms_to_secs", json!(2000)).unwrap(), json!(2));
+        assert_eq!(apply("secs_to_ms", json!(1.5)).unwrap(), json!(1500));
     }
 
     #[test]

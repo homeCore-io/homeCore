@@ -35,7 +35,8 @@ Write them in anything that makes custom elements — Svelte (with
 `index.d.ts`): the plugin's devices, live; commands, its actions and queries;
 files sent to an action (`upload`); a small store the app keeps for its
 screens (`store`); its settings; homeCore's API as the viewer (`fetch`); the
-app's confirm and navigation; and the app's look. A panel is also given its
+units the person reads in (`units` — °F or °C, US or metric; app 0.1.21 and
+later); the app's confirm and navigation; and the app's look. A panel is also given its
 `deviceId`; a step form its `deviceIds` and `value`, and it answers with a
 `change` event carrying the whole step — its class may offer `accepts` and
 `describe` (the step in words, with `{devices}` where the names go).

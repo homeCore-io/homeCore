@@ -284,10 +284,10 @@ description = "Binary switch"
 
 [types.light]
 extends = "switch"
-  [types.light.attributes.brightness]
-  type    = "integer"
+  [types.light.attributes.brightness_pct]
+  type    = "number"
   minimum = 0
-  maximum = 255
+  maximum = 100
   access  = "rw"
 
 [types.power_monitor]
@@ -322,8 +322,8 @@ extends = "switch"
         let schema = reg.get_schema("light").unwrap();
         // Inherits "on" from switch
         assert_eq!(schema["properties"]["on"]["type"], "boolean");
-        // Adds brightness
-        assert_eq!(schema["properties"]["brightness"]["maximum"], 255);
+        // Adds brightness_pct
+        assert_eq!(schema["properties"]["brightness_pct"]["maximum"], 100);
     }
 
     #[test]
@@ -347,10 +347,10 @@ extends = "switch"
 
         assert!(matches!(schema.attributes["on"].kind, AttributeKind::Bool));
         assert!(matches!(
-            schema.attributes["brightness"].kind,
-            AttributeKind::Integer
+            schema.attributes["brightness_pct"].kind,
+            AttributeKind::Float
         ));
-        assert!(schema.attributes["brightness"].writable);
-        assert_eq!(schema.attributes["brightness"].max, Some(255.0));
+        assert!(schema.attributes["brightness_pct"].writable);
+        assert_eq!(schema.attributes["brightness_pct"].max, Some(100.0));
     }
 }

@@ -6,11 +6,13 @@
 <script>
 	import Now from './lib/Now.svelte';
 	import { adopt, ago, battery, kindOf, reading, stale } from './lib/weather.js';
+	import { follow } from './lib/units.svelte.js';
 
 	/** @type {{ host: import('../../../../sdk/ui/index.js').Host }} */
 	let { host: hc } = $props();
 	const me = $host();
 	$effect(() => adopt(me, hc));
+	$effect(() => follow(hc));
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
