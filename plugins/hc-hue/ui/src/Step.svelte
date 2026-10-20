@@ -64,7 +64,7 @@
 		if (k === kind) return;
 		if (k === 'scene') set(clean({ action: 'activate', scene_id: type === 'scene' ? undefined : scenes[0]?.attributes.resource_id }));
 		else if (k === 'look') set({ on: true, color_temp: 2700, transition_ms: 2000 });
-		else if (k === 'flash') set({ action: 'signal', kind: 'on_off', duration_ms: 5000 });
+		else if (k === 'flash') set({ action: 'signal', kind: 'on_off', duration_secs: 5 });
 		else if (k === 'power') set({ on: false });
 	}
 
@@ -112,7 +112,7 @@
 		<span class="hc-row opts">
 			<label
 				>Fade in over
-				<select value={v.duration_ms ?? 0} onchange={(e) => set(clean({ ...v, duration_ms: +e.currentTarget.value || undefined }))}>
+				<select value={v.transition_ms ?? 0} onchange={(e) => set(clean({ ...v, transition_ms: +e.currentTarget.value || undefined }))}>
 					{#each FADES as ms (ms)}<option value={ms}>{fadeWords(ms)}</option>{/each}
 				</select></label
 			>
@@ -187,9 +187,9 @@
 		<span class="hc-label">How</span>
 		<span class="hc-row">
 			<button class="hc-pill" class:go={kind === 'pulse'} onclick={() => set({ action: 'breathe' })}>Pulse once</button>
-			<button class="hc-pill" class:go={v.kind === 'on_off'} onclick={() => set({ action: 'signal', kind: 'on_off', duration_ms: v.duration_ms ?? 5000 })}>Blink</button>
-			<button class="hc-pill" class:go={v.kind === 'on_off_color'} onclick={() => set({ action: 'signal', kind: 'on_off_color', duration_ms: v.duration_ms ?? 5000, colors: [hexToXy('#ff3b30')] })}>Blink in a colour</button>
-			<button class="hc-pill" class:go={v.kind === 'alternating'} onclick={() => set({ action: 'signal', kind: 'alternating', duration_ms: v.duration_ms ?? 5000, colors: [hexToXy('#ff3b30'), hexToXy('#3e7bfa')] })}>Alternate two colours</button>
+			<button class="hc-pill" class:go={v.kind === 'on_off'} onclick={() => set({ action: 'signal', kind: 'on_off', duration_secs: v.duration_secs ?? 5 })}>Blink</button>
+			<button class="hc-pill" class:go={v.kind === 'on_off_color'} onclick={() => set({ action: 'signal', kind: 'on_off_color', duration_secs: v.duration_secs ?? 5, colors: [hexToXy('#ff3b30')] })}>Blink in a colour</button>
+			<button class="hc-pill" class:go={v.kind === 'alternating'} onclick={() => set({ action: 'signal', kind: 'alternating', duration_secs: v.duration_secs ?? 5, colors: [hexToXy('#ff3b30'), hexToXy('#3e7bfa')] })}>Alternate two colours</button>
 		</span>
 		{#if kind === 'flash'}
 			{#if v.colors?.length}
@@ -210,8 +210,8 @@
 			{/if}
 			<label class="opts"
 				>For
-				<select value={v.duration_ms ?? 5000} onchange={(e) => set({ ...v, duration_ms: +e.currentTarget.value })}>
-					{#each [2000, 5000, 10000, 30000, 60000] as ms (ms)}<option value={ms}>{fadeWords(ms)}</option>{/each}
+				<select value={v.duration_secs ?? 5} onchange={(e) => set({ ...v, duration_secs: +e.currentTarget.value })}>
+					{#each [2, 5, 10, 30, 60] as secs (secs)}<option value={secs}>{fadeWords(secs * 1000)}</option>{/each}
 				</select>
 				then back to how they were</label
 			>

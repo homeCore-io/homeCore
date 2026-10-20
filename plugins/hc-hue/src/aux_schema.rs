@@ -25,10 +25,9 @@ use serde_json::{Map, Value};
 fn unit_for(name: &str) -> Option<&'static str> {
     match name {
         "battery_pct" | "brightness_pct" => Some("%"),
-        "temperature" | "temperature_c" => Some("°C"),
-        "temperature_f" => Some("°F"),
-        "illuminance" | "illuminance_lux" | "lux" => Some("lux"),
-        "color_temp_mirek" => Some("mirek"),
+        // Always °C and lux: the plugin converts, the app shows °F.
+        "temperature" => Some("°C"),
+        "illuminance" => Some("lux"),
         "button_repeat_interval_ms" => Some("ms"),
         _ => None,
     }
@@ -42,6 +41,7 @@ fn states_for(name: &str) -> BoolStates {
     };
     match name {
         "motion" => pair(("motion", "detects motion"), ("clear", "clears")),
+        "open" => pair(("open", "opens"), ("closed", "closes")),
         "tampered" => pair(("tampered", "is tampered with"), ("intact", "reads intact")),
         "enabled" => pair(("enabled", "is enabled"), ("disabled", "is disabled")),
         "on" => pair(("on", "turns on"), ("off", "turns off")),
@@ -78,41 +78,12 @@ fn humanise(name: &str) -> String {
     out
 }
 
-/// Describe one attribute from its reported value and the state it arrived in.
+/// Describe one attribute from its reported value.
 ///
 /// Everything is read-only: a sensor's command path takes `enabled` and
 /// motion sensitivity through the accessory command, not an attribute write,
 /// and declaring otherwise would render controls that do nothing.
-/// The unit a `*_unit` sibling names, if this attribute has one in `state`.
-///
-/// **The sibling is the truth and the table is a guess.** A Hue motion sensor
-/// publishes `temperature` in whichever scale the operator configured, says so
-/// in `temperature_unit`, and the schema declared `°C` unconditionally — so a
-/// sensor reporting 71.33 °F was declared as 71.33 °C. The unit is the only
-/// thing telling a client how to read the number, which makes declaring it
-/// wrong worse than not declaring it at all.
-fn unit_from_sibling(name: &str, state: Option<&Map<String, Value>>) -> Option<String> {
-    let raw = state?.get(&format!("{name}_unit"))?.as_str()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(match raw.to_ascii_uppercase().as_str() {
-        // Hue reports the scale as a bare letter; everything else is already
-        // the symbol a person reads.
-        "C" => "°C".to_string(),
-        "F" => "°F".to_string(),
-        "K" => "K".to_string(),
-        _ => raw.to_string(),
-    })
-}
-
-/// [`describe`], with the rest of the published state available so an
-/// attribute's own `*_unit` sibling can say what it is measured in.
-pub fn describe_in(
-    name: &str,
-    value: &Value,
-    state: Option<&Map<String, Value>>,
-) -> AttributeSchema {
+pub fn describe_in(name: &str, value: &Value) -> AttributeSchema {
     let kind = match value {
         Value::Bool(_) => AttributeKind::Bool,
         Value::Number(n) if n.is_i64() || n.is_u64() => AttributeKind::Integer,
@@ -122,7 +93,7 @@ pub fn describe_in(
     };
 
     let mut a = AttributeSchema::read_only(kind).labelled(humanise(name));
-    a.unit = unit_from_sibling(name, state).or_else(|| unit_for(name).map(str::to_string));
+    a.unit = unit_for(name).map(str::to_string);
     // Battery, firmware and the bridge/resource ids are not what a motion
     // sensor is for. One lexicon, in the crate that defines the field.
     a.category = AttributeCategory::for_name(name).or_else(|| {
@@ -145,12 +116,7 @@ pub fn describe_in(
             || name == "last_button"
             || name == "buttons"
             || name == "update_state"
-            || name == "connectivity_status"
-            // The same reading in the other unit, or before conversion.
-            || name == "temperature_c"
-            || name == "temperature_f"
-            || name == "illuminance_raw"
-            || name == "illuminance_lux")
+            || name == "connectivity_status")
             .then_some(AttributeCategory::Diagnostic)
     });
     if matches!(value, Value::Bool(_)) {
@@ -181,7 +147,7 @@ pub fn with_published(mut schema: DeviceSchema, state: &Value) -> DeviceSchema {
         schema
             .attributes
             .entry(name.clone())
-            .or_insert_with(|| describe_in(name, value, Some(obj)));
+            .or_insert_with(|| describe_in(name, value));
     }
     schema
 }
@@ -190,7 +156,7 @@ pub fn with_published(mut schema: DeviceSchema, state: &Value) -> DeviceSchema {
 pub fn schema_for_state(state: &Map<String, Value>) -> DeviceSchema {
     let mut attributes: HashMap<String, AttributeSchema> = HashMap::new();
     for (name, value) in state {
-        attributes.insert(name.clone(), describe_in(name, value, Some(state)));
+        attributes.insert(name.clone(), describe_in(name, value));
     }
     let mut primary = Vec::new();
     // A remote: what was pressed and how, as a choice an automation can
@@ -309,21 +275,12 @@ mod tests {
         assert_eq!(states.when_false.label, "clear");
     }
 
-    /// **The sibling is the truth and the table is a guess.** A Hue motion
-    /// sensor publishes `temperature` in whichever scale the operator
-    /// configured and says so in `temperature_unit`; the schema declared `°C`
-    /// unconditionally, so a sensor reporting 71.33 °F was declared as
-    /// 71.33 °C. The unit is the only thing telling a client how to read the
-    /// number.
+    /// Temperature is declared °C whatever else the state carries — the
+    /// plugin publishes °C only; a stray `temperature_unit` changes nothing.
     #[test]
-    fn the_unit_sibling_outranks_the_table() {
-        let f = schema(json!({ "temperature": 71.33, "temperature_unit": "F" }));
-        assert_eq!(f.attributes["temperature"].unit.as_deref(), Some("°F"));
-
-        let c = schema(json!({ "temperature": 21.85, "temperature_unit": "C" }));
-        assert_eq!(c.attributes["temperature"].unit.as_deref(), Some("°C"));
-
-        // No sibling, so the table still answers.
+    fn temperature_is_always_celsius() {
+        let f = schema(json!({ "temperature": 21.85, "temperature_unit": "F" }));
+        assert_eq!(f.attributes["temperature"].unit.as_deref(), Some("°C"));
         let bare = schema(json!({ "temperature": 21.85 }));
         assert_eq!(bare.attributes["temperature"].unit.as_deref(), Some("°C"));
     }

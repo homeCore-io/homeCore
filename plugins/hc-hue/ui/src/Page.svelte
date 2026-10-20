@@ -266,19 +266,6 @@
 			</div>
 			<div class="settings">
 				<span class="hc-field"
-					><span class="hc-label">Temperature in</span>
-					<span class="hc-row">
-						{#each [['c', '°C'], ['f', '°F']] as [v, label] (v)}
-							<button
-								class="hc-pill"
-								class:go={(hue.display?.temperature_unit ?? 'c') === v}
-								disabled={saving !== ''}
-								onclick={() => setting({ display: { ...(hue.display ?? {}), temperature_unit: v } }, 'unit')}>{label}</button
-							>
-						{/each}
-					</span></span
-				>
-				<span class="hc-field"
 					><span class="hc-label">Entertainment areas</span>
 					<span class="hc-row"
 						><button

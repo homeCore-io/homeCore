@@ -6,21 +6,21 @@ describe('the Hue step', () => {
 		expect(kindOf({ action: 'activate', scene_id: 'r1' })).toBe('scene');
 		expect(kindOf({ on: false, transition_ms: 30000 })).toBe('power');
 		expect(kindOf({ on: true, color_temp: 2700, brightness_pct: 40 })).toBe('look');
-		expect(kindOf({ action: 'signal', kind: 'on_off', duration_ms: 5000 })).toBe('flash');
+		expect(kindOf({ action: 'signal', kind: 'on_off', duration_secs: 5 })).toBe('flash');
 		expect(kindOf({ raw: { method: 'PUT' } })).toBe(null);
 		expect(kindOf({ action: 'refresh' })).toBe(null);
 	});
 
 	it('says each in words', () => {
 		const name = (rid) => (rid === 'r1' ? 'Savanna sunset' : undefined);
-		expect(sentence({ action: 'activate', scene_id: 'r1', duration_ms: 2000 }, name)).toBe(
+		expect(sentence({ action: 'activate', scene_id: 'r1', transition_ms: 2000 }, name)).toBe(
 			'apply “Savanna sunset” in {devices}, fading over 2 s'
 		);
 		expect(sentence({ on: true, color_temp: 2700, brightness_pct: 40, transition_ms: 5000 })).toBe(
 			'set {devices} to warm white at 40 %, fading over 5 s'
 		);
 		expect(sentence({ on: false, transition_ms: 30000 })).toBe('turn {devices} off, fading over 30 s');
-		expect(sentence({ action: 'signal', kind: 'on_off', duration_ms: 5000 })).toBe(
+		expect(sentence({ action: 'signal', kind: 'on_off', duration_secs: 5 })).toBe(
 			'flash {devices} for 5 s, then put them back'
 		);
 	});

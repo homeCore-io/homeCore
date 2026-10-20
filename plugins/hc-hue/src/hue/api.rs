@@ -970,7 +970,7 @@ impl HueApiClient {
 
     pub async fn activate_scene(&self, scene_rid: &str, recall: &SceneRecall) -> Result<()> {
         let mut r = json!({ "action": if recall.dynamic { "dynamic_palette" } else { "active" } });
-        if let Some(ms) = recall.duration_ms {
+        if let Some(ms) = recall.transition_ms {
             r["duration"] = json!(ms);
         }
         if let Some(b) = recall.brightness_pct {
@@ -1100,15 +1100,15 @@ impl HueApiClient {
                     out.insert("motion_sensitivity".to_string(), json!(v));
                 }
                 if resource_type == "grouped_motion" {
-                    Self::insert_temperature_attributes(&mut out, item);
-                    Self::insert_light_level_attributes(&mut out, item);
+                    insert_temperature(&mut out, item);
+                    insert_light_level(&mut out, item);
                 }
             }
             "temperature" => {
-                Self::insert_temperature_attributes(&mut out, item);
+                insert_temperature(&mut out, item);
             }
             "light_level" | "grouped_light_level" => {
-                Self::insert_light_level_attributes(&mut out, item);
+                insert_light_level(&mut out, item);
             }
             "contact" => {
                 if let Some(v) = item
@@ -1116,7 +1116,7 @@ impl HueApiClient {
                     .and_then(|c| c.get("state"))
                     .and_then(|v| v.as_str())
                 {
-                    out.insert("contact_state".to_string(), json!(v));
+                    out.insert("open".to_string(), json!(open_from_contact_report(v)));
                 }
                 if let Some(v) = item.get("tampered").and_then(|v| v.as_bool()) {
                     out.insert("tampered".to_string(), json!(v));
@@ -1289,57 +1289,62 @@ impl HueApiClient {
         serde_json::Value::Object(out)
     }
 
-    fn insert_temperature_attributes(
-        out: &mut serde_json::Map<String, serde_json::Value>,
-        item: &serde_json::Value,
-    ) {
-        if let Some(v) = extract_temperature_c(item) {
-            out.insert("temperature_c".to_string(), json!(v));
-            out.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
-        }
-        if let Some(v) = extract_temperature_valid(item) {
-            out.insert("temperature_valid".to_string(), json!(v));
-        }
-        if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-            out.insert("enabled".to_string(), json!(v));
-        }
-        out.insert("temperature_unit".to_string(), json!("C"));
-    }
-
-    fn insert_light_level_attributes(
-        out: &mut serde_json::Map<String, serde_json::Value>,
-        item: &serde_json::Value,
-    ) {
-        if let Some(v) = extract_light_level_raw(item) {
-            out.insert("illuminance_raw".to_string(), json!(v));
-            if let Some(lux) = Self::light_level_to_lux(v) {
-                out.insert("illuminance_lux".to_string(), json!(lux));
-            }
-        }
-        if let Some(v) = extract_light_level_valid(item) {
-            out.insert("illuminance_valid".to_string(), json!(v));
-        }
-        if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-            out.insert("enabled".to_string(), json!(v));
-        }
-        out.insert("illuminance_unit".to_string(), json!("lux"));
-    }
-
-    fn light_level_to_lux(raw: f64) -> Option<f64> {
-        if raw <= 0.0 {
-            return None;
-        }
-        // Hue light level is log-scaled in many APIs; this approximation is useful for automation thresholds.
-        let lux = 10f64.powf((raw - 1.0) / 10000.0);
-        if lux.is_finite() {
-            Some(lux)
-        } else {
-            None
-        }
-    }
-
     fn http_client(&self) -> Client {
         self.client.clone()
+    }
+}
+
+/// `open` from a contact sensor's report: Hue says `contact` when the two
+/// halves touch (closed) and `no_contact` when they part (open).
+pub(crate) fn open_from_contact_report(state: &str) -> bool {
+    state != "contact"
+}
+
+/// A temperature sensor's reading as published: `temperature` in °C — Hue
+/// reports Celsius, so there is nothing to convert; showing °F is the app's job.
+pub(crate) fn insert_temperature(
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    item: &serde_json::Value,
+) {
+    if let Some(v) = extract_temperature_c(item) {
+        out.insert("temperature".to_string(), json!(v));
+    }
+    if let Some(v) = extract_temperature_valid(item) {
+        out.insert("temperature_valid".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+        out.insert("enabled".to_string(), json!(v));
+    }
+}
+
+/// A light sensor's reading as published: `illuminance` in lux, converted
+/// from the bridge's log-scaled light level.
+pub(crate) fn insert_light_level(
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    item: &serde_json::Value,
+) {
+    if let Some(v) = extract_light_level_raw(item) {
+        out.insert("illuminance".to_string(), json!(lux_from_light_level(v)));
+    }
+    if let Some(v) = extract_light_level_valid(item) {
+        out.insert("illuminance_valid".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+        out.insert("enabled".to_string(), json!(v));
+    }
+}
+
+/// Lux from Hue's light level, which is `10000 × log10(lux) + 1`; 0 is dark.
+/// Rounded to two decimals.
+pub(crate) fn lux_from_light_level(raw: f64) -> f64 {
+    if raw <= 0.0 || !raw.is_finite() {
+        return 0.0;
+    }
+    let lux = 10f64.powf((raw - 1.0) / 10000.0);
+    if lux.is_finite() {
+        (lux * 100.0).round() / 100.0
+    } else {
+        0.0
     }
 }
 
@@ -1355,7 +1360,7 @@ fn extract_temperature_c(item: &serde_json::Value) -> Option<f64> {
 
     // Hue payloads may report centi-degrees (e.g. 2150 == 21.50 C).
     let normalized = if raw.abs() > 120.0 { raw / 100.0 } else { raw };
-    Some(normalized)
+    Some((normalized * 100.0).round() / 100.0)
 }
 
 fn extract_temperature_valid(item: &serde_json::Value) -> Option<bool> {
@@ -1790,13 +1795,12 @@ mod tests {
         });
         let out_temp = client.extract_aux_attributes("temperature", &temperature_item);
         assert_eq!(
-            out_temp.get("temperature_c").and_then(Value::as_f64),
+            out_temp.get("temperature").and_then(Value::as_f64),
             Some(21.5)
         );
-        assert_eq!(
-            out_temp.get("temperature_f").and_then(Value::as_f64),
-            Some(70.7)
-        );
+        for gone in ["temperature_c", "temperature_f", "temperature_unit"] {
+            assert!(out_temp.get(gone).is_none(), "{gone} is not published");
+        }
         assert_eq!(
             out_temp.get("temperature_valid").and_then(Value::as_bool),
             Some(true)
@@ -1809,8 +1813,8 @@ mod tests {
         });
         let out_light = client.extract_aux_attributes("light_level", &light_item);
         assert_eq!(
-            out_light.get("illuminance_raw").and_then(Value::as_f64),
-            Some(19000.0)
+            out_light.get("illuminance").and_then(Value::as_f64),
+            Some(79.41)
         );
         assert_eq!(
             out_light.get("illuminance_valid").and_then(Value::as_bool),
@@ -1820,14 +1824,9 @@ mod tests {
             out_light.get("enabled").and_then(Value::as_bool),
             Some(true)
         );
-        assert_eq!(
-            out_light.get("illuminance_unit").and_then(Value::as_str),
-            Some("lux")
-        );
-        assert!(out_light
-            .get("illuminance_lux")
-            .and_then(Value::as_f64)
-            .is_some());
+        for gone in ["illuminance_raw", "illuminance_lux", "illuminance_unit"] {
+            assert!(out_light.get(gone).is_none(), "{gone} is not published");
+        }
     }
 
     #[test]
@@ -1843,15 +1842,12 @@ mod tests {
 
         let out = client.extract_aux_attributes("grouped_motion", &item);
         assert_eq!(out.get("motion").and_then(Value::as_bool), Some(true));
-        assert_eq!(out.get("temperature_c").and_then(Value::as_f64), Some(21.5));
+        assert_eq!(out.get("temperature").and_then(Value::as_f64), Some(21.5));
         assert_eq!(
             out.get("temperature_valid").and_then(Value::as_bool),
             Some(true)
         );
-        assert_eq!(
-            out.get("illuminance_raw").and_then(Value::as_f64),
-            Some(19000.0)
-        );
+        assert_eq!(out.get("illuminance").and_then(Value::as_f64), Some(79.41));
         assert_eq!(
             out.get("illuminance_valid").and_then(Value::as_bool),
             Some(true)
@@ -1868,14 +1864,38 @@ mod tests {
         });
 
         let out = client.extract_aux_attributes("grouped_light_level", &item);
-        assert_eq!(
-            out.get("illuminance_raw").and_then(Value::as_f64),
-            Some(17500.0)
-        );
+        assert_eq!(out.get("illuminance").and_then(Value::as_f64), Some(56.22));
         assert_eq!(
             out.get("illuminance_valid").and_then(Value::as_bool),
             Some(false)
         );
         assert_eq!(out.get("enabled").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn light_level_to_lux_edges() {
+        // 0 is dark; 1 is 1 lux; each 10000 is a factor of ten.
+        assert_eq!(lux_from_light_level(0.0), 0.0);
+        assert_eq!(lux_from_light_level(-5.0), 0.0);
+        assert_eq!(lux_from_light_level(1.0), 1.0);
+        assert_eq!(lux_from_light_level(10001.0), 10.0);
+        assert_eq!(lux_from_light_level(20001.0), 100.0);
+        assert_eq!(lux_from_light_level(40001.0), 10000.0);
+    }
+
+    #[test]
+    fn temperatures_are_celsius_to_two_decimals() {
+        let item = json!({ "temperature": { "temperature": 2234.0 } });
+        assert_eq!(extract_temperature_c(&item), Some(22.34));
+        let item = json!({ "temperature": 21.456 });
+        assert_eq!(extract_temperature_c(&item), Some(21.46));
+        let item = json!({ "temperature": -3.0 });
+        assert_eq!(extract_temperature_c(&item), Some(-3.0));
+    }
+
+    #[test]
+    fn a_contact_sensor_is_open_when_its_halves_part() {
+        assert!(!open_from_contact_report("contact"));
+        assert!(open_from_contact_report("no_contact"));
     }
 }

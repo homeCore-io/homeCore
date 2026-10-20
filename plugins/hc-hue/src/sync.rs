@@ -4,8 +4,10 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
-use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
-use crate::hue::api::HueApiClient;
+use crate::hue::api::{
+    insert_light_level as insert_light_level_patch, insert_temperature as insert_temperature_patch,
+    open_from_contact_report, HueApiClient,
+};
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
@@ -18,10 +20,9 @@ pub enum EventApplyOutcome {
     NeedsRefresh { reason: String },
 }
 
-/// Aggregates display and feature-flag config for sync operations, avoiding
+/// Aggregates feature-flag config for sync operations, avoiding
 /// the need to pass 7+ separate arguments through every call site.
 pub struct SyncConfig {
-    pub display: HueDisplayConfig,
     pub compact_motion_facets: bool,
     pub publish_grouped_lights: bool,
     pub publish_grouped_lights_for: Vec<String>,
@@ -167,6 +168,14 @@ pub async fn refresh_bridge_state(
             publisher
                 .publish_state(&light.device_id, &translator::light_state(light))
                 .await?;
+            if registry.first_retirement(&light.device_id) {
+                publisher
+                    .publish_state_partial(
+                        &light.device_id,
+                        &translator::retired_state(translator::RetiredKind::Light),
+                    )
+                    .await?;
+            }
             // A light the bridge cannot reach is not there, whatever its
             // last state says: switched off at the wall, or out of range.
             // After the state, which homeCore takes as a sign of life.
@@ -374,7 +383,6 @@ pub async fn refresh_bridge_state(
                 .await?;
 
             let mut state = translator::aux_state(&aux);
-            apply_display_preferences(&mut state, &aux.resource_type, &cfg.display);
 
             // What this device ends up reporting, however many Hue
             // resources compacted onto it — the schema is derived from it
@@ -413,6 +421,21 @@ pub async fn refresh_bridge_state(
                     .publish_state_partial(&device_id, &Value::Object(patch))
                     .await?;
             }
+        }
+
+        // Clear what sensors no longer publish from homeCore's stored state,
+        // once a run; compacted facets publish only partials, which never
+        // remove a key.
+        for device_id in aux_published_attrs.keys() {
+            if registry.is_primary_device_id(device_id) || !registry.first_retirement(device_id) {
+                continue;
+            }
+            publisher
+                .publish_state_partial(
+                    device_id,
+                    &translator::retired_state(translator::RetiredKind::Sensor),
+                )
+                .await?;
         }
 
         // Sensors never described themselves. A Hue motion sensor
@@ -513,7 +536,6 @@ pub async fn apply_eventstream_update(
     registry: &HueRegistry,
     bridge_id: &str,
     payload: &Value,
-    cfg: &SyncConfig,
 ) -> Result<EventApplyOutcome> {
     let mut applied_any = false;
     let mut ignored_reason: Option<String> = None;
@@ -521,7 +543,7 @@ pub async fn apply_eventstream_update(
 
     if let Some(events) = payload.as_array() {
         for event in events {
-            match apply_event_item(publisher, registry, bridge_id, event, &cfg.display).await? {
+            match apply_event_item(publisher, registry, bridge_id, event).await? {
                 EventApplyOutcome::Applied => applied_any = true,
                 EventApplyOutcome::Ignored { reason } => {
                     if ignored_reason.is_none() {
@@ -536,7 +558,7 @@ pub async fn apply_eventstream_update(
             }
         }
     } else if payload.is_object() {
-        match apply_event_item(publisher, registry, bridge_id, payload, &cfg.display).await? {
+        match apply_event_item(publisher, registry, bridge_id, payload).await? {
             EventApplyOutcome::Applied => applied_any = true,
             EventApplyOutcome::Ignored { reason } => ignored_reason = Some(reason),
             EventApplyOutcome::NeedsRefresh { reason } => refresh_reason = Some(reason),
@@ -563,7 +585,6 @@ async fn apply_event_item(
     registry: &HueRegistry,
     bridge_id: &str,
     event: &Value,
-    display_cfg: &HueDisplayConfig,
 ) -> Result<EventApplyOutcome> {
     // `applied` means "the event type was recognized and dispatched to a known device".
     // It does NOT require that a non-empty state patch was produced — a keep-alive ping
@@ -624,20 +645,9 @@ async fn apply_event_item(
                         .and_then(|d| d.get("brightness"))
                         .and_then(|v| v.as_f64())
                     {
-                        patch.insert("brightness_pct".to_string(), json!(brightness));
-                    }
-                    if let Some(mirek) = item
-                        .get("color_temperature")
-                        .and_then(|ct| ct.get("mirek"))
-                        .and_then(|v| v.as_u64())
-                    {
-                        patch.insert("color_temp_mirek".to_string(), json!(mirek));
-                        // The schema promises `color_temp` in Kelvin. Without
-                        // this the promise was fiction: a control bound to the
-                        // writable attribute read nothing, forever.
                         patch.insert(
-                            "color_temp".to_string(),
-                            json!(crate::translator::kelvin_from_mirek(mirek as u16)),
+                            "brightness_pct".to_string(),
+                            json!(translator::published_brightness(brightness)),
                         );
                     }
                     // What is showing now: a temperature set says so with a
@@ -646,6 +656,19 @@ async fn apply_event_item(
                         .get("color_temperature")
                         .and_then(|ct| ct.get("mirek_valid"))
                         .and_then(|v| v.as_bool());
+                    // `color_temp` in kelvin; mirek stops at this edge. A
+                    // mirek the bridge marks invalid (it sends one while a
+                    // colour shows) or one outside any light's range is
+                    // ignored rather than published as a temperature.
+                    if let Some(kelvin) = item
+                        .get("color_temperature")
+                        .filter(|_| mirek_valid != Some(false))
+                        .and_then(|ct| ct.get("mirek"))
+                        .and_then(|v| v.as_u64())
+                        .and_then(translator::kelvin_from_event_mirek)
+                    {
+                        patch.insert("color_temp".to_string(), json!(kelvin));
+                    }
                     match mirek_valid {
                         Some(true) => {
                             patch.insert("color_mode".to_string(), json!("color_temp"));
@@ -743,7 +766,10 @@ async fn apply_event_item(
                         .and_then(|d| d.get("brightness"))
                         .and_then(|v| v.as_f64())
                     {
-                        patch.insert("brightness_pct".to_string(), json!(brightness));
+                        patch.insert(
+                            "brightness_pct".to_string(),
+                            json!(translator::published_brightness(brightness)),
+                        );
                     }
 
                     if !patch.is_empty() {
@@ -803,11 +829,6 @@ async fn apply_event_item(
                     if resource_type == "grouped_motion" {
                         insert_temperature_patch(&mut patch, item);
                         insert_light_level_patch(&mut patch, item);
-                        apply_display_preferences_to_patch(
-                            &mut patch,
-                            "grouped_motion",
-                            display_cfg,
-                        );
                     }
                     if !patch.is_empty() {
                         publisher
@@ -823,18 +844,7 @@ async fn apply_event_item(
                 {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = extract_temperature_c(item) {
-                        patch.insert("temperature_c".to_string(), json!(v));
-                        patch.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
-                        patch.insert("temperature_unit".to_string(), json!("C"));
-                    }
-                    if let Some(v) = extract_temperature_valid(item) {
-                        patch.insert("temperature_valid".to_string(), json!(v));
-                    }
-                    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-                        patch.insert("enabled".to_string(), json!(v));
-                    }
-                    apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
+                    insert_temperature_patch(&mut patch, item);
                     if !patch.is_empty() {
                         publisher
                             .publish_state_partial(&device_id, &Value::Object(patch))
@@ -850,7 +860,6 @@ async fn apply_event_item(
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     insert_light_level_patch(&mut patch, item);
-                    apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
                         publisher
                             .publish_state_partial(&device_id, &Value::Object(patch))
@@ -870,7 +879,7 @@ async fn apply_event_item(
                         .and_then(|c| c.get("state"))
                         .and_then(|v| v.as_str())
                     {
-                        patch.insert("contact_state".to_string(), json!(v));
+                        patch.insert("open".to_string(), json!(open_from_contact_report(v)));
                     }
                     if let Some(v) = item.get("tampered").and_then(|v| v.as_bool()) {
                         patch.insert("tampered".to_string(), json!(v));
@@ -1208,62 +1217,6 @@ async fn apply_event_item(
     }
 }
 
-fn light_level_to_lux(raw: f64) -> Option<f64> {
-    if raw <= 0.0 {
-        return None;
-    }
-    let lux = 10f64.powf((raw - 1.0) / 10000.0);
-    if lux.is_finite() {
-        Some(lux)
-    } else {
-        None
-    }
-}
-
-fn extract_temperature_c(item: &Value) -> Option<f64> {
-    let raw = item
-        .get("temperature")
-        .and_then(|v| v.as_f64())
-        .or_else(|| {
-            item.get("temperature")
-                .and_then(|obj| obj.get("temperature"))
-                .and_then(|v| v.as_f64())
-        })?;
-
-    let normalized = if raw.abs() > 120.0 { raw / 100.0 } else { raw };
-    Some(normalized)
-}
-
-fn extract_temperature_valid(item: &Value) -> Option<bool> {
-    item.get("temperature_valid")
-        .and_then(|v| v.as_bool())
-        .or_else(|| {
-            item.get("temperature")
-                .and_then(|obj| obj.get("temperature_valid"))
-                .and_then(|v| v.as_bool())
-        })
-}
-
-fn extract_light_level_raw(item: &Value) -> Option<f64> {
-    item.get("light_level")
-        .and_then(|v| v.as_f64())
-        .or_else(|| {
-            item.get("light")
-                .and_then(|obj| obj.get("light_level"))
-                .and_then(|v| v.as_f64())
-        })
-}
-
-fn extract_light_level_valid(item: &Value) -> Option<bool> {
-    item.get("light_level_valid")
-        .and_then(|v| v.as_bool())
-        .or_else(|| {
-            item.get("light")
-                .and_then(|obj| obj.get("light_level_valid"))
-                .and_then(|v| v.as_bool())
-        })
-}
-
 fn insert_motion_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
     if let Some(v) = item
         .get("motion")
@@ -1284,38 +1237,6 @@ fn insert_motion_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value)
         .and_then(|v| v.as_u64())
     {
         attrs.insert("motion_sensitivity".to_string(), json!(v));
-    }
-}
-
-fn insert_temperature_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
-    if let Some(v) = extract_temperature_c(item) {
-        attrs.insert("temperature_c".to_string(), json!(v));
-        attrs.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
-    }
-    if let Some(v) = extract_temperature_valid(item) {
-        attrs.insert("temperature_valid".to_string(), json!(v));
-    }
-    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-        attrs.insert("enabled".to_string(), json!(v));
-    }
-    if attrs.contains_key("temperature_c") || attrs.contains_key("temperature_f") {
-        attrs.insert("temperature_unit".to_string(), json!("C"));
-    }
-}
-
-fn insert_light_level_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
-    if let Some(v) = extract_light_level_raw(item) {
-        attrs.insert("illuminance_raw".to_string(), json!(v));
-        if let Some(lux) = light_level_to_lux(v) {
-            attrs.insert("illuminance_lux".to_string(), json!(lux));
-        }
-        attrs.insert("illuminance_unit".to_string(), json!("lux"));
-    }
-    if let Some(v) = extract_light_level_valid(item) {
-        attrs.insert("illuminance_valid".to_string(), json!(v));
-    }
-    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-        attrs.insert("enabled".to_string(), json!(v));
     }
 }
 
@@ -1578,80 +1499,6 @@ fn strip_aux_metadata(state: &mut Value) {
     }
 }
 
-fn apply_display_preferences(
-    state: &mut Value,
-    resource_type: &str,
-    display_cfg: &HueDisplayConfig,
-) {
-    let Some(obj) = state.as_object_mut() else {
-        return;
-    };
-    apply_display_preferences_to_patch(obj, resource_type, display_cfg);
-}
-
-fn apply_display_preferences_to_patch(
-    attrs: &mut serde_json::Map<String, Value>,
-    resource_type: &str,
-    display_cfg: &HueDisplayConfig,
-) {
-    match resource_type {
-        "grouped_motion" => {
-            apply_display_preferences_to_patch(attrs, "temperature", display_cfg);
-            apply_display_preferences_to_patch(attrs, "light_level", display_cfg);
-        }
-        "grouped_light_level" => {
-            apply_display_preferences_to_patch(attrs, "light_level", display_cfg);
-        }
-        "temperature" => {
-            let temperature_c = attrs.get("temperature_c").and_then(Value::as_f64);
-            if let Some(c) = temperature_c {
-                let f = attrs
-                    .get("temperature_f")
-                    .and_then(Value::as_f64)
-                    .unwrap_or((c * 9.0 / 5.0) + 32.0);
-                attrs.insert("temperature_f".to_string(), json!(f));
-                match display_cfg.temperature_unit {
-                    TemperatureUnit::C => {
-                        attrs.insert("temperature".to_string(), json!(c));
-                        attrs.insert("temperature_unit".to_string(), json!("C"));
-                    }
-                    TemperatureUnit::F => {
-                        attrs.insert("temperature".to_string(), json!(f));
-                        attrs.insert("temperature_unit".to_string(), json!("F"));
-                    }
-                }
-            }
-        }
-        "light_level" => {
-            let raw = attrs.get("illuminance_raw").and_then(Value::as_f64);
-            let lux = attrs
-                .get("illuminance_lux")
-                .and_then(Value::as_f64)
-                .or_else(|| raw.and_then(light_level_to_lux));
-
-            if let Some(v) = lux {
-                attrs.insert("illuminance_lux".to_string(), json!(v));
-            }
-
-            match display_cfg.illuminance_display {
-                IlluminanceDisplay::Lux => {
-                    if let Some(v) = lux {
-                        attrs.insert("illuminance".to_string(), json!(v));
-                        attrs.insert("illuminance_unit".to_string(), json!("lux"));
-                    }
-                }
-                IlluminanceDisplay::Raw => {
-                    if let Some(v) = raw {
-                        attrs.insert("illuminance".to_string(), json!(v));
-                        attrs.insert("illuminance_unit".to_string(), json!("raw"));
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -1692,7 +1539,6 @@ mod tests {
         }
     }
     use super::*;
-    use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use crate::hue::models::HueAuxDevice;
     use crate::hue::registry::HueRegistry;
     use plugin_sdk_rs::types::schema::{AttributeKind, DeviceSchema};
@@ -1701,18 +1547,6 @@ mod tests {
 
     fn dummy_publisher() -> DevicePublisher {
         DevicePublisher::test_instance("plugin.hue")
-    }
-
-    fn default_sync_cfg() -> SyncConfig {
-        SyncConfig {
-            display: HueDisplayConfig::default(),
-            compact_motion_facets: false,
-            publish_grouped_lights: false,
-            publish_grouped_lights_for: Vec::new(),
-            skip_grouped_lights_for: Vec::new(),
-            publish_bridge_home: false,
-            publish_entertainment_configurations: false,
-        }
     }
 
     #[test]
@@ -1735,64 +1569,46 @@ mod tests {
         assert_eq!(aux_device_type("unknown_future_type"), "sensor");
     }
 
+    /// Sensor readings publish under the shared names in the shared units —
+    /// `temperature` °C, `illuminance` lux — with no unit siblings and no
+    /// second spelling.
     #[test]
-    fn parses_nested_temperature_and_light_level_fields() {
-        let temp_item = json!({
-            "temperature": { "temperature": 2234.0, "temperature_valid": true }
-        });
-        assert_eq!(extract_temperature_c(&temp_item), Some(22.34));
-        assert_eq!(extract_temperature_valid(&temp_item), Some(true));
-
-        let light_item = json!({
-            "light": { "light_level": 18000.0, "light_level_valid": false }
-        });
-        assert_eq!(extract_light_level_raw(&light_item), Some(18000.0));
-        assert_eq!(extract_light_level_valid(&light_item), Some(false));
-    }
-
-    #[test]
-    fn applies_display_preferences_for_temperature_and_illuminance() {
-        let cfg_f_raw = HueDisplayConfig {
-            temperature_unit: TemperatureUnit::F,
-            illuminance_display: IlluminanceDisplay::Raw,
-        };
+    fn sensor_patches_use_the_shared_names() {
         let mut attrs = serde_json::Map::new();
-        attrs.insert("temperature_c".to_string(), json!(21.0));
-        attrs.insert("illuminance_raw".to_string(), json!(15000.0));
-        apply_display_preferences_to_patch(&mut attrs, "temperature", &cfg_f_raw);
-        apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_f_raw);
-
-        assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(69.8));
+        insert_temperature_patch(
+            &mut attrs,
+            &json!({ "temperature": { "temperature": 2234.0, "temperature_valid": true } }),
+        );
+        insert_light_level_patch(
+            &mut attrs,
+            &json!({ "light": { "light_level": 20001.0, "light_level_valid": false } }),
+        );
         assert_eq!(
-            attrs.get("temperature_unit").and_then(Value::as_str),
-            Some("F")
+            attrs.get("temperature").and_then(Value::as_f64),
+            Some(22.34)
+        );
+        assert_eq!(
+            attrs.get("temperature_valid").and_then(Value::as_bool),
+            Some(true)
         );
         assert_eq!(
             attrs.get("illuminance").and_then(Value::as_f64),
-            Some(15000.0)
+            Some(100.0)
         );
         assert_eq!(
-            attrs.get("illuminance_unit").and_then(Value::as_str),
-            Some("raw")
+            attrs.get("illuminance_valid").and_then(Value::as_bool),
+            Some(false)
         );
-
-        let cfg_c_lux = HueDisplayConfig {
-            temperature_unit: TemperatureUnit::C,
-            illuminance_display: IlluminanceDisplay::Lux,
-        };
-        apply_display_preferences_to_patch(&mut attrs, "temperature", &cfg_c_lux);
-        apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_c_lux);
-
-        assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(21.0));
-        assert_eq!(
-            attrs.get("temperature_unit").and_then(Value::as_str),
-            Some("C")
-        );
-        assert_eq!(
-            attrs.get("illuminance_unit").and_then(Value::as_str),
-            Some("lux")
-        );
-        assert!(attrs.get("illuminance").and_then(Value::as_f64).is_some());
+        for gone in [
+            "temperature_c",
+            "temperature_f",
+            "temperature_unit",
+            "illuminance_raw",
+            "illuminance_lux",
+            "illuminance_unit",
+        ] {
+            assert!(attrs.get(gone).is_none(), "{gone} is not published");
+        }
     }
 
     #[test]
@@ -2064,15 +1880,9 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(
-            &publisher,
-            &registry,
-            "bridge-1",
-            &payload,
-            &default_sync_cfg(),
-        )
-        .await
-        .expect("eventstream update");
+        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+            .await
+            .expect("eventstream update");
 
         assert_eq!(
             outcome,
@@ -2103,15 +1913,9 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(
-            &publisher,
-            &registry,
-            "bridge-1",
-            &payload,
-            &default_sync_cfg(),
-        )
-        .await
-        .expect("eventstream update");
+        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+            .await
+            .expect("eventstream update");
 
         assert_eq!(
             outcome,
@@ -2134,15 +1938,9 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(
-            &publisher,
-            &registry,
-            "bridge-1",
-            &payload,
-            &default_sync_cfg(),
-        )
-        .await
-        .expect("eventstream update");
+        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+            .await
+            .expect("eventstream update");
 
         assert_eq!(
             outcome,

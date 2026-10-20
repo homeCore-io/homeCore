@@ -184,27 +184,6 @@ pub fn config_descriptor() -> serde_json::Value {
                 ),
         )
         .section(
-            Section::new("display", "Display")
-                .field(
-                    Field::enumeration("hue.display.temperature_unit")
-                        .label("Temperature unit")
-                        .render("segmented")
-                        .default("c")
-                        .option("c", "°C")
-                        .option("f", "°F")
-                        .help("Unit for motion-sensor temperature readings."),
-                )
-                .field(
-                    Field::enumeration("hue.display.illuminance_display")
-                        .label("Light level")
-                        .render("segmented")
-                        .default("lux")
-                        .option("lux", "Lux")
-                        .option("raw", "Raw")
-                        .help("Show sensor illuminance as estimated lux, or the bridge's raw value."),
-                ),
-        )
-        .section(
             Section::new("logging", "Logging")
                 .field(
                     Field::text("logging.level")
@@ -381,8 +360,9 @@ pub struct HueConfig {
     pub publish_bridge_home: bool,
     #[serde(default)]
     pub publish_entertainment_configurations: bool,
-    #[serde(default)]
-    pub display: HueDisplayConfig,
+    // `[hue.display]` (temperature_unit, illuminance_display) is gone:
+    // temperatures publish in °C and light levels in lux, always, and showing
+    // °F is the app's job. An old table is ignored, not rejected.
 }
 
 impl Default for HueConfig {
@@ -401,36 +381,8 @@ impl Default for HueConfig {
             skip_grouped_lights_for: Vec::new(),
             publish_bridge_home: false,
             publish_entertainment_configurations: false,
-            display: HueDisplayConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct HueDisplayConfig {
-    #[serde(default)]
-    pub temperature_unit: TemperatureUnit,
-    #[serde(default)]
-    pub illuminance_display: IlluminanceDisplay,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum TemperatureUnit {
-    #[default]
-    C,
-    F,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum IlluminanceDisplay {
-    #[default]
-    Lux,
-    Raw,
 }
 
 /// Merge learned-state bridge records (`{ "bridges": { "<id>": {app_key, host,
@@ -906,25 +858,17 @@ mod tests {
         assert!(props.get("homecore").is_some());
     }
 
+    /// The old `[hue.display]` table still parses — it is ignored, so a
+    /// config written before temperatures were always °C keeps loading.
     #[test]
-    fn defaults_display_preferences() {
-        let cfg = HuePluginConfig::default();
-        assert_eq!(cfg.hue.display.temperature_unit, TemperatureUnit::C);
-        assert_eq!(cfg.hue.display.illuminance_display, IlluminanceDisplay::Lux);
-    }
-
-    #[test]
-    fn parses_display_preferences_from_toml() {
+    fn an_old_display_table_is_ignored() {
         let text = r#"
 [hue]
 [hue.display]
 temperature_unit = "f"
 illuminance_display = "raw"
 "#;
-
-        let cfg: HuePluginConfig = toml::from_str(text).expect("parse display config");
-        assert_eq!(cfg.hue.display.temperature_unit, TemperatureUnit::F);
-        assert_eq!(cfg.hue.display.illuminance_display, IlluminanceDisplay::Raw);
+        let _cfg: HuePluginConfig = toml::from_str(text).expect("old display table still parses");
     }
 
     #[test]

@@ -132,7 +132,7 @@
 								{/each}
 							</ul>
 						{:else}
-							<Scenes {hc} {scenes} columns={4} options={{ dynamic, duration_ms: fade || undefined }} onerror={(e) => (error = e)} />
+							<Scenes {hc} {scenes} columns={4} options={{ dynamic, transition_ms: fade || undefined }} onerror={(e) => (error = e)} />
 						{/if}
 						<span class="hc-row">
 							<label class="check"><input type="checkbox" bind:checked={dynamic} />Keep their colours moving</label>
