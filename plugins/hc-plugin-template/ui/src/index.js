@@ -9,6 +9,9 @@
 // plugin's devices live, commands, its actions, the app's confirm and look.
 // Each element draws into its own shadow root and adopts the app's parts
 // stylesheet, so it looks like the app in light and dark.
+//
+// Screens read and write homeCore's names — `brightness_pct`, 0–100 — never
+// the device's own scale: the plugin converted at the edge already.
 
 /** Shared by both elements: a shadow root with the app's look, and re-drawing
  *  whenever a property or one of the plugin's devices changes. */
@@ -58,7 +61,7 @@ class TemplatePage extends Screen {
 			.map(
 				(d) => `<tr>
 					<td>${this.esc(h.devices.label(d))}</td>
-					<td class="hc-num">${d.attributes.on ? `${d.attributes.brightness ?? '—'}` : 'off'}</td>
+					<td class="hc-num">${d.attributes.on ? `${d.attributes.brightness_pct ?? '—'}%` : 'off'}</td>
 					<td><button class="hc-pill" data-id="${this.esc(d.device_id)}">${d.attributes.on ? 'Turn off' : 'Turn on'}</button></td>
 				</tr>`
 			)
@@ -74,7 +77,9 @@ class TemplatePage extends Screen {
 			</section>`;
 		for (const b of this.shadowRoot.querySelectorAll('button[data-id]')) {
 			const d = this.devices.find((x) => x.device_id === b.dataset.id);
-			b.onclick = () => h.command(d.device_id, { on: !d.attributes.on });
+			// A declared action: `{ action: 'toggle' }`. The card's switch below
+			// writes the attribute instead — both shapes reach the plugin.
+			b.onclick = () => h.command(d.device_id, { action: 'toggle' });
 		}
 	}
 }
@@ -107,16 +112,16 @@ class TemplateCard extends Screen {
 			<div class="hc-tile ${small ? 'compact' : ''} ${on ? 'lit' : ''}">
 				<div class="top">
 					<button class="name"><span class="hc-tile-name">${this.esc(h.devices.label(d))}</span>
-						<span class="hc-tile-state">${on ? `On · ${d.attributes.brightness ?? ''}` : 'Off'}</span></button>
+						<span class="hc-tile-state">${on ? `On · ${d.attributes.brightness_pct ?? ''}%` : 'Off'}</span></button>
 					<button class="hc-pill ${on ? 'go' : ''}" data-act="toggle">${on ? 'On' : 'Off'}</button>
 				</div>
-				${small ? '' : `<input type="range" min="0" max="255" value="${d.attributes.brightness ?? 0}" aria-label="Brightness">`}
+				${small ? '' : `<input type="range" min="0" max="100" value="${d.attributes.brightness_pct ?? 0}" aria-label="Brightness">`}
 			</div>`;
 		const root = this.shadowRoot;
 		root.querySelector('.name').onclick = () => h.ui.openDevice(d.device_id);
 		root.querySelector('[data-act=toggle]').onclick = () => h.command(d.device_id, { on: !on });
 		const range = root.querySelector('input[type=range]');
-		if (range) range.onchange = () => h.command(d.device_id, { brightness: Number(range.value) });
+		if (range) range.onchange = () => h.command(d.device_id, { brightness_pct: Number(range.value) });
 	}
 }
 
