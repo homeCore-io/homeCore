@@ -15,7 +15,7 @@
 
 use crate::config::Config;
 use crate::inclusion::{decode_controller_event, ControllerEvent};
-use crate::translator::{property_key_str, synthetic_attr_name, Translator};
+use crate::translator::{self, property_key_str, synthetic_attr_name, Translator};
 use crate::types::{NodeState, NodeValue, ResultMsg, ServerMsg, ValueUpdatedArgs};
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -144,6 +144,9 @@ fn translate_node_value(
     };
     let pk_str = v.property_key.as_ref().and_then(property_key_str);
     let pk = pk_str.as_deref();
+    if translator.is_unpublished(v.command_class, v.endpoint, &v.property, pk) {
+        return;
+    }
 
     if let Some((attr, val)) =
         translator.translate(v.command_class, v.endpoint, &v.property, pk, raw)
@@ -248,6 +251,23 @@ async fn publish_node(
     // them. Trade-off: a CC removed in firmware would leave a stale
     // attribute in homeCore until manually cleared. Acceptable.
     publisher.publish_state_partial(&device_id, &state).await?;
+    // Earlier versions published a lock's door codes; a null in a partial
+    // removes the attribute, so they are cleared from homeCore's state here.
+    let secrets: serde_json::Map<String, Value> = node
+        .values
+        .iter()
+        .filter(|v| translator::is_secret(v.command_class, &v.property))
+        .map(|v| {
+            let pk = v.property_key.as_ref().and_then(property_key_str);
+            let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk.as_deref());
+            (attr, Value::Null)
+        })
+        .collect();
+    if !secrets.is_empty() {
+        publisher
+            .publish_state_partial(&device_id, &Value::Object(secrets))
+            .await?;
+    }
     publisher
         .publish_availability(&device_id, node.is_available())
         .await?;
@@ -434,7 +454,7 @@ fn primary_state_values_to_poll(node: &NodeState) -> Vec<PollTarget> {
         (68, "mode"),          // Thermostat Fan Mode
         (98, "currentMode"),   // Door Lock
         (102, "currentState"), // Barrier Operator
-        (117, "currentColor"), // Color Switch
+        (51, "currentColor"),  // Color Switch
     ];
     let mut out = Vec::new();
     for v in &node.values {
@@ -551,6 +571,7 @@ struct SetValueCmd {
     command_class: u32,
     endpoint: u32,
     property: String,
+    property_key: Option<Value>,
     value: Value,
 }
 
@@ -922,6 +943,14 @@ async fn handle_event(
                 if let Ok(args) = serde_json::from_value::<ValueUpdatedArgs>(args_val) {
                     let pk_str = args.property_key.as_ref().and_then(property_key_str);
                     let pk = pk_str.as_deref();
+                    if translator.is_unpublished(
+                        args.command_class,
+                        args.endpoint,
+                        &args.property,
+                        pk,
+                    ) {
+                        return Ok(());
+                    }
                     let (attr, val) = match translator.translate(
                         args.command_class,
                         args.endpoint,
@@ -1052,15 +1081,19 @@ async fn handle_event(
 
 async fn send_set_value(ws_tx: &mut WsSink, cmd: &SetValueCmd) -> Result<()> {
     let msg_id = format!("hc-sv-{}", Uuid::new_v4());
+    let mut value_id = json!({
+        "commandClass": cmd.command_class,
+        "endpoint": cmd.endpoint,
+        "property": cmd.property,
+    });
+    if let Some(pk) = &cmd.property_key {
+        value_id["propertyKey"] = pk.clone();
+    }
     let msg = json!({
         "messageId": msg_id,
         "command": "node.set_value",
         "nodeId": cmd.node_id,
-        "valueId": {
-            "commandClass": cmd.command_class,
-            "endpoint": cmd.endpoint,
-            "property": cmd.property,
-        },
+        "valueId": value_id,
         "value": cmd.value,
     });
     // Log the exact JSON so we can compare against the zwave-js-server protocol spec.
@@ -1132,6 +1165,7 @@ async fn handle_cmd(
             command_class: target.command_class,
             endpoint: target.endpoint,
             property: target.property.clone(),
+            property_key: target.property_key.clone(),
             value: native_value,
         };
         if sv_tx.send(sv_cmd).await.is_err() {
@@ -1375,10 +1409,11 @@ mod tests {
 
     #[test]
     fn matches_color_switch() {
-        let n = node_with_values(1, vec![val(117, 0, "currentColor")]);
+        // Color Switch is CC 51; 117 is Protection.
+        let n = node_with_values(1, vec![val(51, 0, "currentColor")]);
         assert_eq!(
             primary_state_values_to_poll(&n),
-            vec![(117, 0, "currentColor".into())]
+            vec![(51, 0, "currentColor".into())]
         );
     }
 
