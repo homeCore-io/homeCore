@@ -394,7 +394,16 @@ fn write(
         // The rest of the step is the action's parameters.
         return;
     }
+    // A fade travels with the change it is sent with — `{"on": true,
+    // "transition_ms": 2000}` — rather than being a reading of its own, so a
+    // device need not declare it, only accept it beside something it does.
+    let has_change = state
+        .keys()
+        .any(|k| !is_metadata(k) && k.as_str() != "transition_ms");
     for key in state.keys().filter(|k| !is_metadata(k)) {
+        if key == "transition_ms" && has_change {
+            continue;
+        }
         if let Some((term, c)) = replacement(key, device_type) {
             out.insert(finding(
                 Severity::Rename,
@@ -593,6 +602,11 @@ mod tests {
                 SUNSET(),
             ),
             rule(step("lamp", json!({"action": "identify"})), SUNSET()),
+            // A fade rides along with the change; the lamp needn't declare it.
+            rule(
+                step("lamp", json!({"on": true, "transition_ms": 2000})),
+                SUNSET(),
+            ),
         ];
         assert_eq!(run(&d, s, &r), vec![]);
     }

@@ -145,6 +145,7 @@ impl TimerManager {
             match rx.recv().await {
                 Ok(Event::MqttMessage { topic, payload, .. }) => {
                     if let Some(device_id) = parse_timer_cmd_topic(&topic) {
+                        let payload = crate::glue::action_as_command(&payload);
                         self.handle_cmd(&device_id, &payload).await;
                     }
                 }

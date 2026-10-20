@@ -11,13 +11,17 @@
 //! purpose is to fire a rule when it finishes.
 //!
 //! **Writability is the command surface, not the attribute list.** Glue devices
-//! take `{"command": "start"}`-shaped payloads, so an attribute-style write of
-//! `remaining_secs` does nothing. Only the attributes a command path genuinely
-//! honours are declared writable; the rest are reported.
+//! take actions — `{"action": "start", "duration_secs": 600}` — so an
+//! attribute-style write of `remaining_secs` does nothing. Only the attributes
+//! a command path genuinely honours are declared writable; the rest are
+//! reported, and every command is a declared [`DeviceAction`]. (`{"command":
+//! "start"}` is the retired spelling, still taken.)
 
 use hc_types::schema::{
-    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceAction, DeviceSchema,
+    StateLabel,
 };
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
@@ -186,8 +190,98 @@ pub fn schema_for(device_type: &str) -> Option<DeviceSchema> {
 
     Some(DeviceSchema {
         attributes: a,
+        actions: actions_for(device_type),
         ..Default::default()
     })
+}
+
+/// The actions a glue device takes, as `(id, label, sentence, params)`.
+fn actions_for(device_type: &str) -> Vec<DeviceAction> {
+    let secs = |name: &str, label: &str, required: bool| json!({"name": name, "kind": "duration", "label": label, "required": required, "min": 1});
+    let value =
+        |kind: &str| json!({"name": "value", "kind": kind, "label": "Value", "required": true});
+    let list: Vec<(&str, &str, &str, Vec<Value>)> = match device_type {
+        "timer" => vec![
+            (
+                "start",
+                "Start",
+                "start {device}",
+                vec![
+                    secs("duration_secs", "For", false),
+                    json!({"name": "label", "kind": "string", "label": "Label"}),
+                    json!({"name": "repeat", "kind": "bool", "label": "Repeat"}),
+                ],
+            ),
+            ("pause", "Pause", "pause {device}", vec![]),
+            ("resume", "Resume", "resume {device}", vec![]),
+            ("cancel", "Cancel", "cancel {device}", vec![]),
+            ("restart", "Restart", "restart {device}", vec![]),
+            (
+                "extend",
+                "Add time",
+                "add {duration_secs} to {device}",
+                vec![secs("duration_secs", "Add", true)],
+            ),
+        ],
+        "counter" => vec![
+            ("increment", "Count up", "count {device} up", vec![]),
+            ("decrement", "Count down", "count {device} down", vec![]),
+            ("reset", "Reset", "reset {device}", vec![]),
+            ("set", "Set", "set {device} to {value}", vec![value("int")]),
+        ],
+        "number" => vec![
+            (
+                "set",
+                "Set",
+                "set {device} to {value}",
+                vec![value("float")],
+            ),
+            ("increment", "Step up", "step {device} up", vec![]),
+            ("decrement", "Step down", "step {device} down", vec![]),
+        ],
+        "select" => vec![
+            (
+                "select",
+                "Choose",
+                "set {device} to {option}",
+                vec![
+                    json!({"name": "option", "kind": "string", "label": "Option", "required": true}),
+                ],
+            ),
+            ("next", "Next", "move {device} to the next option", vec![]),
+            (
+                "previous",
+                "Previous",
+                "move {device} to the previous option",
+                vec![],
+            ),
+        ],
+        "text" | "datetime" => vec![
+            (
+                "set",
+                "Set",
+                "set {device} to {value}",
+                vec![value("string")],
+            ),
+            ("clear", "Clear", "clear {device}", vec![]),
+        ],
+        "button" => vec![("press", "Press", "press {device}", vec![])],
+        "group" => vec![("recalculate", "Recalculate", "recalculate {device}", vec![])],
+        "mode" => vec![
+            ("on", "Turn on", "turn {device} on", vec![]),
+            ("off", "Turn off", "turn {device} off", vec![]),
+            ("toggle", "Toggle", "toggle {device}", vec![]),
+        ],
+        _ => vec![],
+    };
+    list.into_iter()
+        .map(|(id, label, sentence, params)| {
+            serde_json::from_value(json!({
+                "id": id, "label": label, "sentence": sentence, "params": params,
+            }))
+            .expect("a glue action is a DeviceAction")
+        })
+        .collect()
 }
 
 /// The schema for a mode device (`core.mode`).
@@ -224,6 +318,7 @@ pub fn mode_schema() -> DeviceSchema {
     }
     DeviceSchema {
         attributes: a,
+        actions: actions_for("mode"),
         ..Default::default()
     }
 }
@@ -322,5 +417,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_command_a_glue_device_takes_is_a_declared_action() {
+        let ids = |t: &str| -> Vec<String> {
+            schema_for(t)
+                .unwrap()
+                .actions
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        };
+        assert_eq!(
+            ids("timer"),
+            ["start", "pause", "resume", "cancel", "restart", "extend"]
+        );
+        assert_eq!(ids("counter"), ["increment", "decrement", "reset", "set"]);
+        assert_eq!(ids("select"), ["select", "next", "previous"]);
+        assert_eq!(ids("button"), ["press"]);
+        assert!(ids("switch").is_empty(), "a switch is written `on`");
+        let mode: Vec<String> = mode_schema().actions.into_iter().map(|a| a.id).collect();
+        assert_eq!(mode, ["on", "off", "toggle"]);
     }
 }

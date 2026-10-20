@@ -429,7 +429,7 @@ impl ModeManager {
                     match event {
                         Ok(Event::MqttMessage { topic, payload, .. }) => {
                             if let Some(mode_id) = parse_mode_cmd_topic(&topic) {
-                                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&crate::glue::action_as_command(&payload)) {
                                     self.handle_mode_cmd(mode_id, &v, &mut modes).await;
                                 }
                             }
