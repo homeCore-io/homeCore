@@ -7,6 +7,7 @@ import {
   presetCss,
   presetOn,
   rgb,
+  rgbOf,
   segmentCss,
   stepOf,
   stepSentence,
@@ -68,9 +69,8 @@ const seg = (over: Partial<Segment> = {}): Segment => ({
   spacing: 0,
   offset: 0,
   on: true,
-  brightness: 255,
   brightness_pct: 100,
-  cct: 127,
+  color_temp: 5964,
   colors: ["#6a0dad", "#ff4500", "#00ff3c"],
   effect_id: 51,
   effect_speed: 128,
@@ -155,6 +155,8 @@ describe("WLED palettes and looks, drawn", () => {
     expect(rgb("#6a0dad")).toEqual([106, 13, 173]);
     expect(hex([106, 13, 173])).toBe("#6a0dad");
     expect(hex("#ffffff")).toBe("#ffffff");
+    expect(rgbOf("#6a0dad")).toEqual({ r: 106, g: 13, b: 173 });
+    expect(hex({ r: 106, g: 13, b: 173 })).toBe("#6a0dad");
   });
 });
 
@@ -183,12 +185,17 @@ describe("an automation’s WLED step", () => {
   const round = (s: WledStep) => stepOf(stepState(s));
   it("every kind round-trips through the command it sends", () => {
     const steps: WledStep[] = [
-      { kind: "preset", preset_id: 14, transition: 2000 },
+      { kind: "preset", preset_id: 14, transition_ms: 2000 },
       { kind: "playlist", playlist_id: 20 },
       {
         kind: "look",
         segment: "all",
-        look: { effect_id: 51, palette_id: 0, color: [106, 13, 173] },
+        look: {
+          effect_id: 51,
+          palette_id: 0,
+          color_rgb: { r: 106, g: 13, b: 173 },
+          color_temp: 2700,
+        },
       },
       {
         kind: "nightlight",
@@ -204,25 +211,39 @@ describe("an automation’s WLED step", () => {
     ];
     for (const s of steps) expect(round(s)).toEqual(s);
   });
-  it("a step written by hand reads back too, in the old words", () => {
-    expect(stepOf({ preset: 3 })).toEqual({ kind: "preset", preset_id: 3 });
-    expect(stepOf({ action: "apply_preset", apply_preset: 5 })).toEqual({
+  it("a step sends the shared names", () => {
+    expect(
+      stepState({ kind: "power", power: true, transition_ms: 700 }),
+    ).toEqual({ on: true, transition_ms: 700 });
+    expect(
+      stepState({ kind: "preset", preset_id: 3, brightness_pct: 40 }),
+    ).toEqual({ preset_id: 3, brightness_pct: 40 });
+  });
+  it("the two old spellings the plugin still takes read as the new ones", () => {
+    expect(stepOf({ preset_id: 3, transition: 700 })).toEqual({
       kind: "preset",
-      preset_id: 5,
+      preset_id: 3,
+      transition_ms: 700,
     });
-    expect(stepOf({ effect: 9, palette: 1 })).toEqual({
+    expect(stepOf({ color: [1, 2, 3] })).toEqual({
       kind: "look",
       segment: 0,
-      look: { effect_id: 9, palette_id: 1 },
+      look: { color_rgb: [1, 2, 3] },
     });
   });
+  it("the spellings the plugin dropped stay JSON", () => {
+    expect(stepOf({ preset: 3 })).toBeNull();
+    expect(stepOf({ action: "apply_preset", apply_preset: 5 })).toBeNull();
+    expect(stepOf({ effect: 9, palette: 1 })).toBeNull();
+    expect(stepOf({ cct: 127 })).toBeNull();
+  });
   it('an older step\'s "on" beside a preset or look is kept', () => {
-    expect(stepOf({ on: true, preset: 14 })).toEqual({
+    expect(stepOf({ on: true, preset_id: 14 })).toEqual({
       kind: "preset",
       preset_id: 14,
       on: true,
     });
-    expect(stepState(stepOf({ on: true, preset: 14 })!)).toEqual({
+    expect(stepState(stepOf({ on: true, preset_id: 14 })!)).toEqual({
       preset_id: 14,
       on: true,
     });
@@ -252,7 +273,7 @@ describe("an automation’s WLED step", () => {
     };
     expect(
       stepSentence(
-        { kind: "preset", preset_id: 14, transition: 2000 },
+        { kind: "preset", preset_id: 14, transition_ms: 2000 },
         "Eaves lights",
         names,
       ),

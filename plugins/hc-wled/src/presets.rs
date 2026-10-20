@@ -136,7 +136,7 @@ pub fn playlist_view(pl: &Value) -> Value {
                 "preset_id": ps,
                 // Tenths of a second, both.
                 "duration_s": at(&durs, one("dur"), i).map(|d| d as f64 / 10.0),
-                "transition_ms": at(&trs, one("transition"), i).map(|t| t * 100),
+                "transition_ms": at(&trs, one("transition"), i).map(crate::state::ms_of_tenths),
             })
         })
         .collect();
@@ -168,7 +168,7 @@ pub fn playlist_wire(view: &Value) -> Option<Value> {
             .get("transition_ms")
             .and_then(Value::as_f64)
             .unwrap_or(700.0);
-        tr.push((t.max(0.0) / 100.0).round() as u64);
+        tr.push(crate::state::tenths_of_ms(t));
     }
     Some(json!({
         "ps": ps,

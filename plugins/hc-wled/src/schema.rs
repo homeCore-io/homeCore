@@ -13,16 +13,19 @@ use serde_json::json;
 pub fn capabilities() -> serde_json::Value {
     json!({
         "on":               { "type": "boolean" },
-        "brightness":       { "type": "integer", "minimum": 0, "maximum": 255 },
         "brightness_pct":   { "type": "number",  "minimum": 0, "maximum": 100 },
-        "color":            { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 4 },
+        "color_rgb":        { "type": "object", "properties": {
+                                "r": { "type": "integer", "minimum": 0, "maximum": 255 },
+                                "g": { "type": "integer", "minimum": 0, "maximum": 255 },
+                                "b": { "type": "integer", "minimum": 0, "maximum": 255 } } },
+        "color_temp":       { "type": "integer", "minimum": 1900, "maximum": 10091 },
         "effect_id":        { "type": "integer", "minimum": 0 },
         "effect_speed":     { "type": "integer", "minimum": 0, "maximum": 255 },
         "effect_intensity": { "type": "integer", "minimum": 0, "maximum": 255 },
         "palette_id":       { "type": "integer", "minimum": 0 },
         "preset_id":        { "type": "integer" },
         "playlist_id":      { "type": "integer" },
-        "transition":       { "type": "integer", "minimum": 0 },
+        "transition_ms":    { "type": "integer", "minimum": 0 },
         "segments":         { "type": "array" },
     })
 }
@@ -67,31 +70,29 @@ pub fn device_schema() -> DeviceSchema {
             ..attr(K::Bool, true, "Power")
         },
     );
+    // The shared names (`hc_types::device_vocabulary`), in the shared units;
+    // `state.rs` and `command.rs` convert from and to WLED's scales.
     put(
         "brightness_pct",
         AttributeSchema {
             unit: Some("%".into()),
             min: Some(0.0),
             max: Some(100.0),
-            step: Some(1.0),
-            ..attr(K::Integer, true, "Brightness")
+            ..attr(K::Float, true, "Brightness")
         },
     );
-    // The raw 0-255 twin of `brightness_pct`. Writable — the command takes
-    // it — but the percentage is the one to render.
+    // WLED's own 0–255 `cct`, as kelvin: it maps 1900–10091 K onto it.
     put(
-        "brightness",
-        diag(AttributeSchema {
-            min: Some(0.0),
-            max: Some(255.0),
-            step: Some(1.0),
-            ..attr(K::Integer, true, "Brightness (raw)")
-        }),
+        "color_temp",
+        AttributeSchema {
+            unit: Some("K".into()),
+            min: Some(crate::state::KELVIN_MIN as f64),
+            max: Some(crate::state::KELVIN_MAX as f64),
+            ..attr(K::ColorTemp, true, "White temperature")
+        },
     );
-    // **`preset_id`, not `preset`.** The declaration once named the wire key
-    // the command path took while the device published `preset_id`, so a
-    // client writing back what it read was ignored. Both spellings are
-    // accepted; the published one is declared. Same for effect and palette.
+    // **One spelling each**: `preset_id`, `effect_id`, `palette_id` — what
+    // the device publishes is what a command takes.
     put(
         "preset_id",
         AttributeSchema {
@@ -110,12 +111,14 @@ pub fn device_schema() -> DeviceSchema {
             ..attr(K::Integer, true, "Playlist")
         },
     );
+    // Published: the controller's own fade. Written with a change: the fade
+    // for that change (WLED's `tt`), leaving the controller's own as it is.
     put(
         "transition_ms",
         diag(AttributeSchema {
             unit: Some("ms".into()),
             min: Some(0.0),
-            ..attr(K::Integer, false, "Fade")
+            ..attr(K::Integer, true, "Fade")
         }),
     );
     put(
@@ -128,7 +131,8 @@ pub fn device_schema() -> DeviceSchema {
     put("segment_count", diag(attr(K::Integer, false, "Segments")));
     // What `state::attributes` publishes off the first segment, and what the
     // command writes back to it.
-    put("color", attr(K::ColorRgb, true, "Colour"));
+    // The primary colour has the shared name; the other two are WLED's own.
+    put("color_rgb", attr(K::ColorRgb, true, "Colour"));
     put("color2", attr(K::ColorRgb, true, "Background colour"));
     put("color3", attr(K::ColorRgb, true, "Third colour"));
     for (name, display, max) in [
@@ -139,7 +143,6 @@ pub fn device_schema() -> DeviceSchema {
         ("custom1", "Custom 1", Some(255.0)),
         ("custom2", "Custom 2", Some(255.0)),
         ("custom3", "Custom 3", Some(31.0)),
-        ("cct", "White temperature", Some(255.0)),
     ] {
         let mut s = AttributeSchema {
             min: Some(0.0),
@@ -246,8 +249,8 @@ pub fn device_schema() -> DeviceSchema {
         ("mac", "MAC", None),
         ("ip", "IP address", None),
         ("led_count", "LEDs", None),
-        ("led_power_mw", "LED power", Some("mW")),
-        ("led_max_power_mw", "LED power limit", Some("mW")),
+        ("led_current_ma", "LED current", Some("mA")),
+        ("led_max_current_ma", "LED current limit", Some("mA")),
         ("led_max_segments", "Maximum segments", None),
         ("led_fps", "Frames per second", None),
         ("effects_count", "Effects available", None),
@@ -376,7 +379,7 @@ pub fn actions() -> Vec<plugin_sdk_rs::device_actions::Action> {
             .writes("preset_id")
             .sentence("apply preset {preset_id} on {device}")
             .param(Param::int("preset_id").label("Preset").required().options_from(from("presets")))
-            .param(Param::int("transition").label("Fade over").unit("ms").range(0.0, 60000.0)),
+            .param(Param::int("transition_ms").label("Fade over").unit("ms").range(0.0, 60000.0)),
         Action::new("start_playlist")
             .label("Start a playlist")
             .category("Presets")
@@ -397,6 +400,14 @@ pub fn actions() -> Vec<plugin_sdk_rs::device_actions::Action> {
             .param(Param::bool_("include_brightness").label("Include brightness").default(true))
             .param(Param::bool_("include_segments").label("Include segment layout").default(false))
             .param(Param::bool_("selected_only").label("Only the selected segments").default(false)),
+        Action::new("save_playlist")
+            .label("Save a playlist")
+            .category("Presets")
+            .description("Keep a playlist in a preset slot: `playlist` is `{steps: [{preset_id, duration_s, transition_ms}], repeat, shuffle, end_preset_id}`. Its own screen builds it.")
+            .sentence("save {device}'s playlist {name}")
+            .param(Param::int("slot").label("Slot").range(1.0, 250.0).step(1.0))
+            .param(Param::string("name").label("Name"))
+            .param(Param::bool_("start").label("Start it").default(false)),
         Action::new("rename_preset")
             .label("Rename a preset")
             .category("Presets")
@@ -472,6 +483,25 @@ pub fn actions() -> Vec<plugin_sdk_rs::device_actions::Action> {
             .param(Param::string("version").label("Version")),
     ]);
     out
+}
+
+/// The top-level names a controller published before it moved to the shared
+/// vocabulary, as a partial of `null`s — which removes them. homeCore only
+/// merges a partial, so without this a stored state keeps the old name with
+/// its last value for good. Published once per controller at startup.
+pub fn retired_state() -> serde_json::Value {
+    serde_json::Value::Object(
+        [
+            "brightness",
+            "cct",
+            "color",
+            "led_power_mw",
+            "led_max_power_mw",
+        ]
+        .into_iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect(),
+    )
 }
 
 /// The schema WLED devices register: attributes, and the actions above.
@@ -589,8 +619,8 @@ mod tests {
                 "mac",
                 "ip",
                 "led_count",
-                "led_power_mw",
-                "led_max_power_mw",
+                "led_current_ma",
+                "led_max_current_ma",
                 "led_max_segments",
                 "led_rgbw",
                 "led_cct",
@@ -674,6 +704,7 @@ mod tests {
             "install_firmware",
             "rename_preset",
             "set_power_on_preset",
+            "save_playlist",
             "restart",
             "identify",
         ];
@@ -741,5 +772,72 @@ mod tests {
         // Still a schema homeCore reads.
         let parsed: DeviceSchema = serde_json::from_value(s).unwrap();
         assert!(parsed.attributes["preset_id"].options.is_some());
+    }
+
+    /// The shared names in their shared units, and none of the spellings
+    /// they replaced (`hc_types::device_vocabulary`).
+    #[test]
+    fn the_shared_names_are_declared_in_the_shared_units() {
+        let a = device_schema().attributes;
+        let b = &a["brightness_pct"];
+        assert!(matches!(b.kind, AttributeKind::Float));
+        assert_eq!(
+            (b.unit.as_deref(), b.min, b.max),
+            (Some("%"), Some(0.0), Some(100.0))
+        );
+        let t = &a["color_temp"];
+        assert!(matches!(t.kind, AttributeKind::ColorTemp));
+        assert_eq!(t.unit.as_deref(), Some("K"));
+        assert!(matches!(a["color_rgb"].kind, AttributeKind::ColorRgb));
+        assert_eq!(a["transition_ms"].unit.as_deref(), Some("ms"));
+        for gone in [
+            "brightness",
+            "transition",
+            "color",
+            "cct",
+            "preset",
+            "effect",
+            "palette",
+            "led_power_mw",
+            "led_max_power_mw",
+        ] {
+            assert!(!a.contains_key(gone), "{gone} is still declared");
+        }
+        let ids: Vec<String> = actions()
+            .iter()
+            .map(|x| x.build()["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&"restart".into()) && !ids.contains(&"reboot".into()));
+        assert!(ids.contains(&"save_playlist".into()));
+        let preset = actions()
+            .into_iter()
+            .find(|x| x.build()["id"] == "apply_preset")
+            .unwrap()
+            .build();
+        let params: Vec<&str> = preset["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(params, ["preset_id", "transition_ms"]);
+    }
+
+    /// Old names are removed from the stored state, and none of them is a
+    /// name still published.
+    #[test]
+    fn retired_names_are_cleared() {
+        let gone = retired_state();
+        assert_eq!(
+            gone,
+            json!({
+                "brightness": null, "cct": null, "color": null,
+                "led_power_mw": null, "led_max_power_mw": null
+            })
+        );
+        let declared = device_schema().attributes;
+        for k in gone.as_object().unwrap().keys() {
+            assert!(!declared.contains_key(k), "{k} is retired and declared");
+        }
     }
 }

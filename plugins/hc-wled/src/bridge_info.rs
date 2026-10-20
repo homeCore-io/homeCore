@@ -238,12 +238,15 @@ async fn build_attrs(
         if let Some(n) = leds.get("count").and_then(Value::as_u64) {
             attrs.insert("led_count".into(), json!(n));
         }
+        // WLED's `pwr` and `maxpwr` are current in milliamps — the LEDs' draw
+        // as its brightness limiter estimates it, and that limiter's budget —
+        // not power. Both are 0 with the limiter off.
         if let Some(n) = leds.get("pwr").and_then(Value::as_u64) {
-            attrs.insert("led_power_mw".into(), json!(n));
+            attrs.insert("led_current_ma".into(), json!(n));
         }
         if let Some(n) = leds.get("maxpwr").and_then(Value::as_u64) {
             if n > 0 {
-                attrs.insert("led_max_power_mw".into(), json!(n));
+                attrs.insert("led_max_current_ma".into(), json!(n));
             }
         }
         if let Some(n) = leds.get("maxseg").and_then(Value::as_u64) {

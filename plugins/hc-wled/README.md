@@ -12,17 +12,23 @@ without one is polled.
 
 ## Published state
 
-Each controller is a `light` device. Its state, on every change:
+Each controller is a `light` device. Shared ideas use homeCore's shared names
+and units (`hc_types::device_vocabulary`), converted from WLED's own scales:
+`brightness_pct` 0–100 (WLED's `bri` 0–255; any lit level is at least 1 %),
+`transition_ms` (WLED's tenths of a second), `color_temp` in kelvin (WLED's
+`cct` 0–255 maps onto 1900–10091 K, 32 K a step), `color_rgb` as `{r, g, b}`.
+Its state, on every change:
 
-- `on`, `brightness` (0–255), `brightness_pct`, `transition_ms`
+- `on`, `brightness_pct`, `transition_ms` (the controller's own fade)
 - `preset_id`, `playlist_id` (none while nothing runs), `main_segment`
 - `segments` — every segment, in the words a command takes: `id`, `name`,
-  `start`, `stop`, `grouping`, `spacing`, `offset`, `on`, `brightness`,
-  `cct`, `colors` (`#rrggbb` ×3), `effect_id`, `effect_speed`,
+  `start`, `stop`, `grouping`, `spacing`, `offset`, `on`, `brightness_pct`,
+  `color_temp`, `colors` (`#rrggbb` ×3), `whites`, `effect_id`, `effect_speed`,
   `effect_intensity`, `custom1`–`custom3`, `option1`–`option3`,
   `palette_id`, `selected`, `reverse`, `mirror`, `freeze`, `blend_mode`
-- the first segment flat, as before: `color`, `color2`, `color3`,
-  `effect_id`, `palette_id`, `effect_speed`, `effect_intensity`, …
+- the first segment flat: `color_rgb` (primary), `color2` (background),
+  `color3` (each `{r, g, b}`), `color_temp`, `effect_id`, `palette_id`,
+  `effect_speed`, `effect_intensity`, …
 - `nightlight` (`on`, `duration_min`, `mode`, `target_pct`, `remaining_s`),
   `sync` (`send`, `receive`, `send_groups`, `receive_groups`),
   `live_override`, `live`, `live_source`, `audio_reactive`
@@ -30,7 +36,10 @@ Each controller is a `light` device. Its state, on every change:
 
 On a slow tick: `presets` and `playlists` by name (each preset with its
 colours and effect, each playlist with its steps), `effects` and `palettes`
-by name, `power_on_preset_id`, the LED layout, WiFi, and firmware
+by name, `power_on_preset_id`, the LED layout (`led_count`,
+`led_current_ma` — the LEDs' draw in milliamps as WLED's brightness limiter
+estimates it, 0 with the limiter off — and `led_max_current_ma`, its budget),
+WiFi, and firmware
 (`firmware_build`, `firmware_latest`, `firmware_update_available`,
 `firmware_status`). `catalog_storage` says where a client keeps the
 effect and palette catalogue (see below).
@@ -38,19 +47,27 @@ effect and palette catalogue (see below).
 ## Commands
 
 A command to a controller is homeCore's words for WLED's (`src/command.rs`
-lists every one): `on` (or `"toggle"`), `brightness_pct`, `transition` (ms),
-`preset_id`, `playlist_id`, `nightlight`, `sync_send`, `sync_receive`,
-`live_override`, `audio`; a look for `segment` (an id, `"all"`,
-`"selected"`) — `effect_id`, `palette_id`, `color`/`color2`/`color3`,
-`effect_speed`, `custom1`… — or for several at once in `segments`;
+lists every one): `on` (or `"toggle"`), `brightness_pct`, `transition_ms`
+(the fade for this change), `preset_id`, `playlist_id`, `nightlight`,
+`sync_send`, `sync_receive`, `live_override`, `audio`; a look for `segment`
+(an id, `"all"`, `"selected"`; segment 0 when left out) — `effect_id`,
+`palette_id`, `color_rgb`/`color2`/`color3` (`{r, g, b}`), `color_temp`
+(kelvin), `segment_brightness_pct`, `effect_speed`, `custom1`… — or for
+several at once in `segments`;
 `add_segment`, `delete_segment`; `save_preset`, `delete_preset`; and `raw`,
 an object passed to WLED as it is.
+
+One spelling each: `preset`, `apply_preset`, `effect`, `palette`, the 0–255
+`brightness` and `segment_brightness`, `cct` and `reboot` are no longer taken
+(restart with the `restart` action). `transition` and `color`, which meant
+what `transition_ms` and `color_rgb` mean, are still taken but never
+published.
 
 ## Device actions
 
 What a screen or an automation offers each controller: choose an effect or
 palette, apply a preset, start a playlist, next in the playlist, save /
-rename / delete a preset, the preset at power-on, nightlight, sync, live data,
+rename / delete a preset, save a playlist, the preset at power-on, nightlight, sync, live data,
 sound, identify, restart, install firmware.
 
 ## Plugin actions

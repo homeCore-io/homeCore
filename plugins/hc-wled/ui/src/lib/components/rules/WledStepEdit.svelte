@@ -19,6 +19,7 @@
 		presetCss,
 		presetOn,
 		presetsOf,
+		rgbOf,
 		segmentsOf,
 		stepSentence,
 		stepState,
@@ -173,7 +174,7 @@
 		else next[k] = v;
 		patch({ look: next });
 	};
-	const COLOUR_KEY = ['color', 'color2', 'color3'];
+	const COLOUR_KEY = ['color_rgb', 'color2', 'color3'];
 	const segs = $derived(first ? segmentsOf(first) : []);
 	const effects = $derived(
 		catalog?.effects.map((e) => ({ id: e.id, name: e.name })) ?? (first ? effectNames(first) : [])
@@ -339,14 +340,14 @@
 						type="checkbox"
 						checked={look[k] !== undefined}
 						onchange={(e) =>
-							setLook(k, e.currentTarget.checked ? (look[k] ?? [255, 160, 0]) : undefined)}
+							setLook(k, e.currentTarget.checked ? (look[k] ?? { r: 255, g: 160, b: 0 }) : undefined)}
 					/>
 					{c.label}
 					{#if look[k] !== undefined}
 						<input
 							type="color"
 							value={hex(look[k])}
-							onchange={(e) => setLook(k, e.currentTarget.value)}
+							onchange={(e) => setLook(k, rgbOf(e.currentTarget.value))}
 						/>
 					{/if}
 				</label>
@@ -481,10 +482,10 @@
 			<label class="field"
 				><span class="label">Fade over</span>
 				<select
-					value={step.transition === undefined ? '' : String(step.transition)}
+					value={step.transition_ms === undefined ? '' : String(step.transition_ms)}
 					onchange={(e) =>
 						patch({
-							transition: e.currentTarget.value === '' ? undefined : Number(e.currentTarget.value)
+							transition_ms: e.currentTarget.value === '' ? undefined : Number(e.currentTarget.value)
 						})}
 				>
 					<option value="">The controller's own</option>
@@ -492,8 +493,8 @@
 					{#each [700, 2000, 5000, 10000, 30000] as ms (ms)}<option value={String(ms)}
 							>{ms / 1000} s</option
 						>{/each}
-					{#if step.transition !== undefined && ![0, 700, 2000, 5000, 10000, 30000].includes(step.transition)}<option
-							value={String(step.transition)}>{step.transition / 1000} s</option
+					{#if step.transition_ms !== undefined && ![0, 700, 2000, 5000, 10000, 30000].includes(step.transition_ms)}<option
+							value={String(step.transition_ms)}>{step.transition_ms / 1000} s</option
 						>{/if}
 				</select></label
 			>

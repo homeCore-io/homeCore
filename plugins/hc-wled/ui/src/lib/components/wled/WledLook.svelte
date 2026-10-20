@@ -14,6 +14,7 @@
 		mainSegment,
 		paletteCss,
 		presetsOf,
+		rgbOf,
 		segmentsOf,
 		type Catalog,
 		type Effect,
@@ -84,7 +85,7 @@
 			{ slot: 2, label: 'Third' }
 		]
 	);
-	const COLOUR_KEY = ['color', 'color2', 'color3'];
+	const COLOUR_KEY = ['color_rgb', 'color2', 'color3'];
 	const QUICK = [
 		['Red', '#ff0000'],
 		['Orange', '#ffa000'],
@@ -253,7 +254,7 @@
 									value={seg?.colors[c.slot] ?? '#000000'}
 									{disabled}
 									onfocus={() => (slot = c.slot)}
-									onchange={(e) => send({ [COLOUR_KEY[c.slot]!]: e.currentTarget.value })}
+									onchange={(e) => send({ [COLOUR_KEY[c.slot]!]: rgbOf(e.currentTarget.value) })}
 								/>
 								<span>
 									<b>{c.label}</b>
@@ -270,7 +271,7 @@
 								aria-label={`${name} for ${colourSlots.find((c) => c.slot === slot)?.label ?? 'the colour'}`}
 								title={name}
 								{disabled}
-								onclick={() => send({ [COLOUR_KEY[slot]!]: hexValue })}
+								onclick={() => send({ [COLOUR_KEY[slot]!]: rgbOf(hexValue) })}
 							></button>
 						{/each}
 					</div>
@@ -278,15 +279,18 @@
 			{/if}
 			{#if device.attributes.led_cct === true}
 				<label>
-					<span class="label">White temperature · <span class="num">{seg?.cct ?? 127}</span></span>
+					<span class="label"
+						>White temperature · <span class="num">{seg?.color_temp ?? 4000} K</span></span
+					>
 					<input
 						class="warm"
 						type="range"
-						min="0"
-						max="255"
-						value={seg?.cct ?? 127}
+						min="1900"
+						max="10091"
+						step="32"
+						value={seg?.color_temp ?? 4000}
 						{disabled}
-						onchange={(e) => send({ cct: Number(e.currentTarget.value) })}
+						onchange={(e) => send({ color_temp: Number(e.currentTarget.value) })}
 					/>
 				</label>
 			{/if}
