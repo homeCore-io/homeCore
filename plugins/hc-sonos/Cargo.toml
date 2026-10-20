@@ -1,6 +1,6 @@
 [package]
 name        = "hc-sonos"
-version     = "0.1.16"
+version     = "0.1.17"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Sonos speakers as media players, discovered over UPnP"
@@ -24,6 +24,9 @@ tracing-appender   = { workspace = true }
 flate2             = "1"
 chrono             = "0.4"
 sonor              = "2.0"
+# sonor's own UPnP crate, for the model name and UDN in a speaker's
+# description (no request to the speaker needed).
+rupnp              = { version = "2.0", features = ["full_device_spec"] }
 futures            = "0.3"
 axum               = "0.8"
 tower              = "0.5"

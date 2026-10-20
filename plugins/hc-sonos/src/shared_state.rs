@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tokio::task::AbortHandle;
 
 use sonor::Speaker;
 
-use crate::speaker::SpeakerState;
+use crate::speaker::{Caps, SpeakerState};
+use crate::subscription::Subscriptions;
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -23,12 +23,31 @@ pub struct SpeakerEntry {
     pub uuid: String,
     pub hc_id: String,
     pub room_name: String,
+    /// Answering. A speaker that stops is kept — registered, with its id,
+    /// room and automations — and marked offline until it answers again.
     pub available: bool,
+    /// Heartbeats in a row it has not answered; two make it offline.
+    pub missed: u8,
     pub last_discovered_at: Instant,
+    /// Its inputs and soundbar switches.
+    pub caps: Caps,
+    /// Why the last command to it failed, until one succeeds.
+    pub last_error: Option<String>,
+    /// Where `media_position` was last anchored — see `bridge::anchor`.
+    pub anchor: Option<crate::bridge::Anchor>,
+    /// The schema last published for it.
+    pub schema: Option<serde_json::Value>,
+    /// What the speaker itself reports — for a grouped member, its own
+    /// volume and an `x-rincon:` queue, not the music it plays.
     pub last_state: Option<SpeakerState>,
-    /// Abort handles for the two GENA subscription loops (AVTransport, RenderingControl).
-    /// Stored so old loops can be cancelled before spawning new ones on re-subscribe.
-    pub sub_handles: Option<[AbortHandle; 2]>,
+    /// The UUID of the group's coordinator, from the topology; its own when
+    /// it leads or plays alone. Transport goes there.
+    pub coordinator_uuid: Option<String>,
+    /// The state last published for it, so nothing is sent twice.
+    pub last_published: Option<serde_json::Value>,
+    /// Its GENA subscriptions, at the address it had when they were made.
+    /// Cancelled (and unsubscribed) before new ones are made.
+    pub subs: Option<Subscriptions>,
 }
 
 // ---------------------------------------------------------------------------

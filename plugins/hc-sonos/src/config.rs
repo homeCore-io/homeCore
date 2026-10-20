@@ -40,6 +40,16 @@ pub fn config_descriptor() -> serde_json::Value {
         .section(
             Section::new("discovery", "Discovery")
                 .field(
+                    Field::toggle("sonos.ssdp")
+                        .label("Look for speakers on the network")
+                        .default(true)
+                        .help(
+                            "SSDP multicast discovery. Off, only the manual hosts below \
+                             are contacted — for a network multicast does not cross, or \
+                             a test setup that must not find real speakers.",
+                        ),
+                )
+                .field(
                     Field::duration("sonos.discovery_interval_secs")
                         .label("Discovery interval")
                         .unit("secs")
@@ -61,7 +71,8 @@ pub fn config_descriptor() -> serde_json::Value {
                         .default(Vec::<String>::new())
                         .help(
                             "Static speaker IPs to probe in addition to SSDP \
-                             — useful across subnets where multicast is dropped.",
+                             — useful across subnets where multicast is dropped. \
+                             An address may carry a port (10.0.0.5:1400); 1400 otherwise.",
                         ),
                 ),
         )
@@ -255,13 +266,18 @@ impl Default for HomecoreConfig {
 #[derive(Deserialize, Clone, Debug)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SonosSection {
+    /// Look for speakers with SSDP multicast. `false` contacts only
+    /// `manual_hosts` — nothing is sent to the multicast group at all.
+    #[serde(default = "default_ssdp")]
+    pub ssdp: bool,
     /// How often to re-run SSDP discovery (seconds).
     #[serde(default = "default_discovery_interval_secs")]
     pub discovery_interval_secs: u64,
     /// SSDP scan duration (seconds).
     #[serde(default = "default_discovery_timeout_secs")]
     pub discovery_timeout_secs: u64,
-    /// Static IPs to probe in addition to SSDP.
+    /// Static IPs to probe in addition to SSDP, each `a.b.c.d` (port 1400)
+    /// or `a.b.c.d:port`.
     #[serde(default)]
     pub manual_hosts: Vec<String>,
 }
@@ -269,6 +285,7 @@ pub struct SonosSection {
 impl Default for SonosSection {
     fn default() -> Self {
         Self {
+            ssdp: default_ssdp(),
             discovery_interval_secs: default_discovery_interval_secs(),
             discovery_timeout_secs: default_discovery_timeout_secs(),
             manual_hosts: vec![],
@@ -362,11 +379,30 @@ fn default_broker_port() -> u16 {
 fn default_plugin_id() -> String {
     "plugin.sonos".into()
 }
+fn default_ssdp() -> bool {
+    true
+}
 fn default_discovery_interval_secs() -> u64 {
     60
 }
 fn default_discovery_timeout_secs() -> u64 {
     5
+}
+
+#[cfg(test)]
+mod ssdp_tests {
+    use super::*;
+
+    #[test]
+    fn ssdp_is_on_unless_switched_off() {
+        let on: SonosConfig = toml::from_str("[sonos]\n").unwrap();
+        assert!(on.sonos.ssdp);
+        let off: SonosConfig =
+            toml::from_str("[sonos]\nssdp = false\nmanual_hosts = [\"127.0.0.1:14001\"]\n")
+                .unwrap();
+        assert!(!off.sonos.ssdp);
+        assert_eq!(off.sonos.manual_hosts, ["127.0.0.1:14001"]);
+    }
 }
 
 #[cfg(all(test, feature = "schema"))]

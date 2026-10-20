@@ -446,7 +446,7 @@ pub async fn room_state(Path(room): Path<String>, State(state): State<AppState>)
         }
     };
 
-    match speaker::poll(&speaker).await {
+    match speaker::poll(&speaker, speaker::Caps::of(&speaker)).await {
         Ok(s) => {
             let mut obj = speaker::to_json(&s);
             obj["uuid"] = json!(uuid);
@@ -1046,8 +1046,10 @@ pub async fn sonos_notify(
     body: String,
 ) -> StatusCode {
     let event = match service.as_str() {
-        "avt" => events::parse_avt(&body).map(NotifyEvent::Avt),
+        "avt" => events::parse_avt(&body).map(|a| NotifyEvent::Avt(Box::new(a))),
         "rc" => events::parse_rc(&body).map(NotifyEvent::Rc),
+        "grc" => events::parse_grc(&body).map(NotifyEvent::GroupRc),
+        "zgt" => Some(NotifyEvent::Topology),
         other => {
             warn!(uuid, service = other, "Unknown NOTIFY service");
             return StatusCode::OK;

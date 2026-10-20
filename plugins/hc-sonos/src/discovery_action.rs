@@ -45,8 +45,9 @@ pub async fn discover_speakers_streaming(
 
     let timeout = Duration::from_secs(cfg.sonos.discovery_timeout_secs);
     let manual_hosts = cfg.sonos.manual_hosts.clone();
+    let ssdp = cfg.sonos.ssdp;
     let sweep_handle = tokio::spawn(async move {
-        discovery::run_once(&timeout, &manual_hosts, &sweep_tx).await;
+        discovery::run_once(&timeout, ssdp, &manual_hosts, &sweep_tx).await;
         // sweep_tx drops here → sweep_rx.recv() returns None below,
         // ending the drain loop.
     });
