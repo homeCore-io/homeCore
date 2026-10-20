@@ -11,6 +11,10 @@
 //! and reports no level back, so a slider would be a control with nothing
 //! behind it. Same for `media_position`: it is published (read-only) but
 //! not writable, because Roku has no seek command.
+//!
+//! `muted` *is* writable, though ECP cannot report it either: the plugin
+//! tracks it from the VolumeMute presses it sends and presses only when the
+//! state asked for differs. A press on the physical remote is not seen.
 
 use std::collections::HashMap;
 
@@ -61,6 +65,13 @@ pub fn device_schema() -> DeviceSchema {
         }),
     );
     a.insert(
+        "muted".into(),
+        attr(AttributeKind::Bool, true, "Muted", None).with_states(BoolStates {
+            when_true: StateLabel::verbed("muted", "is muted"),
+            when_false: StateLabel::verbed("unmuted", "is unmuted"),
+        }),
+    );
+    a.insert(
         "source".into(),
         // Writable free-form rather than an enum: the option list is the
         // device's own `available_sources`, which varies per device and
@@ -85,6 +96,26 @@ pub fn device_schema() -> DeviceSchema {
     duration.unit = Some("s".into());
     a.insert("media_duration".into(), duration);
 
+    a.insert(
+        "media_description".into(),
+        attr(AttributeKind::String, false, "Programme description", None),
+    );
+    a.insert(
+        "tv_channel_name".into(),
+        attr(AttributeKind::String, false, "TV channel name", None),
+    );
+    for (name, display) in [
+        ("media_format", "Stream format"),
+        ("tv_channel_info", "TV channel detail"),
+    ] {
+        a.insert(
+            name.into(),
+            AttributeSchema {
+                category: Some(AttributeCategory::Diagnostic),
+                ..attr(AttributeKind::Json, false, display, None)
+            },
+        );
+    }
     a.insert(
         "app_name".into(),
         attr(AttributeKind::String, false, "Channel", None),
@@ -297,7 +328,10 @@ mod tests {
             .collect();
         for key in writable {
             assert!(
-                matches!(key.as_str(), "state" | "on" | "source" | "tv_channel"),
+                matches!(
+                    key.as_str(),
+                    "state" | "on" | "muted" | "source" | "tv_channel"
+                ),
                 "{key} is writable in the schema but has no attribute-style command",
             );
         }

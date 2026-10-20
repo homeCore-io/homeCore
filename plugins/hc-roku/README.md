@@ -27,11 +27,12 @@ setting to change, but it is easier to set it first.
 | Attribute | Notes |
 |---|---|
 | `state` | `playing` \| `paused` \| `stopped` \| `idle` \| `buffering` \| `unavailable` |
+| `muted` | tracked by the plugin (see below), writable |
 | `on`, `power_mode` | `power_mode` is Roku's own: `PowerOn`, `Ready`, `DisplayOff`, `Headless`, `PowerOff` |
 | `source`, `app_id`, `app_name`, `app_type`, `app_version` | active channel or TV input; `source` is `"Home"` on the home screen |
 | `is_tv_input` | true when the active "app" is an HDMI/AV/tuner input |
 | `media_title`, `media_description` | live-TV programme info (Roku reports no title for streaming apps) |
-| `media_position`, `media_duration` | seconds; `_ms` variants alongside |
+| `media_position`, `media_duration` | seconds |
 | `media_is_live`, `media_error`, `media_format` | from `query/media-player` |
 | `screensaver_active`, `screensaver_name` | |
 | `tv_channel`, `tv_channel_name`, `tv_channel_info` | Roku TV, tuned to the antenna input |
@@ -42,13 +43,19 @@ There is **no `volume` attribute** — ECP exposes VolumeUp/Down/Mute as key
 presses and reports no level back, so there is nothing to publish. Same
 reason there is no seek: `media_position` is read-only.
 
+`muted` cannot be read from the device either, so the plugin tracks it from
+the VolumeMute presses it sends. `{"muted": true}` presses VolumeMute only
+when the tracked state is unmuted (the key toggles, so pressing a muted device
+would unmute it). Muting from the physical remote is not seen, and the
+tracked state starts as unmuted when the plugin starts.
+
 ## Commands
 
 Send to `homecore/devices/{hc_id}/cmd`, or `PATCH /api/v1/devices/{id}/state`.
 Both an `action` form and an attribute form work.
 
 **Attributes** — `on` (bool), `source` (channel/input name or id), `state`
-(`playing`/`paused`/`stopped`), `tv_channel`, `mute`, `key`, `text`.
+(`playing`/`paused`/`stopped`), `tv_channel`, `muted` (bool), `key`, `text`.
 
 **Actions:**
 
@@ -57,7 +64,7 @@ Both an `action` form and an attribute form work.
 | Power | `power_on`, `power_off`, `power_toggle` |
 | Transport | `play`, `pause`, `play_pause`, `stop`, `next`, `previous`, `instant_replay` |
 | Navigation | `home`, `back`, `select`, `up`, `down`, `left`, `right`, `info`, `enter`, `backspace`, `find_remote` |
-| Volume | `volume_up`, `volume_down`, `mute` (all accept `count`) |
+| Volume | `volume_up`, `volume_down` (both accept `count`), `set_mute` (`muted`), `mute` (toggles) |
 | Live TV | `channel_up`, `channel_down`, `tune` (`channel: "14.3"`) |
 | Apps | `launch_app` (`app`, `content_id`, `media_type`, `params`), `select_source`, `install_app`, `exit_app`, `app_state` |
 | Raw input | `key` (`key`, `count`, `hold_ms`), `key_hold`, `key_down`, `key_up`, `text` (`text`, `submit`), `send_input`, `search` |

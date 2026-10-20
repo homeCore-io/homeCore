@@ -38,6 +38,10 @@ pub struct CommandContext<'a> {
     pub device_info: Option<&'a DeviceInfo>,
     /// Last published `state` attribute — see the module note on `Play`.
     pub playback_state: &'a str,
+    /// Whether the plugin believes the device is muted. ECP cannot report
+    /// mute, so this is tracked from the presses the plugin sent; a mute
+    /// result carries the new value back as `"muted"`.
+    pub muted: bool,
     /// False when the last poll failed; switches `power_on` to
     /// Wake-on-LAN, since a device that isn't answering can't be told to
     /// turn on over HTTP.
@@ -59,6 +63,12 @@ pub async fn execute(client: &EcpClient, cmd: &Value, ctx: &CommandContext<'_>) 
     }
 }
 
+/// Whether reaching `wanted` takes a VolumeMute press, given the tracked
+/// state. The key toggles, so pressing when already there would undo it.
+pub fn mute_press_needed(tracked: bool, wanted: bool) -> bool {
+    tracked != wanted
+}
+
 /// Attribute-style commands. Each recognised key is rewritten into the
 /// action it means and dispatched; unrecognised keys are reported rather
 /// than silently dropped, because a typo'd attribute otherwise looks like
@@ -74,6 +84,7 @@ async fn run_attributes(
 
     let mut applied = Vec::new();
     let mut unknown = Vec::new();
+    let mut muted = None;
 
     for (key, value) in obj {
         if is_metadata_key(key) {
@@ -85,7 +96,12 @@ async fn run_attributes(
                 Some(false) => Some(json!({ "action": "power_off" })),
                 None => None,
             },
-            "mute" => Some(json!({ "action": "mute" })),
+            // `muted` is a level, not a toggle: `{"muted": true}` mutes and
+            // does nothing to a device already muted. `mute` is the old
+            // spelling, still read.
+            "muted" | "mute" => value
+                .as_bool()
+                .map(|m| json!({ "action": "set_mute", "muted": m })),
             "source" => value
                 .as_str()
                 .map(|s| json!({ "action": "select_source", "source": s })),
@@ -111,7 +127,10 @@ async fn run_attributes(
         match rewritten {
             Some(sub) => {
                 let action = sub["action"].as_str().unwrap_or_default().to_string();
-                run_action(client, &action, &sub, ctx).await?;
+                let result = run_action(client, &action, &sub, ctx).await?;
+                if let Some(m) = result.get("muted").and_then(Value::as_bool) {
+                    muted = Some(m);
+                }
                 applied.push(key.clone());
             }
             None => unknown.push(key.clone()),
@@ -127,7 +146,11 @@ async fn run_attributes(
     if !unknown.is_empty() {
         warn!(?unknown, "Ignored unrecognised attributes in Roku command");
     }
-    Ok(json!({ "applied": applied, "ignored": unknown }))
+    let mut out = json!({ "applied": applied, "ignored": unknown });
+    if let Some(m) = muted {
+        out["muted"] = json!(m);
+    }
+    Ok(out)
 }
 
 async fn run_action(
@@ -204,10 +227,20 @@ async fn run_action(
         "volume_down" => press_repeated(client, "VolumeDown", cmd).await,
         "mute" | "toggle_mute" | "volume_mute" => {
             client.keypress("VolumeMute").await?;
-            Ok(json!({
-                "sent": "VolumeMute",
-                "note": "VolumeMute toggles; ECP cannot report or set mute state absolutely",
-            }))
+            Ok(json!({ "sent": "VolumeMute", "muted": !ctx.muted }))
+        }
+        // VolumeMute toggles, so an absolute mute presses it only when the
+        // tracked state differs from the one asked for.
+        "set_mute" => {
+            let wanted = cmd
+                .get("muted")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("set_mute requires boolean 'muted'"))?;
+            if !mute_press_needed(ctx.muted, wanted) {
+                return Ok(json!({ "skipped": "already so", "muted": wanted }));
+            }
+            client.keypress("VolumeMute").await?;
+            Ok(json!({ "sent": "VolumeMute", "muted": wanted }))
         }
         "set_volume" => bail!(
             "Roku ECP has no absolute volume control — use volume_up / volume_down \
@@ -730,6 +763,7 @@ mod http_tests {
             apps,
             device_info: None,
             playback_state: playback,
+            muted: false,
             reachable: true,
             wake_on_lan: false,
             default_hold: Duration::from_millis(500),
@@ -891,6 +925,55 @@ mod http_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_mute_press_is_needed_only_to_change_the_state() {
+        assert!(!mute_press_needed(false, false));
+        assert!(mute_press_needed(false, true));
+        assert!(mute_press_needed(true, false));
+        assert!(!mute_press_needed(true, true));
+    }
+
+    /// `{"muted": true}` on an unmuted device presses VolumeMute once and
+    /// reports the new state; on a muted one it presses nothing.
+    #[tokio::test]
+    async fn muted_true_mutes_once_and_never_toggles_back() {
+        let apps = apps_fixture();
+        let (client, log) = stub(1, 200, "").await;
+        let r = execute(&client, &json!({"muted": true}), &ctx(&apps, "playing"))
+            .await
+            .unwrap();
+        assert_eq!(paths(&log), vec!["/keypress/VolumeMute"]);
+        assert_eq!(r["muted"], true);
+
+        let (client, log) = stub(0, 200, "").await;
+        let muted_ctx = CommandContext {
+            muted: true,
+            ..ctx(&apps, "playing")
+        };
+        let r = execute(&client, &json!({"muted": true}), &muted_ctx)
+            .await
+            .unwrap();
+        assert!(
+            paths(&log).is_empty(),
+            "pressed VolumeMute on a muted device"
+        );
+        assert_eq!(r["muted"], true);
+    }
+
+    #[tokio::test]
+    async fn the_toggle_reports_the_state_it_toggled_to() {
+        let apps = apps_fixture();
+        let (client, _log) = stub(1, 200, "").await;
+        let muted_ctx = CommandContext {
+            muted: true,
+            ..ctx(&apps, "playing")
+        };
+        let r = execute(&client, &json!({"action": "mute"}), &muted_ctx)
+            .await
+            .unwrap();
+        assert_eq!(r["muted"], false);
     }
 
     /// ECP genuinely cannot set an absolute volume; saying so beats

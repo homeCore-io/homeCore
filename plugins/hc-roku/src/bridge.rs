@@ -50,6 +50,10 @@ pub struct DeviceEntry {
     pub online: bool,
     pub snapshot: RokuSnapshot,
     pub playback_state: String,
+    /// Mute as the plugin last left it. ECP cannot report mute, so this is
+    /// tracked from the VolumeMute presses sent and published as `muted`;
+    /// a press on the physical remote is not seen.
+    pub muted: bool,
     /// Last full state document published, for change detection. ECP
     /// answers identically between polls far more often than not, and
     /// republishing a retained topic every 10 s for every device is pure
@@ -250,6 +254,7 @@ impl Bridge {
             online: false,
             snapshot: RokuSnapshot::default(),
             playback_state: "unavailable".into(),
+            muted: false,
             last_published: None,
             apps_refreshed_at: None,
         };
@@ -487,6 +492,7 @@ impl Bridge {
             online: true,
             snapshot: RokuSnapshot::default(),
             playback_state: "unavailable".into(),
+            muted: false,
             last_published: None,
             apps_refreshed_at: None,
         };
@@ -669,7 +675,7 @@ impl Bridge {
         snap.apps = apps;
         snap.tv_channels = tv_channels;
 
-        let doc = state::to_json(&snap);
+        let mut doc = state::to_json(&snap);
         let playback = state::playback_state(&snap).to_string();
 
         let (should_publish, identity, device_name) = {
@@ -678,6 +684,7 @@ impl Bridge {
             d.online = true;
             d.snapshot = snap;
             d.playback_state = playback;
+            doc["muted"] = json!(d.muted);
             if let Some(t) = refreshed_at {
                 d.apps_refreshed_at = Some(t);
             }
@@ -776,6 +783,7 @@ impl Bridge {
             apps: &entry.snapshot.apps,
             device_info: entry.snapshot.device_info.as_ref(),
             playback_state: &entry.playback_state,
+            muted: entry.muted,
             reachable: entry.online,
             wake_on_lan: self.cfg.roku.wake_on_lan,
             default_hold: Duration::from_millis(self.cfg.roku.key_hold_ms),
@@ -785,6 +793,7 @@ impl Bridge {
         match commands::execute(&entry.client, &cmd, &ctx).await {
             Ok(result) => {
                 debug!(hc_id, ?result, "Command executed");
+                self.track_mute(&hc_id, &result).await;
                 // Re-poll so homeCore reflects the change without waiting
                 // for the next tick, tagged with the command that caused
                 // it.
@@ -792,6 +801,16 @@ impl Bridge {
                 self.poll_once(&hc_id, Some(&cmd)).await;
             }
             Err(e) => warn!(hc_id, error = %e, cmd = ?cmd, "Command failed"),
+        }
+    }
+
+    /// Keep the mute state a command result reports (see
+    /// [`commands::CommandContext::muted`]).
+    async fn track_mute(&self, hc_id: &str, result: &Value) {
+        if let Some(m) = result.get("muted").and_then(Value::as_bool) {
+            if let Some(d) = self.devices.write().await.get_mut(hc_id) {
+                d.muted = m;
+            }
         }
     }
 
@@ -914,12 +933,14 @@ impl Bridge {
                     apps: &entry.snapshot.apps,
                     device_info: entry.snapshot.device_info.as_ref(),
                     playback_state: &entry.playback_state,
+                    muted: entry.muted,
                     reachable: entry.online,
                     wake_on_lan: self.cfg.roku.wake_on_lan,
                     default_hold: Duration::from_millis(self.cfg.roku.key_hold_ms),
                     type_delay: Duration::from_millis(self.cfg.roku.type_delay_ms),
                 };
                 let result = commands::execute(&entry.client, &inner, &ctx).await?;
+                self.track_mute(hc_id, &result).await;
                 // Refresh in the background: the caller wants the command
                 // acknowledged now, not after the settle delay.
                 let bridge = Arc::clone(self);
