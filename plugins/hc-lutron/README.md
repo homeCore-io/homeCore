@@ -49,6 +49,39 @@ The names are homeCore's shared device vocabulary (`hc_types::device_vocabulary`
   `cci_N` `"open"`/`"closed"` strings (now `cci_N_open`), and a scene's `on`
   (now `active`). They are removed from the retained state at startup.
 
+### Button names
+
+A keypad, Pico or VCRX publishes its buttons as `available_buttons`
+(`[{"number": 3, "name": "Outside"}]`), named by what Lutron engraved on them.
+A button nobody engraved is named for what it is where its number says so — a
+seeTouch's raise/lower rocker (16/18 **Lower**, 17/19 **Raise**), a Pico's 2
+**On**, 3 **Favorite**, 4 **Off**, 5 **Raise**, 6 **Lower** — and otherwise
+keeps "Button N", for the installer to name. A VCRX's contact inputs 32 and
+33 are its **Input 1** and **Input 2**.
+
+## Its screens
+
+The plugin carries its own screens (`ui/`, Svelte custom elements built to
+`ui/dist` and served by the plugin; the web app loads them):
+
+| Slot | Element | What it is |
+|---|---|---|
+| `plugin.page` | `hc-lutron-page` | Whether the main repeater is connected and where; buttons nobody named yet; the scenes, grouped by the room they're in ("House" for none), lit as the repeater lights them, to run; the keypads drawn with their lights and last press; the Picos and visor receivers; a count of everything else with what is on now |
+| `device.panel` (keypad) | `hc-lutron-keypad` | The keypad as it is on the wall, lights live (flashing ones flash). Pick a button: press it, or set its light off/on/slow/fast. The last presses ("OH1 Toggle, held"), and the automations that start on that button |
+| `device.panel` (pico_remote) | `hc-lutron-pico` | Drawn from the buttons it reports (2-button On/Off, 5-button On/Raise/Favorite/Lower/Off), the last pressed lit; what each button starts; its last press. Sends nothing — a Pico takes no commands |
+| `device.panel` (vcrx) | `hc-lutron-vcrx` | Its buttons with their lights, to press; its contact inputs, Open or Closed and since when; its last press |
+| `device.card` (keypad) | `hc-lutron-card` | Standard and large: its named buttons with their lights, to press, and its last press. Compact: how many are lit, and its lights |
+| `dashboard.card` | `hc-lutron-scenes` | "Lutron scenes": the scenes you choose, in your order, to tap; a grid (large, standard) or one row (compact). Its settings (`hc-lutron-scenes-settings`) tick and drag them into order |
+| `rule.step` (keypad, vcrx) | `hc-lutron-step` | *Press a button* or *Set a light*, picked on the keypad drawn; stores `{"action": "press_button", "button": 3}` or `{"action": "set_led", "button": 3, "state": 1}` |
+
+Presses come from homeCore's history of each `button_N`; the one thing the
+screens ask the plugin itself is the `status` action (read-only: `connected`,
+`since`, `error`, `host`, `port`), for the page's *Connected*.
+
+Build them with `npm ci && npm run build` in `ui/` (`npm test` runs the
+step's and the keypad's logic). A plugin run from source serves `ui/dist`; the
+release packs it as `ui/`.
+
 ## Scenes (phantom buttons)
 
 `[[scenes]]` entries map phantom buttons on the Main Repeater to HomeCore devices. Send `{"action": "activate"}` to trigger a scene. LED state is tracked automatically (+100 offset from button component) and published as `active`.
@@ -64,6 +97,15 @@ Saving credentials restarts the plugin so it logs in with them. Core itself
 does not restart and no other plugin is touched — homeCore owns the config
 file (`config/plugins/plugin.lutron.toml`), watches it, and restarts just the
 plugin whose file changed.
+
+## Its own action
+
+| Action | Role | Answers |
+|---|---|---|
+| `status` | read-only (also on `/query`) | `connected`, `since`, `error`, `host`, `port` — the telnet session as the bridge loop last knew it |
+
+The streaming `import_design` action behind the settings form's *Import* is
+unchanged.
 
 ## Notices
 
