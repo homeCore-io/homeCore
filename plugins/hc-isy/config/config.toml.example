@@ -7,7 +7,7 @@
 #   - Firmware 4.2.3+ for WebSocket push (virtually all modern ISY units)
 #
 # Supported device types auto-detected from each node's UOM and type code:
-#   light         — Insteon dimmable switches/keypads (UOM 51, category 1)
+#   light         — Insteon dimmable switches/keypads (UOM 100 or 51, category 1)
 #   switch        — Insteon relays, outlet modules (UOM 78, category 2)
 #   contact_sensor / motion_sensor / water_sensor — known binary sensor classes
 #   binary_sensor — unknown binary sensors that cannot be classified precisely

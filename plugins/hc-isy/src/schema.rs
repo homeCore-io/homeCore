@@ -18,13 +18,12 @@
 //! control that silently does nothing. The tests check both directions.
 
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
-    StateLabel,
+    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use std::collections::HashMap;
 
-use crate::device::DeviceKind;
+use crate::device::{sensor_reading, DeviceKind, NodeContext};
 
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
     AttributeSchema::read_only(kind).labelled(label)
@@ -62,30 +61,22 @@ fn open_closed(a: AttributeSchema) -> AttributeSchema {
     boolean(a, ("open", "opens"), ("closed", "closes"))
 }
 
-/// The schema for an ISY device kind.
-pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
+/// The schema for an ISY device kind. A generic sensor's reading depends on
+/// its `ST` UOM, so the node's context is needed too.
+pub fn schema_for(kind: &DeviceKind, ctx: &NodeContext) -> DeviceSchema {
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
+    let pct = |a: AttributeSchema| ranged(a, 0.0, 100.0, Some("%"));
+    let celsius = |mut a: AttributeSchema| {
+        a.unit = Some("°C".into());
+        a
+    };
 
     match kind {
         DeviceKind::Light => {
             a.insert("on".into(), on_off(rw(AttributeKind::Bool, "Power")));
             a.insert(
-                "brightness".into(),
-                ranged(
-                    rw(AttributeKind::Integer, "Brightness (raw)"),
-                    0.0,
-                    255.0,
-                    None,
-                ),
-            );
-            a.insert(
                 "brightness_pct".into(),
-                ranged(
-                    rw(AttributeKind::Integer, "Brightness"),
-                    0.0,
-                    100.0,
-                    Some("%"),
-                ),
+                pct(rw(AttributeKind::Float, "Brightness")),
             );
         }
 
@@ -110,7 +101,7 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
 
         DeviceKind::WaterSensor => {
             // Inverted at the source: Insteon leak sensors report ON when DRY,
-            // so `node_to_state` sets leak = (ST <= 0).
+            // so `node_to_state` sets water_detected = (ST <= 0).
             let wet = |label| {
                 boolean(
                     ro(AttributeKind::Bool, label),
@@ -132,13 +123,30 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
         }
 
         DeviceKind::Sensor => {
-            a.insert("value".into(), ro(AttributeKind::Float, "Value"));
-            // Metadata about the reading, not a reading. The cross-plugin
-            // lexicon does not claim a bare `unit` — a thermostat could have a
-            // writable one — but here it is plainly the sibling of `value`.
-            let mut unit = ro(AttributeKind::String, "Unit");
-            unit.category = Some(AttributeCategory::Diagnostic);
-            a.insert("unit".into(), unit);
+            // One reading, under the shared name its UOM gives it, in the
+            // shared unit; `value` in the ISY's own unit where there is none.
+            let r = sensor_reading(if ctx.st_uom.is_empty() {
+                "100"
+            } else {
+                &ctx.st_uom
+            });
+            let label = match r.name {
+                "temperature" => "Temperature",
+                "humidity" => "Humidity",
+                "illuminance" => "Illuminance",
+                "power_w" => "Power",
+                "energy_kwh" => "Energy",
+                "voltage" => "Voltage",
+                "current_a" => "Current",
+                "co2" => "CO₂",
+                "pressure" => "Pressure",
+                "wind_speed" => "Wind speed",
+                "uv_index" => "UV index",
+                _ => "Value",
+            };
+            let mut attr = ro(AttributeKind::Float, label);
+            attr.unit = r.unit.map(str::to_string);
+            a.insert(r.name.into(), attr);
         }
 
         DeviceKind::Lock => {
@@ -153,19 +161,8 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
         }
 
         DeviceKind::Cover => {
-            a.insert(
-                "position".into(),
-                ranged(
-                    rw(AttributeKind::Integer, "Position"),
-                    0.0,
-                    100.0,
-                    Some("%"),
-                ),
-            );
-            a.insert(
-                "state".into(),
-                enum_of(rw(AttributeKind::Enum, "State"), &["open", "closed"]),
-            );
+            // One control. `state: open|closed` was the same reading again.
+            a.insert("position".into(), pct(rw(AttributeKind::Float, "Position")));
         }
 
         DeviceKind::Fan => {
@@ -177,32 +174,43 @@ pub fn schema_for(kind: &DeviceKind) -> DeviceSchema {
                     &["off", "low", "medium", "high"],
                 ),
             );
+            a.insert(
+                "speed_pct".into(),
+                pct(rw(AttributeKind::Float, "Speed (%)")),
+            );
         }
 
         DeviceKind::Thermostat => {
             a.insert(
-                "state".into(),
+                "hvac_action".into(),
                 enum_of(
-                    ro(AttributeKind::Enum, "Operating state"),
-                    &["idle", "heating", "cooling"],
+                    ro(AttributeKind::Enum, "Doing now"),
+                    &["idle", "heating", "cooling", "fan"],
                 ),
             );
             a.insert(
                 "temperature".into(),
-                ro(AttributeKind::Float, "Current temperature"),
+                celsius(ro(AttributeKind::Float, "Current temperature")),
             );
-            a.insert("hvac_mode".into(), ro(AttributeKind::String, "HVAC mode"));
+            a.insert("humidity".into(), pct(ro(AttributeKind::Float, "Humidity")));
             a.insert(
-                "target_temp_heat".into(),
-                rw(AttributeKind::Float, "Heat setpoint"),
+                "hvac_mode".into(),
+                enum_of(
+                    rw(AttributeKind::Enum, "HVAC mode"),
+                    &["off", "heat", "cool", "auto", "fan_only"],
+                ),
             );
             a.insert(
-                "target_temp_cool".into(),
-                rw(AttributeKind::Float, "Cool setpoint"),
+                "heat_setpoint".into(),
+                celsius(rw(AttributeKind::Float, "Heat setpoint")),
+            );
+            a.insert(
+                "cool_setpoint".into(),
+                celsius(rw(AttributeKind::Float, "Cool setpoint")),
             );
             a.insert(
                 "fan_mode".into(),
-                enum_of(ro(AttributeKind::Enum, "Fan mode"), &["auto", "on"]),
+                enum_of(rw(AttributeKind::Enum, "Fan mode"), &["auto", "on"]),
             );
         }
     }
@@ -218,8 +226,9 @@ pub async fn publish(
     publisher: &DevicePublisher,
     device_id: &str,
     kind: &DeviceKind,
+    ctx: &NodeContext,
 ) -> anyhow::Result<()> {
-    let value = serde_json::to_value(schema_for(kind))?;
+    let value = serde_json::to_value(schema_for(kind, ctx))?;
     publisher
         .register_device_schema_json(device_id, &value)
         .await
@@ -228,7 +237,7 @@ pub async fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{cmd_to_isy, node_to_state};
+    use crate::device::{cmd_to_isy, node_to_state, NodeContext};
     use crate::isy::IsyNode;
     use serde_json::json;
 
@@ -254,7 +263,7 @@ mod tests {
     #[test]
     fn every_boolean_names_both_of_its_states() {
         for kind in ALL {
-            for (name, attr) in &schema_for(kind).attributes {
+            for (name, attr) in &schema_for(kind, &NodeContext::default()).attributes {
                 if !matches!(attr.kind, AttributeKind::Bool) {
                     continue;
                 }
@@ -282,15 +291,15 @@ mod tests {
     /// wet when `ST <= 0`, because Insteon leak sensors report ON when dry.
     #[test]
     fn one_name_per_reading_with_the_inversion_declared() {
-        let contact = schema_for(&DeviceKind::ContactSensor).attributes;
+        let contact = schema_for(&DeviceKind::ContactSensor, &NodeContext::default()).attributes;
         assert!(contact.contains_key("open"));
         assert!(!contact.contains_key("contact"));
 
-        let motion = schema_for(&DeviceKind::MotionSensor).attributes;
+        let motion = schema_for(&DeviceKind::MotionSensor, &NodeContext::default()).attributes;
         assert!(motion.contains_key("motion"));
         assert!(!motion.contains_key("occupancy"));
 
-        let water = schema_for(&DeviceKind::WaterSensor).attributes;
+        let water = schema_for(&DeviceKind::WaterSensor, &NodeContext::default()).attributes;
         assert!(!water.contains_key("leak"));
         let w = water["water_detected"].states.as_ref().unwrap();
         assert_eq!(w.get(true).label, "wet");
@@ -304,7 +313,7 @@ mod tests {
     #[test]
     fn nothing_is_writable_that_cmd_to_isy_ignores() {
         for kind in ALL {
-            for (name, attr) in &schema_for(kind).attributes {
+            for (name, attr) in &schema_for(kind, &NodeContext::default()).attributes {
                 if !attr.writable {
                     continue;
                 }
@@ -320,7 +329,7 @@ mod tests {
                     _ => continue,
                 };
                 assert!(
-                    !cmd_to_isy(&probe, kind).is_empty(),
+                    !cmd_to_isy(&probe, kind, &NodeContext::default()).is_empty(),
                     "{kind:?}.{name} is declared writable but cmd_to_isy produces nothing"
                 );
             }
@@ -334,33 +343,82 @@ mod tests {
     #[test]
     fn every_published_attribute_is_declared() {
         for kind in ALL {
-            // A node rich enough to exercise the OPTIONAL branches too. A
-            // default node has no properties, so a thermostat would publish
-            // only `state` and the test would pass without ever checking the
-            // five attributes that appear when the ISY reports them.
-            let mut node = IsyNode::default();
-            for prop in ["ST", "CLITEMP", "CLIMD", "CLISPH", "CLISPC", "CLIFAN"] {
-                node.properties.insert(
-                    prop.into(),
-                    crate::isy::IsyProperty {
-                        value: 1,
-                        formatted: "1".into(),
-                        uom: "17".into(),
-                        prec: 0,
-                    },
-                );
-            }
-            // A node type that maps to a binary-sensor device class, so that
-            // optional key is exercised as well.
-            node.node_type = "16.8.0.0".into();
-            let published = node_to_state(&node, kind);
-            let declared = schema_for(kind).attributes;
-            for name in published.as_object().unwrap().keys() {
-                assert!(
-                    declared.contains_key(name),
-                    "{kind:?} publishes `{name}` but does not declare it"
-                );
+            for st_uom in ["17", "100", "97", "46", ""] {
+                // A node rich enough to exercise the OPTIONAL branches too. A
+                // default node has no properties, so a thermostat would
+                // publish only `hvac_action` and the test would pass without
+                // ever checking what appears when the ISY reports more.
+                let mut node = IsyNode::default();
+                for prop in [
+                    "ST", "CLITEMP", "CLIMD", "CLISPH", "CLISPC", "CLIFS", "CLIHCS", "CLIHUM",
+                ] {
+                    node.properties.insert(
+                        prop.into(),
+                        crate::isy::IsyProperty {
+                            value: 100,
+                            formatted: "100".into(),
+                            uom: if prop == "ST" { st_uom } else { "17" }.into(),
+                            prec: 0,
+                        },
+                    );
+                }
+                // A node type that maps to a binary-sensor device class, so
+                // that optional key is exercised as well.
+                node.node_type = "16.8.0.0".into();
+                let published = node_to_state(&node, kind);
+                let declared = schema_for(kind, &NodeContext::from_node(&node)).attributes;
+                for name in published.as_object().unwrap().keys() {
+                    assert!(
+                        declared.contains_key(name),
+                        "{kind:?} (ST uom {st_uom}) publishes `{name}` but does not declare it"
+                    );
+                }
             }
         }
+    }
+
+    /// The shared names are declared in the shared units, and the old ones
+    /// are gone.
+    #[test]
+    fn shared_names_in_shared_units() {
+        let ctx = NodeContext::default();
+        let attrs = |k: &DeviceKind| schema_for(k, &ctx).attributes;
+
+        let light = attrs(&DeviceKind::Light);
+        assert_eq!(light["brightness_pct"].unit.as_deref(), Some("%"));
+        assert_eq!(light["brightness_pct"].max, Some(100.0));
+        assert!(!light.contains_key("brightness"));
+
+        let cover = attrs(&DeviceKind::Cover);
+        assert!(cover["position"].writable);
+        assert!(!cover.contains_key("state"), "one control per cover");
+
+        let fan = attrs(&DeviceKind::Fan);
+        assert!(fan["speed_pct"].writable && fan["speed"].writable);
+
+        let t = attrs(&DeviceKind::Thermostat);
+        for name in ["heat_setpoint", "cool_setpoint", "temperature"] {
+            assert_eq!(t[name].unit.as_deref(), Some("°C"), "{name}");
+        }
+        for name in ["heat_setpoint", "cool_setpoint", "hvac_mode", "fan_mode"] {
+            assert!(t[name].writable, "{name} is writable");
+        }
+        assert!(!t["hvac_action"].writable);
+        for old in ["state", "target_temp_heat", "target_temp_cool"] {
+            assert!(!t.contains_key(old), "{old} is gone");
+        }
+
+        let sensor = |uom: &str| {
+            let ctx = NodeContext {
+                st_uom: uom.into(),
+                ..Default::default()
+            };
+            schema_for(&DeviceKind::Sensor, &ctx).attributes
+        };
+        let s = sensor("17");
+        assert_eq!(s["temperature"].unit.as_deref(), Some("°C"));
+        assert!(!s.contains_key("unit") && !s.contains_key("value"));
+        assert_eq!(sensor("36")["illuminance"].unit.as_deref(), Some("lux"));
+        assert_eq!(sensor("46")["value"].unit.as_deref(), Some("mm/h"));
     }
 }

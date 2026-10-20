@@ -28,11 +28,13 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::device::{classify_node, cmd_to_isy, event_to_patch, node_to_state, DeviceKind};
+use crate::device::{
+    classify_node, cmd_to_isy, event_to_patch, node_to_state, DeviceKind, NodeContext,
+};
 use crate::isy::{addr_to_device_id, parse_event_xml, IsyClient};
 
 // ---------------------------------------------------------------------------
-// Device registry (shared read-only after startup)
+// Device registry
 // ---------------------------------------------------------------------------
 
 /// Everything needed to translate between HomeCore device IDs and ISY.
@@ -41,16 +43,9 @@ struct Registry {
     kinds: HashMap<String, DeviceKind>,
     /// device_id → original ISY address (for REST commands)
     addrs: HashMap<String, String>,
-}
-
-impl Registry {
-    fn kind(&self, device_id: &str) -> Option<&DeviceKind> {
-        self.kinds.get(device_id)
-    }
-
-    fn addr(&self, device_id: &str) -> Option<&str> {
-        self.addrs.get(device_id).map(String::as_str)
-    }
+    /// device_id → the scales its values arrive in and its last level, kept
+    /// current from its events (commands need them).
+    ctxs: HashMap<String, NodeContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +152,7 @@ async fn run_once(
 
     let mut kinds: HashMap<String, DeviceKind> = HashMap::new();
     let mut addrs: HashMap<String, String> = HashMap::new();
+    let mut ctxs: HashMap<String, NodeContext> = HashMap::new();
 
     for node in &nodes {
         if !node.enabled {
@@ -171,7 +167,8 @@ async fn run_once(
             .await?;
         // Retained, so a client connecting later still knows what this
         // device's attributes mean rather than inferring them.
-        crate::schema::publish(publisher, &device_id, &kind).await?;
+        let ctx = NodeContext::from_node(node);
+        crate::schema::publish(publisher, &device_id, &kind, &ctx).await?;
         let state = node_to_state(node, &kind);
         publisher.publish_state(&device_id, &state).await?;
         publisher.publish_availability(&device_id, true).await?;
@@ -179,6 +176,7 @@ async fn run_once(
 
         debug!(device_id, kind = kind.as_str(), "Registered");
         addrs.insert(device_id.clone(), node.address.clone());
+        ctxs.insert(device_id.clone(), ctx);
         kinds.insert(device_id, kind);
     }
     info!(
@@ -186,7 +184,7 @@ async fn run_once(
         "All ISY devices registered with HomeCore"
     );
 
-    let registry = Arc::new(Registry { kinds, addrs });
+    let mut registry = Registry { kinds, addrs, ctxs };
 
     // ── ISY WebSocket subscription ────────────────────────────────────
     let ws_url = isy.ws_url();
@@ -220,7 +218,7 @@ async fn run_once(
             ws_msg = ws_rx.next() => {
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_event(&text, publisher, &registry).await;
+                        handle_ws_event(&text, publisher, &mut registry).await;
                     }
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) => {
@@ -252,15 +250,16 @@ async fn run_once(
 // ---------------------------------------------------------------------------
 
 async fn handle_command(device_id: &str, payload: &Value, isy: &IsyClient, registry: &Registry) {
-    let Some(kind) = registry.kind(device_id) else {
+    let Some(kind) = registry.kinds.get(device_id) else {
         debug!(device_id = %device_id, "Unknown device — ignoring cmd");
         return;
     };
-    let Some(addr) = registry.addr(device_id) else {
+    let Some(addr) = registry.addrs.get(device_id) else {
         return;
     };
+    let ctx = registry.ctxs.get(device_id).cloned().unwrap_or_default();
 
-    let cmds = cmd_to_isy(payload, kind);
+    let cmds = cmd_to_isy(payload, kind, &ctx);
     if cmds.is_empty() {
         debug!(device_id = %device_id, "No ISY commands for payload");
         return;
@@ -281,7 +280,7 @@ async fn handle_command(device_id: &str, payload: &Value, isy: &IsyClient, regis
 // WebSocket event handler
 // ---------------------------------------------------------------------------
 
-async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &Registry) {
+async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &mut Registry) {
     // The ISY may batch multiple XML events in one frame; split on </Event>
     for part in text.split("</Event>") {
         if part.trim().is_empty() {
@@ -299,12 +298,14 @@ async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &Registry
         }
 
         let device_id = addr_to_device_id(&event.node_addr);
-        let Some(kind) = reg.kind(&device_id) else {
+        let Some(kind) = reg.kinds.get(&device_id) else {
             debug!(device_id, control = %event.control, "Event for unknown device — ignored");
             continue;
         };
+        let ctx = reg.ctxs.entry(device_id.clone()).or_default();
+        ctx.observe(&event);
 
-        if let Some(patch) = event_to_patch(&event, kind) {
+        if let Some(patch) = event_to_patch(&event, kind, ctx) {
             if let Err(e) = publisher.publish_state_partial(&device_id, &patch).await {
                 warn!(device_id, error = %e, "Failed to publish state patch");
             } else {

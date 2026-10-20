@@ -46,23 +46,14 @@ pub struct IsyProperty {
     /// Raw integer value as reported by the ISY.  May need scaling by `prec`.
     pub value: i64,
     /// ISY-formatted display value (e.g. `"68.0"`, `"On"`, `"100%"`).
+    /// Kept for logging; values are read from `value` and `prec`, so a full
+    /// read and an event are scaled the same way.
+    #[allow(dead_code)]
     pub formatted: String,
     /// Unit of measure code (e.g. `"51"` = %, `"17"` = °F, `"78"` = on/off).
     pub uom: String,
     /// Decimal precision: divide `value` by 10^prec to get the real value.
     pub prec: u8,
-}
-
-impl IsyProperty {
-    /// Return the numeric value as f64, applying ISY precision.
-    pub fn as_f64(&self) -> f64 {
-        // Try the pre-formatted string first (most accurate)
-        if let Ok(v) = self.formatted.parse::<f64>() {
-            return v;
-        }
-        let divisor = 10_i64.pow(self.prec as u32) as f64;
-        self.value as f64 / divisor
-    }
 }
 
 /// A state-change event received from the ISY WebSocket subscription.
