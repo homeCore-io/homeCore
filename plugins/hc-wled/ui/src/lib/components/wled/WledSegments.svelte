@@ -261,15 +261,18 @@
 				</label>
 				{#if device.attributes.led_cct === true}
 					<label>
-						<span class="label">White temperature · <span class="num">{s.cct}</span></span>
+						<span class="label"
+							>White temperature · <span class="num">{s.color_temp} K</span></span
+						>
 						<input
 							class="warm"
 							type="range"
-							min="0"
-							max="255"
-							value={s.cct}
+							min="1900"
+							max="10091"
+							step="32"
+							value={s.color_temp}
 							{disabled}
-							onchange={(e) => one(s, { cct: Number(e.currentTarget.value) })}
+							onchange={(e) => one(s, { color_temp: Number(e.currentTarget.value) })}
 						/>
 					</label>
 				{/if}

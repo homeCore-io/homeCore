@@ -1,8 +1,11 @@
 //! hc-plugin-template — a homeCore plugin, reduced to the parts every plugin has.
 //!
 //! It publishes one virtual light per `[[template.devices]]` entry, accepts
-//! `on` and `brightness` commands, and echoes the result back as state. Replace
-//! the device talking with your own protocol and the shape stays the same.
+//! `{"on": true}`, `{"brightness_pct": 40}` and `{"action": "toggle"}`, and
+//! publishes back what it applied. The "light" speaks 0–255, as much real
+//! hardware does, and the plugin converts to homeCore's 0–100 % at the edge.
+//! Replace the device talking with your own protocol and the shape stays the
+//! same.
 //!
 //! What is here because every plugin needs it, in the order it has to happen:
 //!
@@ -25,6 +28,12 @@
 //!      when they stop being true.
 //!  10. Consume commands, applying each and publishing what actually happened.
 //!
+//! **Names and units are homeCore's, not your device's.** `on`,
+//! `brightness_pct` (0–100), `color_temp` (kelvin), temperatures in °C: the
+//! shared table is `hc_types::device_vocabulary`. Convert from the device's
+//! own scale where you talk to it — see [`pct_from_level`] — and nothing
+//! downstream ever converts again.
+//!
 //! Read <https://github.com/homeCore-io/hc-wled> next — it is the smallest
 //! complete plugin — then <https://github.com/homeCore-io/hc-roku> for
 //! discovery and streaming actions.
@@ -32,6 +41,7 @@
 mod config;
 
 use anyhow::Result;
+use plugin_sdk_rs::device_actions::{with_actions, Action as DeviceAction};
 use plugin_sdk_rs::mqtt_log_layer::{MqttLogHandle, MqttLogLayer};
 use plugin_sdk_rs::types::schema::{
     AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
@@ -219,11 +229,11 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
         notices.clear("no_devices_configured");
     }
 
-    // State lives here so both the command handler and the publisher can see
-    // it. A real plugin would read it back from the device instead.
-    let state: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+    // The stand-in devices live here so both the command handler and the
+    // publisher can see them. A real plugin would talk to the hardware.
+    let state: Arc<Mutex<HashMap<String, Light>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let schema = device_schema();
+    let schema = device_schema_json();
 
     for device in &cfg.template.devices {
         publisher
@@ -237,7 +247,7 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
         // reference house were in that state, and every one of them was a
         // plugin that stopped at the line above.
         publisher
-            .register_device_schema(&device.id, &schema)
+            .register_device_schema_json(&device.id, &schema)
             .await?;
 
         // Registration and command subscription are SEPARATE, and forgetting
@@ -246,12 +256,12 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
         // nothing is subscribed to its cmd topic.
         publisher.subscribe_commands(&device.id).await?;
 
-        let initial = json!({ "on": false, "brightness": 0 });
+        let light = Light::default();
         state
             .lock()
             .expect("state mutex")
-            .insert(device.id.clone(), initial.clone());
-        publisher.publish_state(&device.id, &initial).await?;
+            .insert(device.id.clone(), light);
+        publisher.publish_state(&device.id, &light.state()).await?;
         publisher.publish_availability(&device.id, true).await?;
 
         info!(device_id = %device.id, "registered");
@@ -299,26 +309,19 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
 /// when the bulb refused to turn on.
 async fn apply(
     publisher: &plugin_sdk_rs::DevicePublisher,
-    state: &Arc<Mutex<HashMap<String, Value>>>,
+    state: &Arc<Mutex<HashMap<String, Light>>>,
     device_id: &str,
     payload: &Value,
 ) -> Result<()> {
     let next = {
         let mut guard = state.lock().expect("state mutex");
-        let Some(current) = guard.get_mut(device_id) else {
+        let Some(light) = guard.get_mut(device_id) else {
             warn!(device_id, "command for a device this plugin does not own");
             return Ok(());
         };
-
         // ...talk to the real device here, and only record what it confirms.
-        if let Some(on) = payload.get("on").and_then(Value::as_bool) {
-            current["on"] = json!(on);
-        }
-        if let Some(brightness) = payload.get("brightness").and_then(Value::as_u64) {
-            current["brightness"] = json!(brightness.min(255));
-            current["on"] = json!(brightness > 0);
-        }
-        current.clone()
+        light.apply(payload)?;
+        light.state()
     };
 
     // `_for_command` attaches provenance, so the UI and the audit log can say
@@ -329,8 +332,110 @@ async fn apply(
     Ok(())
 }
 
-/// The action manifest. Every entry becomes a button on the plugin's page in
-/// the web UI, and is callable from hc-mcp — with no UI code at either end.
+/// The stand-in hardware: a light whose level runs 0–255, as WLED's and many
+/// others' do. `level` is kept while the light is off, so `{"on": true}`
+/// comes back at the level it had.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Light {
+    on: bool,
+    level: u8,
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self {
+            on: false,
+            level: 255,
+        }
+    }
+}
+
+/// The device's 0–255 as homeCore's `brightness_pct`, 0–100.
+///
+/// **Convert at the edge**, in both directions, and test both ends of the
+/// scale: the device's lowest step must not read as 0 % (which means off),
+/// and 100 % must reach the device's maximum.
+fn pct_from_level(level: u8) -> u8 {
+    if level == 0 {
+        return 0;
+    }
+    ((f64::from(level) * 100.0 / 255.0).round() as u8).max(1)
+}
+
+/// `brightness_pct` as the device's 0–255. Anything above 0 % stays lit.
+fn level_from_pct(pct: f64) -> u8 {
+    if pct <= 0.0 {
+        return 0;
+    }
+    ((pct.min(100.0) * 255.0 / 100.0).round() as u8).max(1)
+}
+
+impl Light {
+    /// What homeCore sees: the shared names, in the shared units. A light
+    /// that is on never reports 0 %, and one that is off reports 0 %.
+    fn state(&self) -> Value {
+        let pct = if self.on {
+            pct_from_level(self.level)
+        } else {
+            0
+        };
+        json!({ "on": self.on, "brightness_pct": pct })
+    }
+
+    /// Apply a command — one of the two shapes homeCore sends:
+    ///
+    /// - **an attribute write**, `{"on": true}` or `{"brightness_pct": 40}`,
+    ///   for anything declared `writable`;
+    /// - **a declared action**, `{"action": "toggle"}`, for something a device
+    ///   *does* that is not setting a value. Read `action`; nothing else.
+    fn apply(&mut self, payload: &Value) -> Result<()> {
+        if let Some(action) = payload.get("action").and_then(Value::as_str) {
+            match action {
+                "toggle" => self.set_on(!self.on),
+                other => anyhow::bail!("unknown action: {other}"),
+            }
+            return Ok(());
+        }
+        if let Some(on) = payload.get("on").and_then(Value::as_bool) {
+            self.set_on(on);
+        }
+        if let Some(pct) = payload.get("brightness_pct").and_then(Value::as_f64) {
+            // 0 % is off, and the level is kept for the next `on`.
+            match level_from_pct(pct) {
+                0 => self.on = false,
+                level => {
+                    self.level = level;
+                    self.on = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `{"on": true}` with no level restores the last one.
+    fn set_on(&mut self, on: bool) {
+        self.on = on;
+        if on && self.level == 0 {
+            self.level = 255;
+        }
+    }
+}
+
+/// What a device can *do* beyond setting a value, each called as
+/// `{"action": "<id>", …params}`. Declared, so a screen offers it and an
+/// automation can phrase it.
+fn device_actions() -> Vec<DeviceAction> {
+    vec![DeviceAction::new("toggle")
+        .label("Toggle")
+        .icon("power")
+        .sentence("toggle {device}")]
+}
+
+/// The schema a light registers: its attributes, and its actions.
+fn device_schema_json() -> Value {
+    with_actions(&device_schema(), device_actions())
+}
+
 /// **What this device reports and accepts, declared once.**
 ///
 /// A client will not offer a control the plugin has not promised, so an
@@ -338,6 +443,10 @@ async fn apply(
 /// exactly what you publish, under the name you publish it — an attribute that
 /// is readable as `brightness` and writable as `level` is a control that
 /// silently does nothing, which is worse than no control at all.
+///
+/// Use homeCore's names and units (`hc_types::device_vocabulary`) for shared
+/// ideas — `brightness_pct` 0–100, never the device's own 0–255 — and your own
+/// name, under one spelling, for an idea only your device has.
 ///
 /// Four rules this covers, each a real bug in a shipped plugin:
 ///
@@ -374,15 +483,16 @@ fn device_schema() -> DeviceSchema {
     );
 
     attributes.insert(
-        "brightness".to_string(),
+        "brightness_pct".to_string(),
         AttributeSchema {
-            kind: AttributeKind::Integer,
+            kind: AttributeKind::Float,
             writable: true,
             display_name: Some("Brightness".to_string()),
-            // The range `apply` actually clamps to. A slider drawn from a
-            // wrong range is a control that lies at one end.
+            unit: Some("%".to_string()),
+            // homeCore's range, whatever the device's is. A slider drawn
+            // from a wrong range is a control that lies at one end.
             min: Some(0.0),
-            max: Some(255.0),
+            max: Some(100.0),
             step: Some(1.0),
             ..Default::default()
         },
@@ -394,6 +504,9 @@ fn device_schema() -> DeviceSchema {
     }
 }
 
+/// The action manifest — the *plugin's* actions, not a device's. Every entry
+/// becomes a button on the plugin's page in the web UI, and is callable from
+/// hc-mcp — with no UI code at either end.
 fn capabilities() -> plugin_sdk_rs::types::Capabilities {
     use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
     Capabilities {
@@ -443,6 +556,31 @@ mod conformance_tests {
     fn the_declaration_follows_the_rules() {
         plugin_sdk_rs::conformance::check_all(&super::device_schema(), &super::capabilities())
             .assert_ok();
+        plugin_sdk_rs::conformance::check_device_schema_json(&super::device_schema_json())
+            .assert_ok();
+    }
+
+    /// Every attribute declared writable is one `apply` really takes.
+    #[test]
+    fn every_writable_attribute_is_applied() {
+        use serde_json::json;
+        let samples = [("on", json!(true)), ("brightness_pct", json!(40))];
+        plugin_sdk_rs::conformance::check_writables(&super::device_schema(), |name| {
+            let Some((_, v)) = samples.iter().find(|(n, _)| *n == name) else {
+                return false;
+            };
+            let mut light = super::Light {
+                on: false,
+                level: 10,
+            };
+            light.apply(&json!({ name: v })).is_ok()
+                && light
+                    != super::Light {
+                        on: false,
+                        level: 10,
+                    }
+        })
+        .assert_ok();
     }
 
     /// The manifest and the handler must agree in both directions: an action
@@ -455,5 +593,57 @@ mod conformance_tests {
     fn every_action_is_both_advertised_and_routed() {
         plugin_sdk_rs::conformance::check_actions_routed(&super::capabilities(), &["say_hello"])
             .assert_ok();
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn device_level_to_percent() {
+        assert_eq!(pct_from_level(0), 0);
+        // The lowest step is lit, so it must not read as 0 % (off).
+        assert_eq!(pct_from_level(1), 1);
+        assert_eq!(pct_from_level(128), 50);
+        assert_eq!(pct_from_level(254), 100);
+        assert_eq!(pct_from_level(255), 100);
+    }
+
+    #[test]
+    fn percent_to_device_level() {
+        assert_eq!(level_from_pct(0.0), 0);
+        assert_eq!(level_from_pct(-5.0), 0);
+        // Anything above 0 % stays lit.
+        assert_eq!(level_from_pct(0.1), 1);
+        assert_eq!(level_from_pct(1.0), 3);
+        assert_eq!(level_from_pct(50.0), 128);
+        // 100 % reaches the device's maximum, and more is clamped.
+        assert_eq!(level_from_pct(100.0), 255);
+        assert_eq!(level_from_pct(150.0), 255);
+    }
+
+    #[test]
+    fn every_whole_percent_survives_the_round_trip() {
+        for pct in 0..=100u8 {
+            assert_eq!(pct_from_level(level_from_pct(f64::from(pct))), pct);
+        }
+    }
+
+    #[test]
+    fn on_restores_the_last_level_and_zero_percent_is_off() {
+        let mut light = Light::default();
+        light.apply(&json!({"brightness_pct": 40})).unwrap();
+        assert_eq!(light.state(), json!({"on": true, "brightness_pct": 40}));
+
+        light.apply(&json!({"brightness_pct": 0})).unwrap();
+        assert_eq!(light.state(), json!({"on": false, "brightness_pct": 0}));
+
+        light.apply(&json!({"on": true})).unwrap();
+        assert_eq!(light.state(), json!({"on": true, "brightness_pct": 40}));
+
+        light.apply(&json!({"action": "toggle"})).unwrap();
+        assert_eq!(light.state()["on"], json!(false));
+        assert!(light.apply(&json!({"action": "explode"})).is_err());
     }
 }

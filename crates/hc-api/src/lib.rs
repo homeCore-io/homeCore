@@ -1605,6 +1605,7 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         // System
         .route("/system/status", get(handlers::system_status))
+        .route("/system/vocabulary-check", get(handlers::vocabulary_check))
         .route("/system/battery_settings", get(handlers::battery_settings))
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/backups", get(backup::list_kept_handler))

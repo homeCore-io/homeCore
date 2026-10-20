@@ -15,6 +15,58 @@ pub struct DeviceEntry {
     pub hc_id: String,
     /// Resolved at construction — an entry only exists for a configured kind.
     pub kind: DeviceKind,
+    /// The last level above zero the bridge reported, so `{"on": true}`
+    /// restores it rather than jumping to full (a dimmer) or half (a fan).
+    pub last_level: Option<f64>,
+}
+
+/// A LIP zone level (0–100, hundredths) as `brightness_pct` / `speed_pct`.
+///
+/// One decimal, clamped to 0–100, and never `0` while the zone is on: a level
+/// of 0.4 % is a lit lamp, and 0 % means off.
+pub fn level_pct(level: f64) -> f64 {
+    let level = level.clamp(0.0, 100.0);
+    let pct = (level * 10.0).round() / 10.0;
+    if level > 0.0 {
+        pct.max(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The fade a command asks for, in seconds: `transition_ms`, or the older
+/// `fade_secs` (still accepted, no longer declared), or the configured default.
+pub fn command_fade_secs(cmd: &Value, default_secs: f64) -> f64 {
+    if let Some(ms) = cmd.get("transition_ms").and_then(Value::as_f64) {
+        return (ms / 1000.0).max(0.0);
+    }
+    if let Some(secs) = cmd.get("fade_secs").and_then(Value::as_f64) {
+        return secs.max(0.0);
+    }
+    default_secs
+}
+
+/// The named fan speed a level falls in — the Maestro table's bands.
+pub fn fan_speed(level: f64) -> &'static str {
+    match level as u32 {
+        0 => "off",
+        1..=25 => "low",
+        26..=50 => "medium",
+        51..=75 => "medium-high",
+        _ => "high",
+    }
+}
+
+/// The level a named fan speed sets, or `None` for a speed the fan lacks.
+pub fn fan_speed_level(speed: &str) -> Option<f64> {
+    Some(match speed {
+        "off" => 0.0,
+        "low" => 25.0,
+        "medium" => 50.0,
+        "medium-high" => 75.0,
+        "high" => 100.0,
+        _ => return None,
+    })
 }
 
 impl DeviceEntry {
@@ -27,7 +79,22 @@ impl DeviceEntry {
             config,
             hc_id,
             kind,
+            last_level: None,
         })
+    }
+
+    /// Note a level the bridge reported; only a level above zero is one
+    /// `{"on": true}` can come back to.
+    pub fn remember_level(&mut self, level: f64) {
+        if level > 0.0 {
+            self.last_level = Some(level.min(100.0));
+        }
+    }
+
+    /// The level `{"on": true}` with no level turns on to: the last one seen,
+    /// or full when nothing has been seen since the plugin started.
+    pub fn restore_level(&self) -> f64 {
+        self.last_level.unwrap_or(100.0)
     }
 
     /// HomeCore device_type string for registration.
@@ -74,8 +141,7 @@ impl DeviceEntry {
         match self.kind {
             DeviceKind::Dimmer => Some(serde_json::json!({
                 "on":             level > 0.0,
-                "brightness_pct": (level * 10.0).round() / 10.0,
-                "brightness":     ((level / 100.0) * 255.0).round() as i64,
+                "brightness_pct": level_pct(level),
             })),
             DeviceKind::Switch => Some(serde_json::json!({
                 "on": level > 0.0,
@@ -86,32 +152,22 @@ impl DeviceEntry {
                 } else {
                     level
                 };
-                Some(serde_json::json!({ "position": (pos * 10.0).round() / 10.0 }))
+                Some(
+                    serde_json::json!({ "position": (pos.clamp(0.0, 100.0) * 10.0).round() / 10.0 }),
+                )
             }
-            DeviceKind::FanControl => {
-                let speed = match level as u32 {
-                    0 => "off",
-                    1..=25 => "low",
-                    26..=50 => "medium",
-                    51..=75 => "medium-high",
-                    _ => "high",
-                };
-                Some(serde_json::json!({
-                    "on":    level > 0.0,
-                    "speed": speed,
-                    "speed_pct": (level * 10.0).round() / 10.0,
-                }))
-            }
+            DeviceKind::FanControl => Some(serde_json::json!({
+                "on":    level > 0.0,
+                "speed": fan_speed(level),
+                "speed_pct": level_pct(level),
+            })),
             _ => None,
         }
     }
 
     /// Translate an occupancy state to a HomeCore state patch.
     pub fn translate_occupancy_state(&self, occupied: bool) -> Value {
-        serde_json::json!({
-            "occupied": occupied,
-            "occupancy": occupied,
-        })
+        serde_json::json!({ "occupied": occupied })
     }
 
     // -----------------------------------------------------------------------
@@ -120,24 +176,18 @@ impl DeviceEntry {
 
     /// Translate a HomeCore command payload into LIP command strings.
     pub fn translate_command(&self, cmd: &Value, global_fade: f64) -> Vec<String> {
-        let fade = cmd["fade_secs"]
-            .as_f64()
-            .unwrap_or_else(|| self.fade_secs(global_fade));
+        let fade = command_fade_secs(cmd, self.fade_secs(global_fade));
         let id = self.config.integration_id;
 
         match self.kind {
             DeviceKind::Dimmer => {
+                // `brightness` is not read: its scale (0–255 or 0–100) was
+                // guessed from the number, and 50 meant two different levels.
                 let level = if let Some(b) = cmd["brightness_pct"].as_f64() {
                     b.clamp(0.0, 100.0)
-                } else if let Some(b) = cmd["brightness"].as_f64() {
-                    if b > 100.0 {
-                        ((b / 255.0) * 100.0).clamp(0.0, 100.0)
-                    } else {
-                        b.clamp(0.0, 100.0)
-                    }
                 } else if let Some(on) = cmd["on"].as_bool() {
                     if on {
-                        100.0
+                        self.restore_level()
                     } else {
                         0.0
                     }
@@ -177,19 +227,15 @@ impl DeviceEntry {
 
             DeviceKind::FanControl => {
                 let level = if let Some(speed) = cmd["speed"].as_str() {
-                    match speed {
-                        "off" => 0.0,
-                        "low" => 25.0,
-                        "medium" => 50.0,
-                        "medium-high" => 75.0,
-                        "high" => 100.0,
-                        _ => return vec![],
+                    match fan_speed_level(speed) {
+                        Some(level) => level,
+                        None => return vec![],
                     }
                 } else if let Some(pct) = cmd["speed_pct"].as_f64() {
                     pct.clamp(0.0, 100.0)
                 } else if let Some(on) = cmd["on"].as_bool() {
                     if on {
-                        50.0
+                        self.restore_level()
                     } else {
                         0.0
                     }
@@ -220,5 +266,107 @@ impl SceneEntry {
     pub fn new(config: SceneConfig) -> Self {
         let hc_id = config.hc_id();
         Self { config, hc_id }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn dev(kind: DeviceKind) -> DeviceEntry {
+        DeviceEntry::new(DeviceConfig {
+            integration_id: 7,
+            name: "Test".into(),
+            kind: Some(kind),
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons: vec![],
+        })
+        .expect("a device")
+    }
+
+    #[test]
+    fn levels_become_percentages_and_on_never_reads_zero() {
+        assert_eq!(level_pct(0.0), 0.0);
+        assert_eq!(level_pct(0.01), 1.0, "a lit lamp never reads 0 %");
+        assert_eq!(level_pct(1.0), 1.0);
+        assert_eq!(level_pct(37.46), 37.5);
+        assert_eq!(level_pct(100.0), 100.0);
+        assert_eq!(level_pct(120.0), 100.0);
+        assert_eq!(level_pct(-1.0), 0.0);
+    }
+
+    /// Only `brightness_pct` — the 0–255 twin is gone, in both directions.
+    #[test]
+    fn a_dimmer_publishes_and_takes_one_brightness() {
+        let d = dev(DeviceKind::Dimmer);
+        assert_eq!(
+            d.translate_output_state(25.0).unwrap(),
+            json!({"on": true, "brightness_pct": 25.0})
+        );
+        assert!(d
+            .translate_command(&json!({"brightness": 128}), 0.0)
+            .is_empty());
+        assert_eq!(
+            d.translate_command(&json!({"brightness_pct": 40.5}), 0.0),
+            vec!["#OUTPUT,7,1,40.50"]
+        );
+    }
+
+    #[test]
+    fn transition_ms_is_the_fade_and_fade_secs_still_works() {
+        let d = dev(DeviceKind::Dimmer);
+        let set = |cmd: Value| d.translate_command(&cmd, 1.0)[0].clone();
+        assert_eq!(
+            set(json!({"brightness_pct": 50, "transition_ms": 750})),
+            "#OUTPUT,7,1,50.00,0.75"
+        );
+        assert_eq!(
+            set(json!({"brightness_pct": 50, "transition_ms": 0})),
+            "#OUTPUT,7,1,50.00"
+        );
+        assert_eq!(
+            set(json!({"brightness_pct": 50, "fade_secs": 2})),
+            "#OUTPUT,7,1,50.00,2"
+        );
+        assert_eq!(set(json!({"brightness_pct": 50})), "#OUTPUT,7,1,50.00,1");
+    }
+
+    /// Rule 5: `{"on": true}` comes back to the last level — a dimmer used to
+    /// jump to 100 % and a fan to 50 %.
+    #[test]
+    fn on_restores_the_last_level() {
+        let on = json!({"on": true});
+        let mut d = dev(DeviceKind::Dimmer);
+        assert_eq!(d.translate_command(&on, 0.0), vec!["#OUTPUT,7,1,100.00"]);
+        d.remember_level(35.0);
+        d.remember_level(0.0);
+        assert_eq!(d.translate_command(&on, 0.0), vec!["#OUTPUT,7,1,35.00"]);
+
+        let mut f = dev(DeviceKind::FanControl);
+        assert_eq!(f.translate_command(&on, 0.0), vec!["#OUTPUT,7,1,100.00"]);
+        f.remember_level(25.0);
+        assert_eq!(f.translate_command(&on, 0.0), vec!["#OUTPUT,7,1,25.00"]);
+    }
+
+    #[test]
+    fn fan_bands() {
+        assert_eq!(fan_speed(0.0), "off");
+        assert_eq!(fan_speed(25.0), "low");
+        assert_eq!(fan_speed(50.0), "medium");
+        assert_eq!(fan_speed(51.0), "medium-high");
+        assert_eq!(fan_speed(100.0), "high");
+        assert_eq!(fan_speed_level("medium-high"), Some(75.0));
+        assert_eq!(fan_speed_level("turbo"), None);
+    }
+
+    #[test]
+    fn occupancy_is_published_once_as_occupied() {
+        assert_eq!(
+            dev(DeviceKind::OccupancySensor).translate_occupancy_state(false),
+            json!({"occupied": false})
+        );
     }
 }

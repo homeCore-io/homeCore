@@ -109,6 +109,38 @@ backoff.
 
 The public page "Developing Plugins" has the long version of each rule.
 
+### Names and units
+
+**One name, one meaning, one unit**, for everything a device reports or takes.
+The table is `hc_types::device_vocabulary::TERMS`; read it before naming an
+attribute.
+
+- **Use a name from the table when the idea matches**, in its unit and range:
+  `on`, `brightness_pct` (0–100, decimals allowed), `color_temp` (kelvin),
+  `color_xy`, `transition_ms`, `position` (100 = open), `locked`, `open`
+  (`true` = open), `motion`, `occupied`, `temperature`, `humidity`,
+  `illuminance` (lux), `setpoint` / `heat_setpoint` / `cool_setpoint`,
+  `hvac_mode`, `hvac_action`, `power_w`, `energy_kwh`, `battery_pct`,
+  `volume`, `muted`, `media_title`, and the rest of the table.
+- **Your own idea gets your own name**, never one of these with another
+  meaning. A WLED preset is `preset_id`; a raw 0–255 level is not
+  `brightness`.
+- **Convert at the edge.** Publish in the table's unit and convert back when
+  commanding. Temperatures are **°C**, rain **mm**, pressure **hPa**, wind
+  **m/s** — whatever the device reports or the person prefers. Showing °F is
+  the app's job, from the person's setting; a plugin has no unit setting.
+  Write the conversion as a function with a test at each end of the scale:
+  a dimmer's lowest step must not read as 0 % (off) and 100 % must reach the
+  device's maximum (99 on Z-Wave, 254 on Zigbee and Matter, 255 on WLED).
+- **Units in names.** A number names its unit as a suffix — `_pct`, `_ms`,
+  `_secs`, `_w`, `_kwh` — unless it is a term whose unit the table sets
+  (`temperature`, `humidity`, `volume`, `position`, …). Fades are `_ms`.
+- **Two command shapes, no others.** A write to a writable attribute,
+  `{"on": true}`, or a declared action, `{"action": "start", …}`. Read
+  `action`; never `command`. The app and automations send exactly these.
+- **`{"on": true}` restores the last level** where the device can. `0` %
+  means off; a light that is on never reports `0` %.
+
 ## 5. The plugin's own actions
 
 Declared on the **capability manifest** (`with_capabilities`), each with a
@@ -338,6 +370,9 @@ GitHub Release; none is on a package registry yet (see
 - [ ] Starts with the event loop first; survives homeCore restarting.
 - [ ] Every device has a `device_type` and a schema; numbers that are choices
       have named options; actions have sentences.
+- [ ] Shared ideas use the names and units in `device_vocabulary`, converted
+      at the edge and tested at both ends of the scale; commands are attribute
+      writes or `{"action": …}`.
 - [ ] Nothing it publishes changes by itself every refresh.
 - [ ] Settings have a schema and a descriptor; the coverage test passes.
 - [ ] Alerts are current state; news is `default_on: false`.

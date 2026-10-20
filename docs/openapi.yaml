@@ -8176,6 +8176,64 @@ paths:
   # ---------------------------------------------------------------------------
   # System
   # ---------------------------------------------------------------------------
+  /system/vocabulary-check:
+    get:
+      operationId: getVocabularyCheck
+      summary: Automations, scenes and devices checked against what devices take
+      description: |
+        Report only — changes nothing. Every automation step, trigger and
+        condition that names a device, and every scene, is compared with the
+        device's schema; every device's schema and state with the shared
+        vocabulary (`hc_types::device_vocabulary`).
+
+        Severities: `broken` (a device that is not there, an action it never
+        declared), `undeclared` (a key or attribute the schema does not have
+        — the plugin may still take it), `rename` (an old spelling or the
+        retired `{"command": …}` shape, with `instead`), `unit` (a shared name
+        with another unit or kind). Requires `devices:read` and
+        `automations:read`.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The findings, most serious first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary, findings]
+                properties:
+                  summary:
+                    type: object
+                    properties:
+                      broken: { type: integer }
+                      undeclared: { type: integer }
+                      rename: { type: integer }
+                      unit: { type: integer }
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                      required: [severity, place, device_id, message]
+                      properties:
+                        severity:
+                          type: string
+                          enum: [broken, undeclared, rename, unit]
+                        place:
+                          type: object
+                          description: "`{kind: automation|scene, id, name}` or `{kind: device}`"
+                          properties:
+                            kind: { type: string, enum: [automation, scene, device] }
+                            id: { type: string }
+                            name: { type: string }
+                        device_id: { type: string }
+                        plugin_id: { type: string }
+                        name: { type: string, description: The attribute, action or key }
+                        message: { type: string }
+                        instead: { type: string, description: What to use instead }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /system/status:
     get:
       operationId: getSystemStatus

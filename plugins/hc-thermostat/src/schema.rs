@@ -5,13 +5,13 @@
 //! became a slider, and the attribute's meaning came from a lexicon keyed on
 //! its name.
 //!
-//! **Nothing here is writable.** `on_device_command` dispatches entirely on
-//! the action named — `{"action": "set_setpoint", "value": 21.5}`, or the older
-//! `{"command": …}` spelling — and
-//! ignores attribute-style writes completely. Declaring `setpoint` writable
-//! would render a slider whose every drag is silently dropped, so the writable
-//! surface is declared as [`DeviceAction`]s instead and every attribute is
-//! read-only.
+//! Names follow the shared vocabulary (`hc_types::device_vocabulary`):
+//! `temperature`, `setpoint` (both °C), `hvac_mode` and `hvac_action`.
+//!
+//! **Two things are writable**: `{"setpoint": 21}` and `{"hvac_mode": "heat"}`
+//! are handled as attribute writes by `on_device_command`. Everything else is
+//! reported only and changes through a declared action
+//! (`{"action": "set_hysteresis", "value": 1.0}`).
 //!
 //! Only what `Runtime::state_payload` actually emits appears here; the tests
 //! walk that function and fail if the two drift apart.
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 /// A read-only attribute, labelled for display.
 ///
-/// Every attribute on a thermostat is read-only — see the module note.
+/// Most attributes on a thermostat are read-only — see the module note.
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
     AttributeSchema::read_only(kind).labelled(label)
 }
@@ -43,20 +43,31 @@ fn ro_enum(label: &str, options: &[&str]) -> AttributeSchema {
     a
 }
 
+/// The `hvac_mode`s a virtual thermostat can be in.
+pub const MODES: &[&str] = &["heat", "cool", "off"];
+
 /// The attribute half of the schema.
 fn attributes() -> HashMap<String, AttributeSchema> {
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
 
     // -- what it is doing right now ------------------------------------------
     a.insert(
-        "current_temperature".into(),
-        ro(AttributeKind::Float, "Current temperature"),
+        "temperature".into(),
+        ro_unit(AttributeKind::Float, "Temperature", "°C"),
     );
     a.insert(
-        "call_for".into(),
-        // "stale" is a real value: it is what the aggregate reads when the
-        // sensors have stopped reporting, and a rule wants to catch that.
-        ro_enum("Calling for", &["idle", "heat", "cool", "stale"]),
+        "hvac_action".into(),
+        // What the actuator is doing for it now, not what it would like to.
+        ro_enum("Doing now", &["idle", "heating", "cooling", "off"]),
+    );
+    a.insert(
+        "sensors_stale".into(),
+        // Its sensors have stopped reporting, so it holds the actuator as it
+        // is. A rule wants to catch that.
+        ro(AttributeKind::Bool, "Sensors stale").with_states(BoolStates {
+            when_true: StateLabel::verbed("sensors stale", "loses its sensors"),
+            when_false: StateLabel::verbed("sensors reporting", "hears its sensors again"),
+        }),
     );
     a.insert(
         "settled".into(),
@@ -76,7 +87,9 @@ fn attributes() -> HashMap<String, AttributeSchema> {
     );
     a.insert(
         "pending_call".into(),
-        ro(AttributeKind::String, "Pending call"),
+        // What it will do once the short-cycle lockout ends, in
+        // `hvac_action`'s words; absent when nothing waits.
+        ro_enum("Waiting to start", &["idle", "heating", "cooling"]),
     );
     a.insert(
         "actuator_last_change".into(),
@@ -96,10 +109,20 @@ fn attributes() -> HashMap<String, AttributeSchema> {
     );
 
     // -- how it is configured -------------------------------------------------
-    // Reported, not writable: these change through `set_*` commands.
-    a.insert("setpoint".into(), ro(AttributeKind::Float, "Setpoint"));
-    a.insert("hysteresis".into(), ro(AttributeKind::Float, "Hysteresis"));
-    a.insert("mode".into(), ro_enum("Mode", &["heat", "cool", "off"]));
+    // The setpoint and the mode take attribute writes; the rest change through
+    // `set_*` actions.
+    let mut setpoint = AttributeSchema::new(AttributeKind::Float).labelled("Setpoint");
+    setpoint.unit = Some("°C".into());
+    a.insert("setpoint".into(), setpoint);
+    let mut mode = AttributeSchema::new(AttributeKind::Enum).labelled("Mode");
+    mode.options = Some(MODES.iter().copied().map(AttributeOption::from).collect());
+    a.insert("hvac_mode".into(), mode);
+    // A width in degrees Celsius, not a temperature: no `°C` unit, or an app
+    // showing °F would add 32 to it.
+    a.insert(
+        "hysteresis".into(),
+        ro(AttributeKind::Float, "Deadband (°C difference)"),
+    );
     a.insert(
         "aggregation".into(),
         ro_enum("Sensor aggregation", &["average", "min", "max"]),
@@ -134,15 +157,19 @@ fn actions() -> Vec<Action> {
             // Stands in for the reading, so a screen starts the field at it.
             .writes("setpoint")
             .sentence("set {device} to {value}")
-            .param(Param::float("value").label("Target temperature").required()),
+            .param(
+                Param::float("value")
+                    .label("Target temperature (°C)")
+                    .required(),
+            ),
         Action::new("set_mode")
             .label("Set the mode")
             .category("Thermostat")
-            .writes("mode")
+            .writes("hvac_mode")
             .sentence("set {device} to {value}")
             .param(
                 Param::enum_("value")
-                    .options(["heat", "cool", "off"])
+                    .options(MODES.iter().copied())
                     .label("Mode")
                     .required(),
             ),
@@ -166,6 +193,22 @@ fn actions() -> Vec<Action> {
             .category("Tuning")
             .param(Param::int("min_on_secs").label("Minimum on time"))
             .param(Param::int("min_off_secs").label("Minimum off time")),
+        Action::new("set_sensors")
+            .label("Choose the sensors")
+            .category("Setup")
+            .writes("sensor_ids")
+            .param(Param::string("sensor_ids").label("Sensor device ids, comma-separated"))
+            .param(Param::string("attribute").label("Sensor attribute (°C)")),
+        Action::new("set_actuator")
+            .label("Choose what it switches")
+            .category("Setup")
+            .writes("actuator_device_id")
+            // `on_cmd` / `off_cmd` (JSON payloads) are taken too, but have
+            // no control to declare them with; they belong in the config file.
+            .param(Param::device_ref("device_id").label("Actuator device")),
+        Action::new("recalculate")
+            .label("Re-evaluate now")
+            .category("Thermostat"),
     ]
 }
 
@@ -219,13 +262,23 @@ mod tests {
         }
     }
 
-    /// Nothing is writable, because `on_device_command` dispatches only on a
-    /// `command` string. A writable declaration here renders a control whose
-    /// every use is silently dropped.
+    /// Only what `on_device_command` takes as an attribute write is writable.
+    /// A writable declaration for anything else renders a control whose every
+    /// use is silently dropped.
     #[test]
-    fn no_attribute_is_ever_writable() {
+    fn only_the_setpoint_and_mode_are_writable() {
         for (name, attr) in &schema().attributes {
-            assert!(!attr.writable, "{name} claims to be writable");
+            let expected = matches!(name.as_str(), "setpoint" | "hvac_mode");
+            assert_eq!(attr.writable, expected, "{name}");
+        }
+    }
+
+    /// Temperatures are declared in °C, as the vocabulary has them.
+    #[test]
+    fn temperatures_are_celsius() {
+        let a = schema().attributes;
+        for name in ["temperature", "setpoint"] {
+            assert_eq!(a[name].unit.as_deref(), Some("°C"), "{name}");
         }
     }
 
@@ -268,6 +321,7 @@ mod tests {
             "set_short_cycle",
             "set_sensors",
             "set_actuator",
+            "recalculate",
         ];
         for a in &schema().actions {
             assert!(

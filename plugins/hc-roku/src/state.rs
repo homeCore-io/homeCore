@@ -140,16 +140,12 @@ pub fn to_json(snap: &RokuSnapshot) -> Value {
         out.insert("media_error".into(), json!(p.error));
         out.insert("media_is_live".into(), json!(p.is_live));
         // homeCore's media_player type declares media_position /
-        // media_duration in **seconds**; ECP reports milliseconds. Both
-        // are published — the canonical seconds for rules and the raw
-        // milliseconds for anything drawing a progress bar.
+        // media_duration in **seconds**; ECP reports milliseconds.
         if let Some(ms) = p.position_ms {
             out.insert("media_position".into(), json!(ms / 1000));
-            out.insert("media_position_ms".into(), json!(ms));
         }
         if let Some(ms) = p.duration_ms {
             out.insert("media_duration".into(), json!(ms / 1000));
-            out.insert("media_duration_ms".into(), json!(ms));
         }
         if !p.format.is_empty() {
             out.insert("media_format".into(), map_to_json(&p.format));
@@ -360,7 +356,7 @@ mod tests {
         assert_eq!(j["source"], "Netflix");
         // Seconds for the canonical attribute, milliseconds alongside.
         assert_eq!(j["media_position"], 5);
-        assert_eq!(j["media_position_ms"], 5000);
+        assert!(j.get("media_position_ms").is_none());
         assert_eq!(j["media_duration"], 60);
     }
 
@@ -582,6 +578,52 @@ mod tests {
         assert_eq!(j["friendly_name"], "Living Room");
         // The untouched firmware dump rides along, snake-cased.
         assert_eq!(j["device_info"]["software_version"], "12.0.0");
+    }
+
+    /// Everything the state document can carry is declared — an undeclared
+    /// attribute is one a client has to guess at. `muted` is added by the
+    /// bridge from its tracked state.
+    #[test]
+    fn every_published_attribute_is_declared() {
+        let chan = ecp::parse_tv_channels(
+            r#"<tv-channel><channel>
+                <number>14.3</number><name>getTV</name>
+                <program-title>Airwolf</program-title>
+                <program-description>Helicopter.</program-description>
+            </channel></tv-channel>"#,
+        )
+        .unwrap()
+        .remove(0);
+        let snap = RokuSnapshot {
+            device_info: Some(info("PowerOn", true)),
+            active: Some(active(
+                r#"<active-app><app id="12" type="appl" version="4.1">Netflix</app><screensaver id="5" type="ssvr">Nebula</screensaver></active-app>"#,
+            )),
+            player: Some(ecp::parse_media_player(
+                r#"<player error="false" state="play"><format audio="aac" video="h264"/><position>5000 ms</position><duration>60000 ms</duration><is_live>false</is_live></player>"#,
+            ).unwrap()),
+            tv_channel: Some(chan.clone()),
+            apps: ecp::parse_apps(r#"<apps><app id="12" type="appl">Netflix</app></apps>"#)
+                .unwrap(),
+            tv_channels: vec![chan],
+        };
+        let j = to_json(&snap);
+        let declared = crate::schema::device_schema().attributes;
+        let mut published: Vec<&String> = j.as_object().unwrap().keys().collect();
+        let muted = "muted".to_string();
+        published.push(&muted);
+        let undeclared: Vec<_> = published
+            .into_iter()
+            .filter(|k| !declared.contains_key(*k))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "published, undeclared: {undeclared:?}"
+        );
+        assert!(
+            j.get("media_format").is_some(),
+            "the fixture covers the format"
+        );
     }
 
     #[test]

@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::config::TemperatureUnit;
 use crate::devices::DeviceKind;
 use crate::yolink::{
     api::YolinkApi,
@@ -37,7 +36,6 @@ pub struct Bridge {
     index: HashMap<String, usize>,
     yolink_api: Arc<YolinkApi>,
     publisher: DevicePublisher,
-    temp_unit: TemperatureUnit,
     poll_interval: Duration,
     inventory_interval: Duration,
     /// Delay between successive per-device getState calls to avoid hub rate limits.
@@ -53,7 +51,6 @@ pub struct Bridge {
 /// signature within clippy's `too_many_arguments` threshold and to give
 /// callers a single place to thread cadence/timing config.
 pub struct BridgeOptions {
-    pub temp_unit: TemperatureUnit,
     pub poll_interval_secs: u64,
     pub inventory_interval_secs: u64,
     pub poll_device_delay_ms: u64,
@@ -87,7 +84,6 @@ impl Bridge {
             index,
             yolink_api,
             publisher,
-            temp_unit: opts.temp_unit,
             poll_interval: Duration::from_secs(opts.poll_interval_secs),
             inventory_interval: Duration::from_secs(opts.inventory_interval_secs),
             poll_device_delay: Duration::from_millis(opts.poll_device_delay_ms),
@@ -122,7 +118,6 @@ impl Bridge {
             let devices: Vec<Device> = self.devices.clone();
             let api = Arc::clone(&self.yolink_api);
             let publisher = self.publisher.clone();
-            let temp_unit = self.temp_unit.clone();
             let device_delay = self.poll_device_delay;
             let startup_delay = self.initial_fetch_delay;
 
@@ -147,7 +142,7 @@ impl Bridge {
                         Ok(data) => {
                             let online = data["online"].as_bool().unwrap_or(true);
                             let _ = publisher.publish_availability(&dev.hc_id, online).await;
-                            if let Some(state) = dev.kind.translate_state(&data, &temp_unit) {
+                            if let Some(state) = dev.kind.translate_state(&data) {
                                 if let Err(e) = publisher.publish_state(&dev.hc_id, &state).await {
                                     warn!(hc_id = %dev.hc_id, error = %e,
                                         "Initial fetch: failed to publish state");
@@ -342,7 +337,7 @@ impl Bridge {
                 Ok(data) => {
                     let online = data["online"].as_bool().unwrap_or(true);
                     let _ = self.publisher.publish_availability(&hc_id, online).await;
-                    if let Some(state) = kind.translate_state(&data, &self.temp_unit) {
+                    if let Some(state) = kind.translate_state(&data) {
                         let _ = self.publisher.publish_state(&hc_id, &state).await;
                     }
                 }
@@ -444,10 +439,7 @@ impl Bridge {
         }
 
         // Translate and publish state as a partial update (merge-patch)
-        if let Some(patch) = dev
-            .kind
-            .translate_report(&report.event, &report.data, &self.temp_unit)
-        {
+        if let Some(patch) = dev.kind.translate_report(&report.event, &report.data) {
             debug!(
                 hc_id = %dev.hc_id,
                 yolink_device_id = %report.device_id,
@@ -553,7 +545,7 @@ impl Bridge {
                         .await;
 
                     // Publish full state (retained — this is a ground-truth refresh)
-                    if let Some(state) = dev.kind.translate_state(&data, &self.temp_unit) {
+                    if let Some(state) = dev.kind.translate_state(&data) {
                         debug!(
                             hc_id = %dev.hc_id,
                             yolink_device_id = %dev.info.device_id,

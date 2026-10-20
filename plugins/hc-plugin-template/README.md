@@ -3,8 +3,10 @@
 A starting point for a [homeCore](https://github.com/homeCore-io/homeCore)
 plugin: the parts every plugin has, and nothing else.
 
-It publishes one virtual light per configured entry, accepts `on` and
-`brightness` commands, and publishes back what it applied. Replace the
+It publishes one virtual light per configured entry, accepts `{"on": true}`,
+`{"brightness_pct": 40}` and `{"action": "toggle"}`, and publishes back what
+it applied. The stand-in light speaks 0–255, as much hardware does; the plugin
+converts to homeCore's 0–100 % where it talks to the device. Replace the
 device-talking with your protocol and the shape stays the same.
 
 ```
@@ -37,7 +39,7 @@ With a homeCore running on `127.0.0.1:1883`, the device appears immediately:
 ```sh
 curl localhost:8080/api/v1/devices/template_light_1
 curl -X PATCH localhost:8080/api/v1/devices/template_light_1/state \
-  -H 'Content-Type: application/json' -d '{"brightness": 200}'
+  -H 'Content-Type: application/json' -d '{"brightness_pct": 80}'
 ```
 
 Then rename: the package and binary in `Cargo.toml`, the `plugin_id` in the
@@ -163,6 +165,29 @@ person gets is a row of raw JSON with no controls, because a client will not
 offer a control the plugin has not promised. 77 of the 184 devices in the
 reference house were in exactly that state, and every one of them was a plugin
 that registered and stopped.
+
+## Names, units and the two command shapes
+
+**Use homeCore's names and units, not your device's.** The shared table is
+`hc_types::device_vocabulary` (`crates/hc-types/src/device_vocabulary.rs`):
+`on`, `brightness_pct` 0–100, `color_temp` in kelvin, `transition_ms`,
+temperatures in °C, `battery_pct`, `volume`, `media_title`… An idea only your
+device has gets your own name, under one spelling.
+
+**Convert at the edge.** The template's light runs 0–255, so `main.rs` has
+`pct_from_level` and `level_from_pct` — publishing converts one way,
+commanding the other — with a test at each end of the scale: the lowest lit
+step reads 1 %, not 0 % (which means off), and 100 % reaches 255. Nothing
+downstream converts again. `{"on": true}` with no level restores the last
+one, and a light that is on never reports 0 %.
+
+**Two command shapes, and only two.** Write a writable attribute —
+`{"on": true}`, `{"brightness_pct": 40}` — or call a declared action —
+`{"action": "toggle"}`. `Light::apply` handles both; read `action`, never
+`command`. Declare actions with `device_actions()` (published with the schema
+by `with_actions`) so a screen offers them and an automation can phrase them.
+
+## Declaring the rest
 
 Declare what you publish, under the name you publish it. The four rules the
 template's own schema demonstrates, each of them a real bug in a shipped

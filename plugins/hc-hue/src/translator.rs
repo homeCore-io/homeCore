@@ -252,11 +252,13 @@ pub fn light_state(light: &HueLight) -> Value {
     });
 
     if let Some(brightness) = light.brightness_pct {
-        state["brightness_pct"] = json!(brightness);
+        state["brightness_pct"] = json!(published_brightness(brightness));
     }
-    if let Some(mirek) = light.color_temp_mirek {
-        state["color_temp_mirek"] = json!(mirek);
-        state["color_temp"] = json!(kelvin_from_mirek(mirek));
+    if let Some(kelvin) = light
+        .color_temp_mirek
+        .and_then(|m| kelvin_from_event_mirek(u64::from(m)))
+    {
+        state["color_temp"] = json!(kelvin);
     }
     if let Some((x, y)) = light.color_xy {
         state["color_xy"] = json!({ "x": x, "y": y });
@@ -281,15 +283,13 @@ pub fn light_state(light: &HueLight) -> Value {
             .collect::<Vec<_>>();
         state["gradient_points"] = Value::Array(points);
     }
-    if let Some(min) = light.mirek_min {
-        state["color_temp_mirek_min"] = json!(min);
-        // Mirek runs backwards to Kelvin, so the smallest mirek is the
-        // *largest* Kelvin. Getting this pair the obvious way round would
-        // hand every warmth control an inverted scale.
+    // Mirek runs backwards to Kelvin, so the smallest mirek is the
+    // *largest* Kelvin. Getting this pair the obvious way round would hand
+    // every warmth control an inverted scale.
+    if let Some(min) = light.mirek_min.filter(|m| *m > 0) {
         state["color_temp_max"] = json!(kelvin_from_mirek(min));
     }
-    if let Some(max) = light.mirek_max {
-        state["color_temp_mirek_max"] = json!(max);
+    if let Some(max) = light.mirek_max.filter(|m| *m > 0) {
         state["color_temp_min"] = json!(kelvin_from_mirek(max));
     }
     if light.gradient_points_capable > 0 {
@@ -380,8 +380,12 @@ pub fn light_schema(light: &HueLight) -> DeviceSchema {
                 writable: true,
                 display_name: Some("Colour Temperature".into()),
                 unit: Some("K".into()),
-                min: Some(f64::from(kelvin_from_mirek(light.mirek_max.unwrap_or(500)))),
-                max: Some(f64::from(kelvin_from_mirek(light.mirek_min.unwrap_or(153)))),
+                min: Some(f64::from(kelvin_from_mirek(
+                    light.mirek_max.filter(|m| *m > 0).unwrap_or(500),
+                ))),
+                max: Some(f64::from(kelvin_from_mirek(
+                    light.mirek_min.filter(|m| *m > 0).unwrap_or(153),
+                ))),
                 step: Some(100.0),
                 ..Default::default()
             },
@@ -491,7 +495,13 @@ fn signal_action() -> Action {
             ("on_off_color", "Blink in a colour"),
             ("alternating", "Alternate two colours"),
         ]))
-        .param(Param::duration("duration_ms").label("For"))
+        .param(
+            Param::duration("duration_secs")
+                .label("For")
+                .unit("s")
+                .range(1.0, 65_534.0)
+                .default(5),
+        )
         .sentence("flash {device}")
 }
 
@@ -508,9 +518,59 @@ pub fn kelvin_from_mirek(mirek: u16) -> u32 {
     (1_000_000f64 / f64::from(mirek)).round() as u32
 }
 
+/// Kelvin from a mirek the bridge reported, or `None` when it is outside the
+/// range Hue defines (153–500) — garbage is ignored, not published as a
+/// temperature.
+pub fn kelvin_from_event_mirek(mirek: u64) -> Option<u32> {
+    (153..=500)
+        .contains(&mirek)
+        .then(|| kelvin_from_mirek(mirek as u16))
+}
+
+/// `brightness_pct` as published. Hue reports the level it holds even when
+/// off, and its dimmest steps sit below 1 %; a level above zero shows as at
+/// least 1 %, so a light that is on never reads as 0 % (off). Two decimals.
+pub fn published_brightness(pct: f64) -> f64 {
+    if !pct.is_finite() || pct <= 0.0 {
+        return 0.0;
+    }
+    ((pct.min(100.0) * 100.0).round() / 100.0).max(1.0)
+}
+
+/// What kind of device a set of retired names belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetiredKind {
+    Light,
+    Sensor,
+}
+
+/// The names this plugin once published and no longer does, as a partial of
+/// nulls — a null in a partial removes the key from homeCore's stored state,
+/// which otherwise keeps a dropped name forever with its last value. Rooms,
+/// zones and scenes retired nothing.
+pub fn retired_state(kind: RetiredKind) -> Value {
+    let names: &[&str] = match kind {
+        RetiredKind::Light => &[
+            "color_temp_mirek",
+            "color_temp_mirek_min",
+            "color_temp_mirek_max",
+        ],
+        RetiredKind::Sensor => &[
+            "temperature_c",
+            "temperature_f",
+            "temperature_unit",
+            "illuminance_lux",
+            "illuminance_raw",
+            "illuminance_unit",
+            "contact_state",
+        ],
+    };
+    Value::Object(names.iter().map(|n| (n.to_string(), Value::Null)).collect())
+}
+
 /// Mirek from Kelvin, clamped to the range every Hue light accepts.
 pub fn mirek_from_kelvin(kelvin: f64) -> u16 {
-    if kelvin <= 0.0 {
+    if kelvin.is_nan() || kelvin <= 0.0 {
         return 500;
     }
     ((1_000_000f64 / kelvin).round() as i64).clamp(153, 500) as u16
@@ -527,15 +587,12 @@ pub fn light_capabilities(light: &HueLight) -> Value {
         );
     }
 
-    if let (Some(min), Some(max)) = (light.mirek_min, light.mirek_max) {
+    if light.supports_color_temp {
+        let max_k = kelvin_from_mirek(light.mirek_min.filter(|m| *m > 0).unwrap_or(153));
+        let min_k = kelvin_from_mirek(light.mirek_max.filter(|m| *m > 0).unwrap_or(500));
         caps.insert(
-            "color_temp_mirek".to_string(),
-            json!({ "type": "integer", "minimum": min, "maximum": max }),
-        );
-    } else if light.color_temp_mirek.is_some() {
-        caps.insert(
-            "color_temp_mirek".to_string(),
-            json!({ "type": "integer", "minimum": 153, "maximum": 500 }),
+            "color_temp".to_string(),
+            json!({ "type": "integer", "minimum": min_k, "maximum": max_k, "unit": "K" }),
         );
     }
 
@@ -607,7 +664,7 @@ pub fn grouped_light_state(group: &HueGroupedLight) -> Value {
         state["on"] = json!(on);
     }
     if let Some(brightness) = group.brightness_pct {
-        state["brightness_pct"] = json!(brightness);
+        state["brightness_pct"] = json!(published_brightness(brightness));
     }
     if let Some(rid) = &group.owner_rid {
         state["group_rid"] = json!(rid);
@@ -648,32 +705,11 @@ pub fn group_schema(group: &HueGroupedLight) -> Value {
             ..Default::default()
         },
     );
-    if group.supports_color_temp {
-        attrs.insert(
-            "color_temp".into(),
-            AttributeSchema {
-                kind: AttributeKind::ColorTemp,
-                writable: true,
-                display_name: Some("Colour Temperature".into()),
-                unit: Some("K".into()),
-                min: Some(2000.0),
-                max: Some(6500.0),
-                step: Some(100.0),
-                ..Default::default()
-            },
-        );
-    }
-    if group.supports_color {
-        attrs.insert(
-            "color_xy".into(),
-            AttributeSchema {
-                kind: AttributeKind::ColorXy,
-                writable: true,
-                display_name: Some("Colour".into()),
-                ..Default::default()
-            },
-        );
-    }
+    // Colour and white are writable on a room (the bridge passes them to its
+    // lights) but a grouped_light reports neither, so neither is declared:
+    // a declared attribute that never arrives is a control that reads
+    // nothing. `supports_color_xy` / `supports_color_temp` say what a
+    // write would reach.
     let filled = crate::aux_schema::with_published(
         DeviceSchema {
             attributes: attrs,
@@ -690,6 +726,7 @@ pub fn group_schema(group: &HueGroupedLight) -> Value {
                 .icon("light")
                 .sentence("pulse {device} once"),
             signal_action(),
+            group_activate_action(),
             Action::new("save_scene")
                 .label("Save how it is now as a scene")
                 .category("Scenes")
@@ -702,7 +739,8 @@ pub fn group_schema(group: &HueGroupedLight) -> Value {
 pub fn grouped_light_capabilities() -> Value {
     json!({
         "on": { "type": "boolean" },
-        "brightness_pct": { "type": "number", "minimum": 0.0, "maximum": 100.0 }
+        "brightness_pct": { "type": "number", "minimum": 0.0, "maximum": 100.0 },
+        "transition_ms": { "type": "integer", "minimum": 0 }
     })
 }
 
@@ -741,15 +779,45 @@ pub fn scene_state(scene: &HueScene) -> Value {
     state
 }
 
-fn activate_action() -> Action {
-    Action::new("activate")
-        .label("Activate the scene")
-        .category("Scenes")
-        .icon("scene")
+/// How a scene comes on: the same three for a scene and for a room.
+fn recall_params(action: Action) -> Action {
+    action
         .param(Param::bool_("dynamic").label("Keep its colours moving"))
-        .param(Param::duration("duration_ms").label("Fade in over"))
-        .param(Param::int("brightness_pct").label("Brightness"))
-        .sentence("activate {device}")
+        .param(
+            Param::int("transition_ms")
+                .label("Fade in over")
+                .unit("ms")
+                .range(0.0, 6_000_000.0),
+        )
+        .param(
+            Param::float("brightness_pct")
+                .label("Brightness")
+                .unit("%")
+                .range(1.0, 100.0),
+        )
+}
+
+fn activate_action() -> Action {
+    recall_params(
+        Action::new("activate")
+            .label("Activate the scene")
+            .category("Scenes")
+            .icon("scene"),
+    )
+    .sentence("activate {device}")
+}
+
+/// A room or zone shows one of its scenes: `{"action": "activate",
+/// "scene_id": …}`, the Hue scene's id or its homeCore device id.
+fn group_activate_action() -> Action {
+    recall_params(
+        Action::new("activate")
+            .label("Show one of its scenes")
+            .category("Scenes")
+            .icon("scene")
+            .param(Param::string("scene_id").label("Scene").required()),
+    )
+    .sentence("show the scene {scene_id} in {device}")
 }
 
 /// **What a Hue bridge is: whether it is reachable, whether it is paired, and
@@ -958,35 +1026,23 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
             "motion_valid": { "type": "boolean" },
             "enabled": { "type": "boolean" },
             "motion_sensitivity": { "type": "integer", "minimum": 0, "maximum": 2 },
-            "temperature": { "type": "number" },
-            "temperature_c": { "type": "number" },
-            "temperature_f": { "type": "number" },
+            "temperature": { "type": "number", "unit": "°C" },
             "temperature_valid": { "type": "boolean" },
-            "temperature_unit": { "type": "string", "enum": ["C", "F"] },
-            "illuminance": { "type": "number", "minimum": 0.0 },
-            "illuminance_raw": { "type": "number", "minimum": 0.0 },
-            "illuminance_lux": { "type": "number", "minimum": 0.0 },
-            "illuminance_valid": { "type": "boolean" },
-            "illuminance_unit": { "type": "string", "enum": ["lux", "raw"] }
+            "illuminance": { "type": "number", "minimum": 0.0, "unit": "lux" },
+            "illuminance_valid": { "type": "boolean" }
         })),
         "temperature" => Some(json!({
-            "temperature": { "type": "number" },
-            "temperature_c": { "type": "number" },
-            "temperature_f": { "type": "number" },
+            "temperature": { "type": "number", "unit": "°C" },
             "temperature_valid": { "type": "boolean" },
-            "enabled": { "type": "boolean" },
-            "temperature_unit": { "type": "string", "enum": ["C", "F"] }
+            "enabled": { "type": "boolean" }
         })),
         "light_level" | "grouped_light_level" => Some(json!({
-            "illuminance": { "type": "number", "minimum": 0.0 },
-            "illuminance_raw": { "type": "number", "minimum": 0.0 },
-            "illuminance_lux": { "type": "number", "minimum": 0.0 },
+            "illuminance": { "type": "number", "minimum": 0.0, "unit": "lux" },
             "illuminance_valid": { "type": "boolean" },
-            "enabled": { "type": "boolean" },
-            "illuminance_unit": { "type": "string", "enum": ["lux", "raw"] }
+            "enabled": { "type": "boolean" }
         })),
         "contact" => Some(json!({
-            "contact_state": { "type": "string" },
+            "open": { "type": "boolean" },
             "enabled": { "type": "boolean" },
             "tampered": { "type": "boolean" }
         })),
@@ -1202,12 +1258,26 @@ mod tests {
     fn grouped_sensor_capabilities_include_compacted_fields() {
         let grouped_motion_caps = aux_capabilities(&aux("grouped_motion"));
         assert!(grouped_motion_caps.get("motion").is_some());
-        assert!(grouped_motion_caps.get("temperature_c").is_some());
-        assert!(grouped_motion_caps.get("illuminance_lux").is_some());
+        assert!(grouped_motion_caps.get("temperature").is_some());
+        assert!(grouped_motion_caps.get("illuminance").is_some());
 
         let grouped_light_caps = aux_capabilities(&aux("grouped_light_level"));
-        assert!(grouped_light_caps.get("illuminance_raw").is_some());
-        assert!(grouped_light_caps.get("illuminance_unit").is_some());
+        assert!(grouped_light_caps.get("illuminance").is_some());
+        for caps in [&grouped_motion_caps, &grouped_light_caps] {
+            for gone in [
+                "temperature_c",
+                "temperature_f",
+                "temperature_unit",
+                "illuminance_raw",
+                "illuminance_lux",
+                "illuminance_unit",
+            ] {
+                assert!(caps.get(gone).is_none(), "{gone} is not offered");
+            }
+        }
+        let contact = aux_capabilities(&aux("contact"));
+        assert!(contact.get("open").is_some());
+        assert!(contact.get("contact_state").is_none());
     }
 
     #[test]
@@ -1331,5 +1401,132 @@ mod colour_temperature_tests {
     #[test]
     fn zero_mirek_is_not_a_division_by_zero() {
         assert_eq!(kelvin_from_mirek(0), 0);
+    }
+
+    /// Edges of the kelvin ↔ mirek conversion at Hue's own limits.
+    #[test]
+    fn mirek_kelvin_edges() {
+        assert_eq!(kelvin_from_mirek(153), 6536);
+        assert_eq!(kelvin_from_mirek(154), 6494);
+        assert_eq!(kelvin_from_mirek(499), 2004);
+        assert_eq!(mirek_from_kelvin(6536.0), 153);
+        assert_eq!(mirek_from_kelvin(6500.0), 154);
+        assert_eq!(mirek_from_kelvin(2001.0), 500);
+        assert_eq!(mirek_from_kelvin(f64::NAN), 500);
+    }
+
+    /// A mirek outside Hue's 153–500 is ignored, not published as a colour
+    /// temperature.
+    #[test]
+    fn an_invalid_event_mirek_is_ignored() {
+        assert_eq!(kelvin_from_event_mirek(0), None);
+        assert_eq!(kelvin_from_event_mirek(152), None);
+        assert_eq!(kelvin_from_event_mirek(501), None);
+        assert_eq!(kelvin_from_event_mirek(65_535), None);
+        assert_eq!(kelvin_from_event_mirek(153), Some(6536));
+        assert_eq!(kelvin_from_event_mirek(500), Some(2000));
+    }
+
+    /// A light publishes kelvin and only kelvin.
+    #[test]
+    fn a_light_publishes_no_mirek() {
+        let state = light_state(&HueLight::sample());
+        let obj = state.as_object().unwrap();
+        assert!(obj.contains_key("color_temp"));
+        assert!(obj.keys().all(|k| !k.contains("mirek")), "{obj:?}");
+        let caps = light_capabilities(&HueLight::sample());
+        assert!(caps
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|k| !k.contains("mirek")));
+        assert!(light_schema(&HueLight::sample())
+            .attributes
+            .keys()
+            .all(|k| !k.contains("mirek")));
+    }
+
+    #[test]
+    fn published_brightness_edges() {
+        assert_eq!(published_brightness(0.0), 0.0);
+        assert_eq!(published_brightness(-1.0), 0.0);
+        assert_eq!(published_brightness(f64::NAN), 0.0);
+        // Hue's dimmest steps are below 1 %; on never reads as off.
+        assert_eq!(published_brightness(0.2), 1.0);
+        assert_eq!(published_brightness(0.99), 1.0);
+        assert_eq!(published_brightness(1.0), 1.0);
+        assert_eq!(published_brightness(42.567), 42.57);
+        assert_eq!(published_brightness(100.0), 100.0);
+        assert_eq!(published_brightness(100.4), 100.0);
+    }
+}
+
+#[cfg(test)]
+mod group_schema_tests {
+    use super::*;
+    use crate::hue::models::HueGroupedLight;
+
+    #[test]
+    fn retired_names_are_cleared_with_nulls() {
+        assert_eq!(
+            retired_state(RetiredKind::Light),
+            json!({
+                "color_temp_mirek": null,
+                "color_temp_mirek_min": null,
+                "color_temp_mirek_max": null,
+            })
+        );
+        assert_eq!(
+            retired_state(RetiredKind::Sensor),
+            json!({
+                "temperature_c": null,
+                "temperature_f": null,
+                "temperature_unit": null,
+                "illuminance_lux": null,
+                "illuminance_raw": null,
+                "illuminance_unit": null,
+                "contact_state": null,
+            })
+        );
+    }
+
+    /// A room declares only what it publishes, and offers `activate` with
+    /// the `scene_id` its command handler reads.
+    #[test]
+    fn a_room_declares_what_it_publishes_and_its_scene_action() {
+        let group = HueGroupedLight::sample();
+        let schema = group_schema(&group);
+        let attrs = schema["attributes"].as_object().unwrap();
+        assert!(attrs.contains_key("on"));
+        assert!(attrs.contains_key("brightness_pct"));
+        assert_eq!(attrs["brightness_pct"]["min"], json!(1.0));
+        let state = grouped_light_state(&group);
+        for name in attrs.keys() {
+            assert!(
+                state.get(name).is_some(),
+                "{name} is declared but never published"
+            );
+        }
+        let actions = schema["actions"].as_array().unwrap();
+        let activate = actions
+            .iter()
+            .find(|a| a["id"] == "activate")
+            .expect("a room declares activate");
+        let params: Vec<&str> = activate["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(params.contains(&"scene_id"));
+        assert!(params.contains(&"transition_ms"));
+        assert!(!params.contains(&"duration_ms"));
+    }
+
+    #[test]
+    fn signal_and_scene_params_use_the_shared_names() {
+        let wire = serde_json::to_string(&group_schema(&HueGroupedLight::sample())).unwrap();
+        assert!(!wire.contains("duration_ms"), "{wire}");
+        assert!(wire.contains("duration_secs"));
     }
 }

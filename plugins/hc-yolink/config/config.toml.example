@@ -48,12 +48,6 @@ inventory_interval_secs = 300
 # one device in a minute) and 010301 (account-level throttling).
 poll_device_delay_ms = 1000
 
-# Temperature unit published to HomeCore.
-# Devices report their own native unit; this plugin always converts.
-# "F" = Fahrenheit (default)
-# "C" = Celsius
-temperature_unit = "F"
-
 # ---------------------------------------------------------------------------
 # Local mode — YS1606 Local Hub only
 # ---------------------------------------------------------------------------

@@ -182,7 +182,9 @@ impl Bridge {
                     debug!(id = integration_id, ?action, "Non-level output action");
                     return;
                 }
-                if let Some(dev) = self.devices.get(&integration_id) {
+                if let Some(dev) = self.devices.get_mut(&integration_id) {
+                    // Remembered for `{"on": true}`, which comes back to it.
+                    dev.remember_level(value);
                     if let Some(state) = dev.translate_output_state(value) {
                         let _ = self.publisher.publish_state(&dev.hc_id, &state).await;
                     }
@@ -216,6 +218,13 @@ impl Bridge {
                 integration_id,
                 state,
             } => {
+                // "We did not hear" is not "nobody is here": an unparseable
+                // state leaves `occupied` as it was (or unpublished, until
+                // the first real report) rather than reading as vacant.
+                if state == OccupancyState::Unknown {
+                    debug!(id = integration_id, "Ignoring unparseable occupancy state");
+                    return;
+                }
                 if let Some(dev) = self.devices.get(&integration_id) {
                     if dev.is_group() {
                         let occupied = state == OccupancyState::Occupied;
@@ -261,10 +270,9 @@ impl Bridge {
                     return;
                 }
 
-                // Optimistic: the bridge sends no LED event for a programmatic
-                // phantom press, so nothing would otherwise confirm it ran.
-                let patch = serde_json::json!({ "on": true });
-                let _ = self.publisher.publish_state(hc_id, &patch).await;
+                // Nothing is published: Caséta has no LED reporting, so a
+                // scene's `active` could only ever be an unconfirmed `true`
+                // that nothing resets — the schema declares no state for it.
                 info!(scene = %hc_id, button = btn, "Scene activated");
             }
             return;
@@ -314,30 +322,48 @@ impl Bridge {
 // Optimistic state
 // ---------------------------------------------------------------------------
 
+/// What a command will do, published before the bridge confirms it.
+///
+/// Built from the level the command actually sends — clamped to 0–100 and the
+/// last level for a bare `{"on": true}` — so an echo never shows a value the
+/// device was not told (`brightness_pct: 140`, or a speed it has no band for)
+/// and never one outside the declared range.
 fn optimistic_state(cmd: &serde_json::Value, dev: &DeviceEntry) -> Option<serde_json::Value> {
     use crate::config::DeviceKind;
+    use crate::devices::{fan_speed, fan_speed_level, level_pct};
+    let on_level = || {
+        cmd.get("on")
+            .and_then(serde_json::Value::as_bool)
+            .map(|on| if on { dev.restore_level() } else { 0.0 })
+    };
     match dev.kind {
         DeviceKind::Dimmer => {
-            if let Some(b) = cmd.get("brightness_pct").and_then(|v| v.as_f64()) {
-                Some(serde_json::json!({"on": b > 0.0, "brightness_pct": b}))
-            } else {
-                cmd.get("on")
-                    .and_then(|v| v.as_bool())
-                    .map(|on| serde_json::json!({"on": on}))
-            }
+            let level = cmd
+                .get("brightness_pct")
+                .and_then(serde_json::Value::as_f64)
+                .map(|b| b.clamp(0.0, 100.0))
+                .or_else(on_level)?;
+            Some(serde_json::json!({"on": level > 0.0, "brightness_pct": level_pct(level)}))
         }
         DeviceKind::Switch => cmd
             .get("on")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .map(|on| serde_json::json!({"on": on})),
         DeviceKind::FanControl => {
-            if let Some(speed) = cmd.get("speed").and_then(|v| v.as_str()) {
-                Some(serde_json::json!({"on": speed != "off", "speed": speed}))
-            } else {
-                cmd.get("on")
-                    .and_then(|v| v.as_bool())
-                    .map(|on| serde_json::json!({"on": on}))
-            }
+            let level = match cmd.get("speed").and_then(serde_json::Value::as_str) {
+                // An unknown speed is refused, so there is nothing to echo.
+                Some(speed) => fan_speed_level(speed)?,
+                None => cmd
+                    .get("speed_pct")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|p| p.clamp(0.0, 100.0))
+                    .or_else(on_level)?,
+            };
+            Some(serde_json::json!({
+                "on": level > 0.0,
+                "speed": fan_speed(level),
+                "speed_pct": level_pct(level),
+            }))
         }
         _ => None,
     }
@@ -362,6 +388,77 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod optimistic_tests {
+    use super::optimistic_state;
+    use crate::config::{DeviceConfig, DeviceKind};
+    use crate::devices::DeviceEntry;
+    use serde_json::json;
+
+    fn dev(kind: DeviceKind) -> DeviceEntry {
+        DeviceEntry::new(DeviceConfig {
+            integration_id: 7,
+            name: "Test".into(),
+            kind: Some(kind),
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons: vec![],
+        })
+        .expect("a device")
+    }
+
+    /// An echo is published before the bridge confirms, so it must be a
+    /// value the device can have: inside the declared range.
+    #[test]
+    fn echoes_are_clamped_to_the_declared_range() {
+        let d = dev(DeviceKind::Dimmer);
+        assert_eq!(
+            optimistic_state(&json!({"brightness_pct": 140}), &d),
+            Some(json!({"on": true, "brightness_pct": 100.0}))
+        );
+        assert_eq!(
+            optimistic_state(&json!({"brightness_pct": -5}), &d),
+            Some(json!({"on": false, "brightness_pct": 0.0}))
+        );
+        assert_eq!(
+            optimistic_state(&json!({"brightness_pct": 0.2}), &d),
+            Some(json!({"on": true, "brightness_pct": 1.0}))
+        );
+
+        let f = dev(DeviceKind::FanControl);
+        assert_eq!(
+            optimistic_state(&json!({"speed_pct": 250}), &f),
+            Some(json!({"on": true, "speed": "high", "speed_pct": 100.0}))
+        );
+        assert_eq!(optimistic_state(&json!({"speed": "turbo"}), &f), None);
+        assert_eq!(
+            optimistic_state(&json!({"speed": "low"}), &f),
+            Some(json!({"on": true, "speed": "low", "speed_pct": 25.0}))
+        );
+    }
+
+    /// A bare `{"on": true}` echoes the level it really restores.
+    #[test]
+    fn on_echoes_the_restored_level() {
+        let mut d = dev(DeviceKind::Dimmer);
+        d.remember_level(30.0);
+        assert_eq!(
+            optimistic_state(&json!({"on": true}), &d),
+            Some(json!({"on": true, "brightness_pct": 30.0}))
+        );
+        assert_eq!(
+            optimistic_state(&json!({"on": false}), &d),
+            Some(json!({"on": false, "brightness_pct": 0.0}))
+        );
+        let f = dev(DeviceKind::FanControl);
+        assert_eq!(
+            optimistic_state(&json!({"on": true}), &f),
+            Some(json!({"on": true, "speed": "high", "speed_pct": 100.0}))
+        );
+    }
 }
 
 #[cfg(test)]

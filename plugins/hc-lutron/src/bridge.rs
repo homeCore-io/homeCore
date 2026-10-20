@@ -184,7 +184,7 @@ impl Bridge {
         // The RA2 has no query command for individual event enabled state.
         self.publish_timeclock_initial_states().await;
 
-        // Publish initial on=false for all scenes.  The RA2 main repeater may
+        // Publish initial active=false for all scenes.  The RA2 main repeater may
         // not respond to LED queries for phantom buttons — unsolicited LED events
         // will update to true when scenes are actually activated.
         self.publish_scene_initial_states().await;
@@ -251,7 +251,9 @@ impl Bridge {
                 action: OutputAction::ZoneLevel,
                 value,
             } => {
-                if let Some(dev) = self.devices.get(&integration_id) {
+                if let Some(dev) = self.devices.get_mut(&integration_id) {
+                    // Remembered for `{"on": true}`, which comes back to it.
+                    dev.remember_level(value);
                     if let Some(state) = dev.translate_output_state(value) {
                         let hc_id = dev.hc_id.clone();
                         if let Err(e) = self.publisher.publish_state(&hc_id, &state).await {
@@ -331,9 +333,11 @@ impl Bridge {
                     self.republish_scene_schema(scene_idx).await;
                     return;
                 }
-                let on = state > 0; // 1=on, 2=flash, 3=rapid → all "on"
-                let patch = serde_json::json!({ "on": on });
-                if let Err(e) = self.publisher.publish_state(&hc_id, &patch).await {
+                let on = state > 0; // 1=on, 2=flash, 3=rapid → all active
+                                    // Partial: a full publish would replace the retained state and
+                                    // with it the `phantom_button` / `led_component` beside it.
+                let patch = serde_json::json!({ "active": on });
+                if let Err(e) = self.publisher.publish_state_partial(&hc_id, &patch).await {
                     warn!(hc_id, error = %e, "Failed to publish scene LED state");
                 }
                 // A real state confirms the LED. Only republishes when it
@@ -381,14 +385,13 @@ impl Bridge {
         let hc_id = dev.hc_id.clone();
         let has_leds = matches!(dev.config.kind, DeviceKind::Keypad | DeviceKind::Vcrx);
 
-        // CCI events on VCRX — contact closure inputs report open/closed.
+        // CCI events on VCRX — contact closure inputs, published as the
+        // shared `open` bool, numbered: `cci_{N}_open`.
         // CCI press (action 3) = contact closed, release (action 4) = contact open.
         if dev.is_cci_component(component) {
             let closed = matches!(action, DeviceAction::Press);
-            let attr = format!("cci_{component}");
-            let patch = serde_json::json!({
-                &attr: if closed { "closed" } else { "open" }
-            });
+            let attr = crate::schema::cci_attribute(component);
+            let patch = serde_json::json!({ &attr: crate::schema::cci_open(closed) });
             let _ = self.publisher.publish_state_partial(&hc_id, &patch).await;
             debug!(hc_id, component, closed, "CCI state changed");
             return;
@@ -572,8 +575,8 @@ impl Bridge {
 
                 // Optimistic state update — the RA2 may not send LED events
                 // for programmatic phantom button activations.
-                let patch = serde_json::json!({ "on": true });
-                let _ = self.publisher.publish_state(hc_id, &patch).await;
+                let patch = serde_json::json!({ "active": true });
+                let _ = self.publisher.publish_state_partial(hc_id, &patch).await;
 
                 info!(scene = %hc_id, "Scene activated");
             }
@@ -675,6 +678,17 @@ impl Bridge {
                     .await
                 {
                     warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish device schema");
+                }
+            }
+            // Names this device no longer publishes (`brightness`,
+            // `occupancy`, `cci_N`), removed from the retained state.
+            if let Some(gone) = crate::schema::retired_state(&dev.config) {
+                if let Err(e) = self
+                    .publisher
+                    .publish_state_partial(&dev.hc_id, &gone)
+                    .await
+                {
+                    warn!(hc_id = %dev.hc_id, error = %e, "Failed to clear retired state");
                 }
             }
             if let Some(cat) = crate::schema::button_catalogue(&dev.config) {
@@ -786,7 +800,7 @@ impl Bridge {
             // longer had, so "this scene supports status, via LED 103" could
             // not be shown for the scenes that actually do.
             let mut state = crate::schema::scene_plumbing_state(&scene.config, false);
-            state["on"] = serde_json::json!(false);
+            state["active"] = serde_json::json!(false);
             if let Err(e) = self.publisher.publish_state(&scene.hc_id, &state).await {
                 warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene initial state");
             }
@@ -877,23 +891,14 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
         return cmd.clone();
     };
     match action {
-        "press_button" => match cmd.get("button").and_then(serde_json::Value::as_u64) {
+        "press_button" => match cmd.get("button").and_then(as_number) {
             Some(b) => serde_json::json!({ "press_button": b }),
             None => cmd.clone(),
         },
         "set_led" => {
-            let button = cmd
-                .get("button")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
+            let button = cmd.get("button").and_then(as_number).unwrap_or(0);
             // The declared param is an enum, so the state may arrive as "1".
-            let state = cmd
-                .get("state")
-                .and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                })
-                .unwrap_or(0);
+            let state = cmd.get("state").and_then(as_number).unwrap_or(0);
             serde_json::json!({ "set_led": { "button": button, "state": state } })
         }
         // The verbs that take no parameters: a scene's `activate`, a shade's
@@ -901,6 +906,17 @@ fn normalise_action_style(cmd: &serde_json::Value) -> serde_json::Value {
         "activate" | "raise" | "lower" | "stop" | "execute" => serde_json::json!({ action: true }),
         _ => cmd.clone(),
     }
+}
+
+/// A whole number, sent as a number or — from an enum or a picker — a string.
+fn as_number(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| {
+            v.as_f64()
+                .filter(|f| *f >= 0.0 && f.fract() == 0.0)
+                .map(|f| f as u64)
+        })
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 #[cfg(test)]
@@ -981,6 +997,48 @@ mod action_style_tests {
                 json!({ verb: true }),
             );
         }
+    }
+
+    /// The shapes the vocabulary check suggests for keypad automations — every
+    /// declared action, written `{"action": …}` — all land on a key the
+    /// translator reads, and the LED one produces the LIP command.
+    #[test]
+    fn every_declared_keypad_action_is_accepted_in_action_form() {
+        use crate::config::{DeviceConfig, DeviceKind};
+        use crate::devices::DeviceEntry;
+        let cfg = DeviceConfig {
+            integration_id: 72,
+            name: "Hall".into(),
+            kind: DeviceKind::Keypad,
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons: vec![1, 2, 3],
+            all_buttons: vec![1, 2, 3],
+            button_names: vec![],
+            ccis: vec![],
+        };
+        let schema = crate::schema::device_schema_json(&cfg).unwrap();
+        let ids: Vec<&str> = schema["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["press_button", "set_led"]);
+
+        assert_eq!(
+            normalise_action_style(&json!({"action": "press_button", "button": "2"})),
+            json!({"press_button": 2})
+        );
+        let dev = DeviceEntry::new(cfg);
+        let led = normalise_action_style(&json!({"action": "set_led", "button": 3, "state": "2"}));
+        assert_eq!(dev.translate_command(&led, 0.0), vec!["#DEVICE,72,83,9,2"]);
+        // The key form older automations used still works.
+        assert_eq!(
+            dev.translate_command(&json!({"set_led": {"button": 3, "state": 1}}), 0.0),
+            vec!["#DEVICE,72,83,9,1"]
+        );
     }
 
     #[test]

@@ -139,12 +139,12 @@ pub fn kind_for(field: &str) -> Option<BatteryKind> {
     None
 }
 
-/// Parse `fields[key]` as a battery value and emit `battery`,
-/// `battery_low`, `battery_kind` into `state`.
+/// Parse `fields[key]` as a battery value and emit `battery_pct` or
+/// `voltage` (by scale), `battery_low` and `battery_kind` into `state`.
 ///
 /// Returns `true` if a battery value was inserted. Returns `false` if
 /// the field is absent or unparseable. For unknown battery field names
-/// (no taxonomy entry), inserts the raw value as `battery` only and
+/// (no taxonomy entry), inserts the raw value as `battery_raw` only and
 /// returns `true` — preserving existing data even when classification
 /// fails.
 pub fn insert(state: &mut Map<String, Value>, fields: &HashMap<String, String>, key: &str) -> bool {
@@ -156,28 +156,22 @@ pub fn insert(state: &mut Map<String, Value>, fields: &HashMap<String, String>, 
     true
 }
 
-/// **`battery` is a percentage, or it is not published.**
+/// **A percentage is `battery_pct`; anything else has its own name.**
 ///
 /// Ecowitt reports battery on three unrelated scales and says which in
-/// `battery_kind` — so `battery` was a number whose meaning depended on the
-/// hardware, published under a name and a `%` unit that claimed otherwise. A
-/// client rendering a low-battery list read a healthy lightning detector at
-/// `2` as "2%", and a WH31 that genuinely needed replacing at `1` as "1%":
-/// two false alarms and one right answer for the wrong reason.
-///
-/// Asking every client to branch on `battery_kind` is asking each of them to
-/// learn what a WH31 is. So the plugin converts what it can and refuses to
+/// `battery_kind`. A client rendering a low-battery list once read a healthy
+/// lightning detector at `2` as "2%", and a WH31 that genuinely needed
+/// replacing at `1` as "1%". So the plugin converts what it can and refuses to
 /// pretend about the rest:
 ///
-/// - **Level 0..=max** → a real percentage, which is what the scale means.
-/// - **Voltage** → `battery_volts`, in the unit it actually is.
+/// - **Level 0..=max** → `battery_pct`, which is what the scale means.
+/// - **Voltage** → `voltage`, in volts — the shared name for a supply voltage.
 /// - **Binary** → nothing. `1` means "replace me", not "1% left", and
 ///   `battery_low` already says exactly that.
 /// - **Unknown** → `battery_raw`, so the number is not lost and nothing is
 ///   claimed about it.
 ///
-/// `battery_low` is unaffected and remains the answer to "is this sensor in
-/// trouble" on every scale.
+/// `battery_low` is the answer to "is this sensor in trouble" on every scale.
 fn emit(state: &mut Map<String, Value>, raw: f64, kind: Option<BatteryKind>) {
     let Some(kind) = kind else {
         state.insert("battery_raw".into(), json!(raw));
@@ -187,11 +181,11 @@ fn emit(state: &mut Map<String, Value>, raw: f64, kind: Option<BatteryKind>) {
     match kind {
         BatteryKind::Level { max } if max > 0 => {
             let pct = (raw.clamp(0.0, max as f64) / max as f64 * 100.0).round();
-            state.insert("battery".into(), json!(pct));
+            state.insert("battery_pct".into(), json!(pct));
         }
         BatteryKind::Level { .. } => {}
         BatteryKind::Voltage { .. } => {
-            state.insert("battery_volts".into(), json!(raw));
+            state.insert("voltage".into(), json!(raw));
         }
         BatteryKind::Binary => {}
     }
@@ -206,7 +200,7 @@ fn emit(state: &mut Map<String, Value>, raw: f64, kind: Option<BatteryKind>) {
 /// the surrounding context (lightning vs. CO2 vs. soil) tells us the
 /// kind directly.
 ///
-/// If `kind` is `None`, only the raw `battery` field is set — graceful
+/// If `kind` is `None`, only `battery_raw` is set — graceful
 /// degradation for ambiguous outdoor / rain blocks where the cloud API
 /// doesn't tell us which sensor model is reporting.
 pub fn classify(state: &mut Map<String, Value>, raw: f64, kind: Option<BatteryKind>) {
@@ -332,16 +326,16 @@ mod tests {
     fn a_level_becomes_the_percentage_it_means() {
         let mut state = Map::new();
         assert!(insert(&mut state, &fields("wh57batt", "2"), "wh57batt"));
-        assert_eq!(state.get("battery"), Some(&json!(40.0)));
+        assert_eq!(state.get("battery_pct"), Some(&json!(40.0)));
         assert_eq!(state.get("battery_low"), Some(&json!(false)));
 
         let mut full = Map::new();
         assert!(insert(&mut full, &fields("wh57batt", "5"), "wh57batt"));
-        assert_eq!(full.get("battery"), Some(&json!(100.0)));
+        assert_eq!(full.get("battery_pct"), Some(&json!(100.0)));
 
         let mut empty = Map::new();
         assert!(insert(&mut empty, &fields("wh57batt", "0"), "wh57batt"));
-        assert_eq!(empty.get("battery"), Some(&json!(0.0)));
+        assert_eq!(empty.get("battery_pct"), Some(&json!(0.0)));
         assert_eq!(empty.get("battery_low"), Some(&json!(true)));
     }
 
@@ -367,7 +361,7 @@ mod tests {
         assert!(insert(&mut state, &f, "wh65batt"));
         // A binary battery publishes no number: `1` means "replace me", and
         // as a `battery` percentage it read as 1% remaining.
-        assert!(state.get("battery").is_none());
+        assert!(state.get("battery_pct").is_none());
         assert_eq!(state.get("battery_low"), Some(&json!(true)));
         assert_eq!(state.get("battery_kind"), Some(&json!("binary")));
     }
@@ -378,8 +372,8 @@ mod tests {
         let mut state = Map::new();
         assert!(insert(&mut state, &f, "ws90batt"));
         // Volts under a name that says volts.
-        assert!(state.get("battery").is_none());
-        assert_eq!(state.get("battery_volts"), Some(&json!(2.6)));
+        assert!(state.get("battery_pct").is_none());
+        assert_eq!(state.get("voltage"), Some(&json!(2.6)));
         assert_eq!(state.get("battery_low"), Some(&json!(false)));
         assert_eq!(state.get("battery_kind"), Some(&json!("voltage")));
     }
@@ -407,7 +401,7 @@ mod tests {
         let mut state = Map::new();
         assert!(insert(&mut state, &f, "mystery_batt"));
         // Unclassified: keep the number, claim nothing about its scale.
-        assert!(state.get("battery").is_none());
+        assert!(state.get("battery_pct").is_none());
         assert_eq!(state.get("battery_raw"), Some(&json!(2.95)));
         assert!(state.get("battery_low").is_none());
         assert!(state.get("battery_kind").is_none());

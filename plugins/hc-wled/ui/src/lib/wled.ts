@@ -10,6 +10,8 @@
  *
  * Commands are homeCore's words for WLED's JSON API, as the plugin's
  * `command.rs` takes them: `{segment, effect_id, palette_id, color2, …}`.
+ * Shared ideas use homeCore's shared names and units: `brightness_pct`
+ * (0–100), `transition_ms`, `color_temp` (kelvin), `color_rgb` (`{r,g,b}`).
  */
 import type { CoreDevice } from "./devices.js";
 
@@ -78,9 +80,9 @@ export interface Segment {
   spacing: number;
   offset: number;
   on: boolean;
-  brightness: number;
   brightness_pct: number;
-  cct: number;
+  /** White temperature, kelvin (WLED's 1900–10091 K). */
+  color_temp: number;
   colors: string[];
   effect_id: number;
   effect_speed: number;
@@ -247,7 +249,7 @@ export function effectCommand(
   return lookCommand(target, { effect_id: e.id, ...e.defaults });
 }
 
-/** `#rrggbb` as the `[r,g,b]` WLED takes. */
+/** `#rrggbb` as `[r,g,b]`. */
 export function rgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "");
   return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0) as [
@@ -257,10 +259,27 @@ export function rgb(hex: string): [number, number, number] {
   ];
 }
 
-/** The `[r,g,b]` a device publishes as `#rrggbb`. */
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+/** `#rrggbb` as the `{r,g,b}` a colour is sent as. */
+export function rgbOf(hex: string): Rgb {
+  const [r, g, b] = rgb(hex);
+  return { r, g, b };
+}
+
+/** A colour — `{r,g,b}`, `[r,g,b]` or `#rrggbb` — as `#rrggbb`. */
 export function hex(c: unknown): string {
   if (typeof c === "string") return c;
-  const a = Array.isArray(c) ? c : [];
+  const o = c as Partial<Rgb> | null;
+  const a = Array.isArray(c)
+    ? c
+    : o && typeof o === "object"
+      ? [o.r, o.g, o.b]
+      : [];
   return `#${[0, 1, 2]
     .map((i) =>
       Math.max(0, Math.min(255, Number(a[i] ?? 0)))
@@ -280,7 +299,7 @@ export interface WledStep {
   preset_id?: number;
   playlist_id?: number;
   segment?: SegmentTarget;
-  /** The look's words: effect_id, palette_id, effect_speed, color, color2, … */
+  /** The look's words: effect_id, palette_id, effect_speed, color_rgb, color2, … */
   look?: Record<string, unknown>;
   nightlight?: {
     on: boolean;
@@ -293,16 +312,14 @@ export interface WledStep {
   /** Brightness to set with it; left out, it stays as the preset or strip has it. */
   brightness_pct?: number;
   /** Its fade, ms; left out, the controller's own. */
-  transition?: number;
+  transition_ms?: number;
   /** "Turn it on" said beside a preset, playlist or look, as older steps do. */
   on?: true;
 }
 
 const LOOK_KEYS = new Set([
   "effect_id",
-  "effect",
   "palette_id",
-  "palette",
   "effect_speed",
   "effect_intensity",
   "custom1",
@@ -311,15 +328,20 @@ const LOOK_KEYS = new Set([
   "option1",
   "option2",
   "option3",
-  "color",
+  "color_rgb",
   "color2",
   "color3",
   "colors",
-  "cct",
+  "color_temp",
   "segment_on",
   "segment_brightness_pct",
 ]);
-const SHARED = new Set(["brightness_pct", "transition", "on"]);
+const SHARED = new Set(["brightness_pct", "transition_ms", "on"]);
+/** Old spellings the plugin still takes, read as the names they became. */
+const RENAMED: Record<string, string> = {
+  transition: "transition_ms",
+  color: "color_rgb",
+};
 
 /** The command a step sends. */
 export function stepState(s: WledStep): Record<string, unknown> {
@@ -363,11 +385,11 @@ export function stepState(s: WledStep): Record<string, unknown> {
   )
     out.brightness_pct = s.brightness_pct;
   if (
-    s.transition !== undefined &&
+    s.transition_ms !== undefined &&
     s.kind !== "sync" &&
     s.kind !== "nightlight"
   )
-    out.transition = s.transition;
+    out.transition_ms = s.transition_ms;
   if (
     s.on &&
     (s.kind === "preset" || s.kind === "playlist" || s.kind === "look")
@@ -383,8 +405,14 @@ const isObj = (v: unknown): v is Record<string, unknown> =>
  * A command read back as a step — the step's form for one written by hand,
  * too — or null when it says something no step does (then it stays JSON).
  */
-export function stepOf(state: unknown): WledStep | null {
-  if (!isObj(state)) return null;
+export function stepOf(given: unknown): WledStep | null {
+  if (!isObj(given)) return null;
+  const state: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(given)) {
+    const to = RENAMED[k];
+    if (to === undefined) state[k] = v;
+    else if (given[to] === undefined) state[to] = v;
+  }
   const keys = Object.keys(state).filter((k) => k !== "action");
   const num = (k: string) =>
     typeof state[k] === "number" ? (state[k] as number) : undefined;
@@ -392,31 +420,22 @@ export function stepOf(state: unknown): WledStep | null {
     ...(num("brightness_pct") !== undefined
       ? { brightness_pct: num("brightness_pct") }
       : {}),
-    ...(num("transition") !== undefined
-      ? { transition: num("transition") }
+    ...(num("transition_ms") !== undefined
+      ? { transition_ms: num("transition_ms") }
       : {}),
     // Older steps say "on" beside a preset or a look; keep it, say it.
     ...(state.on === true ? { on: true as const } : {}),
   };
   const only = (allowed: Set<string>) => keys.every((k) => allowed.has(k));
-  const preset = num("preset_id") ?? num("preset") ?? num("apply_preset");
+  const preset = num("preset_id");
   if (
     preset !== undefined &&
-    only(
-      new Set([
-        "preset_id",
-        "preset",
-        "apply_preset",
-        "brightness_pct",
-        "transition",
-        "on",
-      ]),
-    )
+    only(new Set(["preset_id", "brightness_pct", "transition_ms", "on"]))
   )
     return { kind: "preset", preset_id: preset, ...shared };
   if (
     num("playlist_id") !== undefined &&
-    only(new Set(["playlist_id", "brightness_pct", "transition", "on"]))
+    only(new Set(["playlist_id", "brightness_pct", "transition_ms", "on"]))
   )
     return { kind: "playlist", playlist_id: num("playlist_id"), ...shared };
   if (isObj(state.nightlight) && keys.length === 1) {
@@ -456,11 +475,7 @@ export function stepOf(state: unknown): WledStep | null {
   ) {
     if (keys.includes("on") && state.on !== true) return null;
     const look: Record<string, unknown> = {};
-    for (const k of keys)
-      if (LOOK_KEYS.has(k))
-        look[
-          k === "effect" ? "effect_id" : k === "palette" ? "palette_id" : k
-        ] = state[k];
+    for (const k of keys) if (LOOK_KEYS.has(k)) look[k] = state[k];
     const seg = state.segment;
     const segment: SegmentTarget =
       seg === "all" || seg === "selected"
@@ -472,13 +487,13 @@ export function stepOf(state: unknown): WledStep | null {
   }
   if (
     (state.on === true || state.on === false || state.on === "toggle") &&
-    only(new Set(["on", "brightness_pct", "transition"]))
+    only(new Set(["on", "brightness_pct", "transition_ms"]))
   )
     return {
       kind: "power",
       power: state.on as boolean | "toggle",
-      ...(num("transition") !== undefined
-        ? { transition: num("transition") }
+      ...(num("transition_ms") !== undefined
+        ? { transition_ms: num("transition_ms") }
         : {}),
     };
   return null;
@@ -495,10 +510,10 @@ export function stepSentence(
   } = {},
 ): string {
   const fade =
-    s.transition !== undefined
-      ? s.transition === 0
+    s.transition_ms !== undefined
+      ? s.transition_ms === 0
         ? ", at once"
-        : `, fading over ${Math.round(s.transition / 100) / 10} s`
+        : `, fading over ${Math.round(s.transition_ms / 100) / 10} s`
       : "";
   const bri = s.brightness_pct !== undefined ? ` at ${s.brightness_pct}%` : "";
   switch (s.kind) {
@@ -522,7 +537,9 @@ export function stepSentence(
         bits.push(names.effect?.(l.effect_id) ?? `effect ${l.effect_id}`);
       if (typeof l.palette_id === "number")
         bits.push(`palette ${names.palette?.(l.palette_id) ?? l.palette_id}`);
-      if (l.color || l.colors) bits.push("new colours");
+      if (l.color_rgb || l.color2 || l.color3 || l.colors)
+        bits.push("new colours");
+      if (typeof l.color_temp === "number") bits.push(`${l.color_temp} K`);
       const where =
         s.segment === "all" || s.segment === undefined
           ? ""

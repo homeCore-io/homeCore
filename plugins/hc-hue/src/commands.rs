@@ -28,14 +28,26 @@ pub enum PluginCommand {
     Raw(Value),
 }
 
-/// How long a change takes: `transition_ms`, or `duration_ms`, in
-/// milliseconds; Hue takes at most a little under two hours.
-fn duration_ms(payload: &Value) -> Option<u32> {
+/// How long a change takes: `transition_ms`, in milliseconds; Hue takes at
+/// most a little under two hours. `duration_ms` is the old spelling, still
+/// taken quietly from older rules but never declared.
+fn transition_ms(payload: &Value) -> Option<u32> {
     payload
         .get("transition_ms")
         .or_else(|| payload.get("duration_ms"))
         .and_then(Value::as_f64)
         .map(|ms| ms.clamp(0.0, 6_000_000.0) as u32)
+}
+
+/// How long a `signal` flashes for, in milliseconds: `duration_secs` as
+/// declared, or the old `duration_ms` quietly. Hue takes up to 65 534 s.
+fn signal_ms(payload: &Value) -> Option<u32> {
+    payload
+        .get("duration_secs")
+        .and_then(Value::as_f64)
+        .map(|s| s * 1000.0)
+        .or_else(|| payload.get("duration_ms").and_then(Value::as_f64))
+        .map(|ms| ms.clamp(0.0, 65_534_000.0) as u32)
 }
 
 fn recall_of(payload: &Value) -> SceneRecall {
@@ -44,12 +56,25 @@ fn recall_of(payload: &Value) -> SceneRecall {
             .get("dynamic")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        duration_ms: duration_ms(payload),
+        transition_ms: transition_ms(payload),
         brightness_pct: payload
             .get("brightness_pct")
             .and_then(Value::as_f64)
             .map(|b| b.clamp(1.0, 100.0)),
     }
+}
+
+/// Which scene a room, zone or light is told to show: `scene_id` as
+/// declared — the Hue scene's id or its homeCore device id — or `scene`
+/// quietly.
+fn scene_of(payload: &Value) -> Option<String> {
+    payload
+        .get("scene_id")
+        .or_else(|| payload.get("scene"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
 }
 
 fn xy_list(v: Option<&Value>) -> Vec<(f64, f64)> {
@@ -80,12 +105,8 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         // `activate_scene` is what this plugin has always accepted and what
         // older rules send.
         if action == "activate_scene" || action == "activate" {
-            let scene_id = payload
-                .get("scene_id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
             return PluginCommand::ActivateScene {
-                scene_id,
+                scene_id: scene_of(&payload),
                 recall: recall_of(&payload),
             };
         }
@@ -124,7 +145,7 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
                 .to_string();
             return PluginCommand::SetLightState(LightCommand {
                 signal: Some(Signal {
-                    duration_ms: duration_ms(&payload).unwrap_or(5_000),
+                    duration_ms: signal_ms(&payload).unwrap_or(5_000),
                     colors: xy_list(payload.get("colors")),
                     kind,
                 }),
@@ -177,12 +198,8 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
     // Unified scene activation payload — same as {"action":"activate_scene"} but
     // allows a single activation call across Hue and Lutron scene devices.
     if payload.get("activate").and_then(Value::as_bool) == Some(true) {
-        let scene_id = payload
-            .get("scene_id")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
         return PluginCommand::ActivateScene {
-            scene_id,
+            scene_id: scene_of(&payload),
             recall: recall_of(&payload),
         };
     }
@@ -195,21 +212,25 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         found_light_field = true;
     }
 
+    // 0 % is off. Hue reads a brightness of 0 as its dimmest step, not off,
+    // so it is sent as off; any other level turns the light on with it.
     if let Some(brightness) = payload.get("brightness_pct").and_then(Value::as_f64) {
-        light.brightness_pct = Some(brightness.clamp(0.0, 100.0));
+        if brightness <= 0.0 {
+            light.on = Some(false);
+        } else {
+            light.brightness_pct = Some(brightness.min(100.0));
+            light.on.get_or_insert(true);
+        }
         found_light_field = true;
     }
 
-    if let Some(mirek) = payload.get("color_temp_mirek").and_then(Value::as_u64) {
-        light.color_temp_mirek = Some(mirek.clamp(153, 500) as u16);
-        found_light_field = true;
-    }
-
-    // Kelvin is what the schema says is writable, so it has to be what a
-    // control can send. Mirek stays accepted: anything already speaking it
-    // keeps working.
+    // `color_temp` in kelvin is what is declared. A mirek write from
+    // something older is still taken, quietly; kelvin wins when both come.
     if let Some(kelvin) = payload.get("color_temp").and_then(Value::as_f64) {
         light.color_temp_mirek = Some(crate::translator::mirek_from_kelvin(kelvin));
+        found_light_field = true;
+    } else if let Some(mirek) = payload.get("color_temp_mirek").and_then(Value::as_u64) {
+        light.color_temp_mirek = Some(mirek.clamp(153, 500) as u16);
         found_light_field = true;
     }
 
@@ -232,11 +253,7 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         found_light_field = true;
     }
 
-    if let Some(speed) = payload
-        .get("dynamic_speed")
-        .or_else(|| payload.get("effect_speed"))
-        .and_then(Value::as_f64)
-    {
+    if let Some(speed) = payload.get("dynamic_speed").and_then(Value::as_f64) {
         light.dynamic_speed = Some(speed.clamp(0.0, 1.0));
         found_light_field = true;
     }
@@ -269,7 +286,7 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
 
     // A fade goes with a change, never alone.
     if found_light_field {
-        light.transition_ms = duration_ms(&payload);
+        light.transition_ms = transition_ms(&payload);
     }
 
     if found_light_field {
@@ -442,6 +459,122 @@ mod tests {
                 assert!(light.dynamic_speed.is_none());
             }
             _ => panic!("expected SetLightState"),
+        }
+    }
+
+    fn light(payload: Value) -> LightCommand {
+        match parse_homecore_command(payload.clone()) {
+            PluginCommand::SetLightState(l) => l,
+            other => panic!("expected SetLightState for {payload}, got {other:?}"),
+        }
+    }
+
+    /// 0 % is off — Hue would read a brightness of 0 as its dimmest step.
+    #[test]
+    fn zero_brightness_is_off() {
+        let l = light(json!({ "brightness_pct": 0 }));
+        assert_eq!(l.on, Some(false));
+        assert_eq!(l.brightness_pct, None);
+        let l = light(json!({ "on": true, "brightness_pct": 0 }));
+        assert_eq!(l.on, Some(false));
+        let l = light(json!({ "brightness_pct": -3 }));
+        assert_eq!(l.on, Some(false));
+    }
+
+    #[test]
+    fn a_level_turns_the_light_on_and_tops_out_at_100() {
+        let l = light(json!({ "brightness_pct": 1 }));
+        assert_eq!((l.on, l.brightness_pct), (Some(true), Some(1.0)));
+        let l = light(json!({ "brightness_pct": 0.5 }));
+        assert_eq!((l.on, l.brightness_pct), (Some(true), Some(0.5)));
+        let l = light(json!({ "brightness_pct": 100 }));
+        assert_eq!(l.brightness_pct, Some(100.0));
+        let l = light(json!({ "brightness_pct": 140 }));
+        assert_eq!(l.brightness_pct, Some(100.0));
+        // An explicit off with a level stays off.
+        let l = light(json!({ "on": false, "brightness_pct": 40 }));
+        assert_eq!(l.on, Some(false));
+    }
+
+    #[test]
+    fn kelvin_is_declared_and_mirek_still_taken_quietly() {
+        assert_eq!(
+            light(json!({ "color_temp": 2000 })).color_temp_mirek,
+            Some(500)
+        );
+        assert_eq!(
+            light(json!({ "color_temp": 6500 })).color_temp_mirek,
+            Some(154)
+        );
+        assert_eq!(
+            light(json!({ "color_temp_mirek": 366 })).color_temp_mirek,
+            Some(366)
+        );
+        assert_eq!(
+            light(json!({ "color_temp_mirek": 9 })).color_temp_mirek,
+            Some(153)
+        );
+        // Kelvin wins when both come.
+        let l = light(json!({ "color_temp": 2000, "color_temp_mirek": 153 }));
+        assert_eq!(l.color_temp_mirek, Some(500));
+    }
+
+    #[test]
+    fn a_fade_is_transition_ms_and_duration_ms_is_still_taken() {
+        let l = light(json!({ "on": true, "transition_ms": 400 }));
+        assert_eq!(l.transition_ms, Some(400));
+        let l = light(json!({ "on": true, "duration_ms": 700 }));
+        assert_eq!(l.transition_ms, Some(700));
+        let l = light(json!({ "on": true, "transition_ms": 10_000_000 }));
+        assert_eq!(l.transition_ms, Some(6_000_000));
+        match parse_homecore_command(json!({ "action": "activate", "transition_ms": 2000 })) {
+            PluginCommand::ActivateScene { recall, .. } => {
+                assert_eq!(recall.transition_ms, Some(2000))
+            }
+            other => panic!("expected ActivateScene, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_speed_is_not_hues_speed() {
+        // `effect_speed` is WLED's 0–255; Hue's own idea is `dynamic_speed`.
+        assert!(matches!(
+            parse_homecore_command(json!({ "effect_speed": 0.5 })),
+            PluginCommand::Raw(_)
+        ));
+    }
+
+    #[test]
+    fn a_signal_runs_for_duration_secs() {
+        let secs = |p: Value| match parse_homecore_command(p) {
+            PluginCommand::SetLightState(LightCommand {
+                signal: Some(s), ..
+            }) => s.duration_ms,
+            other => panic!("expected a signal, got {other:?}"),
+        };
+        assert_eq!(
+            secs(json!({ "action": "signal", "duration_secs": 8 })),
+            8_000
+        );
+        assert_eq!(
+            secs(json!({ "action": "signal", "duration_ms": 3000 })),
+            3_000
+        );
+        assert_eq!(secs(json!({ "action": "signal" })), 5_000);
+    }
+
+    #[test]
+    fn a_group_names_its_scene_with_scene_id_or_scene() {
+        for payload in [
+            json!({ "action": "activate", "scene_id": "abc" }),
+            json!({ "action": "activate", "scene": "abc" }),
+        ] {
+            match parse_homecore_command(payload.clone()) {
+                PluginCommand::ActivateScene { scene_id, .. } => {
+                    assert_eq!(scene_id.as_deref(), Some("abc"), "{payload}")
+                }
+                other => panic!("expected ActivateScene, got {other:?}"),
+            }
         }
     }
 }

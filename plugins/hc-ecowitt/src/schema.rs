@@ -27,25 +27,31 @@ use plugin_sdk_rs::DevicePublisher;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-/// The unit for an attribute, where it is unambiguous.
+/// The unit for an attribute.
 ///
-/// Deliberately sparse. Temperature, rain and distance are reported in units
-/// the gateway chooses and publishes *as their own attributes*
-/// (`temperature_unit`, `distance_unit`), so hard-coding one here would
-/// contradict the device half the time.
+/// The parsers convert every reading to homeCore's units (`units`), so each
+/// name has exactly one: °C, hPa, m/s, mm, km, W/m² — whatever the gateway's
+/// display is set to. Showing °F or inches is the app's job.
 fn unit_for(name: &str) -> Option<&'static str> {
     match name {
-        "humidity" => Some("%"),
+        "temperature" | "dewpoint" | "windchill" | "feels_like" | "heat_index" | "wbgt" => {
+            Some("°C")
+        }
+        "humidity" | "soil_moisture_pct" | "leaf_wetness_pct" | "battery_pct" => Some("%"),
+        "pressure" | "pressure_absolute" => Some("hPa"),
+        "vpd" => Some("kPa"),
+        "wind_speed" | "wind_speed_avg10m" | "wind_gust" | "wind_gust_daily_max" => Some("m/s"),
+        "wind_direction" | "wind_direction_avg10m" => Some("°"),
+        "rain_rate_mm_hr" => Some("mm/h"),
+        n if n.starts_with("rain_") && n.ends_with("_mm") => Some("mm"),
+        "air_gap_mm" | "depth_mm" => Some("mm"),
+        "distance_km" => Some("km"),
+        "solar_radiation" => Some("W/m²"),
+        "uvi" => Some("index"),
+        "ec" => Some("µS/cm"),
         "co2" | "co2_24h" | "co2_indoor" | "co2_indoor_24h" => Some("ppm"),
         n if n.starts_with("pm") && !n.ends_with("_aqi") => Some("µg/m³"),
-        "light" => Some("lux"),
-        "uvi" => Some("index"),
         "voltage" => Some("V"),
-        // `battery` is a percentage now or it is not published — see
-        // `battery::emit`. The other two scales carry their own names.
-        "battery" => Some("%"),
-        "battery_volts" => Some("V"),
-        "wind_direction" | "wind_direction_avg10m" => Some("°"),
         _ => None,
     }
 }
@@ -107,12 +113,19 @@ pub fn describe(name: &str, value: &Value) -> AttributeSchema {
     // A weather station reports temperature and, beside it, the battery in the
     // sensor reporting it. Only one of those is what anyone opened the page
     // for. The gateway's ip, mac, model and firmware are the same story.
-    a.category = AttributeCategory::for_name(name).or_else(|| {
-        // Gateway settings rather than readings: `units.*` is display
-        // preference, `customserver.*` is where it uploads to.
-        (name.starts_with("units.") || name.starts_with("customserver."))
-            .then_some(AttributeCategory::Config)
-    });
+    a.category = AttributeCategory::for_name(name)
+        .or_else(|| {
+            // Gateway settings rather than readings: `units.*` is display
+            // preference, `customserver.*` is where it uploads to.
+            (name.starts_with("units.") || name.starts_with("customserver."))
+                .then_some(AttributeCategory::Config)
+        })
+        .or_else(|| {
+            // On an Ecowitt sensor the voltage is always its battery's, and
+            // the other two say how the battery was read.
+            matches!(name, "voltage" | "battery_raw" | "battery_kind")
+                .then_some(AttributeCategory::Diagnostic)
+        });
     if matches!(value, Value::Bool(_)) {
         a.states = Some(states_for(name));
     }
@@ -187,14 +200,14 @@ mod tests {
     fn readings_batteries_and_settings_are_told_apart() {
         let s = schema(json!({
             "temperature": 21.5,
-            "temperature_unit": "C",
-            "battery": 90,
+            "battery_pct": 90,
+            "voltage": 1.4,
             "model": "GW1100B",
             "units.temperature": "1",
             "customserver.host": "example.test",
         }));
         assert_eq!(s.attributes["temperature"].category, None);
-        for name in ["temperature_unit", "battery", "model"] {
+        for name in ["battery_pct", "voltage", "model"] {
             assert_eq!(
                 s.attributes[name].category,
                 Some(AttributeCategory::Diagnostic),
@@ -245,7 +258,7 @@ mod tests {
         let reported = json!({
             "temperature": 21.5,
             "humidity": 44,
-            "rain_rate_piezo": 0.0,
+            "rain_rate_mm_hr": 0.0,
         });
         let s = schema(reported.clone());
         let declared: std::collections::HashSet<&str> =
@@ -278,7 +291,6 @@ mod tests {
             "temperature": 21.5,
             "model": "GW2000",
             "pm25": 8.1,
-            "temperature_unit": "°F",
         }));
         assert!(matches!(
             s.attributes["humidity"].kind,
@@ -289,10 +301,36 @@ mod tests {
             s.attributes["temperature"].kind,
             AttributeKind::Float
         ));
-        // The gateway reports its own temperature unit, so we must not assert one.
-        assert_eq!(s.attributes["temperature"].unit, None);
+        // Converted at the edge, so the unit is always the same one.
+        assert_eq!(s.attributes["temperature"].unit.as_deref(), Some("°C"));
         assert!(matches!(s.attributes["model"].kind, AttributeKind::String));
         assert_eq!(s.attributes["pm25"].unit.as_deref(), Some("µg/m³"));
+    }
+
+    /// Every reading the parsers publish is declared in homeCore's unit — the
+    /// shared names (`temperature`, `humidity`, `pressure`, `wind_speed`,
+    /// `battery_pct`, `voltage`) in the shared table's.
+    #[test]
+    fn readings_declare_homecores_units() {
+        for (name, unit) in [
+            ("temperature", "°C"),
+            ("dewpoint", "°C"),
+            ("humidity", "%"),
+            ("pressure", "hPa"),
+            ("pressure_absolute", "hPa"),
+            ("wind_speed", "m/s"),
+            ("wind_gust", "m/s"),
+            ("rain_daily_mm", "mm"),
+            ("rain_rate_mm_hr", "mm/h"),
+            ("solar_radiation", "W/m²"),
+            ("soil_moisture_pct", "%"),
+            ("leaf_wetness_pct", "%"),
+            ("battery_pct", "%"),
+            ("voltage", "V"),
+            ("distance_km", "km"),
+        ] {
+            assert_eq!(unit_for(name), Some(unit), "{name}");
+        }
     }
 
     #[test]

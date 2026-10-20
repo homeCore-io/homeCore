@@ -1,8 +1,6 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-use crate::config::TemperatureUnit;
-
 // ---------------------------------------------------------------------------
 // DeviceKind — maps YoLink device types to HomeCore device types
 // ---------------------------------------------------------------------------
@@ -94,12 +92,7 @@ impl DeviceKind {
     ///
     /// Patches have no such problem: they merge. So the report path can accept
     /// events the snapshot path must not.
-    pub fn translate_report(
-        &self,
-        event: &str,
-        data: &Value,
-        temp_unit: &TemperatureUnit,
-    ) -> Option<Value> {
+    pub fn translate_report(&self, event: &str, data: &Value) -> Option<Value> {
         // `Outlet.powerReport` is the only one of these seen in the wild, and it
         // arrives hourly from every metered plug. It was logged as an
         // untranslatable payload every time — 137 warnings in the retained logs,
@@ -107,7 +100,7 @@ impl DeviceKind {
         if event.ends_with(".powerReport") {
             return translate_power_report(data);
         }
-        self.translate_state(data, temp_unit)
+        self.translate_state(data)
     }
 
     /// Translate device data from a YoLink report or getState response into a
@@ -115,14 +108,14 @@ impl DeviceKind {
     ///
     /// Returns `None` if the data cannot be translated (e.g. unrecognised
     /// payload shape).
-    pub fn translate_state(&self, data: &Value, temp_unit: &TemperatureUnit) -> Option<Value> {
+    pub fn translate_state(&self, data: &Value) -> Option<Value> {
         match self {
             Self::Outlet | Self::SmartPlug | Self::Switch => translate_switch(data),
             Self::MultiOutlet => translate_multi_outlet(data),
             Self::DoorSensor => translate_door_sensor(data),
             Self::MotionSensor => translate_motion_sensor(data),
             Self::LeakSensor => translate_leak_sensor(data),
-            Self::THSensor => translate_th_sensor(data, temp_unit),
+            Self::THSensor => translate_th_sensor(data),
             Self::VibrationSensor => translate_vibration_sensor(data),
             Self::Lock | Self::LockV2 => translate_lock(data),
             Self::Siren => translate_siren(data),
@@ -269,7 +262,7 @@ fn translate_door_sensor(data: &Value) -> Option<Value> {
     // itself on the next report.
     let mut out = serde_json::json!({ "open": open });
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
     Some(out)
 }
@@ -282,7 +275,7 @@ fn translate_motion_sensor(data: &Value) -> Option<Value> {
         .unwrap_or(false);
     let mut out = serde_json::json!({ "motion": motion });
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
     Some(out)
 }
@@ -300,43 +293,35 @@ fn translate_leak_sensor(data: &Value) -> Option<Value> {
     // `translate_door_sensor` for why two names for one reading is a cost.
     let mut out = serde_json::json!({ "water_detected": leak });
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
     Some(out)
 }
 
-fn translate_th_sensor(data: &Value, unit: &TemperatureUnit) -> Option<Value> {
-    // Temperature value (raw)
-    let raw_temp = data["temperature"]
+fn translate_th_sensor(data: &Value) -> Option<Value> {
+    // YoLink's API reports temperature in °C whatever the device's `tempUnit`
+    // says — that field is only the unit the device's own screen shows — so
+    // the reading is published as it arrives. Showing °F is the app's job.
+    let temperature = data["temperature"]
         .as_f64()
-        .or_else(|| data["state"]["temperature"].as_f64())?;
-
+        .or_else(|| data["state"]["temperature"].as_f64());
+    // A temperature-only probe has no humidity; it still has a temperature.
     let humidity = data["humidity"]
         .as_f64()
-        .or_else(|| data["state"]["humidity"].as_f64())?;
+        .or_else(|| data["state"]["humidity"].as_f64());
+    if temperature.is_none() && humidity.is_none() {
+        return None;
+    }
 
-    // Device reports its own unit in "tempUnit": "℃" or "℉"
-    // Check both data-level and state-level.
-    let raw_unit = data["tempUnit"]
-        .as_str()
-        .or_else(|| data["state"]["tempUnit"].as_str())
-        .unwrap_or("℃");
-
-    // Determine raw unit and convert to the configured output unit.
-    let temp_out = if raw_unit.contains('C') || raw_unit == "℃" {
-        unit.convert_celsius(raw_temp)
-    } else {
-        // Assume Fahrenheit
-        unit.convert_fahrenheit(raw_temp)
-    };
-
-    let mut out = serde_json::json!({
-        "temperature":      round1(temp_out),
-        "temperature_unit": unit.label(),
-        "humidity_pct":     round1(humidity),
-    });
+    let mut out = serde_json::json!({});
+    if let Some(t) = temperature {
+        out["temperature"] = serde_json::json!(round2(t));
+    }
+    if let Some(h) = humidity {
+        out["humidity"] = serde_json::json!(round1(h));
+    }
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
     Some(out)
 }
@@ -348,7 +333,7 @@ fn translate_vibration_sensor(data: &Value) -> Option<Value> {
         .unwrap_or(false);
     let mut out = serde_json::json!({ "vibration": vibration });
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
     Some(out)
 }
@@ -364,12 +349,12 @@ fn translate_lock(data: &Value) -> Option<Value> {
 
     // Battery: top-level for LockV2 (0–4 scale → %)
     if let Some(b) = battery_pct(data) {
-        out["battery"] = b;
+        out["battery_pct"] = b;
     }
 
     // Door contact sensor (separate from the bolt)
     if let Some(door) = data["state"]["door"].as_str() {
-        out["door_open"] = serde_json::json!(door == "open");
+        out["open"] = serde_json::json!(door == "open");
     }
 
     // Last alert (e.g. "UnLockFailed", "LockFailed", "DoorOpenAlarm")
@@ -403,6 +388,11 @@ fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
+/// Round to 2 decimal places.
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 /// Round to 3 decimal places.
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
@@ -427,7 +417,7 @@ mod tests {
             { "time": 1785709247119i64, "watt": 3.0 },
         ]});
         let patch = DeviceKind::Outlet
-            .translate_report("Outlet.powerReport", &data, &TemperatureUnit::F)
+            .translate_report("Outlet.powerReport", &data)
             .unwrap();
         assert_eq!(patch["power_w"], json!(41.5));
         // Says nothing about the relay: a power report does not know.
@@ -443,7 +433,7 @@ mod tests {
             { "time": 1785716447119i64, "watt": 41.5 },
         ]});
         let patch = DeviceKind::Outlet
-            .translate_report("Outlet.powerReport", &data, &TemperatureUnit::F)
+            .translate_report("Outlet.powerReport", &data)
             .unwrap();
         assert_eq!(patch["power_w"], json!(41.5));
     }
@@ -452,7 +442,7 @@ mod tests {
     fn outlet_power_report_empty_is_none() {
         let data = json!({ "watts": [] });
         assert!(DeviceKind::Outlet
-            .translate_report("Outlet.powerReport", &data, &TemperatureUnit::F)
+            .translate_report("Outlet.powerReport", &data)
             .is_none());
     }
 
@@ -461,7 +451,7 @@ mod tests {
     fn ordinary_report_still_translates_state() {
         let data = json!({ "state": "open", "power": 12.5 });
         let patch = DeviceKind::Outlet
-            .translate_report("Outlet.StatusChange", &data, &TemperatureUnit::F)
+            .translate_report("Outlet.StatusChange", &data)
             .unwrap();
         assert_eq!(patch["on"], json!(true));
     }
@@ -471,17 +461,13 @@ mod tests {
     #[test]
     fn power_report_is_not_a_snapshot() {
         let data = json!({ "watts": [{ "time": 1i64, "watt": 5.0 }] });
-        assert!(DeviceKind::Outlet
-            .translate_state(&data, &TemperatureUnit::F)
-            .is_none());
+        assert!(DeviceKind::Outlet.translate_state(&data).is_none());
     }
 
     #[test]
     fn outlet_on() {
         let data = json!({ "state": "open", "power": 12.5, "electricity": 0.031 });
-        let state = DeviceKind::Outlet
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::Outlet.translate_state(&data).unwrap();
         assert_eq!(state["on"], json!(true));
         assert_eq!(state["power_w"], json!(12.5));
         assert_eq!(state["energy_kwh"], json!(0.031));
@@ -490,41 +476,33 @@ mod tests {
     #[test]
     fn outlet_off() {
         let data = json!({ "state": "close" });
-        let state = DeviceKind::Outlet
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::Outlet.translate_state(&data).unwrap();
         assert_eq!(state["on"], json!(false));
     }
 
     #[test]
     fn door_open() {
         let data = json!({ "state": "open", "battery": 3 });
-        let state = DeviceKind::DoorSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::DoorSensor.translate_state(&data).unwrap();
         assert_eq!(state["open"], json!(true));
         assert!(state.get("contact").is_none(), "the alias is gone");
-        assert_eq!(state["battery"], json!(75)); // 3/4 = 75%
+        assert_eq!(state["battery_pct"], json!(75)); // 3/4 = 75%
     }
 
     #[test]
     fn door_open_nested_getstate() {
         // getState response: data["state"] is a nested object
         let data = json!({ "state": { "state": "open", "battery": 4 }, "online": true });
-        let state = DeviceKind::DoorSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::DoorSensor.translate_state(&data).unwrap();
         assert_eq!(state["open"], json!(true));
         assert!(state.get("contact").is_none(), "the alias is gone");
-        assert_eq!(state["battery"], json!(100));
+        assert_eq!(state["battery_pct"], json!(100));
     }
 
     #[test]
     fn door_closed() {
         let data = json!({ "state": "close", "battery": 4 });
-        let state = DeviceKind::DoorSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::DoorSensor.translate_state(&data).unwrap();
         assert_eq!(state["open"], json!(false));
         assert!(state.get("contact").is_none(), "the alias is gone");
     }
@@ -532,9 +510,7 @@ mod tests {
     #[test]
     fn motion_detected() {
         let data = json!({ "alarm": true, "battery": 2 });
-        let state = DeviceKind::MotionSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::MotionSensor.translate_state(&data).unwrap();
         assert_eq!(state["motion"], json!(true));
     }
 
@@ -548,52 +524,67 @@ mod tests {
     #[test]
     fn a_leak_sensor_reports_one_name_for_one_reading() {
         let data = json!({ "alarm": true, "battery": 2 });
-        let state = DeviceKind::LeakSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::LeakSensor.translate_state(&data).unwrap();
         assert_eq!(state["water_detected"], json!(true));
         assert!(state.get("leak").is_none(), "the alias is gone");
     }
 
+    /// The reading is °C as YoLink sends it, whatever the device's screen
+    /// shows; no unit sibling is published.
     #[test]
-    fn th_celsius_device_to_fahrenheit_output() {
+    fn th_publishes_celsius_as_reported() {
         let data = json!({ "temperature": 22.5, "humidity": 65.2, "tempUnit": "℃", "battery": 4 });
-        let state = DeviceKind::THSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
-        // 22.5 °C → 72.5 °F
-        assert_eq!(state["temperature"], json!(72.5));
-        assert_eq!(state["temperature_unit"], json!("F"));
-        assert_eq!(state["humidity_pct"], json!(65.2));
-    }
-
-    #[test]
-    fn th_celsius_device_to_celsius_output() {
-        let data = json!({ "temperature": 22.5, "humidity": 65.2, "tempUnit": "℃", "battery": 4 });
-        let state = DeviceKind::THSensor
-            .translate_state(&data, &TemperatureUnit::C)
-            .unwrap();
+        let state = DeviceKind::THSensor.translate_state(&data).unwrap();
         assert_eq!(state["temperature"], json!(22.5));
-        assert_eq!(state["temperature_unit"], json!("C"));
+        assert_eq!(state["humidity"], json!(65.2));
+        assert_eq!(state["battery_pct"], json!(100));
+        assert!(state.get("temperature_unit").is_none());
+        assert!(state.get("humidity_pct").is_none());
+        assert!(state.get("battery").is_none());
+    }
+
+    /// A device whose screen is set to °F still reports °C over the API.
+    #[test]
+    fn th_display_unit_does_not_change_the_reading() {
+        let data = json!({ "state": { "temperature": -3.25, "humidity": 50.0, "tempUnit": "℉" } });
+        let state = DeviceKind::THSensor.translate_state(&data).unwrap();
+        assert_eq!(state["temperature"], json!(-3.25));
+    }
+
+    /// A temperature-only probe has no humidity and still reports.
+    #[test]
+    fn th_temperature_only_probe_publishes_temperature() {
+        let data = json!({ "state": { "temperature": 4.0, "battery": 2 } });
+        let state = DeviceKind::THSensor.translate_state(&data).unwrap();
+        assert_eq!(state["temperature"], json!(4.0));
+        assert!(state.get("humidity").is_none());
+        assert_eq!(state["battery_pct"], json!(50));
     }
 
     #[test]
-    fn th_fahrenheit_device_to_fahrenheit_output() {
-        let data = json!({ "temperature": 72.5, "humidity": 50.0, "tempUnit": "℉" });
-        let state = DeviceKind::THSensor
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
-        assert_eq!(state["temperature"], json!(72.5));
+    fn th_with_neither_reading_is_none() {
+        assert!(DeviceKind::THSensor
+            .translate_state(&json!({ "battery": 4 }))
+            .is_none());
     }
 
     #[test]
-    fn th_fahrenheit_device_to_celsius_output() {
-        let data = json!({ "temperature": 72.5, "humidity": 50.0, "tempUnit": "℉" });
-        let state = DeviceKind::THSensor
-            .translate_state(&data, &TemperatureUnit::C)
+    fn battery_scale_converts_to_percent() {
+        for (raw, pct) in [(0, 0), (1, 25), (2, 50), (3, 75), (4, 100), (5, 100)] {
+            let state = DeviceKind::DoorSensor
+                .translate_state(&json!({ "state": "open", "battery": raw }))
+                .unwrap();
+            assert_eq!(state["battery_pct"], json!(pct), "raw {raw}");
+        }
+    }
+
+    #[test]
+    fn siren_publishes_alarm() {
+        let state = DeviceKind::Siren
+            .translate_state(&json!({ "state": "open", "alarm": true }))
             .unwrap();
-        // 72.5 °F → 22.5 °C
-        assert_eq!(state["temperature"], json!(22.5));
+        assert_eq!(state["on"], json!(true));
+        assert_eq!(state["alarm"], json!(true));
     }
 
     #[test]
@@ -605,12 +596,10 @@ mod tests {
             "alert": { "source": "Fingerprint", "type": "UnLockFailed" },
             "attributes": { "autoLock": 10, "soundLevel": 2 }
         });
-        let state = DeviceKind::LockV2
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::LockV2.translate_state(&data).unwrap();
         assert_eq!(state["locked"], json!(false));
-        assert_eq!(state["door_open"], json!(true));
-        assert_eq!(state["battery"], json!(100)); // 4 * 25 = 100%
+        assert_eq!(state["open"], json!(true));
+        assert_eq!(state["battery_pct"], json!(100)); // 4 * 25 = 100%
         assert_eq!(state["last_alert"], json!("UnLockFailed"));
         assert_eq!(state["auto_lock_secs"], json!(10));
         assert_eq!(state["sound_level"], json!(2));
@@ -622,32 +611,26 @@ mod tests {
             "state": { "lock": "locked", "door": "closed" },
             "battery": 3
         });
-        let state = DeviceKind::LockV2
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::LockV2.translate_state(&data).unwrap();
         assert_eq!(state["locked"], json!(true));
-        assert_eq!(state["door_open"], json!(false));
-        assert_eq!(state["battery"], json!(75)); // 3 * 25 = 75%
+        assert_eq!(state["open"], json!(false));
+        assert_eq!(state["battery_pct"], json!(75)); // 3 * 25 = 75%
     }
 
     #[test]
     fn lock_flat_string_state() {
         // Legacy Lock flat format: data["state"] is a string
         let data = json!({ "state": "locked", "battery": 3 });
-        let state = DeviceKind::Lock
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
+        let state = DeviceKind::Lock.translate_state(&data).unwrap();
         assert_eq!(state["locked"], json!(true));
-        assert_eq!(state["battery"], json!(75));
+        assert_eq!(state["battery_pct"], json!(75));
     }
 
     #[test]
     fn lock_battery_zero_pct() {
         let data = json!({ "state": { "lock": "locked", "door": "closed" }, "battery": 0 });
-        let state = DeviceKind::LockV2
-            .translate_state(&data, &TemperatureUnit::F)
-            .unwrap();
-        assert_eq!(state["battery"], json!(0));
+        let state = DeviceKind::LockV2.translate_state(&data).unwrap();
+        assert_eq!(state["battery_pct"], json!(0));
     }
 
     #[test]

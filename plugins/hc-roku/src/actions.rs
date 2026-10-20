@@ -119,11 +119,27 @@ pub fn device_actions() -> Vec<Action> {
             .icon("volume-down")
             .sentence("turn {device} down {count} step(s)")
             .param(count()),
-        Action::new("mute")
+        Action::new("set_mute")
             .label("Mute / unmute")
             .category("Volume")
             .icon("volume-mute")
-            .description("VolumeMute toggles; ECP cannot report or set mute absolutely.")
+            .writes("muted")
+            .description(
+                "Presses VolumeMute only when the mute state the plugin tracked \
+                 differs (ECP cannot report mute).",
+            )
+            .sentence("set mute on {device} to {muted}")
+            .param(
+                Param::bool_("muted")
+                    .label("Muted")
+                    .required()
+                    .default(true),
+            ),
+        Action::new("mute")
+            .label("Toggle mute")
+            .category("Volume")
+            .icon("volume-mute")
+            .description("Presses VolumeMute, which toggles.")
             .sentence("toggle mute on {device}"),
         // ── Apps and inputs ──────────────────────────────────────────────
         Action::new("launch_app")

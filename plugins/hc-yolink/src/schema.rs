@@ -50,12 +50,13 @@ fn ro_bool(label: &str, on: (&str, &str), off: (&str, &str)) -> AttributeSchema 
     })
 }
 
-/// The battery percentage every battery-powered YoLink device reports.
+/// The battery percentage every battery-powered YoLink device reports, as
+/// `battery_pct`.
 ///
-/// YoLink sends a 0–4 scale; `battery_pct` converts it, so the declared range
+/// YoLink sends a 0–4 scale; the translator converts it, so the declared range
 /// is the converted one, not the wire one.
 fn battery() -> AttributeSchema {
-    let mut a = ro_unit(AttributeKind::Integer, "Battery", "%");
+    let mut a = ro_unit(AttributeKind::Float, "Battery", "%");
     a.min = Some(0.0);
     a.max = Some(100.0);
     a
@@ -104,6 +105,16 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
                         when_false: StateLabel::verbed("silent", "goes silent"),
                     }),
             );
+            // What the siren reports it is doing; follows `on` when the
+            // device does not say.
+            a.insert(
+                "alarm".into(),
+                ro_bool(
+                    "Alarm",
+                    ("alarming", "starts alarming"),
+                    ("quiet", "stops alarming"),
+                ),
+            );
         }
 
         DeviceKind::DoorSensor => {
@@ -111,7 +122,7 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
                 "open".into(),
                 ro_bool("Door", ("open", "opens"), ("closed", "closes")),
             );
-            a.insert("battery".into(), battery());
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::MotionSensor => {
@@ -123,13 +134,13 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
                     ("clear", "stops detecting motion"),
                 ),
             );
-            a.insert("battery".into(), battery());
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::LeakSensor => {
             let wet = || ro_bool("Water", ("wet", "detects water"), ("dry", "dries out"));
             a.insert("water_detected".into(), wet());
-            a.insert("battery".into(), battery());
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::VibrationSensor => {
@@ -141,24 +152,21 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
                     ("still", "stops vibrating"),
                 ),
             );
-            a.insert("battery".into(), battery());
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::THSensor => {
+            // °C always; the app shows °F from the person's setting.
             a.insert(
                 "temperature".into(),
-                ro(AttributeKind::Float, "Temperature"),
+                ro_unit(AttributeKind::Float, "Temperature", "°C"),
             );
-            // The unit the reading is in, as configured — text, not a number.
-            a.insert(
-                "temperature_unit".into(),
-                ro(AttributeKind::String, "Temperature unit"),
-            );
-            a.insert(
-                "humidity_pct".into(),
-                ro_unit(AttributeKind::Float, "Humidity", "%"),
-            );
-            a.insert("battery".into(), battery());
+            // A temperature-only probe never publishes this one.
+            let mut humidity = ro_unit(AttributeKind::Float, "Humidity", "%");
+            humidity.min = Some(0.0);
+            humidity.max = Some(100.0);
+            a.insert("humidity".into(), humidity);
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::Lock | DeviceKind::LockV2 => {
@@ -174,7 +182,7 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
             // The bolt and the door are different things: a lock can be thrown
             // while the door stands open, and that is worth a rule.
             a.insert(
-                "door_open".into(),
+                "open".into(),
                 ro_bool("Door", ("open", "opens"), ("closed", "closes")),
             );
             a.insert("last_alert".into(), ro(AttributeKind::String, "Last alert"));
@@ -186,7 +194,7 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
                 "sound_level".into(),
                 ro(AttributeKind::Integer, "Sound level"),
             );
-            a.insert("battery".into(), battery());
+            a.insert("battery_pct".into(), battery());
         }
 
         DeviceKind::Hub | DeviceKind::Unknown(_) => return None,
@@ -210,6 +218,30 @@ pub fn schema_for(kind: &DeviceKind) -> Option<DeviceSchema> {
     })
 }
 
+/// The names a kind used to publish and no longer does, as a partial of
+/// `null`s that removes them from homeCore's stored state. `None` when the
+/// kind retired nothing.
+pub fn retired_state(kind: &DeviceKind) -> Option<serde_json::Value> {
+    let names: &[&str] = match kind {
+        DeviceKind::DoorSensor
+        | DeviceKind::MotionSensor
+        | DeviceKind::LeakSensor
+        | DeviceKind::VibrationSensor => &["battery"],
+        DeviceKind::THSensor => &["battery", "humidity_pct", "temperature_unit"],
+        DeviceKind::Lock | DeviceKind::LockV2 => &["battery", "door_open"],
+        _ => &[],
+    };
+    if names.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Object(
+        names
+            .iter()
+            .map(|n| (n.to_string(), serde_json::Value::Null))
+            .collect(),
+    ))
+}
+
 /// Publish the retained schema for a device, if its kind declares one.
 ///
 /// Retained on purpose: a client that connects long after this plugin last ran
@@ -231,22 +263,28 @@ pub async fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TemperatureUnit;
     use serde_json::json;
 
-    /// A temperature sensor ranked `temperature_unit` beside its temperature,
-    /// because only `battery()` asked the lexicon. Every declared attribute
-    /// asks it now.
+    /// Temperature is declared in °C and is the reading, not housekeeping;
+    /// the old `temperature_unit` sibling is gone.
     #[test]
-    fn the_unit_sibling_is_not_a_reading() {
+    fn temperature_is_celsius_and_has_no_unit_sibling() {
         let s = schema_for(&DeviceKind::THSensor).expect("a schema");
         assert_eq!(s.attributes["temperature"].category, None);
-        for name in s.attributes.keys().filter(|k| k.ends_with("_unit")) {
-            assert_eq!(
-                s.attributes[name].category,
-                Some(AttributeCategory::Diagnostic),
-                "{name}"
-            );
+        assert_eq!(s.attributes["temperature"].unit.as_deref(), Some("°C"));
+        assert!(!s.attributes.contains_key("temperature_unit"));
+        assert!(!s.attributes.contains_key("humidity_pct"));
+        assert_eq!(s.attributes["humidity"].unit.as_deref(), Some("%"));
+    }
+
+    /// Only the shared names: no old spelling is declared anywhere.
+    #[test]
+    fn no_old_spelling_is_declared() {
+        for kind in all_kinds() {
+            let s = schema_for(&kind).unwrap();
+            for old in ["battery", "humidity_pct", "door_open", "temperature_unit"] {
+                assert!(!s.attributes.contains_key(old), "{kind:?} declares {old}");
+            }
         }
     }
 
@@ -256,11 +294,11 @@ mod tests {
     fn a_battery_is_declared_housekeeping_and_the_reading_is_not() {
         for kind in all_kinds() {
             let Some(s) = schema_for(&kind) else { continue };
-            if let Some(b) = s.attributes.get("battery") {
+            if let Some(b) = s.attributes.get("battery_pct") {
                 assert_eq!(
                     b.category,
                     Some(AttributeCategory::Diagnostic),
-                    "{kind:?} battery"
+                    "{kind:?} battery_pct"
                 );
             }
             // Whatever the kind exists to report stays primary. Only the
@@ -269,6 +307,42 @@ mod tests {
             for (name, a) in &s.attributes {
                 if AttributeCategory::for_name(name).is_none() {
                     assert_eq!(a.category, None, "{kind:?} {name} is the reading");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retired_names_are_cleared_per_kind() {
+        assert_eq!(
+            retired_state(&DeviceKind::THSensor),
+            Some(json!({ "battery": null, "humidity_pct": null, "temperature_unit": null }))
+        );
+        assert_eq!(
+            retired_state(&DeviceKind::LockV2),
+            Some(json!({ "battery": null, "door_open": null }))
+        );
+        for kind in [
+            DeviceKind::DoorSensor,
+            DeviceKind::MotionSensor,
+            DeviceKind::LeakSensor,
+            DeviceKind::VibrationSensor,
+        ] {
+            assert_eq!(
+                retired_state(&kind),
+                Some(json!({ "battery": null })),
+                "{kind:?}"
+            );
+        }
+        for kind in [DeviceKind::Outlet, DeviceKind::Switch, DeviceKind::Siren] {
+            assert!(retired_state(&kind).is_none(), "{kind:?}");
+        }
+        // A retired name is never one the kind still declares.
+        for kind in all_kinds() {
+            let declared = schema_for(&kind).unwrap();
+            if let Some(gone) = retired_state(&kind) {
+                for name in gone.as_object().unwrap().keys() {
+                    assert!(!declared.attributes.contains_key(name), "{kind:?} {name}");
                 }
             }
         }
@@ -349,7 +423,7 @@ mod tests {
 
         // And the translator agrees, which is the actual authority.
         let state = DeviceKind::DoorSensor
-            .translate_state(&json!({ "state": "open" }), &TemperatureUnit::C)
+            .translate_state(&json!({ "state": "open" }))
             .unwrap();
         assert_eq!(state["open"], json!(true));
         assert!(state.get("contact").is_none());
@@ -367,7 +441,7 @@ mod tests {
                 DeviceKind::Switch,
                 json!({ "state": "open", "power": 12.5, "electricity": 3.25 }),
             ),
-            (DeviceKind::Siren, json!({ "state": "open" })),
+            (DeviceKind::Siren, json!({ "state": "open", "alarm": true })),
             (
                 DeviceKind::DoorSensor,
                 json!({ "state": "open", "battery": 4 }),
@@ -402,7 +476,7 @@ mod tests {
         for (kind, report) in cases {
             let declared = schema_for(&kind).unwrap();
             let published = kind
-                .translate_state(&report, &TemperatureUnit::C)
+                .translate_state(&report)
                 .unwrap_or_else(|| panic!("{kind:?} translated nothing"));
             let published = published.as_object().unwrap();
 

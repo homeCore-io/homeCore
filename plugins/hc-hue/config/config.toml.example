@@ -44,12 +44,6 @@ publish_bridge_home = false
 # When true, publish Hue entertainment configurations as standalone devices.
 publish_entertainment_configurations = false
 
-[hue.display]
-# Temperature display unit in published state: "c" or "f".
-temperature_unit = "c"
-# Illuminance display value in published state: "lux" or "raw".
-illuminance_display = "lux"
-
 [[bridges]]
 name = "main"
 bridge_id = "001788fffe123456" # replace with your bridge ID

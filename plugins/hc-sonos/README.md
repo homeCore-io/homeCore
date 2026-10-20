@@ -26,30 +26,34 @@ UI. They are state rather than log lines.
 
 ## Published HomeCore state
 
-Each speaker publishes a generic media-player contract intended for shared client UI:
+Each speaker publishes the shared media-player names (homeCore's device
+vocabulary), one name per fact:
 
-- `state`
-- `title`
-- `artist`
-- `album`
-- `position_secs`
-- `duration_secs`
-- `volume`
-- `muted`
-- `supported_actions`
-- `ui_enrichments`
+- `state` — `playing`, `paused`, `stopped` or `buffering`
+- `media_title`, `media_artist`, `media_album`, `media_image_url`
+- `media_position`, `media_duration` — seconds
+- `volume` — 0–100, **writable**
+- `muted` — **writable**
+- `shuffle`, `repeat`, `bass`, `treble` (−10–10), `loudness`
+- `available_favorites`, `available_playlists`, `group_coordinator`,
+  `group_members`
+- `supported_actions`, `ui_enrichments`
 
-For compatibility, the plugin also still publishes legacy Sonos-oriented fields:
+`title`, `artist`, `album`, `position_secs` and `duration_secs` are no longer
+published: they were second names for the `media_*` facts.
 
-- `media_title`
-- `media_artist`
-- `media_album`
-- `media_position`
-- `media_duration`
-- `available_favorites`
-- `available_playlists`
-- `group_coordinator`
-- `group_members`
+## Commands
+
+Write an attribute:
+
+```json
+{ "volume": 30 }
+{ "muted": true }
+```
+
+Volume is clamped to 0–100. Everything else is a declared action —
+`{"action": "set_bass", "bass": 3}` (bass and treble are clamped to −10–10),
+`{"action": "join", "coordinator": "<device id>"}` and the rest listed below.
 
 ## Known: radio streams publish no track, and report paused
 
@@ -62,7 +66,7 @@ What core held for the speaker while it was audibly playing:
 ```
 state:            paused
 media_title:      absent      media_artist: absent      media_image_url: absent
-duration_secs:    0           position_secs: 0          ← present
+media_duration:   0           media_position: 0         ← present
 last_seen:        fresh, plugin active, initial poll succeeded
 ```
 
@@ -86,7 +90,10 @@ That last row is visible in the house right now: the Bathroom speaker's
 than new — the workaround was written before the cause was found.
 
 `state: paused` is the same story one level up: `is_playing()` (from `sonor`)
-maps a transport state that a stream reports differently.
+maps a transport state that a stream reports differently. (Since then `state`
+is read from `CurrentTransportState` itself — `PLAYING`, `PAUSED_PLAYBACK`,
+`TRANSITIONING` → `buffering`, `STOPPED`/`NO_MEDIA_PRESENT` → `stopped` — so a
+stream's own answer is what is published.)
 
 **The fix, when it is picked up.** Read `GetMediaInfo` → `CurrentURIMetaData`
 for the station name and art, and `r:streamContent` for the live track, falling

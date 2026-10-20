@@ -144,7 +144,7 @@ pub struct Signal {
 pub struct SceneRecall {
     /// Keep the palette moving (`dynamic_palette`) rather than holding still.
     pub dynamic: bool,
-    pub duration_ms: Option<u32>,
+    pub transition_ms: Option<u32>,
     pub brightness_pct: Option<f64>,
 }
 

@@ -40,10 +40,10 @@ export function sentence(v, sceneName = () => undefined) {
 			const how = [v.dynamic ? 'its colours moving' : '', v.brightness_pct ? `at ${v.brightness_pct} %` : '']
 				.filter(Boolean)
 				.join(', ');
-			return `${what}${how ? `, ${how}` : ''}${fading(v.duration_ms)}`;
+			return `${what}${how ? `, ${how}` : ''}${fading(v.transition_ms)}`;
 		}
 		case 'flash':
-			return `flash {devices}${v.kind === 'alternating' ? ' in two colours' : v.colors?.length ? ' in a colour' : ''} for ${fadeWords(v.duration_ms ?? 5000)}, then put them back`;
+			return `flash {devices}${v.kind === 'alternating' ? ' in two colours' : v.colors?.length ? ' in a colour' : ''} for ${fadeWords((v.duration_secs ?? 5) * 1000)}, then put them back`;
 		case 'pulse':
 			return 'pulse {devices} once';
 		case 'power':

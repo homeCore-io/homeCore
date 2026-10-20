@@ -1786,9 +1786,9 @@ fn run_single_action(
             Action::SetMode { mode_id, command } => {
                 use hc_types::rule::ModeCommand;
                 let payload = match command {
-                    ModeCommand::On => serde_json::json!({ "command": "on" }),
-                    ModeCommand::Off => serde_json::json!({ "command": "off" }),
-                    ModeCommand::Toggle => serde_json::json!({ "command": "toggle" }),
+                    ModeCommand::On => serde_json::json!({ "action": "on" }),
+                    ModeCommand::Off => serde_json::json!({ "action": "off" }),
+                    ModeCommand::Toggle => serde_json::json!({ "action": "toggle" }),
                 };
                 info!(rule = %ctx.rule_name, mode_id, command = ?command, "action: SetMode");
                 publish_device_command(&ctx, &mode_id, payload, rule_change(&ctx, "rule")).await?;

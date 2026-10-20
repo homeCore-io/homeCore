@@ -64,7 +64,8 @@
 
 	const battery = $derived(num(a.battery_pct));
 	const low = $derived(battery !== undefined && battery <= 15);
-	const deg = $derived(a.temperature_unit === 'F' || a.temperature_unit === '°F' ? '°F' : '°C');
+	// Hue publishes °C, always; the screens have no unit setting of their own.
+	const deg = '°C';
 	const sens = ['Low', 'Medium', 'High'];
 </script>
 
@@ -98,7 +99,7 @@
 						<div class="tile">
 							<span class="hc-label">Light level</span>
 							<b class="hc-num">{Math.round(num(a.illuminance))}</b>
-							<span class="hc-quiet">{a.illuminance_unit ?? 'lux'}{num(a.illuminance) < 20 ? ' · dark' : num(a.illuminance) < 200 ? ' · dim' : ''}</span>
+							<span class="hc-quiet">lux{num(a.illuminance) < 20 ? ' · dark' : num(a.illuminance) < 200 ? ' · dim' : ''}</span>
 						</div>
 					{/if}
 				</div>
@@ -147,9 +148,9 @@
 		{:else}
 			<section class="hc-card">
 				<div class="tiles">
-					<div class="tile" class:now={a.contact_state === 'no_contact'}>
+					<div class="tile" class:now={a.open === true}>
 						<span class="hc-label">Door</span>
-						<b>{a.contact_state === 'no_contact' ? 'Open' : a.contact_state === 'contact' ? 'Closed' : '—'}</b>
+						<b>{a.open === true ? 'Open' : a.open === false ? 'Closed' : '—'}</b>
 						{#if a.tampered}<span class="hc-quiet">tampered with</span>{/if}
 					</div>
 				</div>

@@ -3,14 +3,19 @@
 //!
 //! Every word here is one a client or a rule can send to a WLED device:
 //!
-//! **The controller:** `on` (true, false or `"toggle"`), `brightness`
-//! (0–255), `brightness_pct`, `transition` (ms), `preset_id` (also `preset`,
-//! `apply_preset`, and `playlist_id` — a playlist is a preset), `main_segment`,
+//! Shared ideas use the shared names and units (`hc_types::device_vocabulary`),
+//! converted here to WLED's scales.
+//!
+//! **The controller:** `on` (true, false or `"toggle"`), `brightness_pct`
+//! (0–100; above 0 is never off), `transition_ms` (the fade for this change;
+//! WLED's `tt`, in tenths of a second), `preset_id`, `playlist_id` (a playlist
+//! is a preset), `main_segment`,
 //! `nightlight` (`{on, duration_min, mode, target_pct}`), `sync_send`,
 //! `sync_receive`, `sync_send_groups`, `sync_receive_groups` (bitmasks),
 //! `live_override` (0 off, 1 until the stream ends, 2 until restart),
 //! `stop_live` (leave live data now), `next_in_playlist`,
-//! `audio` (the AudioReactive usermod on or off), `reboot`.
+//! `audio` (the AudioReactive usermod on or off). Restarting is the declared
+//! `restart` action, handled by the bridge.
 //!
 //! **Presets:** `save_preset` (a slot) with `preset_name`,
 //! `preset_quick_label`, `include_brightness`, `include_segments`,
@@ -19,11 +24,12 @@
 //! **A segment's look**, sent at the top level for `segment` (an id,
 //! `"all"`, `"selected"`; segment 0 when left out, as it always was) or as
 //! `segments: [{id, …}]` for several at once: `segment_on`,
-//! `segment_brightness` (0–255) or `segment_brightness_pct`, `color`,
-//! `color2`, `color3` or `colors` (each `[r,g,b]`, `[r,g,b,w]`, `{r,g,b}` or
-//! `"#rrggbb"`), `cct` (0–255, warm to cold), `effect_id` (also `effect`),
-//! `effect_speed`, `effect_intensity`, `custom1`–`custom3`, `option1`–`option3`,
-//! `palette_id` (also `palette`), `start`, `stop`, `grouping`, `spacing`,
+//! `segment_brightness_pct`, `color_rgb` (the primary colour), `color2`
+//! (background), `color3` or `colors` (each `{r,g,b}` — also taken as
+//! `{r,g,b,w}`, `[r,g,b]`, `[r,g,b,w]` or `"#rrggbb"`), `color_temp` (kelvin,
+//! 1900–10091), `effect_id`, `effect_speed`, `effect_intensity`,
+//! `custom1`–`custom3`, `option1`–`option3`, `palette_id`, `start`, `stop`,
+//! `grouping`, `spacing`,
 //! `offset`, `reverse`, `mirror`, `freeze`, `selected`, `name`, `blend_mode`,
 //! `sound_sim`, `mapping_1d2d`.
 //!
@@ -38,6 +44,8 @@
 //! [`needs_state`].
 
 use serde_json::{json, Map, Value};
+
+use crate::state::{byte_of_pct, cct_of_kelvin, tenths_of_ms};
 
 /// What the strip is now, for the words that depend on it.
 #[derive(Debug, Clone, Default)]
@@ -85,11 +93,9 @@ pub fn needs_state(cmd: &Value) -> bool {
 /// value is taken.
 const SEGMENT_KEYS: &[(&str, &str, Kind)] = &[
     ("segment_on", "on", Kind::Bool),
-    ("segment_brightness", "bri", Kind::Byte),
     ("segment_brightness_pct", "bri", Kind::Pct),
-    ("cct", "cct", Kind::Byte),
+    ("color_temp", "cct", Kind::Kelvin),
     ("effect_id", "fx", Kind::Uint),
-    ("effect", "fx", Kind::Uint),
     ("effect_speed", "sx", Kind::Byte),
     ("effect_intensity", "ix", Kind::Byte),
     ("custom1", "c1", Kind::Byte),
@@ -99,7 +105,6 @@ const SEGMENT_KEYS: &[(&str, &str, Kind)] = &[
     ("option2", "o2", Kind::Bool),
     ("option3", "o3", Kind::Bool),
     ("palette_id", "pal", Kind::Uint),
-    ("palette", "pal", Kind::Uint),
     ("start", "start", Kind::Uint),
     ("stop", "stop", Kind::Uint),
     ("grouping", "grp", Kind::Uint),
@@ -120,6 +125,7 @@ enum Kind {
     Bool,
     Byte,
     Pct,
+    Kelvin,
     Uint,
     Text,
 }
@@ -128,9 +134,8 @@ fn take(kind: Kind, v: &Value) -> Option<Value> {
     match kind {
         Kind::Bool => v.as_bool().map(Value::Bool),
         Kind::Byte => number(v).map(|n| json!(n.clamp(0.0, 255.0).round() as u64)),
-        Kind::Pct => {
-            number(v).map(|p| json!(((p.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u64))
-        }
+        Kind::Pct => number(v).map(|p| json!(byte_of_pct(p))),
+        Kind::Kelvin => number(v).map(|k| json!(cct_of_kelvin(k))),
         Kind::Uint => number(v).filter(|n| *n >= 0.0).map(|n| json!(n as u64)),
         Kind::Text => v.as_str().map(|s| json!(s)),
     }
@@ -182,8 +187,13 @@ fn segment_look(src: &Map<String, Value>) -> Map<String, Value> {
         Some(list) => list.iter().take(3).filter_map(colour).collect(),
         None => Vec::new(),
     };
-    for (i, key) in ["color", "color2", "color3"].iter().enumerate() {
-        if let Some(c) = src.get(*key).and_then(colour) {
+    // `color` was the primary's old name; still taken, never published.
+    let primary = src.get("color_rgb").or_else(|| src.get("color"));
+    for (i, given) in [primary, src.get("color2"), src.get("color3")]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(c) = given.and_then(colour) {
             while cols.len() <= i {
                 cols.push(json!([]));
             }
@@ -220,28 +230,17 @@ pub fn build(cmd: &Value, strip: &Strip) -> Option<Value> {
         }
         _ => {}
     }
-    if let Some(b) = num("brightness") {
-        body.insert("bri".into(), json!(b.clamp(0.0, 255.0).round() as u64));
-    }
+    // 0–255 `brightness` is not taken: its scale meant different things on
+    // different plugins.
     if let Some(p) = num("brightness_pct") {
-        body.insert(
-            "bri".into(),
-            json!(((p.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u64),
-        );
+        body.insert("bri".into(), json!(byte_of_pct(p)));
     }
-    if let Some(ms) = num("transition") {
-        body.insert(
-            "tt".into(),
-            json!(((ms.max(0.0) / 100.0).round() as u64).min(65535)),
-        );
+    // `transition` (also ms) was the old name; still taken, never published.
+    if let Some(ms) = num("transition_ms").or_else(|| num("transition")) {
+        body.insert("tt".into(), json!(tenths_of_ms(ms)));
     }
-    // `preset_id` is what the device publishes; `preset` is the original wire
-    // key; `apply_preset` the action; `playlist_id` a playlist, which WLED
-    // stores — and starts — as a preset.
-    if let Some(ps) = ["preset_id", "preset", "apply_preset", "playlist_id"]
-        .iter()
-        .find_map(|k| int(k))
-    {
+    // A playlist is stored — and started — as a preset.
+    if let Some(ps) = ["preset_id", "playlist_id"].iter().find_map(|k| int(k)) {
         body.insert("ps".into(), json!(ps));
     }
     if let Some(m) = int("main_segment") {
@@ -281,10 +280,7 @@ pub fn build(cmd: &Value, strip: &Strip) -> Option<Value> {
             out.insert("mode".into(), json!(mode));
         }
         if let Some(p) = nl.get("target_pct").and_then(number) {
-            out.insert(
-                "tbri".into(),
-                json!(((p.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u64),
-            );
+            out.insert("tbri".into(), json!(byte_of_pct(p)));
         }
         if !out.is_empty() {
             body.insert("nl".into(), Value::Object(out));
@@ -331,9 +327,6 @@ pub fn build(cmd: &Value, strip: &Strip) -> Option<Value> {
     }
     if let Some(a) = src.get("audio").and_then(Value::as_bool) {
         body.insert("AudioReactive".into(), json!({ "on": a }));
-    }
-    if src.get("reboot").and_then(Value::as_bool) == Some(true) {
-        body.insert("rb".into(), json!(true));
     }
 
     // Presets.
@@ -439,7 +432,7 @@ mod tests {
     #[test]
     fn the_controller_words_become_wled_s() {
         let b = one(json!({
-            "on": "toggle", "brightness_pct": 50, "transition": 2000, "preset_id": 14,
+            "on": "toggle", "brightness_pct": 50, "transition_ms": 2000, "preset_id": 14,
             "nightlight": {"on": true, "duration_min": 30, "mode": "sunrise", "target_pct": 0},
             "sync_send": false, "sync_receive": true, "live_override": 1, "audio": true
         }));
@@ -468,12 +461,13 @@ mod tests {
     fn a_look_goes_to_segment_zero_unless_told() {
         let b = one(json!({
             "effect_id": 51, "effect_speed": 300, "custom1": 12, "option2": true,
-            "palette_id": 3, "color": "#6a0dad", "color3": {"r": 0, "g": 255, "b": 60}
+            "palette_id": 3, "color_rgb": {"r": 106, "g": 13, "b": 173}, "color3": "#00ff3c",
+            "color_temp": 2700
         }));
         assert_eq!(
             b["seg"],
             json!([{
-                "id": 0, "fx": 51, "sx": 255, "c1": 12, "o2": true, "pal": 3,
+                "id": 0, "fx": 51, "sx": 255, "c1": 12, "o2": true, "pal": 3, "cct": 2700,
                 "col": [[106, 13, 173], [], [0, 255, 60]]
             }])
         );
@@ -561,16 +555,42 @@ mod tests {
     }
 
     #[test]
-    fn the_old_words_still_work() {
-        let b = one(json!({"preset": 2, "effect": 9, "palette": 1, "color": [1, 2, 3]}));
-        assert_eq!(b["ps"], 2);
+    fn two_old_spellings_are_still_taken_and_the_rest_are_not() {
+        // `transition` and `color` meant what the new names mean.
+        let b = one(json!({"transition": 700, "color": [1, 2, 3]}));
+        assert_eq!(b["tt"], 7);
+        assert_eq!(b["seg"], json!([{"id": 0, "col": [[1, 2, 3]]}]));
+        // One spelling each for preset, effect and palette; `brightness`
+        // (0–255 here, other scales elsewhere) and `cct` (0–255) are gone.
+        for gone in [
+            json!({"preset": 2}),
+            json!({"apply_preset": 5}),
+            json!({"effect": 9}),
+            json!({"palette": 1}),
+            json!({"brightness": 128}),
+            json!({"cct": 127}),
+            json!({"reboot": true}),
+            json!({"segment_brightness": 10}),
+        ] {
+            assert!(build(&gone, &Strip::default()).is_none(), "{gone}");
+        }
+    }
+
+    #[test]
+    fn levels_are_converted_to_wled_s_scales() {
+        assert_eq!(one(json!({"brightness_pct": 0}))["bri"], 0);
+        assert_eq!(one(json!({"brightness_pct": 0.2}))["bri"], 1);
+        assert_eq!(one(json!({"brightness_pct": 100}))["bri"], 255);
+        assert_eq!(one(json!({"transition_ms": 0}))["tt"], 0);
+        assert_eq!(one(json!({"transition_ms": 250}))["tt"], 3);
         assert_eq!(
-            b["seg"],
-            json!([{"id": 0, "fx": 9, "pal": 1, "col": [[1, 2, 3]]}])
+            one(json!({"color_temp": 1000}))["seg"][0]["cct"],
+            1900,
+            "below WLED's kelvin range it would be read as 0–255"
         );
         assert_eq!(
-            one(json!({"action": "apply_preset", "apply_preset": 5}))["ps"],
-            5
+            one(json!({"segment_brightness_pct": 1}))["seg"][0]["bri"],
+            3
         );
     }
 

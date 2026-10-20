@@ -66,6 +66,8 @@ pub struct HueRegistry {
     /// device id → the name and area it was last registered with, so a
     /// rename or a move in the Hue app reaches homeCore.
     registered_as: HashMap<String, (String, Option<String>)>,
+    /// Devices whose retired attribute names have been cleared this run.
+    retired_cleared: HashSet<String>,
 }
 
 impl HueRegistry {
@@ -378,6 +380,13 @@ impl HueRegistry {
     /// everything exactly once. The `rid`/`publish_device_id` bindings live in
     /// the same maps, so they are rebuilt by that pass before anything reads
     /// them, and pruning still works: it runs on what the pass just saw.
+    /// True the first time it is asked about a device in this run: the
+    /// moment to clear the names this plugin no longer publishes from the
+    /// state homeCore stored before.
+    pub fn first_retirement(&mut self, device_id: &str) -> bool {
+        self.retired_cleared.insert(device_id.to_string())
+    }
+
     pub fn forget_publications(&mut self) {
         self.registered_as.clear();
         self.lights_by_device_id.clear();

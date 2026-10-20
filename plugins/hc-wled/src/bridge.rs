@@ -193,9 +193,6 @@ async fn handle_command(rt: &Runtime, dev: &DeviceConfig, cmd: &Value) -> Result
             } else {
                 Strip::default()
             };
-            if cmd.get("reboot").and_then(Value::as_bool) == Some(true) {
-                rt.expect_restart(&dev.hc_id);
-            }
             if is_identify(cmd) {
                 return identify(rt, dev, &client, &strip, cmd).await;
             }

@@ -173,43 +173,30 @@ pub fn config_descriptor() -> serde_json::Value {
                 ),
         )
         .section(
-            Section::new("devices", "Devices")
-                .field(
-                    Field::enumeration("yolink.temperature_unit")
-                        .label("Report temperatures in")
-                        .render("segmented")
-                        .default("F")
-                        .option("F", "Fahrenheit")
-                        .option("C", "Celsius")
-                        .help(
-                            "Devices report in their own unit; this is the unit \
-                             everything is converted to before publishing.",
-                        ),
-                )
-                .field(
-                    Field::table("devices")
-                        .label("YoLink devices")
-                        .render("list")
-                        .key_by("device_id")
-                        .help(
-                            "Everything paired to the hub. Names arrive from YoLink \
+            Section::new("devices", "Devices").field(
+                Field::table("devices")
+                    .label("YoLink devices")
+                    .render("list")
+                    .key_by("device_id")
+                    .help(
+                        "Everything paired to the hub. Names arrive from YoLink \
                              — edit one here to override what this house calls it, \
                              and assign it a room.",
-                        )
-                        .source(
-                            Source::core_resource("devices")
-                                .item_key("device_id")
-                                .labels("name", "device_id"),
-                        )
-                        .columns([
-                            Field::text("name").label("Name"),
-                            Field::select("area")
-                                .label("Room")
-                                .placeholder("Unassigned")
-                                .allow_create()
-                                .source(Source::core_resource("areas")),
-                        ]),
-                ),
+                    )
+                    .source(
+                        Source::core_resource("devices")
+                            .item_key("device_id")
+                            .labels("name", "device_id"),
+                    )
+                    .columns([
+                        Field::text("name").label("Name"),
+                        Field::select("area")
+                            .label("Room")
+                            .placeholder("Unassigned")
+                            .allow_create()
+                            .source(Source::core_resource("areas")),
+                    ]),
+            ),
         )
         .section(
             Section::new("logging", "Logging")
@@ -386,48 +373,6 @@ pub enum Mode {
     Local,
 }
 
-/// Display unit for temperatures reported to HomeCore.
-///
-/// YoLink devices report their own unit in the `tempUnit` field; this plugin
-/// always converts to the configured unit before publishing.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum TemperatureUnit {
-    /// Degrees Celsius
-    #[serde(rename = "C")]
-    C,
-    /// Degrees Fahrenheit (default)
-    #[serde(rename = "F")]
-    #[default]
-    F,
-}
-
-impl TemperatureUnit {
-    /// Convert a Celsius value to the target unit.
-    pub fn convert_celsius(&self, c: f64) -> f64 {
-        match self {
-            TemperatureUnit::C => c,
-            TemperatureUnit::F => c * 9.0 / 5.0 + 32.0,
-        }
-    }
-
-    /// Convert a Fahrenheit value to the target unit.
-    pub fn convert_fahrenheit(&self, f: f64) -> f64 {
-        match self {
-            TemperatureUnit::F => f,
-            TemperatureUnit::C => (f - 32.0) * 5.0 / 9.0,
-        }
-    }
-
-    /// Short label used in published state JSON, e.g. `"F"` or `"C"`.
-    pub fn label(&self) -> &'static str {
-        match self {
-            TemperatureUnit::C => "C",
-            TemperatureUnit::F => "F",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct YolinkConfig {
@@ -455,10 +400,6 @@ pub struct YolinkConfig {
     #[serde(default = "default_initial_fetch_delay_secs")]
     pub initial_fetch_delay_secs: u64,
 
-    /// Unit used when publishing temperature values to HomeCore.
-    #[serde(default)]
-    pub temperature_unit: TemperatureUnit,
-
     pub cloud: Option<CloudConfig>,
     pub local: Option<LocalConfig>,
 }
@@ -475,7 +416,6 @@ impl Default for YolinkConfig {
             inventory_interval_secs: None,
             poll_device_delay_ms: default_poll_device_delay_ms(),
             initial_fetch_delay_secs: default_initial_fetch_delay_secs(),
-            temperature_unit: TemperatureUnit::default(),
             cloud: None,
             local: None,
         }

@@ -53,7 +53,7 @@ fn node_device_id(node_id: u32) -> String {
 /// **Where the class is decisive, it decides.** Where it is not, what the node
 /// *reports* does — "Notification Sensor" is the generic and the specific class
 /// of both a door sensor and a motion sensor on this network, and the only
-/// thing telling them apart is that one publishes `contact_open` and the other
+/// thing telling them apart is that one publishes `open` and the other
 /// publishes `motion`. That is the same principle homeCore is moving to for
 /// presentation generally: the declaration is richer than the label.
 ///
@@ -68,7 +68,7 @@ fn device_type_for(node: &NodeState, state: &Value) -> Option<&'static str> {
     let by_reading = || -> Option<&'static str> {
         if has("motion") {
             Some("motion_sensor")
-        } else if has("contact_open") || has("door_open") {
+        } else if has("open") {
             Some("contact_sensor")
         } else if has("water_detected") || has("leak") {
             Some("water_sensor")
@@ -89,15 +89,14 @@ fn device_type_for(node: &NodeState, state: &Value) -> Option<&'static str> {
 
     match generic {
         "Binary Switch" => Some("switch"),
-        "Multilevel Switch" => match specific {
-            // The one place the specific class earns its keep on a dimmer's
-            // generic class: a motorised window covering is not a light.
-            s if s.contains("Motor Control") || s.contains("Class B") || s.contains("Class C") => {
-                Some("cover")
-            }
-            _ => Some("light"),
-        },
+        // The one place the specific class earns its keep on a dimmer's
+        // generic class: a motorised window covering is not a light.
+        "Multilevel Switch" if translator::is_cover_class(generic, specific) => Some("cover"),
+        "Multilevel Switch" => Some("light"),
+        // A garage door opener shares Entry Control with locks.
+        "Entry Control" if specific.contains("Barrier") => Some("cover"),
         "Entry Control" => Some("lock"),
+        "Window Covering" => Some("cover"),
         "Thermostat" => Some("thermostat"),
         "Binary Sensor" | "Notification Sensor" | "Multilevel Sensor" | "Alarm Sensor" => {
             // Ambiguous by design — a door sensor and a motion sensor share
@@ -127,13 +126,14 @@ fn build_state(node: &NodeState, translator: &Translator) -> Value {
     }
 
     for v in &node.values {
-        translate_node_value(v, translator, &mut map);
+        translate_node_value(node.node_id, v, translator, &mut map);
     }
 
     Value::Object(map)
 }
 
 fn translate_node_value(
+    node_id: u32,
     v: &NodeValue,
     translator: &Translator,
     map: &mut serde_json::Map<String, Value>,
@@ -144,14 +144,14 @@ fn translate_node_value(
     };
     let pk_str = v.property_key.as_ref().and_then(property_key_str);
     let pk = pk_str.as_deref();
-    if translator.is_unpublished(v.command_class, v.endpoint, &v.property, pk) {
+    if translator.is_unpublished(v.command_class, &v.property) {
         return;
     }
 
-    if let Some((attr, val)) =
-        translator.translate(v.command_class, v.endpoint, &v.property, pk, raw)
+    if let Some(pairs) =
+        translator.translate(node_id, v.command_class, v.endpoint, &v.property, pk, raw)
     {
-        map.insert(attr, val);
+        map.extend(pairs);
     } else {
         // Generic fallback so every device value is visible even when the
         // alias table doesn't know the canonical name. Identical naming
@@ -160,6 +160,64 @@ fn translate_node_value(
         let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk);
         map.insert(attr, raw.clone());
     }
+}
+
+/// Names published before the device vocabulary, replaced by the shared ones
+/// (`brightness` → `brightness_pct`, `contact_open` → `open`, …).
+const RETIRED_NAMES: &[&str] = &[
+    "brightness",
+    "contact_open",
+    "tamper",
+    "battery",
+    "co2_ppm",
+    "target_temp",
+    "mode",
+];
+
+/// The partial of `null`s that clears from homeCore's stored state every
+/// attribute this node used to publish and no longer does:
+///
+/// - [`RETIRED_NAMES`];
+/// - the raw `cc…` name of any value that now publishes under a shared name
+///   (fan mode, a window covering's position, a sensor newly aliased) or is
+///   never published (a write target, a lock's door codes).
+///
+/// Anything the node publishes now is left alone.
+fn retired_state(
+    node: &NodeState,
+    translator: &Translator,
+    state: &Value,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for name in RETIRED_NAMES {
+        out.insert((*name).to_string(), Value::Null);
+    }
+    for v in &node.values {
+        let pk = v.property_key.as_ref().and_then(property_key_str);
+        let pk = pk.as_deref();
+        let gone = translator.is_unpublished(v.command_class, &v.property)
+            || v.value.as_ref().is_some_and(|raw| {
+                !raw.is_null()
+                    && translator
+                        .translate(
+                            node.node_id,
+                            v.command_class,
+                            v.endpoint,
+                            &v.property,
+                            pk,
+                            raw,
+                        )
+                        .is_some()
+            });
+        if gone {
+            let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk);
+            out.insert(attr, Value::Null);
+        }
+    }
+    if let Some(current) = state.as_object() {
+        out.retain(|k, _| !current.contains_key(k));
+    }
+    out
 }
 
 async fn publish_node(
@@ -195,6 +253,10 @@ async fn publish_node(
         hardware = hardware.sw_version(v);
     }
 
+    // What the node is decides what some of its values mean (a level is a
+    // light's brightness or a blind's position; a sensor's scale), so learn
+    // it before translating anything.
+    translator.learn_node(node);
     let state = build_state(node, translator);
 
     publisher
@@ -234,7 +296,7 @@ async fn publish_node(
 
     // Retained, so a client connecting later knows what this node's attributes
     // mean and which of them can actually be written.
-    if let Some(schema) = crate::schema::schema_json(&state, translator) {
+    if let Some(schema) = crate::schema::schema_json(node.node_id, &state, translator) {
         publisher
             .register_device_schema_json(&device_id, &schema)
             .await?;
@@ -251,21 +313,15 @@ async fn publish_node(
     // them. Trade-off: a CC removed in firmware would leave a stale
     // attribute in homeCore until manually cleared. Acceptable.
     publisher.publish_state_partial(&device_id, &state).await?;
-    // Earlier versions published a lock's door codes; a null in a partial
-    // removes the attribute, so they are cleared from homeCore's state here.
-    let secrets: serde_json::Map<String, Value> = node
-        .values
-        .iter()
-        .filter(|v| translator::is_secret(v.command_class, &v.property))
-        .map(|v| {
-            let pk = v.property_key.as_ref().and_then(property_key_str);
-            let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk.as_deref());
-            (attr, Value::Null)
-        })
-        .collect();
-    if !secrets.is_empty() {
+    // Names earlier versions published and this one does not: a lock's door
+    // codes, the spellings the device vocabulary retired, and raw `cc…` names
+    // for values that now have a shared one. homeCore only merges a partial,
+    // so without this each would sit in stored state with its last value
+    // forever; a null in a partial removes the attribute.
+    let retired = retired_state(node, translator, &state);
+    if !retired.is_empty() {
         publisher
-            .publish_state_partial(&device_id, &Value::Object(secrets))
+            .publish_state_partial(&device_id, &Value::Object(retired))
             .await?;
     }
     publisher
@@ -568,11 +624,7 @@ async fn refresh_primary_state(ws_tx: &mut WsSink, nodes: &[NodeState]) {
 #[derive(Debug)]
 struct SetValueCmd {
     node_id: u32,
-    command_class: u32,
-    endpoint: u32,
-    property: String,
-    property_key: Option<Value>,
-    value: Value,
+    write: translator::Write,
 }
 
 pub struct Bridge {
@@ -671,7 +723,7 @@ impl Bridge {
         // reported; for switches/plugs that only emit meter reports and
         // dimmers/locks that don't auto-report on local actuation, that
         // cache can drift from reality and the snapshot above will then
-        // publish a stale `on`/`brightness`/`locked`. Poll the primary
+        // publish a stale `on`/`brightness_pct`/`locked`. Poll the primary
         // value for each non-sleeping node so a fresh Get is issued; the
         // reply arrives as a `value updated` event and corrects state.
         refresh_primary_state(&mut ws_tx, &nodes).await;
@@ -682,7 +734,6 @@ impl Bridge {
         // Everything runs inline under tokio::select so we can borrow
         // disjoint fields of `self` (cmd_rx, control_rx) mutably. The WS
         // loop can't be tokio::spawn'd without moving those borrows.
-        let cmd_translator = Translator::new();
         let publisher = self.publisher.clone();
         let event_tx = self.event_tx.clone();
         tokio::select! {
@@ -696,7 +747,7 @@ impl Bridge {
                 translator: &translator,
                 event_tx: &event_tx,
             }) => res,
-            res = cmd_dispatch_loop(&mut self.cmd_rx, &sv_tx, &cmd_translator) => res,
+            res = cmd_dispatch_loop(&mut self.cmd_rx, &sv_tx, &translator) => res,
         }
     }
 }
@@ -943,22 +994,18 @@ async fn handle_event(
                 if let Ok(args) = serde_json::from_value::<ValueUpdatedArgs>(args_val) {
                     let pk_str = args.property_key.as_ref().and_then(property_key_str);
                     let pk = pk_str.as_deref();
-                    if translator.is_unpublished(
-                        args.command_class,
-                        args.endpoint,
-                        &args.property,
-                        pk,
-                    ) {
+                    if translator.is_unpublished(args.command_class, &args.property) {
                         return Ok(());
                     }
-                    let (attr, val) = match translator.translate(
+                    let pairs = match translator.translate(
+                        node_id,
                         args.command_class,
                         args.endpoint,
                         &args.property,
                         pk,
                         &args.new_value,
                     ) {
-                        Some((a, v)) => (a, v),
+                        Some(pairs) => pairs,
                         None => {
                             // Generic fallback — synthesise a stable attribute
                             // name so unaliased values still land in homeCore.
@@ -977,7 +1024,7 @@ async fn handle_event(
                                 value = ?args.new_value,
                                 "Unaliased value — publishing under synthetic name"
                             );
-                            (attr, args.new_value.clone())
+                            vec![(attr, args.new_value.clone())]
                         }
                     };
                     // Skip null values — partial-merge semantics treat
@@ -987,13 +1034,40 @@ async fn handle_event(
                     // can fire `value updated` with a null `newValue` for
                     // values that go idle or briefly drop out; we don't
                     // want those to clear data.
-                    if val.is_null() {
-                        debug!(node_id, %attr, "Null value — skipping partial publish");
+                    let patch: serde_json::Map<String, Value> =
+                        pairs.into_iter().filter(|(_, v)| !v.is_null()).collect();
+                    if patch.is_empty() {
+                        debug!(node_id, "Null value — skipping partial publish");
                         return Ok(());
                     }
-                    debug!(node_id, %attr, value = ?val, "Value → publishing");
-                    let patch = json!({ attr: val });
-                    publisher.publish_state_partial(&device_id, &patch).await?;
+                    debug!(node_id, ?patch, "Value → publishing");
+                    publisher
+                        .publish_state_partial(&device_id, &Value::Object(patch))
+                        .await?;
+                }
+            }
+        }
+
+        // A value's unit or supported states changed (a sensor switched
+        // scale). Later readings convert from the new one.
+        "metadata updated" => {
+            if let Some(args) = ev.args {
+                let cc = args.get("commandClass").and_then(Value::as_u64);
+                let ep = args.get("endpoint").and_then(Value::as_u64).unwrap_or(0);
+                let prop = args.get("property").map(|p| match p {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                });
+                let pk = args.get("propertyKey").and_then(property_key_str);
+                if let (Some(cc), Some(prop), Some(meta)) = (cc, prop, args.get("metadata")) {
+                    translator.learn_metadata(
+                        node_id,
+                        cc as u32,
+                        ep as u32,
+                        &prop,
+                        pk.as_deref(),
+                        meta,
+                    );
                 }
             }
         }
@@ -1079,26 +1153,36 @@ async fn handle_event(
 // node.set_value
 // ---------------------------------------------------------------------------
 
-async fn send_set_value(ws_tx: &mut WsSink, cmd: &SetValueCmd) -> Result<()> {
-    let msg_id = format!("hc-sv-{}", Uuid::new_v4());
+fn set_value_msg(msg_id: &str, cmd: &SetValueCmd) -> Value {
+    let w = &cmd.write;
     let mut value_id = json!({
-        "commandClass": cmd.command_class,
-        "endpoint": cmd.endpoint,
-        "property": cmd.property,
+        "commandClass": w.command_class,
+        "endpoint": w.endpoint,
+        "property": w.property,
     });
-    if let Some(pk) = &cmd.property_key {
+    if let Some(pk) = &w.property_key {
         value_id["propertyKey"] = pk.clone();
     }
-    let msg = json!({
+    let mut msg = json!({
         "messageId": msg_id,
         "command": "node.set_value",
         "nodeId": cmd.node_id,
         "valueId": value_id,
-        "value": cmd.value,
+        "value": w.value,
     });
+    // zwave-js `SetValueAPIOptions` — a fade's `transitionDuration`.
+    if let Some(options) = &w.options {
+        msg["options"] = options.clone();
+    }
+    msg
+}
+
+async fn send_set_value(ws_tx: &mut WsSink, cmd: &SetValueCmd) -> Result<()> {
+    let msg_id = format!("hc-sv-{}", Uuid::new_v4());
+    let msg = set_value_msg(&msg_id, cmd);
     // Log the exact JSON so we can compare against the zwave-js-server protocol spec.
     let raw_json = serde_json::to_string(&msg).unwrap_or_default();
-    info!(node_id = cmd.node_id, cc = cmd.command_class, prop = %cmd.property, value = ?cmd.value, json = %raw_json, "Sending node.set_value");
+    info!(node_id = cmd.node_id, cc = cmd.write.command_class, prop = %cmd.write.property, value = ?cmd.write.value, json = %raw_json, "Sending node.set_value");
     ws_send(ws_tx, &msg).await?;
     Ok(())
 }
@@ -1146,28 +1230,12 @@ async fn handle_cmd(
     // HomeCore command metadata keys (`_hc`, top-level `correlation_id`) are
     // not device attributes — skip them when tallying dispatch outcomes so
     // the "nothing dispatched" warn doesn't fire on metadata-only noise.
+    // `transition_ms` rides along with the writes it fades rather than being
+    // written itself.
     let mut dispatched = 0usize;
-    let mut unrecognised: Vec<&str> = Vec::new();
-    for (attr, hc_value) in obj {
-        if attr.starts_with('_') || attr == "correlation_id" {
-            continue;
-        }
-        let target = match translator.write_target(attr) {
-            Some(t) => t,
-            None => {
-                unrecognised.push(attr.as_str());
-                continue;
-            }
-        };
-        let native_value = target.transform.reverse(hc_value);
-        let sv_cmd = SetValueCmd {
-            node_id,
-            command_class: target.command_class,
-            endpoint: target.endpoint,
-            property: target.property.clone(),
-            property_key: target.property_key.clone(),
-            value: native_value,
-        };
+    let (writes, unrecognised) = translator.commands(node_id, obj);
+    for write in writes {
+        let sv_cmd = SetValueCmd { node_id, write };
         if sv_tx.send(sv_cmd).await.is_err() {
             warn!("WS task gone; dropping cmd");
         } else {
@@ -1238,6 +1306,92 @@ mod tests {
             device_type_for(&classed("Static Controller", "PC Controller"), &json!({})),
             Some("gateway")
         );
+        // A garage door opener is Entry Control too, and is not a lock.
+        assert_eq!(
+            device_type_for(
+                &classed("Entry Control", "Secure Barrier Add-on"),
+                &json!({})
+            ),
+            Some("cover")
+        );
+        assert_eq!(
+            device_type_for(
+                &classed("Multilevel Switch", "Motor Control Class C"),
+                &json!({})
+            ),
+            Some("cover")
+        );
+    }
+
+    /// Every retired spelling is cleared, along with the raw names of values
+    /// that now have a shared one — and nothing the node publishes now.
+    #[test]
+    fn retired_names_are_cleared_and_current_ones_kept() {
+        let n = node(json!({
+            "nodeId": 3,
+            "values": [
+                { "commandClass": 38, "endpoint": 0, "property": "currentValue", "value": 50 },
+                { "commandClass": 68, "endpoint": 0, "property": "mode", "value": 1 },
+                { "commandClass": 102, "endpoint": 0, "property": "targetState", "value": 255 },
+                { "commandClass": 99, "endpoint": 0, "property": "userCode", "propertyKey": 1, "value": "1234" },
+                { "commandClass": 112, "endpoint": 0, "property": "3", "value": 7 }
+            ]
+        }));
+        let t = Translator::new();
+        t.learn_node(&n);
+        let state = build_state(&n, &t);
+        let cleared = retired_state(&n, &t, &state);
+        let mut names: Vec<&str> = cleared.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "battery",
+                "brightness",
+                "cc102_targetstate",
+                "cc38_currentvalue",
+                "cc68_mode",
+                "cc99_usercode_pk1",
+                "co2_ppm",
+                "contact_open",
+                "mode",
+                "tamper",
+                "target_temp",
+            ]
+        );
+        assert!(cleared.values().all(Value::is_null));
+        // Still published: untouched.
+        for kept in ["brightness_pct", "on", "fan_mode", "cc112_3"] {
+            assert!(state.get(kept).is_some(), "{kept}");
+            assert!(!cleared.contains_key(kept), "{kept}");
+        }
+    }
+
+    /// A fade rides along as zwave-js set-value options; a write without one
+    /// sends none.
+    #[test]
+    fn set_value_carries_the_fade_as_options() {
+        let mut cmd = SetValueCmd {
+            node_id: 4,
+            write: translator::Write {
+                command_class: 38,
+                endpoint: 0,
+                property: "targetValue".into(),
+                property_key: None,
+                value: json!(99),
+                options: Some(json!({ "transitionDuration": "2s" })),
+            },
+        };
+        let msg = set_value_msg("m", &cmd);
+        assert_eq!(msg["command"], "node.set_value");
+        assert_eq!(msg["value"], 99);
+        assert_eq!(msg["options"], json!({ "transitionDuration": "2s" }));
+        assert!(msg["valueId"].get("propertyKey").is_none());
+        cmd.write.options = None;
+        cmd.write.property_key = Some(json!(1));
+        let msg = set_value_msg("m", &cmd);
+        assert!(msg.get("options").is_none());
+        assert_eq!(msg["valueId"]["propertyKey"], 1);
     }
 
     /// **A door sensor and a motion sensor share both class labels** on the
@@ -1247,11 +1401,11 @@ mod tests {
     fn what_the_node_reports_breaks_the_tie_the_class_cannot() {
         let sensor = classed("Notification Sensor", "Notification Sensor");
         assert_eq!(
-            device_type_for(&sensor, &json!({ "contact_open": true })),
+            device_type_for(&sensor, &json!({ "open": true })),
             Some("contact_sensor")
         );
         assert_eq!(
-            device_type_for(&sensor, &json!({ "motion": false, "tamper": false })),
+            device_type_for(&sensor, &json!({ "motion": false, "tampered": false })),
             Some("motion_sensor")
         );
         // Reporting neither is still a sensor, which is more than "zwave" said.

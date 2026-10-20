@@ -109,6 +109,23 @@ pub(crate) async fn apply_state_update(
     );
 }
 
+/// `{"action": "start", …}` as the `{"command": "start", …}` homeCore's own
+/// devices parse. The action shape is the one the app, automations and every
+/// plugin use; `command` is the retired spelling, still taken.
+pub(crate) fn action_as_command(payload: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_slice(payload) else {
+        return std::borrow::Cow::Borrowed(payload);
+    };
+    if map.contains_key("command") {
+        return std::borrow::Cow::Borrowed(payload);
+    }
+    let Some(action) = map.remove("action") else {
+        return std::borrow::Cow::Borrowed(payload);
+    };
+    map.insert("command".into(), action);
+    std::borrow::Cow::Owned(serde_json::to_vec(&map).unwrap_or_else(|_| payload.to_vec()))
+}
+
 /// Parse a command topic: `homecore/devices/{id}/cmd` → Some(device_id).
 fn parse_glue_cmd_topic(topic: &str, prefix: &str) -> Option<String> {
     let mut parts = topic.splitn(4, '/');
@@ -191,6 +208,7 @@ impl GlueManager {
                 event = rx.recv() => {
                     match event {
                         Ok(Event::MqttMessage { topic, payload, .. }) => {
+                            let payload = action_as_command(&payload);
                             // Command dispatch by device ID prefix.
                             // Timer: handled by TimerManager (complex async countdown tasks).
                             // Switch: handled here (migrated from SwitchManager).
@@ -528,5 +546,23 @@ mod tests {
             1,
             "an existing schema is left as it was found"
         );
+    }
+
+    #[test]
+    fn an_action_is_read_as_the_command_it_names() {
+        let out = action_as_command(br#"{"action":"start","duration_secs":600}"#);
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"command": "start", "duration_secs": 600})
+        );
+        // The old shape, and anything else, passes through untouched.
+        for raw in [
+            &br#"{"command":"cancel"}"#[..],
+            br#"{"on":true}"#,
+            b"not json",
+        ] {
+            assert_eq!(&*action_as_command(raw), raw);
+        }
     }
 }

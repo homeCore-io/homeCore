@@ -243,6 +243,14 @@ async fn try_start(
         {
             warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish schema");
         }
+        // Names this controller no longer publishes (`brightness`, `cct`,
+        // `color`, …), removed from the stored state.
+        if let Err(e) = publisher
+            .publish_state_partial(&dev.hc_id, &schema::retired_state())
+            .await
+        {
+            warn!(hc_id = %dev.hc_id, error = %e, "Failed to clear retired state");
+        }
         if let Err(e) = publisher.subscribe_commands(&dev.hc_id).await {
             error!(hc_id = %dev.hc_id, error = %e, "Failed to subscribe commands");
         }

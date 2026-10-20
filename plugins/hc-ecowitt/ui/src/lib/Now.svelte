@@ -2,24 +2,19 @@
      wind, rain, the sky, and inside. -->
 <script>
 	import Compass from './Compass.svelte';
-	import { ago, fmt, num, stale, uvWords } from './weather.js';
+	import { DEG as deg, ago, fmt, isRaining, num, rainGauge, stale, uvWords } from './weather.js';
 
 	/** @type {{ devices: import('./weather.js').Device[], pressureTrend?: string }} */
 	let { devices = [], pressureTrend = '' } = $props();
 
 	const of = (type) => devices.find((d) => d.device_type === type);
 	const station = $derived(of('weather_station'));
-	const rain = $derived(
-		devices.find((d) => d.device_type === 'rain_sensor' && d.attributes.rain_day_piezo !== undefined) ??
-			of('rain_sensor')
-	);
+	const rain = $derived(rainGauge(devices));
 	const lightning = $derived(of('lightning_sensor'));
 	const indoor = $derived(devices.find((d) => d.device_id.endsWith('_indoor')));
 	const s = $derived(station?.attributes ?? {});
 	const r = $derived(rain?.attributes ?? {});
-	const deg = $derived(s.temperature_unit ?? '°F');
-	const pick = (a, ...keys) => keys.map((k) => a[k]).find((v) => num(v) !== undefined);
-	const raining = $derived(Number(pick(r, 'rain_rate_piezo', 'rain_rate') ?? 0) > 0);
+	const raining = $derived(isRaining(r));
 	const strikeAt = $derived(Number(lightning?.attributes.last_strike) * 1000);
 </script>
 
@@ -49,8 +44,8 @@
 
 		<section class="hc-card wind">
 			<span class="hc-label">Wind</span>
-			<Compass dir={s.wind_direction} avg={s.wind_direction_avg10m} speed={s.wind_speed} gust={s.gust_speed} />
-			<span class="hc-quiet">Strongest today {fmt(s.daily_max_wind)} mph</span>
+			<Compass dir={s.wind_direction} avg={s.wind_direction_avg10m} speed={s.wind_speed} gust={s.wind_gust} />
+			<span class="hc-quiet">Strongest today {fmt(s.wind_gust_daily_max)} m/s</span>
 		</section>
 
 		<section class="hc-card">
@@ -61,13 +56,13 @@
 					>{/if}
 			</div>
 			{#if rain}
-				<div class="temp small"><b class="hc-num">{fmt(pick(r, 'rain_day_piezo', 'rain_day'), 2)}</b><span>in today</span></div>
+				<div class="temp small"><b class="hc-num">{fmt(r.rain_daily_mm)}</b><span>mm today</span></div>
 				<dl>
-					<dt>Now</dt><dd>{fmt(pick(r, 'rain_rate_piezo', 'rain_rate'), 2)} in/h</dd>
-					<dt>This storm</dt><dd>{fmt(pick(r, 'rain_event_piezo', 'rain_event'), 2)} in</dd>
-					<dt>Week</dt><dd>{fmt(pick(r, 'rain_week_piezo', 'rain_week'), 2)} in</dd>
-					<dt>Month</dt><dd>{fmt(pick(r, 'rain_month_piezo', 'rain_month'), 2)} in</dd>
-					<dt>Year</dt><dd>{fmt(pick(r, 'rain_year_piezo', 'rain_year'), 2)} in</dd>
+					<dt>Now</dt><dd>{fmt(r.rain_rate_mm_hr)} mm/h</dd>
+					<dt>This storm</dt><dd>{fmt(r.rain_event_mm)} mm</dd>
+					<dt>Week</dt><dd>{fmt(r.rain_weekly_mm)} mm</dd>
+					<dt>Month</dt><dd>{fmt(r.rain_monthly_mm)} mm</dd>
+					<dt>Year</dt><dd>{fmt(r.rain_yearly_mm)} mm</dd>
 				</dl>
 			{:else}
 				<p class="hc-quiet">No rain gauge.</p>
@@ -78,14 +73,14 @@
 			<span class="hc-label">Sky and air</span>
 			<dl>
 				<dt>Pressure</dt>
-				<dd>{fmt(s.barometric_rel, 2)} inHg{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
+				<dd>{fmt(s.pressure, 0)} hPa{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
 				<dt>UV index</dt><dd>{fmt(s.uvi, 0)} {uvWords(s.uvi)}</dd>
-				<dt>Sunlight</dt><dd>{fmt(s.light, 0)} W/m²</dd>
+				<dt>Sunlight</dt><dd>{fmt(s.solar_radiation, 0)} W/m²</dd>
 				{#if lightning}
 					<dt>Lightning</dt>
 					<dd>
 						{fmt(lightning.attributes.strike_count, 0)} strikes{Number.isFinite(strikeAt)
-							? ` · last ${ago(new Date(strikeAt).toISOString())}, ${fmt(lightning.attributes.distance, 0)} mi`
+							? ` · last ${ago(new Date(strikeAt).toISOString())}, ${fmt(lightning.attributes.distance_km, 0)} km`
 							: ''}
 					</dd>
 				{/if}

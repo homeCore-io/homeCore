@@ -14,7 +14,9 @@
 /// event (even if empty), distinguishing "no track" from "field not sent".
 #[derive(Debug, Clone, Default)]
 pub struct AvtState {
-    pub playing: Option<bool>,
+    /// The vocabulary's word for `TransportState` — see
+    /// [`crate::speaker::playback_of`].
+    pub playback: Option<&'static str>,
     pub shuffle: Option<bool>,
     pub repeat: Option<String>,
     pub title: Option<String>,
@@ -67,7 +69,7 @@ pub fn parse_avt(body: &str) -> Option<AvtState> {
         match child.tag_name().name() {
             "TransportState" => {
                 if let Some(v) = child.attribute("val") {
-                    st.playing = Some(v == "PLAYING");
+                    st.playback = Some(crate::speaker::playback_of(v));
                 }
             }
             "CurrentPlayMode" => {

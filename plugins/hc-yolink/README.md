@@ -46,4 +46,24 @@ UI. They are state rather than log lines.
 - `mode` — `"local"` (recommended, requires YS1606) or `"cloud"`
 - `hub_ip` — YS1606 hub IP (local mode only)
 - `poll_interval_secs` — background state refresh interval
-- `temperature_unit` — `"c"` or `"f"`
+
+There is no temperature-unit setting: temperatures are always published in °C
+(what YoLink's API reports), and the app shows °F from the person's setting.
+
+## Attributes
+
+Names and units follow homeCore's shared device vocabulary.
+
+| Device | Attributes |
+|---|---|
+| DoorSensor | `open`, `battery_pct` |
+| MotionSensor | `motion`, `battery_pct` |
+| LeakSensor | `water_detected`, `battery_pct` |
+| VibrationSensor | `vibration`, `battery_pct` |
+| THSensor | `temperature` (°C), `humidity` (%, absent on a temperature-only probe), `battery_pct` |
+| Outlet / SmartPlug / Switch / MultiOutlet | `on` (writable), `power_w`, `energy_kwh` |
+| Lock (v1/v2) | `locked` (writable), `open` (the door, separate from the bolt), `last_alert`, `auto_lock_secs`, `sound_level`, `battery_pct` |
+| Siren | `on` (writable), `alarm` |
+
+`battery_pct` is YoLink's 0–4 battery scale × 25. Commands: `{"on": bool}` and
+`{"locked": bool}`.

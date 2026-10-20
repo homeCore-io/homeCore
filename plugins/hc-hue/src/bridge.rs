@@ -179,7 +179,6 @@ impl Bridge {
     ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         let sync_cfg = SyncConfig {
-            display: cfg.hue.display.clone(),
             compact_motion_facets: cfg.hue.compact_motion_facets,
             publish_grouped_lights: cfg.hue.publish_grouped_lights,
             publish_grouped_lights_for: cfg.hue.publish_grouped_lights_for.clone(),
@@ -408,7 +407,6 @@ impl Bridge {
                                     &self.registry,
                                     &bridge_id,
                                     &payload,
-                                    &self.sync_cfg,
                                 ).await? {
                                     EventApplyOutcome::Applied => {
                                         self.metrics.incremental_applied.record(&bridge_id, "applied");
@@ -803,7 +801,12 @@ impl Bridge {
                 PluginCommand::ActivateScene { scene_id, recall },
             ) => {
                 let scene_rid = match (&target, scene_id) {
-                    (_, Some(id)) => id,
+                    // The Hue scene's own id, or its homeCore device id.
+                    (_, Some(id)) => self
+                        .registry
+                        .get_scene_binding(&id)
+                        .map(|b| b.scene_rid.clone())
+                        .unwrap_or(id),
                     (Target::Scene(b), None) => b.scene_rid.clone(),
                     _ => {
                         let r = Err(anyhow::anyhow!("missing scene_id"));

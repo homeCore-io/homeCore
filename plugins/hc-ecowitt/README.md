@@ -11,31 +11,56 @@ Bridges Ecowitt weather station sensors into HomeCore. Devices are dynamically d
 
 ## Supported sensors
 
-All sensors discovered from gateway data are auto-registered. Common types include:
+All sensors discovered from gateway data are auto-registered: the outdoor
+station, the indoor sensor, rain gauges (tipping bucket and piezo), WH31
+thermo-hygrometers, WN34 probes, soil moisture and soil EC, leaf wetness, leak
+detectors, water level, PM2.5, CO2 and lightning.
 
-- Temperature (indoor/outdoor/soil/water)
-- Humidity
-- Barometric pressure
-- Wind speed and direction
-- Rainfall
-- UV index
-- Solar radiation
-- CO2 / PM2.5
+## Names and units
+
+Both ways of hearing the gateway — its upload and the poll — publish **the same
+device ids, the same attribute names and the same units**, so an automation
+does not care which one is configured. Readings follow homeCore's shared
+device vocabulary and are converted in the plugin, whatever the gateway's
+display is set to: **°C, hPa, m/s, mm, km, W/m²**. There is no unit setting;
+showing °F or inches is the app's job. A value the gateway cannot read (`--`)
+is left out, never published as 0.
+
+| Device id | Attributes |
+|---|---|
+| `{prefix}_weather` | `temperature`, `humidity`, `dewpoint`, `windchill`, `feels_like`, `heat_index` (°C / %), `pressure` (relative), `pressure_absolute` (hPa), `wind_speed`, `wind_speed_avg10m`, `wind_gust`, `wind_gust_daily_max` (m/s), `wind_direction`, `wind_direction_avg10m` (°), `solar_radiation` (W/m²), `uvi`, `vpd` (kPa), `datetime` |
+| `{prefix}_indoor` | `temperature`, `humidity` |
+| `{prefix}_rain`, `{prefix}_piezo_rain` | `rain_rate_mm_hr` (mm/h), `rain_event_mm`, `rain_hourly_mm`, `rain_24h_mm`, `rain_daily_mm`, `rain_weekly_mm`, `rain_monthly_mm`, `rain_yearly_mm`, `rain_total_mm`; the piezo gauge also `raining` |
+| `{prefix}_temp_{n}` (WH31) | `temperature`, `humidity` |
+| `{prefix}_tf_{n}` (WN34 probe) | `temperature` |
+| `{prefix}_soil_{n}` (WH51) | `soil_moisture_pct`, `soil_moisture_raw` |
+| `{prefix}_ec_{n}` (WH52) | `temperature`, `soil_moisture_pct`, `ec` (µS/cm) |
+| `{prefix}_leaf_{n}` | `leaf_wetness_pct` |
+| `{prefix}_leak_{n}` | `water_detected` |
+| `{prefix}_lds_{n}` (WH54) | `air_gap_mm`, `depth_mm` |
+| `{prefix}_pm25_{n}` | `pm25`, `pm25_24h`, `pm25_aqi`, `pm25_24h_aqi` (µg/m³) |
+| `{prefix}_co2` | `co2`, `co2_24h` (ppm), `pm25`, `pm10`, …, `temperature`, `humidity` |
+| `{prefix}_lightning` | `distance_km`, `strike_count`, `last_strike` |
+
+Plus the battery attributes below. Nothing is writable: Ecowitt gateways are
+receivers.
 
 ## Battery fields
 
 Ecowitt sensors do **not** report a uniform "battery percentage" — the
 semantics depend on the sensor family. hc-ecowitt classifies each
-incoming value and emits three fields per device:
+incoming value and publishes only what it really is:
 
-| field            | type    | meaning                                   |
-| ---------------- | ------- | ----------------------------------------- |
-| `battery`        | f64     | raw value from the sensor (unchanged)     |
-| `battery_low`    | bool    | derived per-kind — true when sensor is low |
+| field            | type    | when                                       |
+| ---------------- | ------- | ------------------------------------------ |
+| `battery_pct`    | f64 %   | a level sensor (0..=5 or 0..=6), converted |
+| `voltage`        | f64 V   | a sensor that reports its cell voltage     |
+| `battery_low`    | bool    | whenever classified — true when low        |
 | `battery_kind`   | string  | `"binary"`, `"voltage"`, or `"level"`      |
+| `battery_raw`    | f64     | a value whose scale is unknown             |
 
-`battery_low` is what rules should trigger off; `battery + battery_kind`
-is what dashboards should display.
+A 0/1 flag publishes only `battery_low` — `1` means "replace me", not "1%".
+`battery_low` is what rules should trigger off.
 
 Taxonomy (per Ecowitt's family-by-family spec, cross-checked against
 [`aioecowitt`](https://github.com/home-assistant-libs/aioecowitt)):
@@ -48,9 +73,9 @@ Taxonomy (per Ecowitt's family-by-family spec, cross-checked against
 | **level** (0..=5)      | 0 to 5    | `<= 1`       | WH57 lightning, PM2.5 ch 1–4, leak detectors           |
 | **level** (0..=6)      | 0 to 6    | `<= 1`       | WH45 / CO2 5-in-1                                      |
 
-The cloud-API path (`get_livedata_info`) doesn't always tag the sensor
-model in its outdoor / rain blocks — those keep the raw `battery`
-value but omit `battery_low` and `battery_kind` rather than guess.
+The poll (`get_livedata_info`) doesn't always tag the sensor model in its
+outdoor / rain blocks — those publish `battery_raw` and omit `battery_low`
+and `battery_kind` rather than guess.
 
 ## Setup
 
