@@ -258,7 +258,7 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
                     when_true: StateLabel::verbed("open", "opens"),
                     when_false: StateLabel::verbed("closed", "closes"),
                 }),
-                ..ro(AttributeKind::Bool, &format!("Input {c} open"))
+                ..ro(AttributeKind::Bool, &format!("{} open", cci_name(*c)))
             },
         );
     }
@@ -455,6 +455,17 @@ pub fn scene_plumbing_state(cfg: &SceneConfig, include_led: bool) -> Value {
     state
 }
 
+/// What a contact-closure input is called. A visor receiver's two inputs are
+/// components 32 and 33 — its "Input 1" and "Input 2" — and calling them
+/// "Input 32" named a socket nobody can find on the box.
+pub fn cci_name(component: u32) -> String {
+    match component {
+        32 => "Input 1".into(),
+        33 => "Input 2".into(),
+        c => format!("Input {c}"),
+    }
+}
+
 /// The attribute a contact-closure input publishes: `cci_{N}_open`.
 pub fn cci_attribute(component: u32) -> String {
     format!("cci_{component}_open")
@@ -494,13 +505,36 @@ pub fn buttons_with_labels(cfg: &DeviceConfig) -> Vec<(u32, String)> {
         .map(|(i, b)| {
             let engraved = cfg.button_names.get(i).map(String::as_str).unwrap_or("");
             let label = if engraved.is_empty() {
-                format!("Button {b}")
+                unengraved_name(&cfg.kind, *b).map_or_else(|| format!("Button {b}"), str::to_string)
             } else {
                 engraved.to_string()
             };
             (*b, label)
         })
         .collect()
+}
+
+/// What a button nobody engraved is, where its component number says.
+///
+/// A seeTouch keypad's raise and lower rockers are components 16–19 (top
+/// pair 16/17, bottom pair 18/19, per the Integration Guide) and carry no
+/// engraving, so they read "Button 18" and "Button 19" in every picker and
+/// sentence — on a keypad whose other buttons say "Outside" and "Deck". A
+/// Pico's raise and lower are 5 and 6; its On, Favorite and Off are 2, 3
+/// and 4, on the 5-button and the 2-button (2 and 4) alike. Anything else
+/// keeps its number: an unengraved programmed button is the installer's to
+/// name.
+fn unengraved_name(kind: &DeviceKind, component: u32) -> Option<&'static str> {
+    match (kind, component) {
+        (DeviceKind::Keypad, 16 | 18) => Some("Lower"),
+        (DeviceKind::Keypad, 17 | 19) => Some("Raise"),
+        (DeviceKind::Pico, 2) => Some("On"),
+        (DeviceKind::Pico, 3) => Some("Favorite"),
+        (DeviceKind::Pico, 4) => Some("Off"),
+        (DeviceKind::Pico, 5) => Some("Raise"),
+        (DeviceKind::Pico, 6) => Some("Lower"),
+        _ => None,
+    }
 }
 
 /// The state a device publishes about its own buttons, merged into its first
@@ -625,6 +659,41 @@ mod tests {
             "Overhead On"
         );
         assert_eq!(schema["attributes"]["button_2"]["display_name"], "Button 2");
+    }
+
+    /// A keypad's raise and lower rockers are never engraved; they are named
+    /// for what they do rather than "Button 18". An unengraved ordinary
+    /// button keeps its number — that one is the installer's to name.
+    #[test]
+    fn unengraved_rockers_are_named_for_what_they_do() {
+        let mut k = cfg(DeviceKind::Keypad, vec![1, 5, 16, 17, 18, 19]);
+        k.button_names = vec!["OH1 Toggle".into(), String::new()];
+        let names: Vec<String> = buttons_with_labels(&k)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(
+            names,
+            ["OH1 Toggle", "Button 5", "Lower", "Raise", "Lower", "Raise"]
+        );
+
+        let p = cfg(DeviceKind::Pico, vec![2, 3, 4, 5, 6]);
+        let names: Vec<String> = buttons_with_labels(&p)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(names, ["On", "Favorite", "Off", "Raise", "Lower"]);
+
+        // An engraving always wins, and a VCRX's buttons are just numbered.
+        let mut p2 = cfg(DeviceKind::Pico, vec![2, 4]);
+        p2.button_names = vec!["Lamps".into(), String::new()];
+        let names: Vec<String> = buttons_with_labels(&p2)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(names, ["Lamps", "Off"]);
+        let v = cfg(DeviceKind::Vcrx, vec![18]);
+        assert_eq!(buttons_with_labels(&v)[0].1, "Button 18");
     }
 
     /// The picker must send a number while showing the engraving.
@@ -811,6 +880,9 @@ mod output_schema_tests {
         let attrs = v["attributes"].as_object().expect("attributes");
         assert_eq!(attrs["cci_30_open"]["kind"], "bool");
         assert_eq!(attrs["cci_32_open"]["states"]["when_true"]["label"], "open");
+        // Named as the receiver labels them, not by component number.
+        assert_eq!(attrs["cci_32_open"]["display_name"], "Input 1 open");
+        assert_eq!(attrs["cci_30_open"]["display_name"], "Input 30 open");
         assert!(!attrs.contains_key("cci_30"));
         // Closed is a press, open a release.
         assert!(!cci_open(true));

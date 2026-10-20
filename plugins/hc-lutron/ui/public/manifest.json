@@ -1,0 +1,20 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-lutron-page" },
+		{ "slot": "device.panel", "element": "hc-lutron-keypad", "device_types": ["keypad"] },
+		{ "slot": "device.panel", "element": "hc-lutron-pico", "device_types": ["pico_remote"] },
+		{ "slot": "device.panel", "element": "hc-lutron-vcrx", "device_types": ["vcrx"] },
+		{ "slot": "device.card", "element": "hc-lutron-card", "device_types": ["keypad"], "forms": ["standard", "large", "compact"] },
+		{ "slot": "rule.step", "element": "hc-lutron-step", "device_types": ["keypad", "vcrx"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-lutron-scenes",
+			"label": "Lutron scenes",
+			"description": "the repeater's scenes you choose, lit when on, to tap",
+			"forms": ["large", "standard", "compact"],
+			"settings": "hc-lutron-scenes-settings"
+		}
+	]
+}

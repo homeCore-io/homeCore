@@ -4,6 +4,7 @@ mod dbxml;
 mod devices;
 mod lip;
 mod schema;
+mod ui_actions;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::PluginNotice;
@@ -206,6 +207,25 @@ async fn try_start(
         },
     ));
 
+    // The page's quick action — is the repeater connected — answered from
+    // what the bridge loop last knew. The manifest carries it so the page can
+    // ask on `/query` as anyone who can see devices.
+    let link = ui_actions::link();
+    let status_link = link.clone();
+    let (status_host, status_port) = (cfg.lutron.host.clone(), cfg.lutron.port);
+    let mgmt = mgmt
+        .with_capabilities(ui_actions::capabilities())
+        .with_custom_handler(move |cmd| {
+            let action = cmd["action"].as_str()?;
+            ui_actions::run(action, &status_link, &status_host, status_port)
+        });
+
+    // Its own screens: the built `ui/` folder it carries, served from here.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
+
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.  Without this, queued publishes/subscribes block
     // forever once the rumqttc internal buffer (64) fills up.
@@ -365,6 +385,7 @@ async fn try_start(
         publisher,
         cfg.lutron.clone(),
         notices,
+        link,
     );
 
     bridge.run(cmd_rx).await;

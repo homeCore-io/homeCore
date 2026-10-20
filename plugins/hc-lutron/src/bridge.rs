@@ -52,6 +52,8 @@ pub struct Bridge {
     /// answering. The reconnect loop below is silent apart from a log line, so
     /// without this the plugin reads "active" while controlling nothing.
     notices: PluginNotices,
+    /// Whether the session is up, for the plugin page's `status` action.
+    link: crate::ui_actions::LinkHandle,
 }
 
 impl Bridge {
@@ -62,6 +64,7 @@ impl Bridge {
         publisher: DevicePublisher,
         lutron_cfg: LutronConfig,
         notices: PluginNotices,
+        link: crate::ui_actions::LinkHandle,
     ) -> Self {
         let global_fade = lutron_cfg.default_fade_secs;
         let hold_threshold_ms = lutron_cfg.hold_threshold_ms;
@@ -104,6 +107,7 @@ impl Bridge {
             global_fade,
             hold_threshold_ms,
             notices,
+            link,
         }
     }
 
@@ -122,6 +126,7 @@ impl Bridge {
                     return;
                 }
                 Err(e) => {
+                    crate::ui_actions::lost(&self.link, &e.to_string());
                     error!(error = %e, backoff_secs = backoff.as_secs(), "LIP connection lost — reconnecting");
                     // Every load, scene and keypad this plugin owns is now
                     // inert. That is worth a page-level notice, not just a log
@@ -171,6 +176,7 @@ impl Bridge {
         // Clearing here rather than in the caller means a repeater that drops
         // and recovers leaves nothing stale on the page.
         self.notices.clear("repeater_unreachable");
+        crate::ui_actions::connected(&self.link);
 
         // Reset backoff to minimum on successful connect
         // (done in caller after Ok return — here we just proceed)
