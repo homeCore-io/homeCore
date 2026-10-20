@@ -1,16 +1,17 @@
 //! The device schema this plugin publishes: what a speaker reports, and what
 //! it can be told to do.
 //!
-//! ## Why every attribute here is read-only
+//! ## What is writable
 //!
-//! `speaker::execute_command` dispatches on `cmd["action"]` and ends
-//! `other => bail!("unknown action: {other}")`. A payload with no `action` key
-//! — `{"volume": 30}` — is rejected outright. So this plugin accepts **no**
-//! attribute-style writes, and declaring `volume` writable would be a promise
-//! it cannot keep: clients would render a slider that errors.
+//! `volume` (0–100, clamped) and `muted` take attribute writes —
+//! `{"volume": 30}`, `{"muted": true}` — which `speaker::execute_command`
+//! handles before it dispatches on `cmd["action"]`. Everything else a person
+//! can change is an [`Action`].
 //!
-//! Everything a person can change is therefore an [`Action`]. That is the whole
-//! point of the action half of the schema.
+//! Names follow the shared vocabulary (`hc_types::device_vocabulary`): `state`
+//! is `playing` / `paused` / `stopped` / `buffering`, and what is playing is
+//! `media_title`, `media_artist`, `media_album`, `media_position` and
+//! `media_duration` (seconds) — one name per fact.
 //!
 //! ## What this replaces
 //!
@@ -27,14 +28,15 @@ use std::collections::HashMap;
 
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Source};
 use plugin_sdk_rs::types::schema::{
-    AttributeCategory, AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use serde_json::Value;
 
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     AttributeSchema {
         kind,
-        // Never true on a Sonos — see the module note.
+        // Only `volume` and `muted` are writable — see the module note.
         writable: false,
         display_name: Some(display.to_string()),
         ..Default::default()
@@ -53,8 +55,7 @@ fn ro_bool(display: &str, on: (&str, &str), off: (&str, &str)) -> AttributeSchem
     })
 }
 
-/// Not what the speaker is for — a catalogue, a grouping, or a legacy twin of
-/// a generic key.
+/// Not what the speaker is for — a catalogue or a grouping.
 fn diagnostic(mut a: AttributeSchema) -> AttributeSchema {
     a.category = Some(AttributeCategory::Diagnostic);
     a
@@ -68,14 +69,30 @@ fn ro_unit(kind: AttributeKind, display: &str, unit: &str) -> AttributeSchema {
 
 fn attributes() -> DeviceSchema {
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
-    a.insert("state".into(), ro(AttributeKind::String, "Playback"));
+    let mut playback = ro(AttributeKind::Enum, "Playback");
+    playback.options = Some(
+        ["playing", "paused", "stopped", "buffering"]
+            .into_iter()
+            .map(AttributeOption::from)
+            .collect(),
+    );
+    a.insert("state".into(), playback);
     a.insert(
         "volume".into(),
-        ro_unit(AttributeKind::Integer, "Volume", "%"),
+        AttributeSchema {
+            writable: true,
+            min: Some(0.0),
+            max: Some(100.0),
+            step: Some(1.0),
+            ..ro_unit(AttributeKind::Float, "Volume", "%")
+        },
     );
     a.insert(
         "muted".into(),
-        ro_bool("Muted", ("muted", "is muted"), ("unmuted", "is unmuted")),
+        AttributeSchema {
+            writable: true,
+            ..ro_bool("Muted", ("muted", "is muted"), ("unmuted", "is unmuted"))
+        },
     );
     a.insert(
         "shuffle".into(),
@@ -105,35 +122,21 @@ fn attributes() -> DeviceSchema {
         ro(AttributeKind::Json, "Playlists"),
     );
 
-    // **What is playing.** The generic media-player keys are the contract
-    // every client reads — `title`, `artist`, `album`, `position_secs`,
-    // `duration_secs` — and this plugin publishes each of them beside a
-    // `media_`-prefixed twin kept for the clients written before that was
-    // settled. Both are published, so both are declared; the twin is
-    // diagnostic, because two rows for one fact is one row too many and the
-    // generic name is the one to lead with.
-    for (name, display) in [("title", "Title"), ("artist", "Artist"), ("album", "Album")] {
+    // **What is playing**, under the shared names and nothing else.
+    for (name, display) in [
+        ("media_title", "Title"),
+        ("media_artist", "Artist"),
+        ("media_album", "Album"),
+    ] {
         a.insert(name.into(), ro(AttributeKind::String, display));
-        a.insert(
-            format!("media_{name}"),
-            diagnostic(ro(AttributeKind::String, display)),
-        );
     }
     a.insert(
-        "position_secs".into(),
+        "media_position".into(),
         ro_unit(AttributeKind::Integer, "Position", "s"),
     );
     a.insert(
-        "media_position".into(),
-        diagnostic(ro_unit(AttributeKind::Integer, "Position", "s")),
-    );
-    a.insert(
-        "duration_secs".into(),
-        ro_unit(AttributeKind::Integer, "Duration", "s"),
-    );
-    a.insert(
         "media_duration".into(),
-        diagnostic(ro_unit(AttributeKind::Integer, "Duration", "s")),
+        ro_unit(AttributeKind::Integer, "Duration", "s"),
     );
     a.insert(
         "media_image_url".into(),
@@ -484,18 +487,39 @@ mod tests {
         }
     }
 
-    /// The whole reason this plugin declares actions instead of writable
-    /// attributes. A `writable: true` here would be a promise
-    /// `execute_command` cannot keep.
+    /// Only what `execute_command` takes as an attribute write is writable;
+    /// anything else would be a promise it cannot keep.
     #[test]
-    fn no_attribute_is_ever_writable() {
+    fn only_volume_and_muted_are_writable() {
         for (name, a) in attributes().attributes {
-            assert!(
-                !a.writable,
-                "{name} is writable, but execute_command rejects any payload \
-                 without an `action` key"
-            );
+            let expected = matches!(name.as_str(), "volume" | "muted");
+            assert_eq!(a.writable, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn media_facts_have_one_name_each() {
+        let a = attributes().attributes;
+        for name in [
+            "media_title",
+            "media_artist",
+            "media_album",
+            "media_position",
+            "media_duration",
+        ] {
+            assert!(a.contains_key(name), "{name}");
+        }
+        for old in ["title", "artist", "album", "position_secs", "duration_secs"] {
+            assert!(!a.contains_key(old), "{old} is still declared");
+        }
+        let states: Vec<String> = a["state"]
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|o| o.value.clone())
+            .collect();
+        assert!(states.contains(&"stopped".to_string()));
     }
 
     /// Everything the old capability arrays advertised is now declared with

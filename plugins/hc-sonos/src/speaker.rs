@@ -49,6 +49,30 @@ fn str_to_repeat(s: &str) -> RepeatMode {
     }
 }
 
+/// The shared vocabulary's playback word for a UPnP `TransportState`.
+///
+/// `stopped` is its own state: a stopped speaker used to read `paused`.
+pub fn playback_of(transport_state: &str) -> &'static str {
+    match transport_state.trim().to_ascii_uppercase().as_str() {
+        "PLAYING" => "playing",
+        "PAUSED_PLAYBACK" | "PAUSED_RECORDING" => "paused",
+        "TRANSITIONING" => "buffering",
+        // STOPPED, NO_MEDIA_PRESENT, and anything a firmware invents.
+        _ => "stopped",
+    }
+}
+
+/// The volume a command asks for, clamped to 0–100.
+pub fn volume_of(v: &Value) -> Option<u16> {
+    v.as_f64().map(|v| v.round().clamp(0.0, 100.0) as u16)
+}
+
+/// A bass or treble level, clamped to the speaker's −10–10 — an `as i8` of
+/// an out-of-range number wraps (200 became −56).
+pub fn eq_level_of(v: &Value) -> Option<i8> {
+    v.as_f64().map(|v| v.round().clamp(-10.0, 10.0) as i8)
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -58,7 +82,8 @@ fn str_to_repeat(s: &str) -> RepeatMode {
 /// depending on `RepeatMode`'s trait implementations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerState {
-    pub playing: bool,
+    /// `playing`, `paused`, `stopped` or `buffering` — see [`playback_of`].
+    pub playback: &'static str,
     pub volume: u16,
     pub muted: bool,
     pub shuffle: bool,
@@ -84,7 +109,7 @@ pub struct SpeakerState {
 impl Default for SpeakerState {
     fn default() -> Self {
         Self {
-            playing: false,
+            playback: "stopped",
             volume: 0,
             muted: false,
             shuffle: false,
@@ -111,8 +136,8 @@ impl Default for SpeakerState {
 impl SpeakerState {
     /// Apply a partial AVTransport update in-place.
     pub fn apply_avt(&mut self, avt: &AvtState) {
-        if let Some(v) = avt.playing {
-            self.playing = v;
+        if let Some(v) = avt.playback {
+            self.playback = v;
         }
         if let Some(v) = avt.shuffle {
             self.shuffle = v;
@@ -156,7 +181,17 @@ impl SpeakerState {
 
 /// Poll all state from a speaker in one pass.
 pub async fn poll(speaker: &Speaker) -> Result<SpeakerState> {
-    let playing = speaker.is_playing().await?;
+    let playback = playback_of(
+        &speaker
+            .action(
+                &URN::service("schemas-upnp-org", "AVTransport", 1),
+                "GetTransportInfo",
+                "<InstanceID>0</InstanceID>",
+            )
+            .await?
+            .remove("CurrentTransportState")
+            .unwrap_or_default(),
+    );
     let volume = speaker.volume().await?;
     let muted = speaker.mute().await?;
     let shuffle = speaker.shuffle().await?;
@@ -198,7 +233,7 @@ pub async fn poll(speaker: &Speaker) -> Result<SpeakerState> {
     });
 
     Ok(SpeakerState {
-        playing,
+        playback,
         volume,
         muted,
         shuffle,
@@ -223,12 +258,11 @@ pub async fn poll(speaker: &Speaker) -> Result<SpeakerState> {
 
 /// Serialise a `SpeakerState` to the HomeCore JSON state schema.
 pub fn to_json(state: &SpeakerState) -> Value {
-    let transport = if state.playing { "playing" } else { "paused" };
     let supported_actions = supported_actions();
     let ui_enrichments = ui_enrichments();
 
     let mut obj = json!({
-        "state":    transport,
+        "state":    state.playback,
         "volume":   state.volume,
         "muted":    state.muted,
         "supported_actions": supported_actions,
@@ -254,27 +288,23 @@ pub fn to_json(state: &SpeakerState) -> Value {
         },
     });
 
+    // One name per fact, the shared vocabulary's; positions in seconds.
     if let Some(v) = &state.title {
-        obj["title"] = json!(v);
         obj["media_title"] = json!(v);
     }
     if let Some(v) = &state.artist {
-        obj["artist"] = json!(v);
         obj["media_artist"] = json!(v);
     }
     if let Some(v) = &state.album {
-        obj["album"] = json!(v);
         obj["media_album"] = json!(v);
     }
     if let Some(v) = &state.media_image_url {
         obj["media_image_url"] = json!(v);
     }
     if let Some(v) = state.duration {
-        obj["duration_secs"] = json!(v);
         obj["media_duration"] = json!(v);
     }
     if let Some(v) = state.position {
-        obj["position_secs"] = json!(v);
         obj["media_position"] = json!(v);
     }
 
@@ -433,6 +463,22 @@ pub async fn execute_command(
 ) -> Result<()> {
     let action = cmd["action"].as_str().unwrap_or("");
 
+    // An attribute write: `{"volume": 30}`, `{"muted": true}`.
+    if action.is_empty() {
+        let volume = cmd.get("volume").and_then(volume_of);
+        let muted = cmd.get("muted").and_then(Value::as_bool);
+        if volume.is_none() && muted.is_none() {
+            bail!("nothing to do: write `volume` or `muted`, or call an action");
+        }
+        if let Some(v) = volume {
+            speaker.set_volume(v).await?;
+        }
+        if let Some(m) = muted {
+            speaker.set_mute(m).await?;
+        }
+        return Ok(());
+    }
+
     match action {
         "play" => speaker.play().await?,
         "pause" => speaker.pause().await?,
@@ -448,10 +494,9 @@ pub async fn execute_command(
         "previous" => speaker.previous().await?,
 
         "set_volume" => {
-            let vol = cmd["volume"]
-                .as_u64()
-                .ok_or_else(|| anyhow::anyhow!("set_volume requires integer 'volume'"))?;
-            speaker.set_volume(vol as u16).await?;
+            let vol = volume_of(&cmd["volume"])
+                .ok_or_else(|| anyhow::anyhow!("set_volume requires number 'volume'"))?;
+            speaker.set_volume(vol).await?;
         }
 
         "mute" | "set_mute" => {
@@ -481,17 +526,15 @@ pub async fn execute_command(
         }
 
         "set_bass" => {
-            let bass = cmd["bass"]
-                .as_i64()
-                .ok_or_else(|| anyhow::anyhow!("set_bass requires integer 'bass'"))?;
-            speaker.set_bass(bass as i8).await?;
+            let bass = eq_level_of(&cmd["bass"])
+                .ok_or_else(|| anyhow::anyhow!("set_bass requires number 'bass'"))?;
+            speaker.set_bass(bass).await?;
         }
 
         "set_treble" => {
-            let treble = cmd["treble"]
-                .as_i64()
-                .ok_or_else(|| anyhow::anyhow!("set_treble requires integer 'treble'"))?;
-            speaker.set_treble(treble as i8).await?;
+            let treble = eq_level_of(&cmd["treble"])
+                .ok_or_else(|| anyhow::anyhow!("set_treble requires number 'treble'"))?;
+            speaker.set_treble(treble).await?;
         }
 
         "set_loudness" => {
@@ -613,7 +656,7 @@ mod tests {
     #[test]
     fn to_json_publishes_generic_media_contract_and_sonos_enrichments() {
         let state = SpeakerState {
-            playing: true,
+            playback: "playing",
             volume: 27,
             muted: false,
             shuffle: true,
@@ -643,18 +686,19 @@ mod tests {
         let json = to_json(&state);
 
         assert_eq!(json["state"].as_str(), Some("playing"));
-        assert_eq!(json["title"].as_str(), Some("Track Title"));
-        assert_eq!(json["artist"].as_str(), Some("Artist Name"));
-        assert_eq!(json["album"].as_str(), Some("Album Name"));
+        assert_eq!(json["media_title"].as_str(), Some("Track Title"));
+        assert_eq!(json["media_artist"].as_str(), Some("Artist Name"));
+        assert_eq!(json["media_album"].as_str(), Some("Album Name"));
         assert_eq!(
             json["media_image_url"].as_str(),
             Some("http://speaker:1400/img/cover.jpg")
         );
-        assert_eq!(json["duration_secs"].as_u64(), Some(240));
-        assert_eq!(json["position_secs"].as_u64(), Some(45));
-
-        assert_eq!(json["media_title"].as_str(), Some("Track Title"));
         assert_eq!(json["media_duration"].as_u64(), Some(240));
+        assert_eq!(json["media_position"].as_u64(), Some(45));
+        // One name per fact: the old spellings are gone.
+        for old in ["title", "artist", "album", "duration_secs", "position_secs"] {
+            assert!(json.get(old).is_none(), "{old} is still published");
+        }
 
         let supported = json["supported_actions"]
             .as_array()
@@ -768,7 +812,7 @@ mod heartbeat_floor_tests {
 
     fn state() -> SpeakerState {
         SpeakerState {
-            playing: false,
+            playback: "paused",
             volume: 20,
             muted: false,
             shuffle: false,
@@ -798,7 +842,7 @@ mod heartbeat_floor_tests {
         // from GENA events and from nothing else.
         let before = state();
         let mut after = state();
-        after.playing = true;
+        after.playback = "playing";
         assert_ne!(before, after, "or the heartbeat would publish nothing");
     }
 
@@ -839,7 +883,7 @@ mod heartbeat_floor_tests {
 #[cfg(test)]
 pub fn poll_shaped_like_a_fresh_poll() -> SpeakerState {
     SpeakerState {
-        playing: true,
+        playback: "playing",
         volume: 20,
         muted: false,
         shuffle: false,
@@ -859,5 +903,46 @@ pub fn poll_shaped_like_a_fresh_poll() -> SpeakerState {
         available_playlists: vec![],
         available_favorite_items: vec![],
         available_playlist_items: vec![],
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_stopped_speaker_says_stopped() {
+        assert_eq!(playback_of("PLAYING"), "playing");
+        assert_eq!(playback_of("PAUSED_PLAYBACK"), "paused");
+        assert_eq!(playback_of("STOPPED"), "stopped");
+        assert_eq!(playback_of("NO_MEDIA_PRESENT"), "stopped");
+        assert_eq!(playback_of("TRANSITIONING"), "buffering");
+        let state = SpeakerState {
+            playback: playback_of("STOPPED"),
+            ..Default::default()
+        };
+        assert_eq!(to_json(&state)["state"], json!("stopped"));
+    }
+
+    #[test]
+    fn volume_is_clamped_to_0_100() {
+        assert_eq!(volume_of(&json!(0)), Some(0));
+        assert_eq!(volume_of(&json!(30)), Some(30));
+        assert_eq!(volume_of(&json!(29.6)), Some(30));
+        assert_eq!(volume_of(&json!(100)), Some(100));
+        assert_eq!(volume_of(&json!(150)), Some(100));
+        assert_eq!(volume_of(&json!(-5)), Some(0));
+        assert_eq!(volume_of(&json!("loud")), None);
+    }
+
+    #[test]
+    fn bass_and_treble_clamp_instead_of_wrapping() {
+        assert_eq!(eq_level_of(&json!(-10)), Some(-10));
+        assert_eq!(eq_level_of(&json!(0)), Some(0));
+        assert_eq!(eq_level_of(&json!(10)), Some(10));
+        assert_eq!(eq_level_of(&json!(200)), Some(10), "200 as i8 was -56");
+        assert_eq!(eq_level_of(&json!(-129)), Some(-10));
+        assert_eq!(eq_level_of(&json!(true)), None);
     }
 }
