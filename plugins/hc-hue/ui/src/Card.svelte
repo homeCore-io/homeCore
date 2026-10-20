@@ -15,10 +15,12 @@
 <script>
 	import Scenes from './lib/SceneTiles.svelte';
 	import { adopt, ago, num, runningIn, scenesOf, swatchOf } from './lib/hue.js';
+	import { follow, temperature } from './lib/units.svelte.js';
 
 	let { host: hc, deviceId, form = 'standard' } = $props();
 	const me = $host();
 	$effect(() => adopt(me, hc));
+	$effect(() => follow(hc));
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
@@ -63,7 +65,7 @@
 			<span class="hc-tile-state">{stateLine}</span>
 			{#if form !== 'compact'}
 				<span class="row facts">
-					{#if num(a.temperature) !== undefined}<span class="hc-num">{num(a.temperature).toFixed(1)}°</span>{/if}
+					{#if num(a.temperature) !== undefined}<span class="hc-num">{temperature(num(a.temperature)).n}°</span>{/if}
 					{#if num(a.illuminance) !== undefined}<span class="hc-num">{Math.round(num(a.illuminance))} lux</span>{/if}
 				</span>
 			{/if}

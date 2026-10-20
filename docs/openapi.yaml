@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.89"
+  version: "0.1.90"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -827,7 +827,7 @@ paths:
               additionalProperties: true
             example:
               on: true
-              brightness: 180
+              brightness_pct: 70
       responses:
         "202":
           description: Command accepted and published to MQTT
@@ -5180,13 +5180,14 @@ paths:
                   on:
                     kind: bool
                     writable: true
-                  brightness:
-                    kind: integer
+                  brightness_pct:
+                    kind: float
                     writable: true
                     min: 0
-                    max: 255
-                  battery:
-                    kind: integer
+                    max: 100
+                    unit: "%"
+                  battery_pct:
+                    kind: float
                     writable: false
                     unit: "%"
                     category: diagnostic
@@ -9851,7 +9852,7 @@ components:
         attributes:
           type: object
           additionalProperties: true
-          description: 'Current device attribute values (e.g. `{"on": true, "brightness": 180}`)'
+          description: 'Current device attribute values (e.g. `{"on": true, "brightness_pct": 70}`)'
         capabilities:
           type: object
           description: JSON Schema describing the device's attributes

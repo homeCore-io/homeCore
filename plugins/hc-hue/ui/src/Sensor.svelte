@@ -9,10 +9,12 @@
      a remote's buttons and how each was last pressed, a door sensor. -->
 <script>
 	import { adopt, ago, num } from './lib/hue.js';
+	import { follow, temperature } from './lib/units.svelte.js';
 
 	let { host: hc, deviceId } = $props();
 	const me = $host();
 	$effect(() => adopt(me, hc));
+	$effect(() => follow(hc));
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
@@ -64,8 +66,8 @@
 
 	const battery = $derived(num(a.battery_pct));
 	const low = $derived(battery !== undefined && battery <= 15);
-	// Hue publishes °C, always; the screens have no unit setting of their own.
-	const deg = '°C';
+	// Hue publishes °C, always; shown in the person's units.
+	const temp = $derived(num(a.temperature) === undefined ? undefined : temperature(num(a.temperature)));
 	const sens = ['Low', 'Medium', 'High'];
 </script>
 
@@ -88,11 +90,11 @@
 						<b class="hc-num">{a.motion === true ? 'Now' : 'None'}</b>
 						<span class="hc-quiet">{a.motion === true ? 'right now' : `last ${ago(motions.at(-1)?.at) || 'not today'}`}</span>
 					</div>
-					{#if num(a.temperature) !== undefined}
+					{#if temp}
 						<div class="tile">
 							<span class="hc-label">Temperature</span>
-							<b class="hc-num">{num(a.temperature).toFixed(1)}°</b>
-							<span class="hc-quiet">{deg}</span>
+							<b class="hc-num">{temp.n}°</b>
+							<span class="hc-quiet">{temp.unit}</span>
 						</div>
 					{/if}
 					{#if num(a.illuminance) !== undefined}

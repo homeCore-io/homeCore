@@ -15,7 +15,7 @@ Not a new policy to invent — an existing one to notice:
 
 - a **Z-Wave node** is one device with many attributes, not one device per
   command class
-- a **Hue bulb** is one device with `on`, `brightness`, `color_temp`
+- a **Hue bulb** is one device with `on`, `brightness_pct`, `color_temp`
 - an **Ecowitt station** is one device with a dozen readings
 
 **homeCore already collapses.** A port that expanded entities into devices would

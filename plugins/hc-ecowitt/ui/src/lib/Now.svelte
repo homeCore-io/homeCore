@@ -2,7 +2,7 @@
      wind, rain, the sky, and inside. -->
 <script>
 	import Compass from './Compass.svelte';
-	import { DEG as deg, ago, fmt, isRaining, num, rainGauge, stale, uvWords } from './weather.js';
+	import { ago, fmt, isRaining, n, num, rainGauge, stale, u, uvWords } from './weather.js';
 
 	/** @type {{ devices: import('./weather.js').Device[], pressureTrend?: string }} */
 	let { devices = [], pressureTrend = '' } = $props();
@@ -16,6 +16,9 @@
 	const r = $derived(rain?.attributes ?? {});
 	const raining = $derived(isRaining(r));
 	const strikeAt = $derived(Number(lightning?.attributes.last_strike) * 1000);
+	// In the person's units: °F, mph, in, inHg where they read those.
+	const deg = $derived(u('°C'));
+	const rainUnit = $derived(u('mm'));
 </script>
 
 {#if !station}
@@ -27,14 +30,14 @@
 				<span class="hc-label">Outside</span>
 				<span class="hc-quiet" class:late={stale(station.last_seen)}>{ago(station.last_seen)}</span>
 			</div>
-			<div class="temp"><b class="hc-num">{fmt(s.temperature)}</b><span>{deg}</span></div>
+			<div class="temp"><b class="hc-num">{n(s.temperature, '°C')}</b><span>{deg}</span></div>
 			<div class="facts">
 				<span><span class="hc-label">Humidity</span> <b class="hc-num">{fmt(s.humidity, 0)}%</b></span>
 				{#if num(s.feels_like) !== undefined}<span
-						><span class="hc-label">Feels like</span> <b class="hc-num">{fmt(s.feels_like)}{deg}</b></span
+						><span class="hc-label">Feels like</span> <b class="hc-num">{n(s.feels_like, '°C')}{deg}</b></span
 					>{/if}
 				{#if num(s.dewpoint) !== undefined}<span
-						><span class="hc-label">Dew point</span> <b class="hc-num">{fmt(s.dewpoint)}{deg}</b></span
+						><span class="hc-label">Dew point</span> <b class="hc-num">{n(s.dewpoint, '°C')}{deg}</b></span
 					>{/if}
 				{#if num(s.vpd) !== undefined}<span
 						><span class="hc-label">VPD</span> <b class="hc-num">{fmt(s.vpd, 2)} kPa</b></span
@@ -45,7 +48,7 @@
 		<section class="hc-card wind">
 			<span class="hc-label">Wind</span>
 			<Compass dir={s.wind_direction} avg={s.wind_direction_avg10m} speed={s.wind_speed} gust={s.wind_gust} />
-			<span class="hc-quiet">Strongest today {fmt(s.wind_gust_daily_max)} m/s</span>
+			<span class="hc-quiet">Strongest today {n(s.wind_gust_daily_max, 'm/s')} {u('m/s')}</span>
 		</section>
 
 		<section class="hc-card">
@@ -56,13 +59,13 @@
 					>{/if}
 			</div>
 			{#if rain}
-				<div class="temp small"><b class="hc-num">{fmt(r.rain_daily_mm)}</b><span>mm today</span></div>
+				<div class="temp small"><b class="hc-num">{n(r.rain_daily_mm, 'mm')}</b><span>{rainUnit} today</span></div>
 				<dl>
-					<dt>Now</dt><dd>{fmt(r.rain_rate_mm_hr)} mm/h</dd>
-					<dt>This storm</dt><dd>{fmt(r.rain_event_mm)} mm</dd>
-					<dt>Week</dt><dd>{fmt(r.rain_weekly_mm)} mm</dd>
-					<dt>Month</dt><dd>{fmt(r.rain_monthly_mm)} mm</dd>
-					<dt>Year</dt><dd>{fmt(r.rain_yearly_mm)} mm</dd>
+					<dt>Now</dt><dd>{n(r.rain_rate_mm_hr, 'mm/h')} {u('mm/h')}</dd>
+					<dt>This storm</dt><dd>{n(r.rain_event_mm, 'mm')} {rainUnit}</dd>
+					<dt>Week</dt><dd>{n(r.rain_weekly_mm, 'mm')} {rainUnit}</dd>
+					<dt>Month</dt><dd>{n(r.rain_monthly_mm, 'mm')} {rainUnit}</dd>
+					<dt>Year</dt><dd>{n(r.rain_yearly_mm, 'mm')} {rainUnit}</dd>
 				</dl>
 			{:else}
 				<p class="hc-quiet">No rain gauge.</p>
@@ -73,20 +76,20 @@
 			<span class="hc-label">Sky and air</span>
 			<dl>
 				<dt>Pressure</dt>
-				<dd>{fmt(s.pressure, 0)} hPa{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
+				<dd>{n(s.pressure, 'hPa', 0)} {u('hPa')}{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
 				<dt>UV index</dt><dd>{fmt(s.uvi, 0)} {uvWords(s.uvi)}</dd>
 				<dt>Sunlight</dt><dd>{fmt(s.solar_radiation, 0)} W/m²</dd>
 				{#if lightning}
 					<dt>Lightning</dt>
 					<dd>
 						{fmt(lightning.attributes.strike_count, 0)} strikes{Number.isFinite(strikeAt)
-							? ` · last ${ago(new Date(strikeAt).toISOString())}, ${fmt(lightning.attributes.distance_km, 0)} km`
+							? ` · last ${ago(new Date(strikeAt).toISOString())}, ${n(lightning.attributes.distance_km, 'km', 0)} ${u('km')}`
 							: ''}
 					</dd>
 				{/if}
 				{#if indoor}
 					<dt>Inside</dt>
-					<dd>{fmt(indoor.attributes.temperature)}{deg} · {fmt(indoor.attributes.humidity, 0)}%</dd>
+					<dd>{n(indoor.attributes.temperature, '°C')}{deg} · {fmt(indoor.attributes.humidity, 0)}%</dd>
 				{/if}
 			</dl>
 		</section>

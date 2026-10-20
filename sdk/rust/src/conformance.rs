@@ -75,7 +75,7 @@ impl Findings {
 ///   specially, but no other plugin uses one and a client humanising
 ///   `led.count` renders "Led.count".
 /// - **Housekeeping says so.** An attribute the shared lexicon recognises —
-///   battery, rssi, firmware, ip, a `*_unit` sibling, anything `supports_*` —
+///   `battery_pct`, rssi, firmware, ip, a `*_unit` sibling, anything `supports_*` —
 ///   that carries no `category` is declared as primary as the reading it sits
 ///   beside.
 /// - **A range is a range.** `min` above `max` draws a slider that cannot move.
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn housekeeping_declared_as_a_reading_is_caught() {
         let battery = AttributeSchema::read_only(AttributeKind::Integer);
-        let f = check_device_schema(&schema(vec![("battery", battery)]));
+        let f = check_device_schema(&schema(vec![("battery_pct", battery)]));
         assert_eq!(f.iter().count(), 1);
         assert!(f.iter().next().unwrap().contains("housekeeping"));
     }

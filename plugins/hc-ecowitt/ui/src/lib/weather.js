@@ -1,7 +1,10 @@
 // What hc-ecowitt's devices report, put the way a person reads it.
 // The plugin converts every reading to homeCore's units — °C, m/s, hPa, mm,
-// km, W/m² — whichever way it hears the gateway. The host gives these screens
-// no unit preference, so they show those units as they are.
+// km, W/m² — whichever way it hears the gateway; the screens show them in the
+// person's own (`units.svelte.js`).
+import { fmt, n, num, u } from './units.svelte.js';
+
+export { fmt, n, num, u };
 
 /** @typedef {import('../../../../../sdk/ui/index.js').Device} Device */
 /** @typedef {import('../../../../../sdk/ui/index.js').Host} Host */
@@ -13,14 +16,6 @@ export function adopt(el, host) {
 	const sheet = host.theme.sheet;
 	if (!root.adoptedStyleSheets.includes(sheet))
 		root.adoptedStyleSheets = [sheet, ...root.adoptedStyleSheets];
-}
-
-export const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-
-/** `52.3`, or a dash. */
-export function fmt(v, digits = 1) {
-	const n = num(v);
-	return n === undefined ? '—' : n.toFixed(digits).replace(/\.0+$/, '');
 }
 
 const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
@@ -41,8 +36,6 @@ export function ago(iso, now = Date.now()) {
 
 /** Stale after three missed uploads at the usual minute. */
 export const stale = (iso, now = Date.now()) => now - Date.parse(iso ?? '') > 3.5 * 60_000;
-
-export const DEG = '°C';
 
 /** A sensor's battery: `battery_pct` where it is a level, `voltage` where it
  *  is a cell voltage, and only `battery_low` where it is a 0/1 flag. */
@@ -83,15 +76,15 @@ export function reading(d) {
 	const a = d.attributes;
 	switch (d.device_type) {
 		case 'weather_station':
-			return `${fmt(a.temperature)}${DEG} · ${fmt(a.humidity, 0)}% · wind ${fmt(a.wind_speed)} m/s`;
+			return `${n(a.temperature, '°C')}${u('°C')} · ${fmt(a.humidity, 0)}% · wind ${n(a.wind_speed, 'm/s')} ${u('m/s')}`;
 		case 'temperature_sensor':
-			return `${fmt(a.temperature)}${DEG}${num(a.humidity) !== undefined ? ` · ${fmt(a.humidity, 0)}%` : ''}`;
+			return `${n(a.temperature, '°C')}${u('°C')}${num(a.humidity) !== undefined ? ` · ${fmt(a.humidity, 0)}%` : ''}`;
 		case 'rain_sensor': {
 			const rate = a.rain_rate_mm_hr;
-			return `${fmt(a.rain_daily_mm)} mm today${num(rate) ? ` · ${fmt(rate)} mm/h now` : ''}`;
+			return `${n(a.rain_daily_mm, 'mm')} ${u('mm')} today${num(rate) ? ` · ${n(rate, 'mm/h')} ${u('mm/h')} now` : ''}`;
 		}
 		case 'lightning_sensor':
-			return `${fmt(a.strike_count, 0)} strikes · nearest ${fmt(a.distance_km, 0)} km`;
+			return `${fmt(a.strike_count, 0)} strikes · nearest ${n(a.distance_km, 'km', 0)} ${u('km')}`;
 		case 'air_quality_sensor':
 			return a.co2 !== undefined ? `CO₂ ${fmt(a.co2, 0)} ppm` : `PM2.5 ${fmt(a.pm25, 0)}`;
 		case 'soil_sensor':

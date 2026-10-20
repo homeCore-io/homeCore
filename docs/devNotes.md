@@ -1680,7 +1680,7 @@ Response: `{ "enabled": true, "updated": N, "rules": [...] }` where `rules` cont
 
 This is the most common rule pattern during development: watch the virtual light for a state change, check a condition, and react.
 
-**Goal:** when `light.virtual_01` turns on, if its brightness is above 200, publish an MQTT event and log a notification.
+**Goal:** when `light.virtual_01` turns on, if its `brightness_pct` is above 80, publish an MQTT event and log a notification.
 
 **Step 1 — create the rule:**
 
@@ -1701,16 +1701,16 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
       {
         "type": "DeviceState",
         "device_id": "light.virtual_01",
-        "attribute": "brightness",
+        "attribute": "brightness_pct",
         "op": "Gt",
-        "value": 200
+        "value": 80
       }
     ],
     "actions": [
       {
         "type": "FireEvent",
         "event_type": "bright_light_alert",
-        "payload": { "device": "light.virtual_01", "reason": "brightness > 200" }
+        "payload": { "device": "light.virtual_01", "reason": "brightness_pct > 80" }
       },
       {
         "type": "Notify",
@@ -1744,12 +1744,12 @@ In Terminal 4 (WebSocket), watch for the event:
 websocat "ws://localhost:8080/api/v1/events/stream?token=$TOKEN"
 ```
 
-Then send a command that satisfies the condition — `on: true` and `brightness > 200`:
+Then send a command that satisfies the condition — `on: true` and `brightness_pct > 80`:
 ```sh
 curl -s -X PATCH http://localhost:8080/api/v1/devices/light.virtual_01/state \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"on": true, "brightness": 220}'
+  -d '{"on": true, "brightness_pct": 86}'
 ```
 
 You should see this sequence of events in the WebSocket stream:
@@ -1801,11 +1801,11 @@ RULE_ID=$(curl -s -X POST http://localhost:8080/api/v1/automations \
     },
     "conditions": [],
     "actions": [
-      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness": 255 } },
+      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness_pct": 100 } },
       { "type": "Delay", "duration_secs": 1 },
       { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": false } },
       { "type": "Delay", "duration_secs": 1 },
-      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness": 180 } }
+      { "type": "SetDeviceState", "device_id": "light.living_room_main", "state": { "on": true,  "brightness_pct": 70 } }
     ]
   }' | jq -r .id)
 
@@ -1910,7 +1910,7 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
     "conditions": [],
     "actions": [
       { "type": "SetDeviceState", "device_id": "lutron_scene_deck_evening", "state": { "activate": true } },
-      { "type": "SetDeviceState", "device_id": "wled_deck_strip",           "state": { "on": true, "brightness": 60 } }
+      { "type": "SetDeviceState", "device_id": "wled_deck_strip",           "state": { "on": true, "brightness_pct": 24 } }
     ]
   }' | jq
 ```
@@ -1974,7 +1974,7 @@ state     = { activate = true }
 [[actions]]
 type      = "set_device_state"
 device_id = "wled_deck_strip"
-state     = { on = true, brightness = 60 }
+state     = { on = true, brightness_pct = 24 }
 ```
 
 **Testing:** fire the event manually via the API:
@@ -2128,7 +2128,7 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `PingHost` | `host`, `count?`, `timeout_ms?`, `then_actions?`, `else_actions?`, `response_event?` | ICMP ping via system `ping` binary. Runs `then_actions` on success, `else_actions` on failure. Optionally fires a `Custom` event with `{host, reachable, rtt_ms}`. See [Action: PingHost](#action-pinghost). |
 | `CaptureDeviceState` | `key`, `device_ids` | Snapshot current state of listed devices under a named key. Persists across firings. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
 | `RestoreDeviceState` | `key` | Re-publish device states saved by `CaptureDeviceState`. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
-| `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (brightness, color_temp, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
+| `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (`brightness_pct`, `color_temp`, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
 | `DelayPerMode` | `modes`, `default_secs?` | Delay for a duration that depends on the active mode. First matching mode wins. `duration_secs = 0` skips the delay. See [Action: DelayPerMode](#action-delaypermode). |
 | `SetHubVariable` | `name`, `value`, `op?` | Write a cross-rule hub variable. Fires `hub_variable_changed` event. Supports all `VariableOp` operators. See [Hub Variables](#hub-variables). |
 | `ActivateScenePerMode` | `modes`, `default_scene_id?` | Activate a different scene depending on which mode is active. See [Action: ActivateScenePerMode](#action-activatescenepermode). |
@@ -2142,7 +2142,7 @@ Every `[[actions]]` entry accepts an `enabled` field (default `true`). Setting i
 [[actions]]
 type      = "set_device_state"
 device_id = "light_desk"
-state     = { on = true, brightness = 200 }
+state     = { on = true, brightness_pct = 80 }
 # enabled = true  ← default; omitting is the same as true
 
 [[actions]]
@@ -2247,7 +2247,7 @@ expression = "0 0 18 * * Mon-Fri"   # 18:00 Mon–Fri
 [[actions]]
 type      = "set_device_state"
 device_id = "light_living_room"
-state     = { "on" = true, "brightness" = 200 }
+state     = { "on" = true, "brightness_pct" = 80 }
 ```
 
 #### Example — periodic check with conditions
@@ -2425,7 +2425,7 @@ value     = true
 [[actions]]
 type      = "set_device_state"
 device_id = "light_living_room"
-state     = { "on" = true, "brightness" = 180 }
+state     = { "on" = true, "brightness_pct" = 70 }
 ```
 
 #### Example — fire only OUTSIDE a time window
@@ -2814,7 +2814,7 @@ value     = true
 [[rule.actions]]
 type      = "set_device_state"
 device_id = "light.hall"
-state     = { brightness = 30, on = true }
+state     = { brightness_pct = 12, on = true }
 
 [[rule.actions]]
 type = "stop_rule_chain"   # prevents the daytime rule from also firing
@@ -2836,7 +2836,7 @@ to        = true
 [[rule.actions]]
 type      = "set_device_state"
 device_id = "light.hall"
-state     = { brightness = 255, on = true }
+state     = { brightness_pct = 100, on = true }
 ```
 
 **Notes:**
@@ -3106,7 +3106,7 @@ interval_ms    = 5000
 [[rule.actions.actions]]
 type      = "set_device_state"
 device_id = "light.office"
-state     = { brightness = 100 }
+state     = { brightness_pct = 40 }
 ```
 
 #### `repeat_count` — fixed-count loop
@@ -3817,8 +3817,8 @@ changed.  Use it instead of diffing `previous` vs `current` manually:
   "type": "device_state_changed",
   "timestamp": "2026-03-25T15:04:05Z",
   "device_id": "yolink_door_01",
-  "previous": { "open": false, "battery": 90 },
-  "current":  { "open": true,  "battery": 90 },
+  "previous": { "open": false, "battery_pct": 90 },
+  "current":  { "open": true,  "battery_pct": 90 },
   "changed":  ["open"]
 }
 ```
@@ -4699,7 +4699,7 @@ curl -s -X POST http://localhost:8080/api/v1/automations \
       {
         "type": "SetDeviceState",
         "device_id": "light.living_room_main",
-        "state": { "on": true, "brightness": 180, "color_temp": 2700 }
+        "state": { "on": true, "brightness_pct": 70, "color_temp": 2700 }
       }
     ]
   }' | jq
@@ -4819,8 +4819,8 @@ For every node in the initial state, `hc-zwave` publishes:
 Incoming `homecore/devices/zwave_{nodeId}/cmd` payloads are translated and sent as `node.set_value` WebSocket commands:
 
 ```sh
-curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"brightness": 80}'
-# → node.set_value: nodeId=5, CC=38, ep=0, property="targetValue", value=80
+curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"brightness_pct": 80}'
+# → node.set_value: nodeId=5, CC=38, ep=0, property="targetValue", value=79
 
 curl -X PATCH http://localhost:8080/api/v1/devices/zwave_5/state -d '{"locked": true}'
 # → node.set_value: nodeId=5, CC=98, ep=0, property="targetMode", value=255
@@ -4836,19 +4836,19 @@ If the WebSocket connection drops, `hc-zwave` reconnects with exponential backof
 
 | CC | Number | HomeCore attributes |
 |----|--------|---------------------|
-| Binary Sensor | 48 | `motion`, `contact_open`, `water_detected`, `smoke`, `co`, `vibration`, `tamper` |
+| Binary Sensor | 48 | `motion`, `open`, `water_detected`, `smoke`, `co`, `vibration`, `tampered` |
 | Binary Switch | 37 | `on` |
-| Multilevel Switch / Dimmer | 38 | `brightness` (0–99) |
-| Multilevel Sensor | 49 | `temperature`, `humidity`, `illuminance`, `uv_index`, `co2_ppm`, `pressure` |
+| Multilevel Switch / Dimmer | 38 | `brightness_pct` (0–100; Z-Wave 0–99 converted) |
+| Multilevel Sensor | 49 | `temperature` (°C), `humidity`, `illuminance` (lux), `uv_index`, `co2`, `pressure` (hPa) |
 | Meter | 50 | `power_w`, `energy_kwh`, `voltage`, `current_a` |
 | Color Switch | 51 | `color_rgb` |
-| Thermostat Mode | 64 | `mode` (`off`/`heat`/`cool`/`auto`/`fan_only`/`energy_heat`) |
+| Thermostat Mode | 64 | `hvac_mode` (`off`/`heat`/`cool`/`auto`/`fan_only`/`dry`; others keep their own name, e.g. `energy_heat`) |
 | Thermostat Operating State | 66 | `hvac_action` |
-| Thermostat Setpoint | 67 | `target_temp` (endpoint 1 = heating setpoint) |
+| Thermostat Setpoint | 67 | `heat_setpoint`, `cool_setpoint` (°C, converted from °F thermostats) |
 | Door Lock | 98 | `locked` (0/255 → false/true) |
-| Window Covering | 102 | `position` |
-| Notification | 113 | `locked`, `tamper`, `smoke`, `co`, `water_detected` |
-| Battery | 128 | `battery`, `battery_low` |
+| Window Covering | 106 | `position`, `tilt_pct` |
+| Notification | 113 | `locked`, `open`, `tampered`, `smoke`, `co`, `water_detected` |
+| Battery | 128 | `battery_pct`, `battery_low` |
 
 Alias table lives in `src/translator.rs`. To add a new CC, add an `AliasEntry` row to the `ALIAS_TABLE` slice — no other changes needed.
 
@@ -5177,18 +5177,20 @@ INFO hc_wled: Connecting WebSocket url="ws://192.168.1.200/ws"
 ```json
 {
   "on":             true,
-  "brightness":     200,
   "brightness_pct": 78.4,
-  "color":          [255, 170, 0],
+  "transition_ms":  700,
+  "color_rgb":      { "r": 255, "g": 170, "b": 0 },
   "effect_id":      5,
   "effect_speed":   180,
   "effect_intensity": 128,
   "palette_id":     10,
-  "preset_id":      -1
+  "preset_id":      null
 }
 ```
 
-`color` is the primary color of segment 0. `preset_id` is `-1` when no preset is active.
+An abridged example; `plugins/hc-wled/README.md` lists every field.
+`color_rgb` is the primary colour of the first segment. `preset_id` is `null`
+while no preset is active.
 
 ---
 
@@ -5199,17 +5201,20 @@ Send to `homecore/devices/{hc_id}/cmd` as JSON. Fields can be combined:
 | Field | Type | Notes |
 |-------|------|-------|
 | `on` | `bool` | power on/off |
-| `brightness` | `0–255` | master brightness |
-| `brightness_pct` | `0.0–100.0` | converted to 0–255 |
-| `color` | `[r, g, b]` | segment 0 primary color |
-| `effect` | `int` | effect ID (see WLED effect list) |
+| `brightness_pct` | `0.0–100.0` | converted to WLED's 0–255 |
+| `color_rgb` | `{r, g, b}` | primary colour |
+| `effect_id` | `int` | effect ID (see WLED effect list) |
 | `effect_speed` | `0–255` | |
 | `effect_intensity` | `0–255` | |
-| `palette` | `int` | palette ID |
-| `preset` | `int` | recall preset by ID |
-| `transition` | `int` (ms) | one-shot crossfade time |
+| `palette_id` | `int` | palette ID |
+| `preset_id` | `int` | recall preset by ID |
+| `transition_ms` | `int` (ms) | one-shot crossfade time |
 
-`color`, `effect`, `effect_speed`, `effect_intensity`, and `palette` apply to segment 0. For multi-segment control, POST directly to the WLED API via a `call_service` rule action.
+`color_rgb`, `effect_id`, `effect_speed`, `effect_intensity` and `palette_id`
+apply to `segment` (an id, `"all"` or `"selected"`; segment 0 when left out).
+`plugins/hc-wled/README.md` lists every command, including `segments` for
+several at once. The 0–255 `brightness`, `preset`, `effect`, `palette` and
+`cct` are no longer taken.
 
 **Examples:**
 
@@ -5217,17 +5222,17 @@ Send to `homecore/devices/{hc_id}/cmd` as JSON. Fields can be combined:
 # Turn on at 80% brightness with a warm-white color
 curl -X PATCH http://localhost:8080/api/v1/devices/wled_deck/state \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"on":true,"brightness_pct":80,"color":[255,180,80]}'
+  -d '{"on":true,"brightness_pct":80,"color_rgb":{"r":255,"g":180,"b":80}}'
 
 # Activate effect 5 (Breathe) with custom speed
 curl -X PATCH http://localhost:8080/api/v1/devices/wled_deck/state \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"on":true,"effect":5,"effect_speed":120,"effect_intensity":200}'
+  -d '{"on":true,"effect_id":5,"effect_speed":120,"effect_intensity":200}'
 
 # Recall preset 3
 curl -X PATCH http://localhost:8080/api/v1/devices/wled_deck/state \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"preset":3}'
+  -d '{"preset_id":3}'
 ```
 
 ---
@@ -5576,7 +5581,7 @@ condition = 'device_state("timer_bathroom")["state"] == "running"'
   [[actions.then_actions]]
   type    = "publish_mqtt"
   topic   = "homecore/devices/timer_bathroom/cmd"
-  payload = '{"command":"cancel"}'
+  payload = '{"action":"cancel"}'
   retain  = false
 ```
 
@@ -5625,7 +5630,7 @@ Publishes a command to `homecore/devices/{id}/cmd`.
 
 ```rhai
 set_device_state("plug_office", #{ on: true });
-set_device_state("light_kitchen", #{ on: true, brightness: 180 });
+set_device_state("light_kitchen", #{ on: true, brightness_pct: 70 });
 ```
 
 #### `notify(channel, message)`
@@ -5666,7 +5671,7 @@ http_post("http://api.example.com/webhook", `{"event":"motion","zone":"front"}`)
 Publishes a raw MQTT message.
 
 ```rhai
-publish_mqtt("homecore/devices/timer_bathroom/cmd", `{"command":"start","duration_secs":300}`);
+publish_mqtt("homecore/devices/timer_bathroom/cmd", `{"action":"start","duration_secs":300}`);
 publish_mqtt("homecore/events/my_custom_event", "fired");
 ```
 
@@ -5728,7 +5733,7 @@ script = """
   let timer = device_state("timer_bathroom");
   if timer["state"] == "running" {
       publish_mqtt("homecore/devices/timer_bathroom/cmd",
-                   `{"command":"cancel"}`);
+                   `{"action":"cancel"}`);
   }
   set_device_state("lutron_21", #{ on: true });
   http_get("http://10.0.10.200:5005/Bathroom/favorite/1");
@@ -5746,11 +5751,11 @@ script = """
 
   if !is_weekend {
       set_device_state("coffee_maker", #{ on: true });
-      set_device_state("light_kitchen", #{ on: true, brightness: 200 });
+      set_device_state("light_kitchen", #{ on: true, brightness_pct: 80 });
       notify("pushover", "Good morning! Coffee is brewing.");
   } else {
       // Weekend: just turn on the kitchen light at low brightness
-      set_device_state("light_kitchen", #{ on: true, brightness: 80 });
+      set_device_state("light_kitchen", #{ on: true, brightness_pct: 31 });
   }
 """
 ```
@@ -5870,7 +5875,7 @@ device_id = "light_office"
 
 [[actions.modes]]
 mode  = "mode_night"
-state = { on = true, brightness = 30, color_temp = 2700 }
+state = { on = true, brightness_pct = 12, color_temp = 2700 }
 
 [[actions.modes]]
 mode  = "mode_away"
@@ -5879,7 +5884,7 @@ state = { on = false }
 # Optional: used when no mode above is active
 [actions.default_state]
 on         = true
-brightness = 180
+brightness_pct = 70
 color_temp = 4000
 ```
 
@@ -5896,11 +5901,11 @@ device_id = "light_desk"
 
 [[actions.modes]]
 mode  = "mode_night"
-state = { on = true, brightness = 20 }    # dim at night
+state = { on = true, brightness_pct = 8 }    # dim at night
 
 [actions.default_state]
 on         = true
-brightness = 255                           # full brightness otherwise
+brightness_pct = 100                           # full brightness otherwise
 ```
 
 ### Example: outdoor lights off when away, dim when night, bright otherwise
@@ -5952,7 +5957,7 @@ device_id = "light_night_light"
 
 [[actions.modes]]
 mode  = "mode_night"
-state = { on = true, brightness = 5 }
+state = { on = true, brightness_pct = 2 }
 # No default_state — light is only set at night; other times this action is a no-op
 ```
 
@@ -6044,12 +6049,12 @@ host  = "192.168.1.42"    # phone's static DHCP lease
 [[actions.then_actions]]
 type      = "set_device_state"
 device_id = "switch_phone_home"
-state     = { command = "on" }
+state     = { on = true }
 
 [[actions.else_actions]]
 type      = "set_device_state"
 device_id = "switch_phone_home"
-state     = { command = "off" }
+state     = { on = false }
 ```
 
 ### Notes
@@ -6090,7 +6095,7 @@ script = """
   let timer = device_state("timer_bathroom");
   if timer["state"] == "running" {
       publish_mqtt("homecore/devices/timer_bathroom/cmd",
-                   `{"command":"cancel"}`);
+                   `{"action":"cancel"}`);
   }
 
   // Turn on exhaust fan
@@ -6135,7 +6140,7 @@ type = "parallel"
   device_id = "light_entry"
   [actions.actions.state]
   on         = true
-  brightness = 200
+  brightness_pct = 80
 
   [[actions.actions]]
   type      = "set_device_state"
@@ -6190,7 +6195,7 @@ script = """
       "Front door opened while alarm is armed!");
 
   // Flash the entry light
-  set_device_state("light_entry", #{ on: true, brightness: 255 });
+  set_device_state("light_entry", #{ on: true, brightness_pct: 100 });
   // The Delay action can be used between RunScript for pausing;
   // for in-script pauses combine with Parallel or separate actions.
 
@@ -6314,9 +6319,9 @@ via `GET /api/v1/devices`.
 Send commands via `PATCH /api/v1/devices/{id}/state`:
 
 ```json
-{ "command": "on" }
-{ "command": "off" }
-{ "command": "toggle" }
+{ "on": true }
+{ "on": false }
+{ "action": "toggle" }
 ```
 
 Commands that do not change the current state are silently ignored (no spurious
@@ -6365,7 +6370,7 @@ script = 'device_state("switch_vacation_mode")["on"] == true'
 type      = "set_device_state"
 device_id = "switch_vacation_mode"
 [actions.state]
-command = "on"
+on = true
 ```
 
 Or from a `RunScript` action:
@@ -6404,13 +6409,13 @@ type = "parallel"
   type      = "set_device_state"
   device_id = "light_living_room"
   [actions.actions.state]
-  command = "off"
+  on = false
 
   [[actions.actions]]
   type      = "set_device_state"
   device_id = "light_kitchen"
   [actions.actions.state]
-  command = "off"
+  on = false
 
 [[actions]]
 type    = "notify"
@@ -7137,7 +7142,7 @@ see.
 | Pulsed CCO (`device_type = "scene"`) | none — a momentary output has no resting level, and the Integration Guide says not to query one | `activate` |
 | Phantom scene | `phantom_button`, `led_component` and `on` — the last two **only when the scene really reports** | `activate` |
 | Keypad / VCRX / Pico | `available_buttons`, one per button | `press_button`, `set_led` (Pico: none) |
-| Occupancy group | `occupied` and `occupancy` — the same reading under both names it has always published | — |
+| Occupancy group | `occupied` | — |
 | Timeclock event | `enabled` (writable) | `execute` |
 
 **A scene's state is its phantom button's LED, and not every phantom button has
@@ -7201,7 +7206,7 @@ shade, occupancy sensor and scene published no schema at all.
 | Switch | `on` | — |
 | Fan control | `on`, `speed`, `speed_pct` | — |
 | Shade | `position` (0–100 %) | `raise`, `lower`, `stop` |
-| Occupancy sensor | `occupied`, `occupancy` | — |
+| Occupancy sensor | `occupied` | — |
 | Pico | `available_buttons`, one per button | — (read-only over LIP) |
 | Scene | none | `activate` |
 
@@ -7717,26 +7722,29 @@ Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM
 
 | Type | Attributes |
 |---|---|
-| `light` | `on: bool`, `brightness: 0–255`, `brightness_pct: 0–100` |
+| `light` | `on: bool`, `brightness_pct: 0–100` |
 | `switch` | `on: bool` |
-| `contact_sensor` | `open: bool`, `contact: bool` |
-| `motion_sensor` | `motion: bool`, `occupancy: bool` |
-| `water_sensor` | `leak: bool`, `water_detected: bool` |
+| `contact_sensor` | `open: bool` |
+| `motion_sensor` | `motion: bool` |
+| `water_sensor` | `water_detected: bool` |
 | `binary_sensor` | fallback only: `on: bool`, `device_class: motion\|opening\|moisture` (when detectable) |
-| `sensor` | `value: f64`, `unit: str` |
+| `sensor` | one reading under the shared name its UOM gives it (`temperature` °C, `humidity`, `illuminance` lux, `power_w`, …), else `value` |
 | `lock` | `locked: bool` |
-| `cover` | `position: 0–100`, `state: open\|closed` |
-| `fan` | `on: bool`, `speed: off\|low\|medium\|high` |
-| `thermostat` | `temperature`, `target_temp_heat`, `target_temp_cool`, `hvac_mode: off\|heat\|cool\|auto`, `fan_mode: auto\|on`, `state: idle\|heating\|cooling` |
+| `cover` | `position: 0–100` |
+| `fan` | `on: bool`, `speed: off\|low\|medium\|high`, `speed_pct: 0–100` |
+| `thermostat` | `temperature` (°C), `humidity`, `heat_setpoint`, `cool_setpoint` (°C), `hvac_mode: off\|heat\|cool\|auto\|fan_only`, `fan_mode: auto\|on`, `hvac_action: idle\|heating\|cooling\|fan` |
 | `scene` | `on: bool` |
+
+`plugins/hc-isy/README.md` has the conversions (UOM, Insteon 0–255 levels,
+°F thermostats).
 
 ### Commands
 
 ```json
 // Light
-{"on": true}                          → DON (use device preset level)
-{"on": true, "brightness": 200}       → DON/200
-{"brightness_pct": 50}                → DON/127
+{"on": true}                          → DON at the last level seen (plain DON before one is known)
+{"brightness_pct": 80}                → DON/204
+{"brightness_pct": 0}                 → DOF
 {"on": false}                         → DOF
 
 // Switch / Scene
@@ -7755,12 +7763,13 @@ Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM
 
 // Cover
 {"position": 50}                      → DON/127
-{"state": "open"}                     → DON/255
-{"state": "closed"}                   → DOF
+{"position": 100}                     → DON/255
+{"position": 0}                       → DOF
 
-// Thermostat (all fields optional; each triggers a separate REST command)
-{"target_temp_heat": 68, "target_temp_cool": 76, "hvac_mode": "auto"}
-  → CLISPH/680, CLISPC/760, CLIMD/3
+// Thermostat (all fields optional; each triggers a separate REST command).
+// Setpoints are °C, written back in the thermostat's own degrees and precision.
+{"heat_setpoint": 20, "cool_setpoint": 24.5, "hvac_mode": "auto"}
+  → CLISPH/68, CLISPC/76, CLIMD/3   (on a whole-degree °F thermostat)
 ```
 
 ### ISY Programs (future)
@@ -7792,7 +7801,7 @@ to         = "active"
 ```rhai
 // In a Conditional action or required_expression:
 if trigger_label() == "motion_hallway" {
-    set_device_state("light_hall", #{ on: true, brightness: 200 });
+    set_device_state("light_hall", #{ on: true, brightness_pct: 80 });
 }
 ```
 
@@ -7818,7 +7827,7 @@ type      = "set_device_state"
 device_id = "light_living"
 [actions.state]
 on         = true
-brightness = 20
+brightness_pct = 8
 
 # Rule: "Movie Mode Off" — restore saved state
 [[actions]]
@@ -7856,7 +7865,7 @@ steps         = 30          # optional — default = duration_secs (1 per second
 
 [actions.target]
 on         = true           # non-numeric: sent on every step
-brightness = 255            # interpolated: 0 → 255 over 30 steps
+brightness_pct = 100        # interpolated: 0 → 100 over 30 steps
 ```
 
 ### Fields
@@ -7888,7 +7897,7 @@ steps         = 60
 
 [actions.target]
 on         = true
-brightness = 255
+brightness_pct = 100
 color_temp = 6500
 ```
 
@@ -7902,7 +7911,7 @@ steps         = 10
 
 [actions.target]
 on         = true
-brightness = 0
+brightness_pct = 0
 ```
 
 **Note:** `FadeDevice` is sequential — the next action only starts after the fade finishes. Use `Parallel` if you need to fade multiple devices simultaneously:
@@ -7916,14 +7925,14 @@ type          = "fade_device"
 device_id     = "light_living"
 duration_secs = 10
 [actions.actions.target]
-brightness = 128
+brightness_pct = 50
 
 [[actions.actions]]
 type          = "fade_device"
 device_id     = "light_dining"
 duration_secs = 10
 [actions.actions.target]
-brightness = 80
+brightness_pct = 31
 ```
 
 ---
@@ -8166,7 +8175,7 @@ device_id = "light_living_room"
 
 [actions.state]
 on         = true
-brightness = 200
+brightness_pct = 80
 color_temp = 2700
 ```
 
@@ -8212,7 +8221,7 @@ on      = true
 
 ### `Action::SetMode`
 
-Turns a manual mode on, off, or toggles it.  Publishes `{"command":"on|off|toggle"}` to the mode device's cmd topic.
+Turns a manual mode on, off, or toggles it.  Publishes `{"action":"on|off|toggle"}` to the mode device's cmd topic.
 
 ```toml
 [[actions]]
@@ -8256,7 +8265,7 @@ The `Skipped` outcome appears in the rule fire history:
 
 Core synthesizes `device.battery_low` and `device.battery_recovered` events
 from `DeviceStateChanged` updates that touch a battery attribute
-(`battery`, `battery_pct`, or `battery_level`). Hysteresis is enforced in
+(`battery_pct`; the retired `battery` and `battery_level` are still read). Hysteresis is enforced in
 the watcher (`hc-core/src/battery_watcher.rs`) and persisted in
 `hc-state`'s `battery_state` redb table, so a restart while a device is
 already low does not re-emit on the next reading.
@@ -8290,7 +8299,7 @@ actions: [
         let id = trigger_device();
         let dev = device_state(id);
         notify("all", "Battery low",
-            "Battery low: " + dev["name"] + " at " + dev["attributes"]["battery"] + "%");
+            "Battery low: " + dev["name"] + " at " + dev["attributes"]["battery_pct"] + "%");
     "#)),
 ]
 ```

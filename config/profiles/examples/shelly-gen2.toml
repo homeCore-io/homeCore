@@ -32,7 +32,7 @@
 #
 # ─── Command payloads (HomeCore → device) ─────────────────────────────────────
 #   Switch / Plug:  {"on": true}  or  {"on": false}
-#   Dimmer / Light: {"on": true, "brightness": 75}
+#   Dimmer / Light: {"on": true, "brightness_pct": 75}
 #   Cover:          {"position": 50}  (0=fully closed, 100=fully open)
 #                   Send {"position": 100} to fully open, {"position": 0} to close.
 #
@@ -167,7 +167,7 @@ device_id = "shelly_{device}_light_{light_id}"
 
   [ecosystem.state_topics.field_map]
   output          = "on"
-  brightness      = "brightness"   # 0–100 (percent)
+  brightness      = "brightness_pct" # 0–100 (percent)
   apower          = "power_w"
   voltage         = "voltage"
   current         = "current_a"
@@ -177,7 +177,7 @@ device_id = "shelly_{device}_light_{light_id}"
 
 # ─── Dimmer commands ──────────────────────────────────────────────────────────
 # RPC: Light.Set  params: {"id": 0, "on": true, "brightness": 75}
-# HomeCore sends: {"on": true, "brightness": 75}
+# HomeCore sends: {"on": true, "brightness_pct": 75}
 
 [[ecosystem.cmd_topics]]
 source     = "homecore/devices/shelly_{device}_light_0/cmd"
@@ -186,8 +186,8 @@ rpc_method = "Light.Set"
 rpc_id     = 0
 
   [ecosystem.cmd_topics.field_map]
-  on         = "on"
-  brightness = "brightness"
+  on             = "on"
+  brightness_pct = "brightness"
 
 [[ecosystem.cmd_topics]]
 source     = "homecore/devices/shelly_{device}_light_1/cmd"
@@ -196,8 +196,8 @@ rpc_method = "Light.Set"
 rpc_id     = 1
 
   [ecosystem.cmd_topics.field_map]
-  on         = "on"
-  brightness = "brightness"
+  on             = "on"
+  brightness_pct = "brightness"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -267,8 +267,7 @@ pattern   = "{device}/status/temperature:{temp_id}"
 device_id = "shelly_{device}_sensor"
 
   [ecosystem.state_topics.field_map]
-  tC = "temperature"    # °C (null if sensor error)
-  tF = "temperature_f"  # °F (optional, for display)
+  tC = "temperature"    # °C (null if sensor error); homeCore keeps °C only
 
 
 [[ecosystem.state_topics]]

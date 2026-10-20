@@ -10,12 +10,14 @@
 <script>
 	import Now from './lib/Now.svelte';
 	import Spark from './lib/Spark.svelte';
-	import { adopt, ago, kindOf, reading, trend } from './lib/weather.js';
+	import { adopt, ago, kindOf, reading, trend, u } from './lib/weather.js';
+	import { follow, series } from './lib/units.svelte.js';
 
 	/** @type {{ host: import('../../../../sdk/ui/index.js').Host, deviceId?: string }} */
 	let { host: hc, deviceId } = $props();
 	const me = $host();
 	$effect(() => adopt(me, hc));
+	$effect(() => follow(hc));
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
@@ -45,9 +47,14 @@
 	<section class="hc-card">
 		<span class="hc-label">The last day</span>
 		<div class="days">
-			<Spark points={temp} label="Temperature" unit="°C" />
-			<Spark points={wind} label="Wind" unit=" m/s" />
-			<Spark points={pressure} label="Pressure" unit=" hPa" digits={0} />
+			<Spark points={series(temp, '°C')} label="Temperature" unit={u('°C')} />
+			<Spark points={series(wind, 'm/s')} label="Wind" unit={` ${u('m/s')}`} />
+			<Spark
+				points={series(pressure, 'hPa')}
+				label="Pressure"
+				unit={` ${u('hPa')}`}
+				digits={u('hPa') === 'hPa' ? 0 : 2}
+			/>
 		</div>
 	</section>
 
