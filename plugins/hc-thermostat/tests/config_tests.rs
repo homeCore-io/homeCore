@@ -57,7 +57,7 @@ name = "Living Room"
 sensor_device_ids = ["s1", "s2"]
 sensor_attribute = "temperature"
 aggregation = "min"
-setpoint = 68.5
+setpoint = 20.5
 hysteresis = 2.0
 mode = "heat"
 actuator_device_id = "switch_furnace"
@@ -71,7 +71,7 @@ min_off_secs = 180
     assert_eq!(t.id, "lr");
     assert_eq!(t.sensor_device_ids, vec!["s1", "s2"]);
     assert_eq!(t.aggregation, "min");
-    assert_eq!(t.setpoint, 68.5);
+    assert_eq!(t.setpoint, 20.5);
     assert_eq!(t.min_on_secs, 300);
     assert_eq!(t.mode, "heat");
 }
@@ -91,7 +91,7 @@ password = "p"
 id = "default"
 name = "Default"
 sensor_device_ids = ["s1"]
-setpoint = 70.0
+setpoint = 21.0
 "#,
     );
     let cfg = config::Config::load(f.path().to_str().unwrap()).unwrap();
@@ -119,7 +119,7 @@ password = "p"
 id = "x"
 name = "X"
 sensor_device_ids = ["s"]
-setpoint = 70.0
+setpoint = 21.0
 mode = "bogus"
 "#,
     );
@@ -142,7 +142,7 @@ password = "p"
 id = "x"
 name = "X"
 sensor_device_ids = ["s"]
-setpoint = 70.0
+setpoint = 21.0
 aggregation = "median"
 "#,
     );
@@ -165,7 +165,7 @@ password = "p"
 id = "x"
 name = "X"
 sensor_device_ids = ["s"]
-setpoint = 70.0
+setpoint = 21.0
 hysteresis = -0.5
 "#,
     );
@@ -187,4 +187,30 @@ password = "p"
     );
     let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
     assert!(err.to_string().contains("plugin_id"));
+}
+
+#[test]
+fn rejects_a_fahrenheit_setpoint() {
+    let f = write_config(
+        r#"
+[homecore]
+plugin_id = "p"
+
+[[thermostat]]
+id = "x"
+name = "X"
+sensor_device_ids = ["s"]
+setpoint = 68.0
+"#,
+    );
+    let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
+    assert!(err.to_string().contains("°C"), "{err}");
+}
+
+#[test]
+fn setpoint_range_edges() {
+    assert!(config::setpoint_problem(-40.0).is_none());
+    assert!(config::setpoint_problem(45.0).is_none());
+    assert!(config::setpoint_problem(45.1).is_some());
+    assert!(config::setpoint_problem(-40.1).is_some());
 }

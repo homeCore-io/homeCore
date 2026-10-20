@@ -86,7 +86,7 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .label("Setpoint")
                                 .prompt_when_empty()
                                 .help(
-                                    "The target temperature, in whatever unit the sensors report.",
+                                    "The target temperature, in °C. Sensors report °C; the app shows °F if you prefer it.",
                                 ),
                             Field::number("hysteresis")
                                 .label("Deadband")
@@ -95,7 +95,7 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .help(
                                     "How far past the setpoint before switching \
                                      back. Too small and the relay chatters around \
-                                     the target; 1 degree is a sane start.",
+                                     the target; 0.5–1 °C is a sane start.",
                                 ),
                             Field::select("actuator_device_id")
                                 .label("Switches")
@@ -306,6 +306,24 @@ fn default_mode() -> String {
     "off".into()
 }
 
+/// The setpoints a thermostat accepts, °C.
+///
+/// Setpoints are °C, as the sensors report. A number above this is almost
+/// certainly a °F setpoint left from before — 68 °C would run a furnace
+/// without end — so it is refused rather than obeyed.
+pub const SETPOINT_RANGE: std::ops::RangeInclusive<f64> = -40.0..=45.0;
+
+/// Why `setpoint` cannot be used, if it cannot.
+pub fn setpoint_problem(setpoint: f64) -> Option<String> {
+    (!SETPOINT_RANGE.contains(&setpoint)).then(|| {
+        format!(
+            "setpoint {setpoint} is outside {}–{} °C (setpoints are °C; convert a °F one with (F − 32) × 5/9)",
+            SETPOINT_RANGE.start(),
+            SETPOINT_RANGE.end()
+        )
+    })
+}
+
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
@@ -343,6 +361,9 @@ impl Config {
                     "thermostat {}: hysteresis must be non-negative",
                     t.id
                 ));
+            }
+            if let Some(p) = setpoint_problem(t.setpoint) {
+                return Err(anyhow!("thermostat {}: {p}", t.id));
             }
         }
         Ok(())

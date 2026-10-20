@@ -53,6 +53,67 @@ pub(crate) fn command_of(payload: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// `hvac_action`'s word for a call: `heat` → `heating`, `cool` → `cooling`.
+pub(crate) fn action_word(call: &str) -> &'static str {
+    match call {
+        "heat" => "heating",
+        "cool" => "cooling",
+        _ => "idle",
+    }
+}
+
+/// What the thermostat is doing now, from its mode and whether its actuator
+/// is on — not what it would like to do, which a short-cycle lockout can hold
+/// back (that is `pending_call`).
+pub(crate) fn hvac_action(mode: &str, actuator_on: bool) -> &'static str {
+    match (mode, actuator_on) {
+        ("off", _) => "off",
+        (m, true) => action_word(m),
+        (_, false) => "idle",
+    }
+}
+
+/// The attribute writes a command carries: `{"setpoint": 21}` and
+/// `{"hvac_mode": "heat"}`. `mode` is the old spelling, still read quietly.
+pub(crate) fn attribute_writes(payload: &Value) -> (Option<f64>, Option<&str>) {
+    let setpoint = payload.get("setpoint").and_then(Value::as_f64);
+    let mode = ["hvac_mode", "mode"]
+        .iter()
+        .find_map(|k| payload.get(*k).and_then(Value::as_str));
+    (setpoint, mode)
+}
+
+/// The sensor ids a `set_sensors` command names: a list, or one string of
+/// ids separated by commas (what a form's text field sends).
+pub(crate) fn sensor_ids_of(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::Array(ids) => Some(
+            ids.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        ),
+        Value::String(s) => Some(
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Take a new setpoint, °C, unless it is out of range (see
+/// [`crate::config::SETPOINT_RANGE`]). Returns whether it changed anything.
+fn set_setpoint(rt: &mut Runtime, v: f64, device_id: &str) -> bool {
+    if let Some(problem) = crate::config::setpoint_problem(v) {
+        warn!(device_id, "Setpoint refused: {problem}");
+        return false;
+    }
+    rt.cfg.setpoint = v;
+    true
+}
+
 /// The runtime changes to keep for one thermostat, or `None` when it is as the
 /// config file has it.
 ///
@@ -76,14 +137,19 @@ pub(crate) fn learned_entry(file: &ThermostatEntry, kept: &Value) -> Option<Ther
         return None;
     }
     let entry: ThermostatEntry = serde_json::from_value(kept.get("entry")?.clone()).ok()?;
-    (entry.id == file.id).then_some(entry)
+    // A setpoint kept from before setpoints were °C is dropped, not obeyed.
+    (entry.id == file.id && crate::config::setpoint_problem(entry.setpoint).is_none())
+        .then_some(entry)
 }
 
 /// Per-thermostat runtime state — what we've last published.
 #[derive(Debug, Clone)]
 struct Runtime {
     cfg: ThermostatEntry,
-    current_temperature: Option<f64>,
+    /// The aggregated sensor reading, °C.
+    temperature: Option<f64>,
+    /// What the control loop calls for: `heat`, `cool`, `idle` or `stale`.
+    /// Internal — published as `hvac_action` and `sensors_stale`.
     call_for: String,
     actuator_state: bool,
     actuator_last_change: Option<DateTime<Utc>>,
@@ -116,7 +182,7 @@ impl Runtime {
     fn new(cfg: ThermostatEntry) -> Self {
         Self {
             cfg,
-            current_temperature: None,
+            temperature: None,
             call_for: "idle".into(),
             actuator_state: false,
             actuator_last_change: None,
@@ -145,16 +211,17 @@ impl Runtime {
             "aggregation": self.cfg.aggregation,
             "setpoint": self.cfg.setpoint,
             "hysteresis": self.cfg.hysteresis,
-            "mode": self.cfg.mode,
+            "hvac_mode": self.cfg.mode,
             "actuator_device_id": self.cfg.actuator_device_id,
             "min_on_secs": self.cfg.min_on_secs,
             "min_off_secs": self.cfg.min_off_secs,
 
-            "current_temperature": self.current_temperature,
-            "call_for": self.call_for,
+            "temperature": self.temperature,
+            "hvac_action": hvac_action(&self.cfg.mode, self.actuator_state),
+            "sensors_stale": self.call_for == "stale",
             "actuator_state": self.actuator_state,
             "actuator_last_change": self.actuator_last_change.map(|t| t.to_rfc3339()),
-            "pending_call": self.pending_call,
+            "pending_call": self.pending_call.as_deref().map(action_word),
             "lockout_until": self.lockout_until.map(|t| t.to_rfc3339()),
             "settled": self.settled,
             "actuator_last_error": self.actuator_last_error.as_ref().map(|e| json!({
@@ -484,8 +551,13 @@ impl BridgeHandle {
         if let Some(b_) = payload.get("actuator_state").and_then(|v| v.as_bool()) {
             rt.actuator_state = b_;
         }
-        if let Some(s) = payload.get("call_for").and_then(|v| v.as_str()) {
-            rt.call_for = s.to_string();
+        if let Some(s) = payload.get("hvac_action").and_then(|v| v.as_str()) {
+            rt.call_for = match s {
+                "heating" => "heat",
+                "cooling" => "cool",
+                _ => "idle",
+            }
+            .to_string();
         }
         debug!(device_id, "Restored runtime state from retained message");
     }
@@ -612,13 +684,12 @@ impl BridgeHandle {
             match cmd {
                 "set_setpoint" => {
                     if let Some(v) = payload.get("value").and_then(|v| v.as_f64()) {
-                        rt.cfg.setpoint = v;
-                        changed = true;
+                        changed |= set_setpoint(rt, v, device_id);
                     }
                 }
                 "set_mode" => {
                     if let Some(m) = payload.get("value").and_then(|v| v.as_str()) {
-                        if matches!(m, "heat" | "cool" | "off") {
+                        if crate::schema::MODES.contains(&m) {
                             rt.cfg.mode = m.to_string();
                             changed = true;
                         } else {
@@ -651,12 +722,8 @@ impl BridgeHandle {
                     }
                 }
                 "set_sensors" => {
-                    if let Some(ids) = payload.get("sensor_ids").and_then(|v| v.as_array()) {
-                        let new_ids: Vec<String> = ids
-                            .iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect();
-                        rt.cfg.sensor_device_ids = new_ids;
+                    if let Some(ids) = payload.get("sensor_ids").and_then(sensor_ids_of) {
+                        rt.cfg.sensor_device_ids = ids;
                         changed = true;
                     }
                     if let Some(a) = payload.get("attribute").and_then(|v| v.as_str()) {
@@ -678,7 +745,21 @@ impl BridgeHandle {
                         changed = true;
                     }
                 }
-                "recalculate" | "" => {}
+                "" => {
+                    let (setpoint, mode) = attribute_writes(&payload);
+                    if let Some(v) = setpoint {
+                        changed |= set_setpoint(rt, v, device_id);
+                    }
+                    if let Some(m) = mode {
+                        if crate::schema::MODES.contains(&m) {
+                            rt.cfg.mode = m.to_string();
+                            changed = true;
+                        } else {
+                            warn!(device_id, mode = %m, "Unknown hvac_mode");
+                        }
+                    }
+                }
+                "recalculate" => {}
                 other => {
                     warn!(device_id, cmd = %other, "Unknown thermostat command");
                     return;
@@ -893,7 +974,7 @@ impl BridgeHandle {
                 if rt.call_for != "stale" {
                     warn!(id = %rt.cfg.id, "No sensor readings available");
                     rt.call_for = "stale".into();
-                    rt.current_temperature = None;
+                    rt.temperature = None;
                 }
                 (None, rt.device_id(), rt.state_payload())
             } else {
@@ -936,7 +1017,7 @@ impl BridgeHandle {
                 let publish_cmd: Option<(String, Value)> = if remaining > 0 {
                     rt.pending_call = Some(new_call.to_string());
                     rt.lockout_until = Some(now + chrono::Duration::seconds(remaining as i64));
-                    rt.current_temperature = current;
+                    rt.temperature = current;
                     rt.call_for = new_call.to_string();
                     None
                 } else if desired_act != rt.actuator_state || force_command {
@@ -960,7 +1041,7 @@ impl BridgeHandle {
                     rt.actuator_last_change = Some(now);
                     rt.pending_call = None;
                     rt.lockout_until = None;
-                    rt.current_temperature = current;
+                    rt.temperature = current;
                     rt.call_for = new_call.to_string();
                     if force_command && !was_transition {
                         info!(
@@ -979,7 +1060,7 @@ impl BridgeHandle {
                 } else {
                     rt.pending_call = None;
                     rt.lockout_until = None;
-                    rt.current_temperature = current;
+                    rt.temperature = current;
                     rt.call_for = new_call.to_string();
                     None
                 };
@@ -1165,6 +1246,9 @@ impl BridgeHandle {
         }
         if entry.hysteresis < 0.0 {
             return Err(anyhow::anyhow!("hysteresis must be non-negative"));
+        }
+        if let Some(problem) = crate::config::setpoint_problem(entry.setpoint) {
+            return Err(anyhow::anyhow!(problem));
         }
 
         let therm_id = entry.id.clone();
@@ -1458,7 +1542,10 @@ pub fn bridge_task_channel() -> (mpsc::Sender<BridgeTask>, mpsc::Receiver<Bridge
 
 #[cfg(test)]
 mod tests {
-    use super::{command_of, interpret_actuator_on, learned_entry, runtime_change};
+    use super::{
+        action_word, attribute_writes, command_of, hvac_action, interpret_actuator_on,
+        learned_entry, runtime_change, sensor_ids_of, Runtime,
+    };
     use crate::config::ThermostatEntry;
     use serde_json::json;
 
@@ -1471,15 +1558,21 @@ mod tests {
 
     #[test]
     fn a_change_made_at_runtime_is_kept_and_comes_back() {
-        assert!(runtime_change(&office(70.0), &office(70.0)).is_none());
-        let kept = runtime_change(&office(70.0), &office(68.5)).unwrap();
-        assert_eq!(learned_entry(&office(70.0), &kept).unwrap().setpoint, 68.5);
+        assert!(runtime_change(&office(21.0), &office(21.0)).is_none());
+        let kept = runtime_change(&office(21.0), &office(20.5)).unwrap();
+        assert_eq!(learned_entry(&office(21.0), &kept).unwrap().setpoint, 20.5);
+    }
+
+    #[test]
+    fn a_kept_fahrenheit_setpoint_is_dropped() {
+        let kept = runtime_change(&office(21.0), &office(68.0)).unwrap();
+        assert!(learned_entry(&office(21.0), &kept).is_none());
     }
 
     #[test]
     fn an_edit_to_the_config_file_afterwards_wins() {
-        let kept = runtime_change(&office(70.0), &office(68.5)).unwrap();
-        assert!(learned_entry(&office(72.0), &kept).is_none());
+        let kept = runtime_change(&office(21.0), &office(20.5)).unwrap();
+        assert!(learned_entry(&office(22.0), &kept).is_none());
     }
 
     #[test]
@@ -1497,6 +1590,72 @@ mod tests {
             "set_mode"
         );
         assert_eq!(command_of(&json!({"setpoint": 20})), "");
+    }
+
+    #[test]
+    fn hvac_action_says_what_the_actuator_is_doing() {
+        assert_eq!(hvac_action("heat", true), "heating");
+        assert_eq!(hvac_action("cool", true), "cooling");
+        assert_eq!(hvac_action("heat", false), "idle");
+        assert_eq!(hvac_action("off", true), "off");
+        assert_eq!(hvac_action("off", false), "off");
+        assert_eq!(action_word("stale"), "idle");
+    }
+
+    #[test]
+    fn setpoint_and_hvac_mode_are_attribute_writes() {
+        assert_eq!(
+            attribute_writes(&json!({"setpoint": 21})),
+            (Some(21.0), None)
+        );
+        assert_eq!(
+            attribute_writes(&json!({"hvac_mode": "heat"})),
+            (None, Some("heat"))
+        );
+        // The old spelling is still read, the new one wins.
+        assert_eq!(
+            attribute_writes(&json!({"mode": "cool", "hvac_mode": "heat"})),
+            (None, Some("heat"))
+        );
+        assert_eq!(
+            attribute_writes(&json!({"action": "recalculate"})),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn sensor_ids_come_as_a_list_or_a_comma_separated_string() {
+        assert_eq!(
+            sensor_ids_of(&json!(["a", "b"])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            sensor_ids_of(&json!("a, b,")),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(sensor_ids_of(&json!(3)), None);
+    }
+
+    #[test]
+    fn publishes_the_shared_names_only() {
+        let mut rt = Runtime::new(office(21.0));
+        rt.cfg.mode = "heat".into();
+        rt.temperature = Some(19.5);
+        rt.call_for = "heat".into();
+        rt.actuator_state = true;
+        rt.pending_call = Some("cool".into());
+        let p = rt.state_payload();
+        assert_eq!(p["temperature"], json!(19.5));
+        assert_eq!(p["setpoint"], json!(21.0));
+        assert_eq!(p["hvac_mode"], json!("heat"));
+        assert_eq!(p["hvac_action"], json!("heating"));
+        assert_eq!(p["pending_call"], json!("cooling"));
+        assert_eq!(p["sensors_stale"], json!(false));
+        for old in ["current_temperature", "mode", "call_for"] {
+            assert!(p.get(old).is_none(), "{old} is still published");
+        }
+        rt.call_for = "stale".into();
+        assert_eq!(rt.state_payload()["sensors_stale"], json!(true));
     }
 
     #[test]
