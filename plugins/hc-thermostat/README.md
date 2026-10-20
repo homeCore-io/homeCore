@@ -88,15 +88,21 @@ See `config/config.toml.example` for a complete example with comments.
 Published to `homecore/devices/thermostat_<id>/cmd`:
 
 ```json
-{ "command": "set_setpoint",    "value": 72.0 }
-{ "command": "set_mode",        "value": "heat" | "cool" | "off" }
-{ "command": "set_hysteresis",  "value": 1.0 }
-{ "command": "set_aggregation", "value": "average" | "min" | "max" }
-{ "command": "set_short_cycle", "min_on_secs": 300, "min_off_secs": 180 }
-{ "command": "recalculate" }
+{ "action": "set_setpoint",    "value": 72.0 }
+{ "action": "set_mode",        "value": "heat" | "cool" | "off" }
+{ "action": "set_hysteresis",  "value": 1.0 }
+{ "action": "set_aggregation", "value": "average" | "min" | "max" }
+{ "action": "set_short_cycle", "min_on_secs": 300, "min_off_secs": 180 }
+{ "action": "recalculate" }
 ```
 
-Runtime changes are persisted to `config.toml` so restarts are idempotent.
+`"command"` in place of `"action"` still works.
+
+Runtime changes are kept in homeCore's learned state for the plugin, not
+written to the config file — homeCore restarts a plugin whose config file
+changes, and commands sent during that restart were lost. On start they are
+applied over the file, unless the file's entry for that thermostat has been
+edited since the change was made: then the file wins.
 
 ## Management commands
 

@@ -5,8 +5,9 @@
 //! became a slider, and the attribute's meaning came from a lexicon keyed on
 //! its name.
 //!
-//! **Nothing here is writable.** `on_device_command` dispatches entirely on a
-//! `command` string — `{"command": "set_setpoint", "value": 21.5}` — and
+//! **Nothing here is writable.** `on_device_command` dispatches entirely on
+//! the action named — `{"action": "set_setpoint", "value": 21.5}`, or the older
+//! `{"command": …}` spelling — and
 //! ignores attribute-style writes completely. Declaring `setpoint` writable
 //! would render a slider whose every drag is silently dropped, so the writable
 //! surface is declared as [`DeviceAction`]s instead and every attribute is
