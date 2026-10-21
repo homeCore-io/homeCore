@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Insteon, Z-Wave and Zigbee devices behind a Universal Devices ISY/IoX hub"
 repository  = "https://github.com/homeCore-io/hc-isy"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "ISY"
+
 [[bin]]
 name = "hc-isy"
 path = "src/main.rs"

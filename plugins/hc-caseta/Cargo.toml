@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Lutron Caseta dimmers, switches and Pico remotes, via a Smart Bridge Pro over LIP"
 repository  = "https://github.com/homeCore-io/hc-caseta"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Caséta"
+
 [[bin]]
 name = "hc-caseta"
 path = "src/main.rs"

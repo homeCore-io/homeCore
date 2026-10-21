@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Lutron RadioRA2 dimmers, switches and scenes, over telnet to the main repeater"
 repository  = "https://github.com/homeCore-io/hc-lutron"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Lutron"
+
 [[bin]]
 name = "hc-lutron"
 path = "src/main.rs"
