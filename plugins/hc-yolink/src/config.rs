@@ -170,6 +170,18 @@ pub fn config_descriptor() -> serde_json::Value {
                              load at startup. 0 skips the initial fetch and relies \
                              on reports plus the periodic refresh.",
                         ),
+                )
+                .field(
+                    Field::duration("yolink.silent_after_mins")
+                        .label("Not reporting after")
+                        .unit("mins")
+                        .default(540)
+                        .min(5)
+                        .help(
+                            "A battery sensor silent for this long shows as offline, \
+                             never as its last reading. YoLink sensors check in every \
+                             few hours; the default allows two missed check-ins.",
+                        ),
                 ),
         )
         .section(
@@ -310,7 +322,7 @@ impl Config {
         if self.yolink.cloud.is_none() && self.yolink.local.is_none() {
             return Ok(());
         }
-        match self.yolink.mode {
+        match self.yolink.mode() {
             Mode::Cloud if self.yolink.cloud.is_none() => {
                 bail!("[yolink.cloud] section is required when mode = \"cloud\"");
             }
@@ -376,7 +388,12 @@ pub enum Mode {
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct YolinkConfig {
-    pub mode: Mode,
+    /// `local` or `cloud`. Optional: left out, it is whichever credentials
+    /// section is present (local when only `[yolink.local]` is there). It
+    /// used to be required, and a config without it failed to parse — the
+    /// plugin exited before it could say why.
+    #[serde(default)]
+    pub mode: Option<Mode>,
 
     /// How often to poll all devices for a full state refresh (seconds).
     /// MQTT events are the primary delivery mechanism; this is a safety true-up.
@@ -400,6 +417,13 @@ pub struct YolinkConfig {
     #[serde(default = "default_initial_fetch_delay_secs")]
     pub initial_fetch_delay_secs: u64,
 
+    /// A battery sensor that has not reported for this long is shown offline
+    /// ("not reporting"), so a leak sensor with flat batteries is never shown
+    /// as dry. YoLink sensors check in every few hours even when nothing
+    /// happens; the default allows for two missed check-ins.
+    #[serde(default = "default_silent_after_mins")]
+    pub silent_after_mins: u64,
+
     pub cloud: Option<CloudConfig>,
     pub local: Option<LocalConfig>,
 }
@@ -411,11 +435,12 @@ impl Default for YolinkConfig {
             // fills in cloud/local before the plugin can talk to a hub. This
             // default just lets the config parse from a `[homecore]`-only file
             // so the operator-config schema can be published first.
-            mode: Mode::Cloud,
+            mode: None,
             poll_interval_secs: default_poll_interval(),
             inventory_interval_secs: None,
             poll_device_delay_ms: default_poll_device_delay_ms(),
             initial_fetch_delay_secs: default_initial_fetch_delay_secs(),
+            silent_after_mins: default_silent_after_mins(),
             cloud: None,
             local: None,
         }
@@ -430,6 +455,20 @@ fn default_poll_device_delay_ms() -> u64 {
 }
 fn default_initial_fetch_delay_secs() -> u64 {
     10
+}
+fn default_silent_after_mins() -> u64 {
+    9 * 60
+}
+
+impl YolinkConfig {
+    /// The mode in force: the one set, else the one the credentials say.
+    pub fn mode(&self) -> Mode {
+        match &self.mode {
+            Some(m) => m.clone(),
+            None if self.local.is_some() && self.cloud.is_none() => Mode::Local,
+            None => Mode::Cloud,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,11 +549,12 @@ pub struct Endpoints {
     /// Local hub Net ID (local mode only; empty string for cloud mode).
     /// Used to build the MQTT topic prefix: `ylsubnet/{net_id}/+/report`
     pub net_id: String,
+    pub mode: Mode,
 }
 
 impl Endpoints {
     pub fn from_config(cfg: &YolinkConfig) -> Result<Self> {
-        match cfg.mode {
+        match cfg.mode() {
             Mode::Cloud => {
                 let c = cfg.cloud.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("[yolink.cloud] section is required when mode = \"cloud\"")
@@ -527,6 +567,7 @@ impl Endpoints {
                     client_id: c.uaid.clone(),
                     client_secret: c.secret_key.clone(),
                     net_id: String::new(),
+                    mode: Mode::Cloud,
                 })
             }
             Mode::Local => {
@@ -542,6 +583,7 @@ impl Endpoints {
                     client_id: l.client_id.clone(),
                     client_secret: l.client_secret.clone(),
                     net_id: l.net_id.clone(),
+                    mode: Mode::Local,
                 })
             }
         }
@@ -602,4 +644,32 @@ mod tests {
         assert_eq!(cfg.homecore.plugin_id, "plugin.yolink");
     }
     use super::*;
+
+    /// `mode` may be left out: the credentials say which.
+    #[test]
+    fn mode_is_inferred_when_left_out() {
+        let local: Config = toml::from_str(
+            "[yolink.local]\nhub_ip = \"127.0.0.1\"\nclient_id = \"a\"\nclient_secret = \"b\"\nnet_id = \"c\"\n",
+        )
+        .expect("a config without `mode` parses");
+        assert_eq!(local.yolink.mode(), Mode::Local);
+        local.validate().unwrap();
+        let cloud: Config =
+            toml::from_str("[yolink.cloud]\nuaid = \"u\"\nsecret_key = \"s\"\n").unwrap();
+        assert_eq!(cloud.yolink.mode(), Mode::Cloud);
+        let set: Config = toml::from_str("[yolink]\nmode = \"local\"\n").unwrap();
+        assert_eq!(set.yolink.mode(), Mode::Local);
+        assert_eq!(set.yolink.silent_after_mins, 540);
+    }
+
+    /// The cloud defaults are YoLink's documented US endpoints.
+    #[test]
+    fn cloud_defaults_are_yolinks_own() {
+        let cfg: Config =
+            toml::from_str("[yolink.cloud]\nuaid = \"u\"\nsecret_key = \"s\"\n").unwrap();
+        let ep = Endpoints::from_config(&cfg.yolink).unwrap();
+        assert_eq!(ep.token_url, "https://api.yosmart.com/open/yolink/token");
+        assert_eq!(ep.mqtt_host, "mqtt.api.yosmart.com");
+        assert_eq!(ep.mqtt_port, 8003);
+    }
 }

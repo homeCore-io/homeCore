@@ -260,7 +260,10 @@ plugin, and is the stable way in — the app's internals are not.
   names go, used in every automation sentence.
 - **Cards** are drawn at a `form`: `compact` (one row), `standard`, `large`
   (two columns). List the sizes in the slot's `forms` (first = size when
-  added). A `device.card` replaces the generic card at the sizes it lists.
+  added). A `device.card` replaces the generic card at the sizes it lists —
+  for every device of its `device_types`, unless its class has a static
+  `accepts(device)` that says no for one (hc-yolink's card takes locks and
+  temperature probes and leaves room sensors the app's card).
 - **`dashboard.card`** needs a `label`. Each one added is its own card, with
   its own `config` on that page (kept by the web app). Its `settings` element
   gets `host` and `config` and answers `change` with `detail: {config}` — keep

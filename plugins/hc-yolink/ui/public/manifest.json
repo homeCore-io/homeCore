@@ -1,0 +1,17 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-yolink-page" },
+		{ "slot": "device.panel", "element": "hc-yolink-panel", "device_types": ["lock", "temperature_sensor", "water_sensor"] },
+		{ "slot": "device.card", "element": "hc-yolink-card", "device_types": ["lock", "temperature_sensor"], "forms": ["standard", "compact", "large"] },
+		{ "slot": "rule.step", "element": "hc-yolink-step", "device_types": ["lock"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-yolink-water",
+			"label": "Water",
+			"description": "every YoLink leak sensor at a glance: all dry, or which are wet and since when — and whether they all checked in",
+			"forms": ["standard", "large"]
+		}
+	]
+}

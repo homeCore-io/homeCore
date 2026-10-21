@@ -1,9 +1,9 @@
 [package]
 name        = "hc-yolink"
-version     = "0.1.16"
+version     = "0.1.17"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "YoLink door, motion and temperature sensors, over the YoLink cloud MQTT service"
+description = "YoLink sensors, locks and plugs, through a YS1606 local hub or the YoLink cloud"
 repository  = "https://github.com/homeCore-io/hc-yolink"
 
 [[bin]]
