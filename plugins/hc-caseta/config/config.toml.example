@@ -23,8 +23,12 @@ password = "integration"           # Factory default
 # `transition_ms` sent beside the level.
 # default_fade_secs = 1.0
 
-# Optional: delay between reconnection attempts (seconds).
+# Optional: first delay between reconnection attempts (seconds); doubles up
+# to a minute.
 # reconnect_delay_secs = 5
+
+# Optional: how long a Pico button stays down before it is a hold (ms).
+# hold_threshold_ms = 500
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -37,8 +41,10 @@ password = "integration"           # Factory default
 
 # ── Devices ──────────────────────────────────────────────────────────────────
 #
-# Each device needs an integration_id from the Caseta Pro bridge.
-# Find IDs in the Lutron app or at http://{bridge_ip}/DbXmlInfo.xml
+# Each device needs an integration_id from the Caseta Pro bridge. Find them in
+# the integration report (Lutron app → Settings → Advanced → Integration →
+# Send Integration Report) — or paste the report in the plugin's Settings.
+# (DbXmlInfo.xml is RadioRA 2's; a Caséta bridge has none.)
 #
 # Supported kinds: dimmer, switch, shade, fan_control, pico, occupancy_sensor
 
@@ -65,4 +71,5 @@ area           = "kitchen"
 # name           = "Living Room Pico"
 # kind           = "pico"
 # area           = "living_room"
-# buttons        = [2, 3, 4, 5, 6]
+# buttons        = [2, 3, 4, 5, 6]   # empty = the usual 5-button Pico
+# button_names   = ["On", "", "Off"]  # optional, in the order of buttons

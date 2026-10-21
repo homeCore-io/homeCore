@@ -66,4 +66,14 @@ describe('a keypad', () => {
 		];
 		expect(automationsOn(rules, 'lutron_72', 3).map((r) => r.id)).toEqual(['a', 'b']);
 	});
+
+	it('finds the automations a button trigger starts, for that button or any', () => {
+		const rules = [
+			{ id: 'a', trigger: { ButtonEvent: { device_id: 'caseta_6', button_number: 2, event: 'Pushed' } } },
+			{ id: 'b', trigger: { ButtonEvent: { device_id: 'caseta_6', event: 'Held' } } },
+			{ id: 'c', trigger: { ButtonEvent: { device_id: 'caseta_6', button_number: 4, event: 'Pushed' } } },
+			{ id: 'd', trigger: { ButtonEvent: { device_id: 'caseta_9', button_number: 2, event: 'Pushed' } } }
+		];
+		expect(automationsOn(rules, 'caseta_6', 2).map((r) => r.id)).toEqual(['a', 'b']);
+	});
 });

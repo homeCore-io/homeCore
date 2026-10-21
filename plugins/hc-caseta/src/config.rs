@@ -20,11 +20,10 @@ pub fn config_schema() -> Option<serde_json::Value> {
 /// `GET /plugins/{id}/config/descriptor`.
 ///
 /// Coverage note (phase 6): a published descriptor is authoritative, so an
-/// omitted key is uneditable. Every `Config` key is represented except two,
-/// both deliberate: `homecore.plugin_id` is bootstrap identity fixed at
-/// install, and `devices[].buttons` (Pico/keypad button-component numbers) is
-/// reserved for future use — unread by this plugin today, so it stays in TOML
-/// rather than shipping a column that does nothing.
+/// omitted key is uneditable. Every `Config` key is represented except
+/// `homecore.plugin_id`, bootstrap identity fixed at install. A Pico's
+/// `buttons` and `button_names` are columns: they say which buttons it has
+/// (published as `available_buttons`) and what they are called.
 ///
 /// Caséta has no queryable device list (unlike RadioRA 2), so the Devices
 /// table writes the `[[devices]]` array directly — filled either by hand or
@@ -69,12 +68,27 @@ pub fn config_descriptor() -> serde_json::Value {
                         .help("Dimmer/shade transition time. Override per device in the table below."),
                 )
                 .field(
+                    Field::duration("caseta.hold_threshold_ms")
+                        .label("Hold threshold")
+                        .unit("ms")
+                        .default(500)
+                        .min(1)
+                        .help(
+                            "How long a Pico button must stay down before it reports a \
+                             hold instead of a press. The bridge says only press and \
+                             release, so the hold is timed here.",
+                        ),
+                )
+                .field(
                     Field::duration("caseta.reconnect_delay_secs")
                         .label("Reconnect delay")
                         .unit("secs")
                         .default(5)
                         .min(1)
-                        .help("Backoff before retrying a dropped bridge connection."),
+                        .help(
+                            "First wait before retrying a dropped bridge connection; it \
+                             doubles on each failure, up to a minute.",
+                        ),
                 ),
         )
         .section(
@@ -141,6 +155,26 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::toggle("invert_position")
                                 .label("Invert position")
                                 .default(false),
+                            // Picos only — the same column for every row,
+                            // for the same reason as `invert_position`.
+                            Field::list("buttons", "int")
+                                .label("Pico buttons")
+                                .placeholder("2, 3, 4, 5, 6")
+                                .help(
+                                    "Which buttons a Pico has, by component number. \
+                                     Empty means the usual 5-button Pico (2 On, 3 \
+                                     Favorite, 4 Off, 5 Raise, 6 Lower); a 2-button is \
+                                     2, 4 and a 4-button scene Pico 8, 9, 10, 11. A \
+                                     4-button Pico is also recognised the first time one \
+                                     of its buttons is pressed.",
+                                ),
+                            Field::list("button_names", "string")
+                                .label("Pico button names")
+                                .placeholder("Bright, Entertain, Relax, Off")
+                                .help(
+                                    "What each button is called, in the order of Pico \
+                                     buttons. Leave one blank for its usual name.",
+                                ),
                         ]),
                 ),
         )
@@ -274,6 +308,7 @@ impl Default for CasetaConfig {
             username: default_username(),
             password: default_password(),
             default_fade_secs: default_fade_secs(),
+            hold_threshold_ms: default_hold_threshold_ms(),
             reconnect_delay_secs: default_reconnect_delay_secs(),
         }
     }
@@ -342,7 +377,12 @@ pub struct CasetaConfig {
     /// Default fade time for dimmers (seconds).
     #[serde(default = "default_fade_secs")]
     pub default_fade_secs: f64,
-    /// Delay between reconnection attempts (seconds).
+    /// How long a Pico button stays down before it is a hold (ms). Caséta's
+    /// LIP sends press and release only, so the hold is timed here.
+    #[serde(default = "default_hold_threshold_ms")]
+    pub hold_threshold_ms: u64,
+    /// First delay between reconnection attempts (seconds); it doubles per
+    /// failure up to a minute.
     #[serde(default = "default_reconnect_delay_secs")]
     pub reconnect_delay_secs: u64,
 }
@@ -362,6 +402,9 @@ fn default_fade_secs() -> f64 {
 fn default_reconnect_delay_secs() -> u64 {
     5
 }
+fn default_hold_threshold_ms() -> u64 {
+    500
+}
 
 // ---------------------------------------------------------------------------
 // Scene config
@@ -374,8 +417,10 @@ fn default_reconnect_delay_secs() -> u64 {
 /// as a physical button would be — the bridge then runs whatever the Lutron
 /// app programmed onto it.
 ///
-/// HomeCore device ID: `caseta_scene_{name_slug}`
-/// Commands accepted:  `{ "activate": true }`
+/// HomeCore device ID: `caseta_scene_{name_slug}` of the name it had when the
+/// plugin first saw it — kept on a rename (see `crate::devices::scene_ids`),
+/// so automations survive the scene being renamed in the Lutron app.
+/// Commands accepted:  `{"action": "activate"}` (or `{ "activate": true }`)
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SceneConfig {
@@ -428,6 +473,20 @@ pub enum DeviceKind {
     OccupancySensor,
 }
 
+impl DeviceKind {
+    /// The kind as the settings file spells it.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Dimmer => "dimmer",
+            Self::Switch => "switch",
+            Self::Shade => "shade",
+            Self::FanControl => "fan_control",
+            Self::Pico => "pico",
+            Self::OccupancySensor => "occupancy_sensor",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceConfig {
@@ -445,18 +504,23 @@ pub struct DeviceConfig {
     pub area: Option<String>,
     /// Per-device fade time override (seconds).  Falls back to caseta.default_fade_secs.
     pub fade_secs: Option<f64>,
-    /// Invert shade position: false = Lutron native (0=open, 100=closed),
-    /// true = inverted (0=closed, 100=open).
+    /// Invert shade position. In Caséta's LIP a shade's level is 0 = closed,
+    /// 100 = open — the shared `position` already — so false publishes it as
+    /// the bridge says; true flips it for a shade installed the other way up.
     #[serde(default)]
     pub invert_position: bool,
     /// Pico button component numbers (e.g. [2, 3, 4, 5, 6]).
     ///
     /// Published as `available_buttons` so a rule editor can name the buttons
     /// of a Pico rather than asking for a component number. Filled in by the
-    /// integration report import; empty on a config written before that
-    /// carried the numbers through, in which case no catalogue is published.
+    /// integration report import, or by hand. Empty means the usual 5-button
+    /// Pico, `[2, 3, 4, 5, 6]`, until a press says otherwise.
     #[serde(default)]
     pub buttons: Vec<u32>,
+    /// A name for each of `buttons`, in the same order; blank keeps the
+    /// usual one (On, Favorite, Off, Raise, Lower…).
+    #[serde(default)]
+    pub button_names: Vec<String>,
 }
 
 #[cfg(all(test, feature = "schema"))]
@@ -549,9 +613,6 @@ mod tests {
             &[
                 // Bootstrap identity fixed at install, not an operator setting.
                 "homecore.plugin_id",
-                // Reserved for future use (Pico/keypad button components) and
-                // unread by the plugin today — a column would do nothing.
-                "devices[].buttons",
             ],
         );
         assert!(

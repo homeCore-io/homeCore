@@ -1,9 +1,9 @@
 [package]
 name        = "hc-caseta"
-version     = "0.1.14"
+version     = "0.1.15"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "Lutron Caseta dimmers, switches and Pico remotes, via a Smart Bridge Pro over LIP"
+description = "Lutron Caséta dimmers, switches and Pico remotes, via a Smart Bridge Pro over LIP"
 repository  = "https://github.com/homeCore-io/hc-caseta"
 
 [package.metadata.homecore]

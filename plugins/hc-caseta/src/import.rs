@@ -78,6 +78,15 @@ impl Import {
     }
 }
 
+/// "A, B and C".
+pub fn list_words(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
