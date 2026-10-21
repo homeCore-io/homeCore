@@ -11,11 +11,31 @@
 //! Binary Switch on a relay and to the level on a dimmer. The translator keeps
 //! a [`NodeInfo`] per node, learned from the node's values and metadata, for
 //! exactly those decisions.
+//!
+//! **Endpoints.** zwave-js hides a multi-channel device's root values when
+//! the endpoints carry them, so an outlet whose only switch is on endpoint 1
+//! used to publish `cc37_e1_currentvalue` and nothing writable. Now:
+//!
+//! - one endpoint with the device's values and none on the root: that
+//!   endpoint *is* the device — its values publish under the plain names and
+//!   writes go to it;
+//! - several: each endpoint's values publish with an `ep{n}_` prefix
+//!   (`ep1_on`, `ep2_on`, `ep2_power_w`) — the app shows one switch per
+//!   channel — and a write to `ep{n}_on` goes to endpoint `n`;
+//! - anything else on another endpoint keeps its raw `cc…_e{n}_…` name.
+//!
+//! **Not everything a node reports is state.** Identity (Manufacturer
+//! Specific, Version, Z-Wave Plus Info), wake-up settings, security, a
+//! node's configuration parameters, a lock's code slots, a v1 alarm's raw
+//! numbers and a switch's transition duration all have better homes — the
+//! device's registration, the Health and Settings tabs, the lock's Codes and
+//! History — and were noise in every automation picker. [`is_unpublished`]
+//! says which.
 
 use crate::convert::{self, Sensor};
 use crate::types::NodeState;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -26,13 +46,25 @@ use std::sync::Mutex;
 pub enum Transform {
     /// Pass value through unchanged.
     Identity,
-    /// Non-zero number/bool → true, zero → false.
-    /// Used for Door Lock CC 98: 255 → true (locked), 0 → false.
-    /// Also used for CC 113 Notification "Opening state" (1=open, 0=closed).
+    /// Non-zero number/bool → true, zero → false. A Notification CC state
+    /// (0 = idle), a Protection state.
     NonzeroBool,
-    /// CC 113 Access Control "Door state" numeric → `open` bool.
-    /// 22 = "Window/door is open" → true, 23 = "closed" / 0 = idle → false.
+    /// Door Lock CC 98 `currentMode`: 255 is secured (`true`); 254 is
+    /// "unknown" — published as null, so homeCore says it does not know
+    /// instead of claiming locked; every other mode (0 unsecured, and the
+    /// timed / inside / outside unsecured variants 1, 16, 17, 32, 33) is
+    /// unlocked.
+    LockMode,
+    /// Door Lock `doorStatus`: `"open"` / `"closed"`.
+    DoorStatus,
+    /// CC 113 Access Control "Door state" → `open`: 22 is open, and so are
+    /// 5632 / 5633 (22 with a parameter: open in its regular or tilt
+    /// position, which zwave-js encodes as `22 << 8 | parameter`); 23 is
+    /// closed, 0 idle.
     AccessControlDoorState,
+    /// A Notification CC variable that is one particular state: `true` when
+    /// the value is that state, `false` when it is anything else (idle).
+    StateIs(u64),
     /// Thermostat Mode CC 64 number → `hvac_mode`.
     HvacMode,
     /// Thermostat Operating State CC 66 number → `hvac_action`.
@@ -80,10 +112,31 @@ fn number(v: f64) -> Value {
     }
 }
 
+/// The DoorLockMode that means "secured".
+pub const LOCK_SECURED: u64 = 255;
+/// The DoorLockMode that means "unknown".
+pub const LOCK_UNKNOWN: u64 = 254;
+
+/// Whether a Door Lock mode is locked: `Some(true)` only for 255, `None` for
+/// 254 (unknown), `Some(false)` for every other mode.
+pub fn lock_mode_locked(mode: u64) -> Option<bool> {
+    match mode {
+        LOCK_SECURED => Some(true),
+        LOCK_UNKNOWN => None,
+        _ => Some(false),
+    }
+}
+
+/// CC 113 Access Control door state → open.
+pub fn door_state_open(v: u64) -> bool {
+    v == 22 || v >> 8 == 22
+}
+
 impl Transform {
     /// Apply forward transform: raw ZWave value → `(attribute, value)` pairs.
     /// `None` when the value cannot be published under a shared name (an
-    /// unknown sensor scale) — the caller publishes it raw instead.
+    /// unknown sensor scale) — the caller publishes it raw instead. A pair
+    /// whose value is `null` says "unknown now" and is published as such.
     pub fn apply(&self, attr: &str, v: &Value, ctx: Ctx) -> Option<Vec<(String, Value)>> {
         let one = |a: &str, v: Value| Some(vec![(a.to_string(), v)]);
         match self {
@@ -92,7 +145,21 @@ impl Transform {
                 let nonzero = num(v).is_some_and(|f| f != 0.0);
                 one(attr, Value::Bool(nonzero))
             }
-            Transform::AccessControlDoorState => one(attr, Value::Bool(v.as_u64() == Some(22))),
+            Transform::LockMode => {
+                let mode = num(v)? as u64;
+                one(
+                    attr,
+                    lock_mode_locked(mode).map_or(Value::Null, Value::Bool),
+                )
+            }
+            Transform::DoorStatus => match v {
+                Value::String(s) => one(attr, Value::Bool(s.eq_ignore_ascii_case("open"))),
+                other => one(attr, Value::Bool(num(other)? == 0.0)),
+            },
+            Transform::AccessControlDoorState => {
+                one(attr, Value::Bool(door_state_open(num(v)? as u64)))
+            }
+            Transform::StateIs(state) => one(attr, Value::Bool(num(v)? as u64 == *state)),
             Transform::HvacMode => {
                 let n = v.as_u64()?;
                 let name = convert::name_of(convert::HVAC_MODES, n)
@@ -179,8 +246,8 @@ const fn alias(key: &'static str, attribute: &'static str, transform: Transform)
 }
 
 use Transform::{
-    AccessControlDoorState, Barrier, Color, FanMode, HvacAction, HvacMode, Identity, Level,
-    NonzeroBool, Setpoint,
+    AccessControlDoorState, Barrier, Color, DoorStatus, FanMode, HvacAction, HvacMode, Identity,
+    Level, LockMode, NonzeroBool, Setpoint, StateIs,
 };
 
 /// What each read value publishes as. Writes are decided in
@@ -261,18 +328,26 @@ static ALIAS_TABLE: &[AliasEntry] = &[
     // Electric (meterType=1), rateType=Consumed (1): scale 0 kWh → 65537,
     // 1 kVAh → 65793, 2 W → 66049, 3 pulses → 66305, 4 V → 66561, 5 A → 66817,
     // 6 power factor → 67073, 7 kVar → 67329, 8 kVarh → 67585.
-    // rateType=Produced (2) gives the parallel exported keys.
+    // rateType=Produced (2) gives the parallel exported keys. rateType 0
+    // ("unspecified", what Meter v1/v2 devices report) is consumption:
+    // 65536 kWh, 66048 W, 66560 V, 66816 A.
     //
     // History note: the original 65537/65538/65539/65540 aliases mapped each
     // propertyKey to a different unit (W/kWh/V/A) — that was wrong; verified
     // against a real Meter v3 device (node 47, 2026-04-24).
     alias("50/0/value/65537", "energy_kwh", Identity),
+    alias("50/0/value/65536", "energy_kwh", Identity),
     alias("50/0/value/65793", "apparent_energy_kvah", Identity),
+    alias("50/0/value/65792", "apparent_energy_kvah", Identity),
     alias("50/0/value/66049", "power_w", Identity),
+    alias("50/0/value/66048", "power_w", Identity),
     alias("50/0/value/66305", "pulse_count", Identity),
     alias("50/0/value/66561", "voltage", Identity),
+    alias("50/0/value/66560", "voltage", Identity),
     alias("50/0/value/66817", "current_a", Identity),
+    alias("50/0/value/66816", "current_a", Identity),
     alias("50/0/value/67073", "power_factor", Identity),
+    alias("50/0/value/67072", "power_factor", Identity),
     alias("50/0/value/67329", "reactive_power_kvar", Identity),
     alias("50/0/value/67585", "reactive_energy_kvarh", Identity),
     alias("50/0/value/65538", "energy_kwh_exported", Identity),
@@ -280,14 +355,12 @@ static ALIAS_TABLE: &[AliasEntry] = &[
     // Battery (CC 128).
     alias("128/0/level", "battery_pct", Identity),
     alias("128/0/isLow", "battery_low", Identity),
-    // Door Lock (CC 98). DoorLockMode: 0=Unsecured, 255=Secured (plus
-    // 1,16,17,32,33 for timed/inside/outside variants). currentMode is what the
-    // hardware confirmed; targetMode is where commands go.
-    alias("98/0/currentMode", "locked", NonzeroBool),
-    alias("98/0/boltStatus", "bolt_status", Identity),
-    alias("98/0/latchStatus", "latch_status", Identity),
-    alias("98/0/doorStatus", "door_status", Identity),
-    // 1=Constant, 2=Timed (auto-relock after timeout).
+    // Door Lock (CC 98). currentMode is what the hardware confirmed;
+    // targetMode is where commands go. `boltStatus` said the same as
+    // `locked`, so it is not published.
+    alias("98/0/currentMode", "locked", LockMode),
+    alias("98/0/doorStatus", "open", DoorStatus),
+    // 1=Constant, 2=Timed (locks again by itself after the timeout).
     alias("98/0/operationType", "lock_operation_type", Identity),
     alias(
         "98/0/lockTimeoutConfiguration",
@@ -307,40 +380,62 @@ static ALIAS_TABLE: &[AliasEntry] = &[
     alias("64/0/mode", "hvac_mode", HvacMode),
     alias("66/0/state", "hvac_action", HvacAction),
     alias("68/0/mode", "fan_mode", FanMode),
-    // Notification (CC 113). Always has a propertyKey (the variable name).
-    // Access Control: "Door state" 22 = open, 23 = closed, 0 = idle.
+    // Protection (CC 117): the buttons on the device itself do nothing.
+    alias("117/0/local", "child_lock", NonzeroBool),
+    // Notification (CC 113): property is the notification type's name and
+    // propertyKey the variable's, exactly as zwave-js names them (its
+    // `Notifications` table). The value is the state's number; 0 is idle.
+    //
+    // Access Control: "Door state" 22 = open (5632/5633 with a parameter),
+    // 23 = closed. Newer zwave-js also creates "Door state (simple)" (22/23
+    // only) beside it.
     alias(
         "113/0/Access Control/Door state",
         "open",
         AccessControlDoorState,
     ),
-    // "Opening state": synthetic value created by zwave-js; 1 = open.
-    alias("113/0/Access Control/Opening state", "open", NonzeroBool),
+    alias(
+        "113/0/Access Control/Door state (simple)",
+        "open",
+        AccessControlDoorState,
+    ),
+    // "Lock state" has one state: 11, lock jammed.
+    alias("113/0/Access Control/Lock state", "jammed", StateIs(11)),
     alias(
         "113/0/Home Security/Motion sensor status",
         "motion",
         NonzeroBool,
     ),
     alias(
-        "113/0/Home Security/Tampering, Product cover removed",
-        "tampered",
+        "113/0/Home Security/Sensor status",
+        "intrusion",
         NonzeroBool,
     ),
-    alias(
-        "113/0/Home Security/Tampering, invalid code",
-        "tampered",
-        NonzeroBool,
-    ),
-    alias(
-        "113/0/Smoke Alarm/Smoke sensor status",
-        "smoke",
-        NonzeroBool,
-    ),
-    alias("113/0/CO Alarm/CO sensor status", "co", NonzeroBool),
+    // The cover's tamper switch. ("Tampering, invalid code" is an event, not
+    // a state — it arrives as a notification and goes in a lock's history.)
+    alias("113/0/Home Security/Cover status", "tampered", NonzeroBool),
+    alias("113/0/Smoke Alarm/Sensor status", "smoke", NonzeroBool),
+    alias("113/0/CO Alarm/Sensor status", "co", NonzeroBool),
+    alias("113/0/CO2 Alarm/Sensor status", "co2_alarm", NonzeroBool),
     alias(
         "113/0/Water Alarm/Sensor status",
         "water_detected",
         NonzeroBool,
+    ),
+    alias(
+        "113/0/Heat Alarm/Heat sensor status",
+        "heat_alarm",
+        NonzeroBool,
+    ),
+    alias(
+        "113/0/Power Management/Over-load status",
+        "overload",
+        StateIs(8),
+    ),
+    alias(
+        "113/0/Power Management/Over-current status",
+        "overcurrent",
+        StateIs(6),
     ),
 ];
 
@@ -363,7 +458,7 @@ const WC_TILT_PARAMS: &[u64] = &[11, 23];
 /// would sit in homeCore's state, its history and on the bus for anyone who
 /// can read a device.
 pub fn is_secret(cc: u32, property: &str) -> bool {
-    cc == 99 && matches!(property, "userCode" | "adminCode" | "masterCode")
+    crate::types::is_code_value(cc, property)
 }
 
 /// A write target (`targetValue`, `targetMode`, …). A target is what was asked
@@ -379,9 +474,102 @@ pub fn is_target(cc: u32, property: &str) -> bool {
     )
 }
 
+/// Command classes none of whose values are state:
+///
+/// - 32 Basic — a duplicate of the switch it is mapped to;
+/// - 89 Association Group Info, 133 Association, 142 Multi Channel
+///   Association, 96 Multi Channel, 108 Supervision, 115 Powerlevel,
+///   122 Firmware Update — plumbing;
+/// - 94 Z-Wave Plus Info, 114 Manufacturer Specific, 134 Version — identity,
+///   on the device's registration and its Health tab;
+/// - 132 Wake Up — the wake-up interval and controller node, on the Health tab;
+/// - 152 Security, 159 Security 2 — on the Health tab;
+/// - 112 Configuration — the Settings tab, through `get_config_params`;
+/// - 99 User Code — every slot, code or not: the Codes tab, through
+///   `list_user_codes`;
+/// - 135 Indicator — the device's own LED, not what it is doing.
+pub const NOT_STATE_CCS: &[u32] = &[
+    32, 89, 94, 96, 99, 108, 112, 114, 115, 122, 132, 133, 134, 135, 142, 152, 159,
+];
+
+/// Whether a value is left out of what is published.
+pub fn is_unpublished(cc: u32, property: &str, property_key: Option<&str>) -> bool {
+    if is_secret(cc, property) || is_target(cc, property) || NOT_STATE_CCS.contains(&cc) {
+        return true;
+    }
+    match cc {
+        // A transition's remaining time, and a dimmer's "come back as it
+        // was" switch, change by themselves or not at all.
+        37 | 38 => matches!(
+            property,
+            "duration" | "restorePrevious" | "Up" | "Down" | "On" | "Off"
+        ),
+        // A battery's level and whether it is low are the readings; its
+        // chemistry and charging flags are not.
+        128 => !matches!(property, "level" | "isLow"),
+        // A lock: whether it is locked, whether the door is open, and how it
+        // locks again by itself. The bolt and latch said the same as
+        // `locked`; the handles and twist assist are installation settings;
+        // `lockTimeout` counts down by itself.
+        98 => !matches!(
+            property,
+            "currentMode"
+                | "doorStatus"
+                | "operationType"
+                | "lockTimeoutConfiguration"
+                | "autoRelockTime"
+        ),
+        // A meter's reset is a button, not a reading.
+        50 => property == "reset",
+        // Notification v1: a lock's raw alarm numbers, decoded into its
+        // lock events (`last_lock_*`) where they are known.
+        113 => {
+            matches!(property, "alarmType" | "alarmLevel")
+                || property_key == Some("Keypad state")
+                || property_key == Some("Door handle state")
+        }
+        // Protection: only the device's own buttons are a setting people use.
+        117 => property != "local",
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-node knowledge
 // ---------------------------------------------------------------------------
+
+/// The command classes whose values make an endpoint "the device": switches,
+/// sensors, meters, colour, covers.
+const DEVICE_CCS: &[u32] = &[37, 38, 49, 50, 51, 106];
+
+/// The prefix a multi-channel endpoint's attributes carry.
+pub fn ep_prefix(endpoint: u32) -> String {
+    format!("ep{endpoint}_")
+}
+
+/// `ep2_on` → `(2, "on")`.
+pub fn strip_ep_prefix(attr: &str) -> Option<(u32, &str)> {
+    let rest = attr.strip_prefix("ep")?;
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let n: u32 = rest[..digits].parse().ok()?;
+    let base = rest[digits..].strip_prefix('_')?;
+    (!base.is_empty()).then_some((n, base))
+}
+
+/// How an endpoint's values are published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpRole {
+    /// Under the plain names: the root, or the one endpoint that stands for
+    /// the device.
+    Root,
+    /// With an `ep{n}_` prefix: one of several channels.
+    Channel(u32),
+    /// Under its raw `cc…_e{n}_…` name.
+    Raw,
+}
 
 /// What the translator knows about one node: the parts of its values and
 /// metadata that change what an attribute means or where a write goes.
@@ -389,14 +577,18 @@ pub fn is_target(cc: u32, property: &str) -> bool {
 pub struct NodeInfo {
     /// A Multilevel Switch that drives a cover, by its device class.
     pub cover: bool,
-    /// Has a Binary Switch (CC 37) on the root endpoint.
+    /// Has a Binary Switch (CC 37) on the endpoint that stands for the device.
     pub binary_switch: bool,
-    /// Has a Multilevel Switch (CC 38) on the root endpoint.
+    /// Has a Multilevel Switch (CC 38) there.
     pub multilevel_switch: bool,
     /// Has a Barrier Operator (CC 102).
     pub barrier: bool,
     /// Has a Door Lock (CC 98).
     pub lock: bool,
+    /// Has Door Lock v4's `autoRelockTime`.
+    pub auto_relock: bool,
+    /// Has Protection (CC 117) local control; the states it supports.
+    pub protection: Option<Vec<u64>>,
     /// The Window Covering parameter that carries the position, if any.
     pub wc_position: Option<u64>,
     /// The Window Covering slat-angle parameter, if any.
@@ -408,6 +600,12 @@ pub struct NodeInfo {
     /// Supported numeric states per alias key (Thermostat Mode / Fan Mode),
     /// from each value's metadata.
     pub states: HashMap<String, Vec<u64>>,
+    /// The endpoint whose values stand for the device: 0, or the only
+    /// endpoint with any when zwave-js hides the root's.
+    pub root_ep: u32,
+    /// Endpoints published as channels, with what switches each has
+    /// (`binary`, `multilevel`).
+    pub channels: std::collections::BTreeMap<u32, (bool, bool)>,
 }
 
 /// Whether a node's device class says it is a motorised cover.
@@ -427,15 +625,64 @@ impl NodeInfo {
             cover: is_cover_class(generic, specific),
             ..Default::default()
         };
+
+        // Which endpoint is the device, and which are channels.
+        let mut root_has = false;
+        let mut eps: BTreeSet<u32> = BTreeSet::new();
+        for v in &node.values {
+            if DEVICE_CCS.contains(&v.command_class) {
+                if v.endpoint == 0 {
+                    root_has = true;
+                } else {
+                    eps.insert(v.endpoint);
+                }
+            }
+        }
+        if !root_has && eps.len() == 1 {
+            info.root_ep = *eps.iter().next().unwrap_or(&0);
+        } else if eps.len() >= 2 || (root_has && !eps.is_empty()) {
+            for ep in &eps {
+                info.channels.insert(*ep, (false, false));
+            }
+        }
+
         for v in &node.values {
             let pk = v.property_key.as_ref().and_then(property_key_str);
-            let root = v.endpoint == 0;
-            match (v.command_class, v.property.as_str()) {
-                (37, "currentValue") if root => info.binary_switch = true,
-                (38, "currentValue") if root => info.multilevel_switch = true,
-                (102, _) => info.barrier = true,
-                (98, _) => info.lock = true,
-                (106, "currentValue") if root => {
+            let role = info.role(v.endpoint);
+            match (v.command_class, v.property.as_str(), role) {
+                (37, "currentValue", EpRole::Root) => info.binary_switch = true,
+                (38, "currentValue", EpRole::Root) => info.multilevel_switch = true,
+                (37, "currentValue", EpRole::Channel(n)) => {
+                    if let Some(c) = info.channels.get_mut(&n) {
+                        c.0 = true;
+                    }
+                }
+                (38, "currentValue", EpRole::Channel(n)) => {
+                    if let Some(c) = info.channels.get_mut(&n) {
+                        c.1 = true;
+                    }
+                }
+                (102, _, _) => info.barrier = true,
+                (98, "autoRelockTime", _) => {
+                    info.lock = true;
+                    info.auto_relock = true;
+                }
+                (98, _, _) => info.lock = true,
+                (117, "local", EpRole::Root) => {
+                    let states = v
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("states"))
+                        .and_then(Value::as_object)
+                        .map(|s| {
+                            let mut n: Vec<u64> = s.keys().filter_map(|k| k.parse().ok()).collect();
+                            n.sort_unstable();
+                            n
+                        })
+                        .unwrap_or_else(|| vec![0, 2]);
+                    info.protection = Some(states);
+                }
+                (106, "currentValue", EpRole::Root) => {
                     if let Some(p) = pk.as_deref().and_then(|p| p.parse::<u64>().ok()) {
                         if WC_POSITION_PARAMS.contains(&p) && info.wc_position.is_none() {
                             info.wc_position = Some(p);
@@ -445,7 +692,7 @@ impl NodeInfo {
                         }
                     }
                 }
-                (51, "currentColor") if root && pk.is_none() => {
+                (51, "currentColor", EpRole::Root) if pk.is_none() => {
                     if let Some(obj) = v.value.as_ref().and_then(Value::as_object) {
                         info.color_components = obj.keys().cloned().collect();
                     }
@@ -453,12 +700,35 @@ impl NodeInfo {
                 _ => {}
             }
             if let Some(meta) = &v.metadata {
-                let key =
-                    Translator::alias_key(v.command_class, v.endpoint, &v.property, pk.as_deref());
+                let ep = if role == EpRole::Root { 0 } else { v.endpoint };
+                let key = Translator::alias_key(v.command_class, ep, &v.property, pk.as_deref());
                 info.learn_metadata(key, meta);
             }
         }
         info
+    }
+
+    /// How values from `endpoint` are published.
+    pub fn role(&self, endpoint: u32) -> EpRole {
+        if endpoint == 0 || endpoint == self.root_ep {
+            EpRole::Root
+        } else if self.channels.contains_key(&endpoint) {
+            EpRole::Channel(endpoint)
+        } else {
+            EpRole::Raw
+        }
+    }
+
+    /// What a channel endpoint can be written as, as though it were a device.
+    fn for_channel(&self, endpoint: u32) -> Option<NodeInfo> {
+        let (binary, multilevel) = *self.channels.get(&endpoint)?;
+        Some(NodeInfo {
+            binary_switch: binary,
+            multilevel_switch: multilevel,
+            root_ep: endpoint,
+            units: self.units.clone(),
+            ..Default::default()
+        })
     }
 
     fn learn_metadata(&mut self, key: String, meta: &Value) {
@@ -487,15 +757,19 @@ impl NodeInfo {
 
     /// Whether a write to this attribute reaches the device.
     pub fn writable(&self, attr: &str) -> bool {
+        if let Some((n, base)) = strip_ep_prefix(attr) {
+            return matches!(base, "on" | "brightness_pct")
+                && self.for_channel(n).is_some_and(|c| c.writable(base));
+        }
         match attr {
             "on" => self.binary_switch || (self.multilevel_switch && !self.cover),
             "brightness_pct" => self.multilevel_switch && !self.cover,
             "position" => self.wc_position.is_some() || (self.multilevel_switch && self.cover),
             "tilt_pct" => self.wc_tilt.is_some(),
             "open" => self.barrier,
-            "locked" | "lock_operation_type" | "lock_timeout_secs" | "lock_auto_relock_secs" => {
-                self.lock
-            }
+            "locked" | "lock_operation_type" | "lock_timeout_secs" => self.lock,
+            "lock_auto_relock_secs" => self.lock && self.auto_relock,
+            "child_lock" => self.protection.is_some(),
             "color_rgb" => self.has_color("red"),
             "color_temp" => self.has_color("warmWhite") && self.has_color("coldWhite"),
             "heat_setpoint" | "cool_setpoint" | "hvac_mode" | "fan_mode" => true,
@@ -539,6 +813,8 @@ pub struct Write {
     pub value: Value,
     /// zwave-js set-value options (`transitionDuration`).
     pub options: Option<Value>,
+    /// The attribute it came from, for saying which one failed.
+    pub attribute: String,
 }
 
 fn write(cc: u32, property: &str, key: Option<Value>, value: Value) -> Write {
@@ -549,6 +825,7 @@ fn write(cc: u32, property: &str, key: Option<Value>, value: Value) -> Write {
         property_key: key,
         value,
         options: None,
+        attribute: String::new(),
     }
 }
 
@@ -565,8 +842,56 @@ fn mode_number(table: &[(u64, &str)], v: &Value) -> Option<u64> {
 /// Build the writes for one command, given what the node is.
 ///
 /// Returns the writes and the attributes that could not be written (no
-/// target on this node, or a value that does not fit).
+/// target on this node, or a value that does not fit). A channel's
+/// attributes (`ep2_on`) go to its endpoint; the rest to the endpoint that
+/// stands for the device.
 pub fn commands_for(info: &NodeInfo, cmd: &Map<String, Value>) -> (Vec<Write>, Vec<String>) {
+    let mut writes = Vec::new();
+    let mut rejected = Vec::new();
+    // Channels first: split the command by endpoint.
+    let mut root = Map::new();
+    let mut by_channel: std::collections::BTreeMap<u32, Map<String, Value>> = Default::default();
+    for (attr, v) in cmd {
+        match strip_ep_prefix(attr) {
+            Some((n, base)) if info.channels.contains_key(&n) => {
+                by_channel
+                    .entry(n)
+                    .or_default()
+                    .insert(base.to_string(), v.clone());
+            }
+            _ => {
+                root.insert(attr.clone(), v.clone());
+            }
+        }
+    }
+    // A fade sent with a channel's level applies to it too.
+    if let Some(fade) = cmd.get("transition_ms") {
+        for c in by_channel.values_mut() {
+            c.insert("transition_ms".into(), fade.clone());
+        }
+    }
+    for (n, c) in by_channel {
+        let Some(ch) = info.for_channel(n) else {
+            continue;
+        };
+        let (w, r) = commands_for_root(&ch, &c);
+        writes.extend(w.into_iter().map(|mut w| {
+            w.endpoint = n;
+            w.attribute = format!("{}{}", ep_prefix(n), w.attribute);
+            w
+        }));
+        rejected.extend(r.into_iter().map(|a| format!("{}{a}", ep_prefix(n))));
+    }
+    let (w, r) = commands_for_root(info, &root);
+    writes.extend(w.into_iter().map(|mut w| {
+        w.endpoint = info.root_ep;
+        w
+    }));
+    rejected.extend(r);
+    (writes, rejected)
+}
+
+fn commands_for_root(info: &NodeInfo, cmd: &Map<String, Value>) -> (Vec<Write>, Vec<String>) {
     let mut writes = Vec::new();
     let mut rejected = Vec::new();
     let fade = cmd
@@ -627,12 +952,38 @@ pub fn commands_for(info: &NodeInfo, cmd: &Map<String, Value>) -> (Vec<Write>, V
             "open" if info.barrier => v
                 .as_bool()
                 .map(|o| write(102, "targetState", None, json!(if o { 255 } else { 0 }))),
-            "locked" => v
-                .as_bool()
-                .map(|l| write(98, "targetMode", None, json!(if l { 255 } else { 0 }))),
-            "lock_operation_type" => Some(write(98, "operationType", None, v.clone())),
-            "lock_timeout_secs" => Some(write(98, "lockTimeoutConfiguration", None, v.clone())),
-            "lock_auto_relock_secs" => Some(write(98, "autoRelockTime", None, v.clone())),
+            "locked" => v.as_bool().map(|l| {
+                write(
+                    98,
+                    "targetMode",
+                    None,
+                    json!(if l { LOCK_SECURED } else { 0 }),
+                )
+            }),
+            "lock_operation_type" => num(v)
+                .filter(|n| *n == 1.0 || *n == 2.0)
+                .map(|n| write(98, "operationType", None, json!(n as u64))),
+            "lock_timeout_secs" => num(v)
+                .filter(|n| *n >= 0.0)
+                .map(|n| write(98, "lockTimeoutConfiguration", None, json!(n as u64))),
+            "lock_auto_relock_secs" if info.auto_relock => num(v)
+                .filter(|n| *n >= 0.0)
+                .map(|n| write(98, "autoRelockTime", None, json!(n as u64))),
+            "child_lock" => match (&info.protection, v.as_bool()) {
+                (Some(states), Some(on)) => {
+                    // "No operation possible" where the device has it, else
+                    // "by sequence"; off is unprotected.
+                    let state = if !on {
+                        0
+                    } else if states.contains(&2) {
+                        2
+                    } else {
+                        1
+                    };
+                    Some(write(117, "local", None, json!(state)))
+                }
+                _ => None,
+            },
             "heat_setpoint" | "cool_setpoint" => {
                 let kind = if attr == "heat_setpoint" { 1 } else { 2 };
                 let unit = info.unit(&format!("67/0/setpoint/{kind}"));
@@ -677,7 +1028,10 @@ pub fn commands_for(info: &NodeInfo, cmd: &Map<String, Value>) -> (Vec<Write>, V
             _ => None,
         };
         match w {
-            Some(w) => writes.push(w),
+            Some(mut w) => {
+                w.attribute = attr.clone();
+                writes.push(w)
+            }
             None => rejected.push(attr.clone()),
         }
     }
@@ -732,6 +1086,19 @@ impl Translator {
             .insert(node.node_id, info);
     }
 
+    /// Forget a node that has left the network.
+    pub fn forget_node(&self, node_id: u32) {
+        self.nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&node_id);
+    }
+
+    /// A copy of what is known about a node.
+    pub fn info(&self, node_id: u32) -> NodeInfo {
+        self.with_node(node_id, Clone::clone)
+    }
+
     /// A `metadata updated` event: a value's unit or states changed.
     pub fn learn_metadata(
         &self,
@@ -742,19 +1109,22 @@ impl Translator {
         property_key: Option<&str>,
         meta: &Value,
     ) {
-        let key = Self::alias_key(cc, endpoint, property, property_key);
-        self.nodes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(node_id)
-            .or_default()
-            .learn_metadata(key, meta);
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let info = nodes.entry(node_id).or_default();
+        let ep = if info.role(endpoint) == EpRole::Root {
+            0
+        } else {
+            endpoint
+        };
+        let key = Self::alias_key(cc, ep, property, property_key);
+        info.learn_metadata(key, meta);
     }
 
-    /// Whether a value is left out of what is published: a secret, or a
-    /// write target whose attribute comes from the device's current value.
-    pub fn is_unpublished(&self, cc: u32, property: &str) -> bool {
-        is_secret(cc, property) || is_target(cc, property)
+    /// Whether a value is left out of what is published: a secret, a write
+    /// target whose attribute comes from the device's current value, or one
+    /// of the values that are not state (see [`is_unpublished`]).
+    pub fn is_unpublished(&self, cc: u32, property: &str, property_key: Option<&str>) -> bool {
+        is_unpublished(cc, property, property_key)
     }
 
     /// Build the alias key from a ValueID's components.
@@ -798,6 +1168,25 @@ impl Translator {
     pub fn options(&self, node_id: u32, attr: &str) -> Option<Vec<String>> {
         self.with_node(node_id, |info| info.options(attr))
     }
+
+    /// The attribute name a value publishes under when nothing maps it.
+    pub fn synthetic_name(
+        &self,
+        node_id: u32,
+        cc: u32,
+        endpoint: u32,
+        property: &str,
+        property_key: Option<&str>,
+    ) -> String {
+        self.with_node(node_id, |info| match info.role(endpoint) {
+            EpRole::Channel(n) => format!(
+                "{}{}",
+                ep_prefix(n),
+                synthetic_attr_name(cc, 0, property, property_key)
+            ),
+            _ => synthetic_attr_name(cc, endpoint, property, property_key),
+        })
+    }
 }
 
 fn translate_with(
@@ -809,8 +1198,23 @@ fn translate_with(
     property_key: Option<&str>,
     raw: &Value,
 ) -> Option<Vec<(String, Value)>> {
+    let role = info.role(endpoint);
+    let prefix = match role {
+        EpRole::Root => String::new(),
+        EpRole::Channel(n) => ep_prefix(n),
+        EpRole::Raw => return None,
+    };
+    let named = |pairs: Vec<(String, Value)>| {
+        pairs
+            .into_iter()
+            .map(|(k, v)| (format!("{prefix}{k}"), v))
+            .collect::<Vec<_>>()
+    };
     // Window Covering: which parameter it is says what the value means.
-    if cc == 106 && endpoint == 0 && property == "currentValue" {
+    if cc == 106 && property == "currentValue" {
+        if role != EpRole::Root {
+            return None;
+        }
         let p: u64 = property_key?.parse().ok()?;
         let level = num(raw)?;
         return if WC_TILT_PARAMS.contains(&p) {
@@ -827,13 +1231,17 @@ fn translate_with(
             None
         };
     }
-    let key = Translator::alias_key(cc, endpoint, property, property_key);
+    let key = Translator::alias_key(cc, 0, property, property_key);
     let (attr, transform) = t.forward.get(&key)?;
+    let unit_key = match role {
+        EpRole::Root => key.clone(),
+        _ => Translator::alias_key(cc, endpoint, property, property_key),
+    };
     let ctx = Ctx {
-        unit: info.unit(&key),
+        unit: info.unit(&unit_key),
         cover: info.cover,
     };
-    transform.apply(attr, raw, ctx)
+    transform.apply(attr, raw, ctx).map(named)
 }
 
 /// Deterministic attribute name for a value with no alias entry. Used so
@@ -932,12 +1340,24 @@ mod tests {
         info
     }
 
+    fn w(cc: u32, prop: &str, key: Option<Value>, value: Value, attr: &str) -> Write {
+        let mut w = write(cc, prop, key, value);
+        w.attribute = attr.into();
+        w
+    }
+
+    fn node(j: Value) -> NodeState {
+        NodeState::from_value(&j).expect("fixture parses")
+    }
+
     #[test]
     fn a_lock_s_codes_are_never_published() {
         let t = Translator::new();
-        assert!(t.is_unpublished(99, "userCode"));
-        assert!(t.is_unpublished(99, "adminCode"));
-        assert!(!t.is_unpublished(99, "userIdStatus"));
+        assert!(t.is_unpublished(99, "userCode", Some("1")));
+        assert!(t.is_unpublished(99, "adminCode", None));
+        // Every User Code value — the slots' status included — is the Codes
+        // tab's, not state.
+        assert!(t.is_unpublished(99, "userIdStatus", Some("1")));
     }
 
     #[test]
@@ -951,11 +1371,55 @@ mod tests {
             (102, "targetState"),
             (106, "targetValue"),
         ] {
-            assert!(t.is_unpublished(cc, prop), "{cc}/{prop}");
+            assert!(t.is_unpublished(cc, prop, None), "{cc}/{prop}");
             assert!(tr(cc, prop, None, Value::Bool(true)).is_none());
         }
         // A value that is both read and written stays published.
-        assert!(!t.is_unpublished(64, "mode"));
+        assert!(!t.is_unpublished(64, "mode", None));
+    }
+
+    /// NOISE: identity, settings, codes, raw alarm numbers and a switch's
+    /// transition are not state.
+    #[test]
+    fn what_is_not_state_is_not_published() {
+        for (cc, prop, pk) in [
+            (114, "manufacturerId", None),
+            (134, "firmwareVersions", None),
+            (94, "zwavePlusVersion", None),
+            (132, "controllerNodeId", None),
+            (132, "wakeUpInterval", None),
+            (152, "securityClasses", None),
+            (159, "securityClasses", None),
+            (112, "3", None),
+            (32, "currentValue", None),
+            (37, "duration", None),
+            (38, "duration", None),
+            (38, "restorePrevious", None),
+            (128, "chargingStatus", None),
+            (128, "temperature", None),
+            (98, "boltStatus", None),
+            (98, "latchStatus", None),
+            (98, "lockTimeout", None),
+            (113, "alarmType", None),
+            (113, "alarmLevel", None),
+            (113, "Access Control", Some("Keypad state")),
+            (50, "reset", None),
+            (117, "rf", None),
+        ] {
+            assert!(is_unpublished(cc, prop, pk), "{cc}/{prop}/{pk:?}");
+        }
+        for (cc, prop, pk) in [
+            (37, "currentValue", None),
+            (128, "level", None),
+            (128, "isLow", None),
+            (98, "currentMode", None),
+            (98, "doorStatus", None),
+            (113, "Access Control", Some("Door state")),
+            (117, "local", None),
+            (50, "value", Some("66049")),
+        ] {
+            assert!(!is_unpublished(cc, prop, pk), "{cc}/{prop}/{pk:?}");
+        }
     }
 
     #[test]
@@ -1050,11 +1514,11 @@ mod tests {
             barrier: true,
             ..Default::default()
         };
-        let (w, _) = commands_for(&info, &cmd(json!({ "open": false })));
-        assert_eq!(w, vec![write(102, "targetState", None, json!(0))]);
+        let (wr, _) = commands_for(&info, &cmd(json!({ "open": false })));
+        assert_eq!(wr, vec![w(102, "targetState", None, json!(0), "open")]);
         // A contact sensor's `open` is not writable.
-        let (w, rejected) = commands_for(&NodeInfo::default(), &cmd(json!({ "open": true })));
-        assert!(w.is_empty());
+        let (wr, rejected) = commands_for(&NodeInfo::default(), &cmd(json!({ "open": true })));
+        assert!(wr.is_empty());
         assert_eq!(rejected, vec!["open".to_string()]);
     }
 
@@ -1071,27 +1535,30 @@ mod tests {
     #[test]
     fn on_restores_the_dimmer_s_last_level() {
         let d = dimmer();
-        let w = commands_for(&d, &cmd(json!({ "on": true }))).0;
-        assert_eq!(w, vec![write(38, "targetValue", None, json!(255))]);
-        let w = commands_for(&d, &cmd(json!({ "on": false }))).0;
-        assert_eq!(w, vec![write(38, "targetValue", None, json!(0))]);
+        let wr = commands_for(&d, &cmd(json!({ "on": true }))).0;
+        assert_eq!(wr, vec![w(38, "targetValue", None, json!(255), "on")]);
+        let wr = commands_for(&d, &cmd(json!({ "on": false }))).0;
+        assert_eq!(wr, vec![w(38, "targetValue", None, json!(0), "on")]);
         // With a level, the level says how on.
-        let w = commands_for(&d, &cmd(json!({ "on": true, "brightness_pct": 40 }))).0;
-        assert_eq!(w, vec![write(38, "targetValue", None, json!(40))]);
+        let wr = commands_for(&d, &cmd(json!({ "on": true, "brightness_pct": 40 }))).0;
+        assert_eq!(
+            wr,
+            vec![w(38, "targetValue", None, json!(40), "brightness_pct")]
+        );
         // Off wins over a level sent with it.
-        let w = commands_for(&d, &cmd(json!({ "on": false, "brightness_pct": 40 }))).0;
-        assert_eq!(w, vec![write(38, "targetValue", None, json!(0))]);
+        let wr = commands_for(&d, &cmd(json!({ "on": false, "brightness_pct": 40 }))).0;
+        assert_eq!(wr, vec![w(38, "targetValue", None, json!(0), "on")]);
     }
 
     #[test]
     fn a_fade_goes_with_the_level() {
-        let w = commands_for(
+        let wr = commands_for(
             &dimmer(),
             &cmd(json!({ "brightness_pct": 50, "transition_ms": 1500 })),
         )
         .0;
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].options, Some(json!({ "transitionDuration": "2s" })));
+        assert_eq!(wr.len(), 1);
+        assert_eq!(wr[0].options, Some(json!({ "transitionDuration": "2s" })));
     }
 
     #[test]
@@ -1100,11 +1567,11 @@ mod tests {
             binary_switch: true,
             ..Default::default()
         };
-        let w = commands_for(&info, &cmd(json!({ "on": true }))).0;
-        assert_eq!(w, vec![write(37, "targetValue", None, json!(true))]);
+        let wr = commands_for(&info, &cmd(json!({ "on": true }))).0;
+        assert_eq!(wr, vec![w(37, "targetValue", None, json!(true), "on")]);
         // A node nothing is known about yet still gets a relay write.
-        let w = commands_for(&NodeInfo::default(), &cmd(json!({ "on": false }))).0;
-        assert_eq!(w, vec![write(37, "targetValue", None, json!(false))]);
+        let wr = commands_for(&NodeInfo::default(), &cmd(json!({ "on": false }))).0;
+        assert_eq!(wr, vec![w(37, "targetValue", None, json!(false), "on")]);
         assert_eq!(
             one(37, "currentValue", None, json!(true)),
             ("on".into(), json!(true))
@@ -1118,10 +1585,28 @@ mod tests {
         assert_eq!(out, vec![("heat_setpoint".into(), json!(20))]);
         let out = tr(67, "setpoint", Some("2"), json!(24.5)).unwrap();
         assert_eq!(out, vec![("cool_setpoint".into(), json!(24.5))]);
-        let (w, _) = commands_for(&f, &cmd(json!({ "heat_setpoint": 20 })));
-        assert_eq!(w, vec![write(67, "setpoint", Some(json!(1)), json!(68))]);
-        let (w, _) = commands_for(&NodeInfo::default(), &cmd(json!({ "cool_setpoint": 24.5 })));
-        assert_eq!(w, vec![write(67, "setpoint", Some(json!(2)), json!(24.5))]);
+        let (wr, _) = commands_for(&f, &cmd(json!({ "heat_setpoint": 20 })));
+        assert_eq!(
+            wr,
+            vec![w(
+                67,
+                "setpoint",
+                Some(json!(1)),
+                json!(68),
+                "heat_setpoint"
+            )]
+        );
+        let (wr, _) = commands_for(&NodeInfo::default(), &cmd(json!({ "cool_setpoint": 24.5 })));
+        assert_eq!(
+            wr,
+            vec![w(
+                67,
+                "setpoint",
+                Some(json!(2)),
+                json!(24.5),
+                "cool_setpoint"
+            )]
+        );
     }
 
     #[test]
@@ -1147,15 +1632,15 @@ mod tests {
             ("fan_mode".into(), json!("low"))
         );
         let info = NodeInfo::default();
-        let (w, _) = commands_for(&info, &cmd(json!({ "hvac_mode": "cool" })));
-        assert_eq!(w, vec![write(64, "mode", None, json!(2))]);
+        let (wr, _) = commands_for(&info, &cmd(json!({ "hvac_mode": "cool" })));
+        assert_eq!(wr, vec![w(64, "mode", None, json!(2), "hvac_mode")]);
         // The old spelling is still accepted.
-        let (w, _) = commands_for(&info, &cmd(json!({ "mode": "off" })));
-        assert_eq!(w, vec![write(64, "mode", None, json!(0))]);
-        let (w, _) = commands_for(&info, &cmd(json!({ "fan_mode": "circulation" })));
-        assert_eq!(w, vec![write(68, "mode", None, json!(6))]);
-        let (w, rejected) = commands_for(&info, &cmd(json!({ "hvac_mode": "warp" })));
-        assert!(w.is_empty());
+        let (wr, _) = commands_for(&info, &cmd(json!({ "mode": "off" })));
+        assert_eq!(wr, vec![w(64, "mode", None, json!(0), "mode")]);
+        let (wr, _) = commands_for(&info, &cmd(json!({ "fan_mode": "circulation" })));
+        assert_eq!(wr, vec![w(68, "mode", None, json!(6), "fan_mode")]);
+        let (wr, rejected) = commands_for(&info, &cmd(json!({ "hvac_mode": "warp" })));
+        assert!(wr.is_empty());
         assert_eq!(rejected, vec!["hvac_mode".to_string()]);
     }
 
@@ -1204,17 +1689,17 @@ mod tests {
                 .to_vec(),
             ..Default::default()
         };
-        let (w, _) = commands_for(
+        let (wr, _) = commands_for(
             &info,
             &cmd(json!({ "color_rgb": { "r": 255, "g": 0, "b": 0 } })),
         );
         assert_eq!(
-            w[0].value,
+            wr[0].value,
             json!({ "red": 255, "green": 0, "blue": 0, "warmWhite": 0, "coldWhite": 0 })
         );
-        let (w, _) = commands_for(&info, &cmd(json!({ "color_temp": 6500 })));
+        let (wr, _) = commands_for(&info, &cmd(json!({ "color_temp": 6500 })));
         assert_eq!(
-            w[0].value,
+            wr[0].value,
             json!({ "warmWhite": 0, "coldWhite": 255, "red": 0, "green": 0, "blue": 0 })
         );
         // No white channels: no colour temperature to write.
@@ -1264,30 +1749,146 @@ mod tests {
         assert_eq!(one(128, "level", None, json!(80)).0, "battery_pct");
         assert_eq!(one(48, "Door/Window", None, json!(true)).0, "open");
         assert_eq!(one(48, "Tamper", None, json!(true)).0, "tampered");
-        assert_eq!(
-            one(
-                113,
-                "Home Security",
-                Some("Tampering, Product cover removed"),
-                json!(3)
-            ),
-            ("tampered".into(), json!(true))
-        );
         assert_eq!(one(49, "CO2 level", None, json!(600)).0, "co2");
     }
 
+    /// M7: the names zwave-js's Notifications table really uses.
     #[test]
-    fn door_lock_reads_and_writes() {
+    fn notification_variables_by_their_zwave_js_names() {
         assert_eq!(
-            one(98, "currentMode", None, json!(255)),
-            ("locked".into(), json!(true))
+            one(113, "Home Security", Some("Cover status"), json!(3)),
+            ("tampered".into(), json!(true))
         );
         assert_eq!(
-            one(98, "currentMode", None, json!(0)),
-            ("locked".into(), json!(false))
+            one(113, "Home Security", Some("Cover status"), json!(0)),
+            ("tampered".into(), json!(false))
         );
-        let (w, _) = commands_for(&NodeInfo::default(), &cmd(json!({ "locked": true })));
-        assert_eq!(w, vec![write(98, "targetMode", None, json!(255))]);
+        assert_eq!(
+            one(113, "Home Security", Some("Motion sensor status"), json!(8)),
+            ("motion".into(), json!(true))
+        );
+        assert_eq!(
+            one(113, "Smoke Alarm", Some("Sensor status"), json!(2)),
+            ("smoke".into(), json!(true))
+        );
+        assert_eq!(
+            one(113, "CO Alarm", Some("Sensor status"), json!(0)),
+            ("co".into(), json!(false))
+        );
+        assert_eq!(
+            one(113, "Water Alarm", Some("Sensor status"), json!(2)),
+            ("water_detected".into(), json!(true))
+        );
+        assert_eq!(
+            one(113, "Access Control", Some("Lock state"), json!(11)),
+            ("jammed".into(), json!(true))
+        );
+        assert_eq!(
+            one(113, "Access Control", Some("Lock state"), json!(0)),
+            ("jammed".into(), json!(false))
+        );
+        assert_eq!(
+            one(113, "Power Management", Some("Over-load status"), json!(8)),
+            ("overload".into(), json!(true))
+        );
+        // Names that never existed are not aliased any more.
+        assert!(tr(113, "Access Control", Some("Opening state"), json!(1)).is_none());
+        assert!(tr(
+            113,
+            "Home Security",
+            Some("Tampering, Product cover removed"),
+            json!(3)
+        )
+        .is_none());
+        assert!(tr(113, "Smoke Alarm", Some("Smoke sensor status"), json!(2)).is_none());
+    }
+
+    /// H4: only 255 is locked; 254 is "don't know", not locked.
+    #[test]
+    fn only_secured_is_locked() {
+        let locked = |m: u64| one(98, "currentMode", None, json!(m)).1;
+        assert_eq!(locked(255), json!(true));
+        for unsecured in [0, 1, 16, 17, 32, 33] {
+            assert_eq!(locked(unsecured), json!(false), "mode {unsecured}");
+        }
+        assert_eq!(locked(254), Value::Null);
+        let (wr, _) = commands_for(&NodeInfo::default(), &cmd(json!({ "locked": true })));
+        assert_eq!(wr, vec![w(98, "targetMode", None, json!(255), "locked")]);
+        let (wr, _) = commands_for(&NodeInfo::default(), &cmd(json!({ "locked": false })));
+        assert_eq!(wr, vec![w(98, "targetMode", None, json!(0), "locked")]);
+    }
+
+    #[test]
+    fn a_lock_s_door_status_is_open() {
+        assert_eq!(
+            one(98, "doorStatus", None, json!("open")),
+            ("open".into(), json!(true))
+        );
+        assert_eq!(
+            one(98, "doorStatus", None, json!("closed")),
+            ("open".into(), json!(false))
+        );
+    }
+
+    #[test]
+    fn auto_lock_writes_where_the_lock_takes_it() {
+        let v3 = NodeInfo {
+            lock: true,
+            ..Default::default()
+        };
+        let (wr, _) = commands_for(
+            &v3,
+            &cmd(json!({ "lock_operation_type": 2, "lock_timeout_secs": 30 })),
+        );
+        assert_eq!(wr.len(), 2);
+        assert!(v3.writable("lock_timeout_secs"));
+        assert!(!v3.writable("lock_auto_relock_secs"));
+        let (wr, rej) = commands_for(&v3, &cmd(json!({ "lock_operation_type": 7 })));
+        assert!(wr.is_empty());
+        assert_eq!(rej, vec!["lock_operation_type"]);
+        let v4 = NodeInfo {
+            lock: true,
+            auto_relock: true,
+            ..Default::default()
+        };
+        let (wr, _) = commands_for(&v4, &cmd(json!({ "lock_auto_relock_secs": 60 })));
+        assert_eq!(
+            wr,
+            vec![w(
+                98,
+                "autoRelockTime",
+                None,
+                json!(60),
+                "lock_auto_relock_secs"
+            )]
+        );
+    }
+
+    #[test]
+    fn child_lock_is_protection() {
+        assert_eq!(
+            one(117, "local", None, json!(2)),
+            ("child_lock".into(), json!(true))
+        );
+        assert_eq!(
+            one(117, "local", None, json!(0)),
+            ("child_lock".into(), json!(false))
+        );
+        let info = NodeInfo {
+            protection: Some(vec![0, 1]),
+            ..Default::default()
+        };
+        let (wr, _) = commands_for(&info, &cmd(json!({ "child_lock": true })));
+        assert_eq!(wr[0].value, json!(1));
+        let info = NodeInfo {
+            protection: Some(vec![0, 1, 2]),
+            ..Default::default()
+        };
+        let (wr, _) = commands_for(&info, &cmd(json!({ "child_lock": true })));
+        assert_eq!(wr[0].value, json!(2));
+        let (wr, _) = commands_for(&info, &cmd(json!({ "child_lock": false })));
+        assert_eq!(wr[0].value, json!(0));
+        assert!(!NodeInfo::default().writable("child_lock"));
     }
 
     #[test]
@@ -1302,6 +1903,9 @@ mod tests {
             one(50, "value", Some("67073"), json!(0.95)).0,
             "power_factor"
         );
+        // L4: rateType 0 (Meter v1/v2) is consumption too.
+        assert_eq!(one(50, "value", Some("65536"), json!(1.5)).0, "energy_kwh");
+        assert_eq!(one(50, "value", Some("66048"), json!(2.7)).0, "power_w");
     }
 
     #[test]
@@ -1311,11 +1915,11 @@ mod tests {
 
     #[test]
     fn metadata_and_ignored_keys_are_not_attributes() {
-        let (w, rejected) = commands_for(
+        let (wr, rejected) = commands_for(
             &dimmer(),
             &cmd(json!({ "_hc": {}, "correlation_id": "x", "transition_ms": 500 })),
         );
-        assert!(w.is_empty() && rejected.is_empty());
+        assert!(wr.is_empty() && rejected.is_empty());
     }
 
     #[test]
@@ -1344,15 +1948,18 @@ mod tests {
         assert!(tr(48, "Door/Window Status", None, Value::Bool(true)).is_none());
     }
 
+    /// M6: 22 is open, and so are 0x1600 / 0x1601 — 22 with a parameter.
     #[test]
     fn cc113_access_control_door_state() {
         let ds = |v| one(113, "Access Control", Some("Door state"), json!(v));
         assert_eq!(ds(22), ("open".into(), json!(true)));
+        assert_eq!(ds(5632), ("open".into(), json!(true)));
+        assert_eq!(ds(5633), ("open".into(), json!(true)));
         assert_eq!(ds(23), ("open".into(), json!(false)));
         assert_eq!(ds(0), ("open".into(), json!(false)));
-        let os = |v| one(113, "Access Control", Some("Opening state"), json!(v));
-        assert_eq!(os(1), ("open".into(), json!(true)));
-        assert_eq!(os(0), ("open".into(), json!(false)));
+        let simple = |v| one(113, "Access Control", Some("Door state (simple)"), json!(v));
+        assert_eq!(simple(22), ("open".into(), json!(true)));
+        assert_eq!(simple(23), ("open".into(), json!(false)));
     }
 
     #[test]
@@ -1363,7 +1970,7 @@ mod tests {
 
     #[test]
     fn node_info_is_learned_from_the_node() {
-        let node: NodeState = serde_json::from_value(json!({
+        let n = node(json!({
             "nodeId": 9,
             "deviceClass": {
                 "generic": { "label": "Multilevel Switch" },
@@ -1376,10 +1983,9 @@ mod tests {
                 { "commandClass": 51, "endpoint": 0, "property": "currentColor",
                   "value": { "red": 0, "green": 0, "blue": 0 } }
             ]
-        }))
-        .unwrap();
+        }));
         let t = Translator::new();
-        t.learn_node(&node);
+        t.learn_node(&n);
         assert_eq!(
             t.translate(9, 38, 0, "currentValue", None, &json!(99))
                 .unwrap(),
@@ -1393,5 +1999,94 @@ mod tests {
         assert!(t.writable(9, "position"));
         assert!(t.writable(9, "color_rgb"));
         assert!(!t.writable(9, "color_temp"));
+        t.forget_node(9);
+        assert!(!t.writable(9, "position"));
+    }
+
+    /// M8: an outlet whose switch zwave-js reports only on endpoint 1 (its
+    /// root values hidden) is that endpoint — `on`, writable, written there.
+    #[test]
+    fn one_endpoint_with_the_root_hidden_is_the_device() {
+        let n = node(json!({
+            "nodeId": 12,
+            "values": [
+                { "commandClass": 37, "endpoint": 1, "property": "currentValue", "value": true },
+                { "commandClass": 37, "endpoint": 1, "property": "targetValue", "value": true },
+                { "commandClass": 50, "endpoint": 1, "property": "value", "propertyKey": 66049, "value": 3.5,
+                  "metadata": { "unit": "W" } },
+                { "commandClass": 114, "endpoint": 0, "property": "manufacturerId", "value": 99 }
+            ]
+        }));
+        let t = Translator::new();
+        t.learn_node(&n);
+        assert_eq!(
+            t.translate(12, 37, 1, "currentValue", None, &json!(true)),
+            Some(vec![("on".into(), json!(true))])
+        );
+        assert_eq!(
+            t.translate(12, 50, 1, "value", Some("66049"), &json!(3.5)),
+            Some(vec![("power_w".into(), json!(3.5))])
+        );
+        assert!(t.writable(12, "on"));
+        let (wr, rej) = t.commands(12, &cmd(json!({ "on": false })));
+        assert!(rej.is_empty());
+        assert_eq!(wr.len(), 1);
+        assert_eq!((wr[0].command_class, wr[0].endpoint), (37, 1));
+    }
+
+    /// M8: a real power strip — one channel per endpoint, each written where
+    /// its value came from.
+    #[test]
+    fn several_endpoints_are_channels() {
+        let n = node(json!({
+            "nodeId": 13,
+            "values": [
+                { "commandClass": 37, "endpoint": 1, "property": "currentValue", "value": true },
+                { "commandClass": 37, "endpoint": 2, "property": "currentValue", "value": false },
+                { "commandClass": 50, "endpoint": 2, "property": "value", "propertyKey": 66049, "value": 0 }
+            ]
+        }));
+        let t = Translator::new();
+        t.learn_node(&n);
+        assert_eq!(
+            t.translate(13, 37, 2, "currentValue", None, &json!(false)),
+            Some(vec![("ep2_on".into(), json!(false))])
+        );
+        assert_eq!(
+            t.translate(13, 50, 2, "value", Some("66049"), &json!(0)),
+            Some(vec![("ep2_power_w".into(), json!(0))])
+        );
+        assert!(t.writable(13, "ep1_on"));
+        assert!(t.writable(13, "ep2_on"));
+        assert!(!t.writable(13, "ep3_on"));
+        assert!(!t.writable(13, "on"));
+        let (wr, rej) = t.commands(13, &cmd(json!({ "ep2_on": true, "ep1_on": false })));
+        assert!(rej.is_empty(), "{rej:?}");
+        let mut got: Vec<(u32, Value, String)> = wr
+            .iter()
+            .map(|w| (w.endpoint, w.value.clone(), w.attribute.clone()))
+            .collect();
+        got.sort_by_key(|g| g.0);
+        assert_eq!(
+            got,
+            vec![
+                (1, json!(false), "ep1_on".to_string()),
+                (2, json!(true), "ep2_on".to_string())
+            ]
+        );
+        // An endpoint that is neither keeps its raw name.
+        assert_eq!(
+            t.synthetic_name(13, 49, 5, "Air temperature", None),
+            "cc49_e5_air_temperature"
+        );
+    }
+
+    #[test]
+    fn ep_prefixes_parse() {
+        assert_eq!(strip_ep_prefix("ep2_on"), Some((2, "on")));
+        assert_eq!(strip_ep_prefix("ep12_power_w"), Some((12, "power_w")));
+        assert_eq!(strip_ep_prefix("ep_on"), None);
+        assert_eq!(strip_ep_prefix("ep2"), None);
+        assert_eq!(strip_ep_prefix("energy_kwh"), None);
     }
 }

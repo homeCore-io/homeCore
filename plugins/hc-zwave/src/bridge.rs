@@ -1,74 +1,206 @@
-//! Bridge between zwave-js-server WebSocket and HomeCore MQTT.
+//! Bridge between zwave-js-server and homeCore.
 //!
 //! # Flow
 //!
-//! 1. Connect WebSocket → handshake (set_api_schema → start_listening)
-//! 2. Publish full state for all nodes from the start_listening result
-//! 3. Subscribe to commands for each device via DevicePublisher
-//! 4. Event loop:
-//!    - WS `value updated`       → translate → partial state via DevicePublisher
-//!    - WS `node status changed` → availability via DevicePublisher
-//!    - WS `node name updated`   → partial state `{"name": "..."}`
-//!    - WS `node ready`          → republish full node state
-//!    - SDK cmd channel          → `node.set_value` WebSocket command
-//! 5. Reconnect on WS disconnect with exponential back-off
+//! 1. Connect ([`ZwClient::open`]) → `set_api_schema` → `start_listening`.
+//! 2. Register and publish every node in the result.
+//! 3. Handle events as they come: values, notifications, statistics, a node
+//!    waking, sleeping, dying or coming back, a node ready after its
+//!    interview, nodes added and removed.
+//! 4. Device commands go out as `node.set_value`, each waiting for its own
+//!    answer; a failure is said on the device (`last_command_error`) and as a
+//!    `plugin_command_result` event.
+//! 5. When the connection goes, every device is marked offline; on the next
+//!    connection everything is published again, online.
+//!
+//! **Devices are removed only when the network says so** — a `node removed`
+//! event (excluded, or removed as failed) — or when someone asks
+//! (`forget_device`). They used to be removed by difference: whatever was
+//! missing from `start_listening` was deleted from homeCore, so one node that
+//! failed to parse, or a result with no node list, deleted devices with their
+//! rooms and their place in every automation.
+//!
+//! **Commands are never queued for later.** One that arrives while Z-Wave JS
+//! is unreachable waits [`COMMAND_TTL`] for the connection and otherwise fails
+//! and says so. It used to sit in a channel and be sent whenever the
+//! connection came back — an unlock an hour late.
 
 use crate::config::Config;
 use crate::inclusion::{decode_controller_event, ControllerEvent};
-use crate::translator::{self, property_key_str, synthetic_attr_name, Translator};
-use crate::types::{NodeState, NodeValue, ResultMsg, ServerMsg, ValueUpdatedArgs};
-use anyhow::{bail, Context, Result};
-use futures_util::{SinkExt, StreamExt};
-use plugin_sdk_rs::types::PluginNotice;
+use crate::lock::{self, CodeNames, LockEvent};
+use crate::network::Network;
+use crate::translator::{self, property_key_str, Translator};
+use crate::types::{NodeState, NodeValue, RawEvent, ValueUpdatedArgs};
+use crate::zwclient::{self, Incoming, ZwClient, ZwError, REQUEST_TIMEOUT};
+use anyhow::{bail, Result};
+use chrono::Utc;
+use plugin_sdk_rs::types::{PluginAlert, PluginNotice};
 use plugin_sdk_rs::{DevicePublisher, PluginNotices};
-use serde_json::{json, Value};
-use std::time::Duration;
+use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+use tracing::{debug, info, warn};
+
+/// How long a device command waits for the connection before it fails.
+pub const COMMAND_TTL: Duration = Duration::from_secs(5);
+/// How long a `node.set_value` may take: a lock is battery-powered and
+/// answers slowly.
+pub const SET_VALUE_TIMEOUT: Duration = Duration::from_secs(25);
+/// Gap between startup polls, so they don't crowd the radio.
+const POLL_DELAY: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
-// Node state → MQTT
+// Ids
 // ---------------------------------------------------------------------------
 
-fn node_device_id(node_id: u32) -> String {
+pub fn node_device_id(node_id: u32) -> String {
     format!("zwave_{node_id}")
 }
 
-/// Build a full state map from a NodeState, translating each value via the alias table.
+pub fn node_of_device(device_id: &str) -> Option<u32> {
+    device_id.strip_prefix("zwave_")?.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// What every part of the plugin shares
+// ---------------------------------------------------------------------------
+
+/// A controller backup waiting to be downloaded.
+pub struct Backup {
+    pub id: String,
+    /// Base64, as zwave-js sent it.
+    pub data: String,
+    pub size: usize,
+    pub made: Instant,
+}
+
+pub struct Shared {
+    pub cfg: Config,
+    pub client: ZwClient,
+    pub publisher: DevicePublisher,
+    pub notices: PluginNotices,
+    pub translator: Translator,
+    pub net: Mutex<Network>,
+    pub names: CodeNames,
+    /// Controller-scope events, for the streaming actions.
+    pub events: broadcast::Sender<ControllerEvent>,
+    /// Nodes whose retired attribute names were cleared this run.
+    cleaned: Mutex<HashSet<u32>>,
+    /// The last command error said on each device.
+    last_errors: Mutex<HashMap<String, Option<String>>>,
+    /// A v1 lock alarm's type, waiting for its level.
+    alarm_types: Mutex<HashMap<u32, (u64, Instant)>>,
+    /// Alerts said on each device, so they are only said again when they
+    /// change.
+    alerts: Mutex<HashMap<String, Vec<String>>>,
+    pub backup: Mutex<Option<Backup>>,
+    /// The last command sent to each node, with the attributes it wrote and
+    /// when — so the change it causes is credited to whoever asked.
+    recent: Mutex<HashMap<u32, Sent>>,
+}
+
+/// A command sent to a node: its payload, the attributes it wrote, and when.
+type Sent = (Value, Vec<String>, Instant);
+
+/// How long after a command the changes it causes are credited to it.
+const CREDIT_WINDOW: Duration = Duration::from_secs(30);
+
+impl Shared {
+    pub fn new(
+        cfg: Config,
+        config_path: &str,
+        publisher: DevicePublisher,
+        notices: PluginNotices,
+    ) -> Arc<Self> {
+        let (events, _) = broadcast::channel(256);
+        Arc::new(Self {
+            cfg,
+            client: ZwClient::new(),
+            publisher,
+            notices,
+            translator: Translator::new(),
+            net: Mutex::new(Network::default()),
+            names: CodeNames::load(CodeNames::path_for(config_path)),
+            events,
+            cleaned: Mutex::new(HashSet::new()),
+            last_errors: Mutex::new(HashMap::new()),
+            alarm_types: Mutex::new(HashMap::new()),
+            alerts: Mutex::new(HashMap::new()),
+            backup: Mutex::new(None),
+            recent: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// The command that caused a change to these attributes, if one was
+    /// sent moments ago.
+    fn cause(&self, node_id: u32, attrs: &[&str], any: bool) -> Option<Value> {
+        let held = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let (cmd, wrote, at) = held.get(&node_id)?;
+        let matches = any || attrs.iter().any(|a| wrote.iter().any(|w| w == a));
+        (matches && at.elapsed() < CREDIT_WINDOW).then(|| cmd.clone())
+    }
+
+    /// Publish a partial, credited to the command that caused it if there
+    /// was one.
+    async fn publish_caused(
+        &self,
+        node_id: u32,
+        patch: &Value,
+        cause: Option<Value>,
+    ) -> Result<()> {
+        let device_id = node_device_id(node_id);
+        match cause {
+            Some(cmd) => {
+                self.publisher
+                    .publish_state_partial_for_command(&device_id, patch, &cmd, "plugin.zwave")
+                    .await
+            }
+            None => {
+                self.publisher
+                    .publish_state_partial(&device_id, patch)
+                    .await
+            }
+        }
+    }
+
+    pub fn net(&self) -> std::sync::MutexGuard<'_, Network> {
+        self.net.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A copy of one node as last heard.
+    pub fn node(&self, node_id: u32) -> Option<NodeState> {
+        self.net().nodes.get(&node_id).cloned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Node state → homeCore
+// ---------------------------------------------------------------------------
+
 /// What kind of thing this node is, in homeCore's words.
 ///
 /// **Every Z-Wave node used to register as `device_type: "zwave"`**, which is
-/// the protocol rather than the device — a lock, four outlets, a door sensor
-/// and a motion sensor all arrived indistinguishable, and every client that
-/// filters or ranks by type had nothing to work with. It is also why the
-/// reading-rank fallback in core had to exist.
-///
-/// zwave-js has known the answer all along and sends it on every node:
-/// `deviceClass.generic` / `.specific`, filled in once the interview
-/// completes.
+/// the protocol rather than the device. zwave-js has known the answer all
+/// along and sends it on every node: `deviceClass.generic` / `.specific`,
+/// filled in once the interview completes.
 ///
 /// **Where the class is decisive, it decides.** Where it is not, what the node
 /// *reports* does — "Notification Sensor" is the generic and the specific class
-/// of both a door sensor and a motion sensor on this network, and the only
-/// thing telling them apart is that one publishes `open` and the other
-/// publishes `motion`. That is the same principle homeCore is moving to for
-/// presentation generally: the declaration is richer than the label.
+/// of both a door sensor and a motion sensor, and the only thing telling them
+/// apart is that one publishes `open` and the other `motion`.
 ///
 /// `None` means "say nothing" rather than "unknown": an uninterviewed node has
 /// no class yet, and a registration that omits `device_type` leaves whatever
-/// core already stored alone — so a second registration after the interview
-/// fills it in without a special path.
+/// core already stored alone.
 fn device_type_for(node: &NodeState, state: &Value) -> Option<&'static str> {
     let has = |name: &str| state.get(name).is_some();
 
-    // What the node reports, where that is the more specific answer.
     let by_reading = || -> Option<&'static str> {
         if has("motion") {
             Some("motion_sensor")
-        } else if has("open") {
+        } else if has("open") && !has("locked") {
             Some("contact_sensor")
         } else if has("water_detected") || has("leak") {
             Some("water_sensor")
@@ -83,87 +215,91 @@ fn device_type_for(node: &NodeState, state: &Value) -> Option<&'static str> {
         }
     };
 
+    if node.is_controller_node == Some(true) {
+        return Some("gateway");
+    }
     let class = node.device_class.as_ref();
     let generic = class.and_then(|c| c.generic_label()).unwrap_or_default();
     let specific = class.and_then(|c| c.specific_label()).unwrap_or_default();
 
     match generic {
         "Binary Switch" => Some("switch"),
-        // The one place the specific class earns its keep on a dimmer's
-        // generic class: a motorised window covering is not a light.
         "Multilevel Switch" if translator::is_cover_class(generic, specific) => Some("cover"),
         "Multilevel Switch" => Some("light"),
-        // A garage door opener shares Entry Control with locks.
         "Entry Control" if specific.contains("Barrier") => Some("cover"),
         "Entry Control" => Some("lock"),
         "Window Covering" => Some("cover"),
         "Thermostat" => Some("thermostat"),
         "Binary Sensor" | "Notification Sensor" | "Multilevel Sensor" | "Alarm Sensor" => {
-            // Ambiguous by design — a door sensor and a motion sensor share
-            // both class labels. What it publishes is the answer.
             by_reading().or(Some("sensor"))
         }
-        // The controller is not a device anybody operates.
         "Static Controller" => Some("gateway"),
-        // An unknown or absent class still yields to what the node reports.
         _ => by_reading(),
     }
 }
 
+/// The node's state, translated. Its name and room are its registration's,
+/// not state: published as attributes, core copied `name` over the device's
+/// own on every update.
 fn build_state(node: &NodeState, translator: &Translator) -> Value {
-    let mut map = serde_json::Map::new();
-
-    // Include name/location if present
-    if let Some(name) = &node.name {
-        if !name.is_empty() {
-            map.insert("name".into(), Value::String(name.clone()));
-        }
-    }
-    if let Some(loc) = &node.location {
-        if !loc.is_empty() {
-            map.insert("location".into(), Value::String(loc.clone()));
-        }
-    }
-
+    let mut map = Map::new();
     for v in &node.values {
         translate_node_value(node.node_id, v, translator, &mut map);
     }
-
     Value::Object(map)
+}
+
+/// One value's attributes, or none.
+fn value_pairs(
+    node_id: u32,
+    cc: u32,
+    endpoint: u32,
+    property: &str,
+    pk: Option<&str>,
+    raw: &Value,
+    translator: &Translator,
+) -> Vec<(String, Value)> {
+    if raw.is_null() || translator.is_unpublished(cc, property, pk) {
+        return Vec::new();
+    }
+    match translator.translate(node_id, cc, endpoint, property, pk, raw) {
+        Some(pairs) => pairs,
+        None => vec![(
+            translator.synthetic_name(node_id, cc, endpoint, property, pk),
+            raw.clone(),
+        )],
+    }
 }
 
 fn translate_node_value(
     node_id: u32,
     v: &NodeValue,
     translator: &Translator,
-    map: &mut serde_json::Map<String, Value>,
+    map: &mut Map<String, Value>,
 ) {
-    let raw = match &v.value {
-        Some(val) if !val.is_null() => val,
-        _ => return,
-    };
-    let pk_str = v.property_key.as_ref().and_then(property_key_str);
-    let pk = pk_str.as_deref();
-    if translator.is_unpublished(v.command_class, &v.property) {
+    let Some(raw) = v.value.as_ref() else {
         return;
-    }
-
-    if let Some(pairs) =
-        translator.translate(node_id, v.command_class, v.endpoint, &v.property, pk, raw)
-    {
-        map.extend(pairs);
-    } else {
-        // Generic fallback so every device value is visible even when the
-        // alias table doesn't know the canonical name. Identical naming
-        // logic in `handle_event` so the initial state and subsequent
-        // value-updated events agree on the attribute name.
-        let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk);
-        map.insert(attr, raw.clone());
+    };
+    let pk = v.property_key.as_ref().and_then(property_key_str);
+    for (k, val) in value_pairs(
+        node_id,
+        v.command_class,
+        v.endpoint,
+        &v.property,
+        pk.as_deref(),
+        raw,
+        translator,
+    ) {
+        // "Unknown" (a lock mode of 254) on a full publish is simply absent.
+        if !val.is_null() {
+            map.insert(k, val);
+        }
     }
 }
 
-/// Names published before the device vocabulary, replaced by the shared ones
-/// (`brightness` → `brightness_pct`, `contact_open` → `open`, …).
+/// Names published before, replaced or retired: the device vocabulary's old
+/// spellings, the node's name and room (registration now), and the lock
+/// attributes that said the same as another.
 const RETIRED_NAMES: &[&str] = &[
     "brightness",
     "contact_open",
@@ -172,6 +308,11 @@ const RETIRED_NAMES: &[&str] = &[
     "co2_ppm",
     "target_temp",
     "mode",
+    "name",
+    "location",
+    "bolt_status",
+    "latch_status",
+    "door_status",
 ];
 
 /// The partial of `null`s that clears from homeCore's stored state every
@@ -179,23 +320,20 @@ const RETIRED_NAMES: &[&str] = &[
 ///
 /// - [`RETIRED_NAMES`];
 /// - the raw `cc…` name of any value that now publishes under a shared name
-///   (fan mode, a window covering's position, a sensor newly aliased) or is
-///   never published (a write target, a lock's door codes).
+///   or is never published (a write target, a lock's code slots, a
+///   configuration parameter, identity).
 ///
-/// Anything the node publishes now is left alone.
-fn retired_state(
-    node: &NodeState,
-    translator: &Translator,
-    state: &Value,
-) -> serde_json::Map<String, Value> {
-    let mut out = serde_json::Map::new();
+/// Anything the node publishes now is left alone. Sent once per node per run
+/// — it used to go out on every publish.
+fn retired_state(node: &NodeState, translator: &Translator, state: &Value) -> Map<String, Value> {
+    let mut out = Map::new();
     for name in RETIRED_NAMES {
         out.insert((*name).to_string(), Value::Null);
     }
     for v in &node.values {
         let pk = v.property_key.as_ref().and_then(property_key_str);
         let pk = pk.as_deref();
-        let gone = translator.is_unpublished(v.command_class, &v.property)
+        let gone = translator.is_unpublished(v.command_class, &v.property, pk)
             || v.value.as_ref().is_some_and(|raw| {
                 !raw.is_null()
                     && translator
@@ -210,7 +348,8 @@ fn retired_state(
                         .is_some()
             });
         if gone {
-            let attr = synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk);
+            let attr =
+                translator::synthetic_attr_name(v.command_class, v.endpoint, &v.property, pk);
             out.insert(attr, Value::Null);
         }
     }
@@ -220,49 +359,41 @@ fn retired_state(
     out
 }
 
-async fn publish_node(
-    publisher: &DevicePublisher,
-    node: &NodeState,
-    translator: &Translator,
-) -> Result<()> {
-    let device_id = node_device_id(node.node_id);
-    let display_name = node
-        .name
-        .as_deref()
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&device_id)
-        .to_string();
-    // Treat zwave-js's per-node `location` as the homeCore area. The
-    // include flow's name+area prompt writes both via `node.set_name` /
-    // `node.set_location` to zwave-js, then triggers a rescan that lands
-    // here.
-    let area = node.location.as_deref().filter(|s| !s.is_empty());
+/// The name a node registers under: what zwave-js calls it, else its model,
+/// else its id.
+fn display_name(node: &NodeState) -> String {
+    node.name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| node.model_name())
+        .unwrap_or_else(|| node_device_id(node.node_id))
+}
 
-    // What the node actually is, once zwave-js has interviewed it. Absent
-    // before then, and absent means "not said" rather than "unknown" — core
-    // keeps whatever an earlier registration established, so the bare
-    // registration of a freshly-included node is not a step backwards.
+/// Register a node, describe it and publish its state and availability.
+pub async fn publish_node(s: &Shared, node: &NodeState) -> Result<()> {
+    let device_id = node_device_id(node.node_id);
     let mut hardware = plugin_sdk_rs::DeviceHardware::new();
-    if let Some(v) = node.manufacturer.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(v) = node.manufacturer_name() {
         hardware = hardware.manufacturer(v);
     }
-    if let Some(v) = node.label.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(v) = node.model_name() {
         hardware = hardware.model(v);
     }
     if let Some(v) = node.firmware_version.as_deref().filter(|s| !s.is_empty()) {
         hardware = hardware.sw_version(v);
     }
 
-    // What the node is decides what some of its values mean (a level is a
-    // light's brightness or a blind's position; a sensor's scale), so learn
-    // it before translating anything.
-    translator.learn_node(node);
-    let state = build_state(node, translator);
-
-    publisher
+    // What the node is decides what some of its values mean, so learn it
+    // before translating anything.
+    s.translator.learn_node(node);
+    let state = build_state(node, &s.translator);
+    // zwave-js's location is the room the include flow put it in; core keeps
+    // a room someone chose in homeCore over it.
+    let area = node.location.as_deref().filter(|l| !l.trim().is_empty());
+    s.publisher
         .register_device_detailed(
             &device_id,
-            &display_name,
+            &display_name(node),
             device_type_for(node, &state),
             area,
             None,
@@ -270,891 +401,776 @@ async fn publish_node(
         )
         .await?;
 
-    // Diagnostic: log all CC 98 (Door Lock) value IDs so we can see exactly what the
-    // device reports and verify the write target (targetMode) exists on this node.
-    let cc98_values: Vec<String> = node
-        .values
-        .iter()
-        .filter(|v| v.command_class == 98)
-        .map(|v| {
-            let pk = v
-                .property_key
-                .as_ref()
-                .map(|pk| format!("[{pk}]"))
-                .unwrap_or_default();
-            let val = v
-                .value
-                .as_ref()
-                .map(|val| format!("={val}"))
-                .unwrap_or_default();
-            format!("{}{}{}", v.property, pk, val)
-        })
-        .collect();
-    if !cc98_values.is_empty() {
-        info!(node_id = node.node_id, values = ?cc98_values, "Door Lock CC 98 value IDs on this node");
-    }
-
-    // Retained, so a client connecting later knows what this node's attributes
-    // mean and which of them can actually be written.
-    if let Some(schema) = crate::schema::schema_json(node.node_id, &state, translator) {
-        publisher
-            .register_device_schema_json(&device_id, &schema)
+    publish_schema(s, node, &state).await?;
+    // Partial-merge, not full replace: a node mid-interview reports sparsely,
+    // and a full replace would wipe what it reported before.
+    if state.as_object().is_some_and(|o| !o.is_empty()) {
+        s.publisher
+            .publish_state_partial(&device_id, &state)
             .await?;
     }
-    // Partial-merge, NOT full replace. zwave-js's `start_listening` /
-    // `node ready` snapshots can be transiently sparse — particularly
-    // for a freshly-included node whose interview hasn't yet populated
-    // every CC's values, or after a brief reconnect during an active
-    // interview. A full replace wipes any attribute not in the current
-    // snapshot, so the device's homeCore record flickers back to
-    // "empty" and the auto-create path then loses device_type. Partial
-    // merge preserves prior attributes; missing values just don't get
-    // updated this round, and the next `value updated` event refreshes
-    // them. Trade-off: a CC removed in firmware would leave a stale
-    // attribute in homeCore until manually cleared. Acceptable.
-    publisher.publish_state_partial(&device_id, &state).await?;
-    // Names earlier versions published and this one does not: a lock's door
-    // codes, the spellings the device vocabulary retired, and raw `cc…` names
-    // for values that now have a shared one. homeCore only merges a partial,
-    // so without this each would sit in stored state with its last value
-    // forever; a null in a partial removes the attribute.
-    let retired = retired_state(node, translator, &state);
-    if !retired.is_empty() {
-        publisher
-            .publish_state_partial(&device_id, &Value::Object(retired))
-            .await?;
+    let first = s
+        .cleaned
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(node.node_id);
+    if first {
+        let retired = retired_state(node, &s.translator, &state);
+        if !retired.is_empty() {
+            s.publisher
+                .publish_state_partial(&device_id, &Value::Object(retired))
+                .await?;
+        }
     }
-    publisher
+    s.publisher
         .publish_availability(&device_id, node.is_available())
         .await?;
-    publisher.subscribe_commands(&device_id).await?;
-    debug!(
-        node_id = node.node_id,
-        device_id, "Published full node state"
-    );
+    s.publisher.subscribe_commands(&device_id).await?;
+    say_alerts(s, &device_id, &state, first).await;
+    debug!(node_id = node.node_id, device_id, "Published node");
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket handshake
-// ---------------------------------------------------------------------------
-
-type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    Message,
->;
-type WsStream = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
-
-async fn ws_send(tx: &mut WsSink, msg: &Value) -> Result<()> {
-    let text = serde_json::to_string(msg)?;
-    tx.send(Message::Text(text.into()))
-        .await
-        .context("ws send")?;
+/// Describe a node (its schema, with a lock's actions and named slots).
+pub async fn publish_schema(s: &Shared, node: &NodeState, state: &Value) -> Result<()> {
+    let names = s.names.of(node.node_id);
+    if let Some(schema) = crate::schema::node_schema(node, state, &s.translator, &names) {
+        s.publisher
+            .register_device_schema_json(&node_device_id(node.node_id), &schema)
+            .await?;
+    }
     Ok(())
 }
 
-async fn ws_recv_result(rx: &mut WsStream, expected_id: &str) -> Result<ResultMsg> {
+/// Describe a node again, from what is known of it now.
+pub async fn republish_schema(s: &Shared, node_id: u32) {
+    let Some(node) = s.node(node_id) else {
+        return;
+    };
+    let state = build_state(&node, &s.translator);
+    if let Err(e) = publish_schema(s, &node, &state).await {
+        debug!(node_id, error = %e, "Could not republish the schema");
+    }
+}
+
+/// The plugin's alerts on a device, from its state: an overload. (A jammed
+/// lock is homeCore's own alert, from `jammed`.) Said again only when they
+/// change.
+async fn update_alerts(s: &Shared, device_id: &str, patch: &Value) {
+    say_alerts(s, device_id, patch, false).await;
+}
+
+/// `force`: say the list even if nothing changed — the first time a device is
+/// published in a run, so an alert left from before (retained) is cleared.
+async fn say_alerts(s: &Shared, device_id: &str, patch: &Value, force: bool) {
+    let Some(obj) = patch.as_object() else {
+        return;
+    };
+    let watched = ["overload", "overcurrent"];
+    if !force && !watched.iter().any(|k| obj.contains_key(*k)) {
+        return;
+    }
+    let mut now: Vec<String> = s
+        .alerts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device_id)
+        .cloned()
+        .unwrap_or_default();
+    for k in watched {
+        match obj.get(k).and_then(Value::as_bool) {
+            Some(true) if !now.iter().any(|x| x == k) => now.push(k.to_string()),
+            Some(false) => now.retain(|x| x != k),
+            _ => {}
+        }
+    }
+    let changed = {
+        let mut held = s.alerts.lock().unwrap_or_else(|e| e.into_inner());
+        let before = held.get(device_id).cloned().unwrap_or_default();
+        held.insert(device_id.to_string(), now.clone());
+        before != now
+    };
+    if !changed && !force {
+        return;
+    }
+    let alerts: Vec<PluginAlert> = now
+        .iter()
+        .map(|k| match k.as_str() {
+            "overload" => PluginAlert::new("overload", "Overloaded — it may have switched off"),
+            _ => PluginAlert::new("overload", "Drawing too much current").key("overcurrent"),
+        })
+        .collect();
+    if let Err(e) = s.publisher.set_alerts(device_id, &alerts).await {
+        debug!(device_id, error = %e, "Could not say the alerts");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The connection's life
+// ---------------------------------------------------------------------------
+
+/// Run forever: connect, keep the network current, reconnect with back-off.
+pub async fn run(s: Arc<Shared>, cmd_rx: mpsc::Receiver<(String, Value)>) {
+    tokio::spawn(command_intake(s.clone(), cmd_rx));
+    let mut backoff = 2u64;
+    let mut polled = false;
     loop {
-        match rx.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let msg: ServerMsg = serde_json::from_str(&text)
-                    .with_context(|| format!("parse WS message: {text}"))?;
-                if let ServerMsg::Result(r) = msg {
-                    if r.message_id == expected_id {
-                        if !r.success {
-                            bail!("zwave-js command {expected_id} failed: {:?}", r.error_code);
-                        }
-                        return Ok(r);
-                    }
-                }
+        s.net().connection.state = "connecting";
+        match session(&s, &mut polled).await {
+            Ok(why) => {
+                warn!(reason = %why, "Lost the connection to Z-Wave JS; reconnecting");
+                backoff = 2;
+                went_offline(&s, &why).await;
             }
-            Some(Ok(Message::Ping(d))) => {
-                // tungstenite auto-responds to pings, but we log it
-                debug!("WS ping: {} bytes", d.len());
+            Err(e) => {
+                let why = format!("{e:#}");
+                warn!(error = %why, backoff_secs = backoff, "Cannot reach Z-Wave JS; retrying");
+                went_offline(&s, &why).await;
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(60);
             }
-            Some(Ok(_)) => {}
-            Some(Err(e)) => bail!("ws recv error: {e}"),
-            None => bail!("WS stream ended during handshake"),
         }
     }
 }
 
-/// Perform the three-step handshake and return the initial node list.
-async fn handshake(
-    tx: &mut WsSink,
-    rx: &mut WsStream,
-    schema_version: u32,
-) -> Result<Vec<NodeState>> {
-    // Step 1: receive version announcement
-    let version_msg = loop {
-        match rx.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let msg: ServerMsg = serde_json::from_str(&text)
-                    .with_context(|| format!("parse version msg: {text}"))?;
-                if let ServerMsg::Version(v) = msg {
-                    break v;
-                }
-            }
-            Some(Ok(_)) => {}
-            Some(Err(e)) => bail!("ws error awaiting version: {e}"),
-            None => bail!("WS closed before version message"),
-        }
-    };
-
+/// One connection, from connecting to its end. `Ok` with why it ended, once
+/// it was up; `Err` if it never came up.
+async fn session(s: &Arc<Shared>, polled: &mut bool) -> Result<String> {
+    let url = s.cfg.server.url.clone();
+    let mut session = s.client.open(&url).await?;
+    let v = session.version.clone();
     info!(
-        server_version = %version_msg.server_version,
-        driver_version = %version_msg.driver_version,
-        min_schema = version_msg.min_schema_version,
-        max_schema = version_msg.max_schema_version,
+        server_version = %v.server_version,
+        driver_version = %v.driver_version,
+        min_schema = v.min_schema_version,
+        max_schema = v.max_schema_version,
         "Connected to zwave-js-server"
     );
-
-    let negotiated = schema_version.clamp(
-        version_msg.min_schema_version,
-        version_msg.max_schema_version,
+    let schema = s.cfg.server.schema_version.clamp(
+        v.min_schema_version,
+        v.max_schema_version.max(v.min_schema_version),
     );
+    s.client
+        .request_raw(
+            json!({ "command": "set_api_schema", "schemaVersion": schema }),
+            REQUEST_TIMEOUT,
+        )
+        .await?;
+    let answer = s
+        .client
+        .request_raw(
+            json!({ "command": "start_listening" }),
+            Duration::from_secs(60),
+        )
+        .await?;
+    let nodes = apply_state(s, &answer)?;
+    {
+        let mut net = s.net();
+        net.connection.state = "connected";
+        net.connection.since = Utc::now();
+        net.connection.last_error = None;
+        net.connection.server_version = Some(v.server_version.clone());
+        net.connection.driver_version = Some(v.driver_version.clone());
+        net.connection.schema = Some(schema);
+    }
+    s.client.set_ready(true);
+    s.notices.clear("server_unreachable");
+    info!(nodes = nodes.len(), schema, "Z-Wave network ready");
+    for node in &nodes {
+        if let Err(e) = publish_node(s, node).await {
+            warn!(node_id = node.node_id, error = %e, "Could not publish a node");
+        }
+    }
+    if !*polled {
+        *polled = true;
+        tokio::spawn(refresh_primary_state(s.clone(), nodes));
+    }
 
-    // Step 2: set API schema version
-    let init_id = "hc-zwave-init";
-    ws_send(
-        tx,
-        &json!({
-            "messageId": init_id,
-            "command": "set_api_schema",
-            "schemaVersion": negotiated,
-        }),
-    )
-    .await?;
-    ws_recv_result(rx, init_id).await?;
-    info!(schema_version = negotiated, "Schema negotiated");
+    loop {
+        match session.incoming.recv().await {
+            Some(Incoming::Event(ev)) => on_event(s, ev).await,
+            Some(Incoming::Closed(why)) => return Ok(why),
+            None => return Ok("the connection ended".into()),
+        }
+    }
+}
 
-    // Step 3: start listening — returns full Z-Wave state
-    let listen_id = "hc-zwave-listen";
-    ws_send(
-        tx,
-        &json!({ "messageId": listen_id, "command": "start_listening" }),
-    )
-    .await?;
-    let result = ws_recv_result(rx, listen_id).await?;
+/// The connection is gone: every device offline, and the page says why.
+async fn went_offline(s: &Shared, why: &str) {
+    s.client.set_ready(false);
+    let ids: Vec<u32> = {
+        let mut net = s.net();
+        net.connection.state = "disconnected";
+        net.connection.since = Utc::now();
+        net.connection.last_error = Some(why.to_string());
+        net.nodes.keys().copied().collect()
+    };
+    for id in ids {
+        let _ = s
+            .publisher
+            .publish_availability(&node_device_id(id), false)
+            .await;
+    }
+    s.notices.raise(
+        PluginNotice::error(
+            "server_unreachable",
+            format!(
+                "Cannot reach zwave-js-server at {} — {why}. Every Z-Wave device is \
+                 unavailable until it comes back.",
+                crate::network::redact_url(&s.cfg.server.url)
+            ),
+        )
+        .with_remedy(
+            "Check that zwave-js-server is running and that [server].url points at its \
+             WebSocket address (ws://host:3000 by default). It is a separate service from \
+             homeCore and has to be started on its own.",
+        ),
+    );
+}
 
-    let nodes = result
-        .result
-        .as_ref()
-        .and_then(|r| r.get("state"))
-        .and_then(|s| s.get("nodes"))
-        .and_then(|n| n.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(NodeState::from_value)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    info!(node_count = nodes.len(), "Received initial Z-Wave state");
+/// Take a `start_listening` answer: the controller and the nodes. A result
+/// without a node list is refused — it would otherwise read as "no nodes".
+fn apply_state(s: &Shared, answer: &Value) -> Result<Vec<NodeState>> {
+    let state = answer.get("state");
+    let Some(raw_nodes) = state
+        .and_then(|st| st.get("nodes"))
+        .and_then(Value::as_array)
+    else {
+        bail!("Z-Wave JS sent a start_listening result with no node list; nothing was changed");
+    };
+    let mut nodes = Vec::with_capacity(raw_nodes.len());
+    for raw in raw_nodes {
+        if let Some(n) = NodeState::from_value(raw) {
+            nodes.push(n);
+        }
+    }
+    let mut net = s.net();
+    if let Some(c) = state.and_then(|st| st.get("controller")) {
+        net.controller = c.clone();
+        net.rebuilding = c
+            .get("isRebuildingRoutes")
+            .or_else(|| c.get("isHealNetworkActive"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    }
+    // Nodes that did not parse keep what was known of them.
+    for n in &nodes {
+        net.nodes.insert(n.node_id, n.clone());
+    }
     Ok(nodes)
+}
+
+/// `start_listening` again, and publish everything from it.
+pub async fn rescan(s: &Shared) -> Result<usize, ZwError> {
+    let answer = s
+        .client
+        .request(
+            json!({ "command": "start_listening" }),
+            Duration::from_secs(60),
+        )
+        .await?;
+    let nodes = apply_state(s, &answer).map_err(|e| ZwError::new("malformed", e.to_string()))?;
+    for node in &nodes {
+        if let Err(e) = publish_node(s, node).await {
+            warn!(node_id = node.node_id, error = %e, "Rescan: could not publish a node");
+        }
+    }
+    Ok(nodes.len())
+}
+
+/// Ask zwave-js for one node afresh and publish it.
+pub async fn refresh_node(s: &Shared, node_id: u32) -> Result<NodeState, ZwError> {
+    let answer = s
+        .client
+        .request(
+            json!({ "command": "node.get_state", "nodeId": node_id }),
+            REQUEST_TIMEOUT,
+        )
+        .await?;
+    let node = answer
+        .get("state")
+        .and_then(NodeState::from_value)
+        .ok_or_else(|| ZwError::new("malformed", "Z-Wave JS sent no node"))?;
+    s.net().nodes.insert(node_id, node.clone());
+    if let Err(e) = publish_node(s, &node).await {
+        warn!(node_id, error = %e, "Could not publish a node");
+    }
+    Ok(node)
 }
 
 // ---------------------------------------------------------------------------
 // Startup value refresh
 // ---------------------------------------------------------------------------
 
-/// Whether to ask zwave-js to refresh primary-state values for this node on
-/// startup. We poll mains-powered nodes (`isListening=true`) and FLiRS nodes
-/// (`isFrequentListening` set to a wake-interval string — door locks are
-/// typical). Sleeping battery devices are skipped: they can't answer until
-/// they wake on their own schedule, and zwave-js will queue the request and
-/// flood the air when wake-up arrives.
-fn should_poll_initial_values(node: &NodeState) -> bool {
-    if node.is_listening.unwrap_or(false) {
-        return true;
-    }
-    matches!(
-        node.is_frequent_listening.as_ref(),
-        Some(v) if !v.is_null() && !matches!(v, Value::Bool(false))
-    )
-}
-
 /// One value to refresh on a node: `(commandClass, endpoint, property)`.
-///
-/// Endpoint is part of the identity rather than an afterthought — a dual-relay
-/// plug exposes the same command class and property on endpoints 1 and 2, and
-/// polling only one leaves the other stale.
 type PollTarget = (u32, u32, String);
 
-/// One node's worth of work: the node, and every value to refresh on it.
-type NodePolls = (u32, Vec<PollTarget>);
-
-/// Primary-state value IDs we ask zwave-js to refresh on startup. zwave-js
-/// caches each value's last seen state, but devices that only emit meter or
-/// sensor reports — and actuators that don't auto-report on local actuation —
-/// can leave their primary state (on / level / setpoint / mode / locked /
-/// barrier-state / color) stale across plugin restarts. Our snapshot then
-/// publishes those stale values over the live state in homeCore. Polling
-/// triggers a real Get to the device; the reply arrives as a `value updated`
-/// event and corrects everything downstream.
-///
-/// Endpoint is intentionally not constrained — multi-endpoint devices
-/// (e.g., a dual-relay smart plug exposing endpoints 1 and 2) need every
-/// endpoint refreshed.
+/// Primary-state value IDs to refresh at startup: zwave-js's cache can be
+/// stale for actuators that don't report local changes.
 fn primary_state_values_to_poll(node: &NodeState) -> Vec<PollTarget> {
-    // (commandClass, property) pairs whose primary state we refresh. Add
-    // new actuator command classes here as they appear on the network.
     const TARGETS: &[(u32, &str)] = &[
-        (37, "currentValue"),  // Binary Switch — on/off
-        (38, "currentValue"),  // Multilevel Switch — level (dimmer / shade / fan)
-        (64, "mode"),          // Thermostat Mode
-        (66, "state"),         // Thermostat Operating State
-        (67, "setpoint"),      // Thermostat Setpoint (per-type via propertyKey)
-        (68, "mode"),          // Thermostat Fan Mode
-        (98, "currentMode"),   // Door Lock
-        (102, "currentState"), // Barrier Operator
-        (51, "currentColor"),  // Color Switch
+        (37, "currentValue"),
+        (38, "currentValue"),
+        (64, "mode"),
+        (66, "state"),
+        (67, "setpoint"),
+        (68, "mode"),
+        (98, "currentMode"),
+        (102, "currentState"),
+        (51, "currentColor"),
     ];
     let mut out = Vec::new();
     for v in &node.values {
-        for (cc, prop) in TARGETS {
-            if v.command_class == *cc && v.property == *prop {
-                out.push((*cc, v.endpoint, (*prop).to_string()));
-                break;
+        if TARGETS
+            .iter()
+            .any(|(cc, prop)| v.command_class == *cc && v.property == *prop)
+        {
+            let t = (v.command_class, v.endpoint, v.property.clone());
+            if !out.contains(&t) {
+                out.push(t);
             }
         }
     }
     out
 }
 
-async fn send_poll_value(
-    ws_tx: &mut WsSink,
-    node_id: u32,
-    cc: u32,
-    endpoint: u32,
-    property: &str,
-) -> Result<()> {
-    let msg_id = format!("hc-poll-{}", Uuid::new_v4());
-    let msg = json!({
-        "messageId": msg_id,
-        "command": "node.poll_value",
-        "nodeId": node_id,
-        "valueId": {
-            "commandClass": cc,
-            "endpoint": endpoint,
-            "property": property,
-        },
-    });
-    ws_send(ws_tx, &msg).await
+/// Which nodes are polled at startup: mains-powered ones. A lock (FLiRS)
+/// answers, but costs its battery a wake-up per poll, and reports its own
+/// changes anyway; a sleeping sensor can't answer at all.
+fn should_poll(node: &NodeState) -> bool {
+    node.is_mains() && node.is_controller_node != Some(true)
 }
 
-/// Inter-poll throttle. Each `node.poll_value` triggers a Get → device →
-/// response round-trip on the Z-Wave radio; firing dozens back-to-back
-/// causes routing congestion on the controller and starves real traffic.
-/// 200ms is comfortable for a 700-series controller — ~5 polls/sec, so a
-/// 100-poll startup completes in ~20s of background chatter.
-const POLL_DELAY: Duration = Duration::from_millis(200);
-
-/// Outcome of the planning step in [`refresh_primary_state`]. Splitting the
-/// pure categorization off from the async send loop keeps the counter logic
-/// directly testable without WS plumbing.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct PollPlan {
-    /// Per-node targets to poll, in the order encountered.
-    /// `(node_id, [(commandClass, endpoint, property), ...])`
-    polls: Vec<NodePolls>,
-    /// Sleeping battery devices we won't bother — zwave-js would just queue
-    /// the request and flood the air at wake-up.
-    skipped_battery: usize,
-    /// Mains/FLiRS nodes that expose no command class we currently refresh
-    /// (controller, repeater, sensor-only device). Tracked separately so
-    /// coverage gaps are visible in the log.
-    eligible_no_targets: usize,
-}
-
-/// Pure categorization step: walks the node list, decides which to poll, and
-/// records the bookkeeping counters. Side-effect free.
-fn plan_primary_state_refresh(nodes: &[NodeState]) -> PollPlan {
-    let mut plan = PollPlan::default();
-    for node in nodes {
-        if !should_poll_initial_values(node) {
-            plan.skipped_battery += 1;
-            continue;
-        }
-        let targets = primary_state_values_to_poll(node);
-        if targets.is_empty() {
-            plan.eligible_no_targets += 1;
-            continue;
-        }
-        plan.polls.push((node.node_id, targets));
-    }
-    plan
-}
-
-/// Best-effort refresh of primary-state values across all polled nodes.
-/// Failures log a warning and continue — a single unreachable node should
-/// not block startup.
-async fn refresh_primary_state(ws_tx: &mut WsSink, nodes: &[NodeState]) {
-    let plan = plan_primary_state_refresh(nodes);
-    let mut polled_values = 0usize;
-    for (node_id, targets) in &plan.polls {
-        for (cc, ep, prop) in targets {
-            polled_values += 1;
-            if let Err(e) = send_poll_value(ws_tx, *node_id, *cc, *ep, prop).await {
-                warn!(
-                    node_id = *node_id,
-                    cc, prop = %prop, error = %e,
-                    "Failed to send node.poll_value"
-                );
+/// Poll each mains node's primary state, in the background, one at a time.
+async fn refresh_primary_state(s: Arc<Shared>, nodes: Vec<NodeState>) {
+    let mut polled = 0usize;
+    for node in nodes.iter().filter(|n| should_poll(n)) {
+        for (cc, ep, prop) in primary_state_values_to_poll(node) {
+            let r = s
+                .client
+                .request(
+                    json!({
+                        "command": "node.poll_value",
+                        "nodeId": node.node_id,
+                        "valueId": { "commandClass": cc, "endpoint": ep, "property": prop },
+                    }),
+                    Duration::from_secs(10),
+                )
+                .await;
+            if let Err(e) = r {
+                debug!(node_id = node.node_id, cc, error = %e, "A startup poll failed");
+                if e.code == "not_connected" || e.code == "disconnected" {
+                    return;
+                }
             }
-            sleep(POLL_DELAY).await;
+            polled += 1;
+            tokio::time::sleep(POLL_DELAY).await;
         }
     }
-    info!(
-        polled_nodes = plan.polls.len(),
-        polled_values,
-        skipped_battery = plan.skipped_battery,
-        eligible_no_targets = plan.eligible_no_targets,
-        "Refreshed primary-state values"
-    );
+    info!(polled, "Refreshed primary-state values");
 }
 
 // ---------------------------------------------------------------------------
-// Main bridge loop
+// Events
 // ---------------------------------------------------------------------------
 
-/// Messages sent from the command channel to the WS task to trigger `node.set_value`.
-#[derive(Debug)]
-struct SetValueCmd {
-    node_id: u32,
-    write: translator::Write,
-}
-
-pub struct Bridge {
-    pub config: Config,
-    pub publisher: DevicePublisher,
-    pub cmd_rx: mpsc::Receiver<(String, Value)>,
-    /// Raw zwave-js-server commands pushed by streaming action handlers
-    /// (include_node, exclude_node). The WS loop drains this into the
-    /// live WebSocket. Long-lived across reconnects — buffer persists
-    /// while the plugin is down.
-    pub control_rx: mpsc::Receiver<Value>,
-    /// Broadcaster for controller-scope events the streaming action
-    /// handlers subscribe to. Cloned into the WS loop; long-lived so
-    /// active subscribers survive reconnects.
-    pub event_tx: broadcast::Sender<ControllerEvent>,
-    /// `rescan_nodes` management action pings this; the WS loop sends a
-    /// fresh `start_listening` and republishes every node from the result.
-    pub rescan_rx: mpsc::Receiver<()>,
-    /// What the operator sees on the plugin page when zwave-js-server is not
-    /// answering. The loop below retries forever and says so only in the log.
-    pub notices: PluginNotices,
-}
-
-impl Bridge {
-    pub async fn run(mut self) -> Result<()> {
-        let mut backoff_secs = 2u64;
-        loop {
-            match self.run_once().await {
-                Ok(()) => {
-                    info!("Bridge exited cleanly");
-                    break;
-                }
-                Err(e) => {
-                    error!(error = %e, backoff_secs, "Bridge error; reconnecting");
-                    self.notices.raise(
-                        PluginNotice::error(
-                            "server_unreachable",
-                            format!(
-                                "Cannot reach zwave-js-server at {} — {e}. Every Z-Wave \
-                                 device is unavailable until it comes back.",
-                                self.config.server.url
-                            ),
-                        )
-                        .with_remedy(
-                            "Check that zwave-js-server is running and that [server].url \
-                             points at its WebSocket address (ws://host:3000 by default). \
-                             It is a separate service from homeCore and has to be started \
-                             on its own.",
-                        ),
-                    );
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(60);
-                }
-            }
-        }
-        Ok(())
+async fn on_event(s: &Arc<Shared>, ev: RawEvent) {
+    if let Some(ce) = decode_controller_event(&ev) {
+        let _ = s.events.send(ce);
     }
-
-    async fn run_once(&mut self) -> Result<()> {
-        let cfg = &self.config;
-
-        // --- WebSocket ---
-        let (ws_stream, _) = connect_async(&cfg.server.url)
-            .await
-            .with_context(|| format!("WS connect to {}", cfg.server.url))?;
-        // The socket is up — whatever the last failure was, it is over.
-        self.notices.clear("server_unreachable");
-        let (mut ws_tx, mut ws_rx) = ws_stream.split();
-
-        // --- Handshake ---
-        let translator = Translator::new();
-        let nodes = handshake(&mut ws_tx, &mut ws_rx, cfg.server.schema_version).await?;
-        let current_ids: std::collections::HashSet<String> = nodes
-            .iter()
-            .map(|node| node_device_id(node.node_id))
-            .collect();
-
-        // --- Unregister stale devices via SDK reconcile ---
-        // SDK has the persisted set from prior sessions plus anything
-        // we've registered this session; diff gives us stale devices
-        // (nodes excluded from the controller while this plugin was
-        // offline) which it unregisters and prunes from the snapshot.
-        if let Err(e) = self.publisher.reconcile_devices(current_ids.clone()).await {
-            warn!(error = %e, "reconcile_devices failed");
-        }
-
-        // --- Publish initial state + subscribe to commands ---
-        for node in &nodes {
-            if let Err(e) = publish_node(&self.publisher, node, &translator).await {
-                warn!(node_id = node.node_id, error = %e, "Failed to publish initial node state");
-            }
-        }
-
-        // --- Refresh primary-state values ---
-        // zwave-js's per-node cache holds whatever value the device last
-        // reported; for switches/plugs that only emit meter reports and
-        // dimmers/locks that don't auto-report on local actuation, that
-        // cache can drift from reality and the snapshot above will then
-        // publish a stale `on`/`brightness_pct`/`locked`. Poll the primary
-        // value for each non-sleeping node so a fresh Get is issued; the
-        // reply arrives as a `value updated` event and corrects state.
-        refresh_primary_state(&mut ws_tx, &nodes).await;
-
-        // --- Command channel: SDK cmd_rx → WS sender ---
-        let (sv_tx, mut sv_rx) = mpsc::channel::<SetValueCmd>(64);
-
-        // Everything runs inline under tokio::select so we can borrow
-        // disjoint fields of `self` (cmd_rx, control_rx) mutably. The WS
-        // loop can't be tokio::spawn'd without moving those borrows.
-        let publisher = self.publisher.clone();
-        let event_tx = self.event_tx.clone();
-        tokio::select! {
-            res = ws_event_loop(WsLoopDeps {
-                ws_tx: &mut ws_tx,
-                ws_rx: &mut ws_rx,
-                cmd_rx: &mut sv_rx,
-                control_rx: &mut self.control_rx,
-                rescan_rx: &mut self.rescan_rx,
-                publisher: &publisher,
-                translator: &translator,
-                event_tx: &event_tx,
-            }) => res,
-            res = cmd_dispatch_loop(&mut self.cmd_rx, &sv_tx, &translator) => res,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// WS event loop
-// ---------------------------------------------------------------------------
-
-/// Bundles the WS connection + channels + helpers that `ws_event_loop`
-/// needs. Grouping keeps the function below clippy's `too_many_arguments`
-/// threshold without splitting the loop itself.
-struct WsLoopDeps<'a> {
-    ws_tx: &'a mut WsSink,
-    ws_rx: &'a mut WsStream,
-    cmd_rx: &'a mut mpsc::Receiver<SetValueCmd>,
-    control_rx: &'a mut mpsc::Receiver<Value>,
-    rescan_rx: &'a mut mpsc::Receiver<()>,
-    publisher: &'a DevicePublisher,
-    translator: &'a Translator,
-    event_tx: &'a broadcast::Sender<ControllerEvent>,
-}
-
-async fn ws_event_loop(deps: WsLoopDeps<'_>) -> Result<()> {
-    let WsLoopDeps {
-        ws_tx,
-        ws_rx,
-        cmd_rx,
-        control_rx,
-        rescan_rx,
-        publisher,
-        translator,
-        event_tx,
-    } = deps;
-    // Tracks an in-flight `start_listening` issued by a rescan request.
-    // We refuse a second rescan while one is pending — `start_listening`
-    // re-snapshots the entire controller and re-running it concurrently
-    // is wasteful.
-    let mut pending_rescan_id: Option<String> = None;
-
-    loop {
-        tokio::select! {
-            // Incoming WebSocket message
-            frame = ws_rx.next() => {
-                match frame {
-                    Some(Ok(Message::Text(text))) => {
-                        // Rescan completion takes precedence — if this is
-                        // the Result for our pending start_listening,
-                        // republish all nodes here instead of letting it
-                        // drop into handle_ws_message (which only logs
-                        // failures).
-                        let mut consumed = false;
-                        if let Some(expected) = pending_rescan_id.as_ref() {
-                            if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                                let is_result = val.get("type").and_then(Value::as_str)
-                                    == Some("result");
-                                let id_match = val.get("messageId").and_then(Value::as_str)
-                                    == Some(expected.as_str());
-                                if is_result && id_match {
-                                    let success = val.get("success")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false);
-                                    if success {
-                                        let nodes: Vec<NodeState> = val
-                                            .get("result")
-                                            .and_then(|r| r.get("state"))
-                                            .and_then(|s| s.get("nodes"))
-                                            .and_then(|n| n.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(NodeState::from_value)
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default();
-                                        info!(
-                                            count = nodes.len(),
-                                            "Rescan: republishing node states"
-                                        );
-                                        for node in &nodes {
-                                            if let Err(e) =
-                                                publish_node(publisher, node, translator).await
-                                            {
-                                                warn!(
-                                                    node_id = node.node_id,
-                                                    error = %e,
-                                                    "Rescan publish_node failed"
-                                                );
-                                            }
-                                        }
-                                        refresh_primary_state(ws_tx, &nodes).await;
-                                    } else {
-                                        warn!("Rescan start_listening returned success=false");
-                                    }
-                                    pending_rescan_id = None;
-                                    consumed = true;
-                                }
-                            }
-                        }
-                        if !consumed {
-                            if let Err(e) =
-                                handle_ws_message(&text, publisher, translator, event_tx).await
-                            {
-                                warn!(error = %e, "Error handling WS message");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Ping(_))) => {}
-                    Some(Ok(Message::Close(_))) => bail!("WS closed by server"),
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => bail!("WS read error: {e}"),
-                    None => bail!("WS stream ended"),
-                }
-            }
-            // Outgoing SetValueCmd from the device command path
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(c) => {
-                        if let Err(e) = send_set_value(ws_tx, &c).await {
-                            warn!(error = %e, "Failed to send set_value");
-                        }
-                    }
-                    None => break, // sender dropped
-                }
-            }
-            // Raw control JSON from streaming action handlers
-            // (include_node, exclude_node).
-            ctrl = control_rx.recv() => {
-                match ctrl {
-                    Some(msg) => {
-                        if let Err(e) = ws_send(ws_tx, &msg).await {
-                            warn!(error = %e, cmd = ?msg.get("command"), "Failed to send control command");
-                        }
-                    }
-                    None => {
-                        // Control channel closed (bridge being torn down).
-                        // Continue so we don't prematurely exit the WS loop.
-                    }
-                }
-            }
-            // Rescan ping from the management custom_handler.
-            sig = rescan_rx.recv() => {
-                match sig {
-                    Some(()) => {
-                        if pending_rescan_id.is_some() {
-                            debug!("Rescan already pending; ignoring duplicate request");
-                            continue;
-                        }
-                        let msg_id = format!("hc-zwave-rescan-{}", Uuid::new_v4());
-                        if let Err(e) = ws_send(
-                            ws_tx,
-                            &json!({ "messageId": &msg_id, "command": "start_listening" }),
-                        )
-                        .await
-                        {
-                            warn!(error = %e, "Rescan: failed to send start_listening");
-                        } else {
-                            info!(message_id = %msg_id, "Rescan: start_listening sent");
-                            pending_rescan_id = Some(msg_id);
-                        }
-                    }
-                    None => {
-                        // Sender dropped — keep the loop running.
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn handle_ws_message(
-    text: &str,
-    publisher: &DevicePublisher,
-    translator: &Translator,
-    event_tx: &broadcast::Sender<ControllerEvent>,
-) -> Result<()> {
-    let msg: ServerMsg = match serde_json::from_str(text) {
-        Ok(m) => m,
-        Err(e) => {
-            debug!(error = %e, msg = %&text[..text.len().min(120)], "Unrecognised WS frame");
-            return Ok(());
-        }
+    let r = match (ev.source.as_str(), ev.event.as_str()) {
+        ("controller", _) | ("driver", _) => on_controller_event(s, &ev).await,
+        _ => on_node_event(s, &ev).await,
     };
+    if let Err(e) = r {
+        debug!(event = %ev.event, error = %e, "An event could not be handled");
+    }
+}
 
-    match msg {
-        ServerMsg::Event(wrapper) => {
-            // Broadcast controller-scope events for streaming handlers
-            // (include_node / exclude_node). Node-scope events keep
-            // flowing through the existing handle_event pipeline.
-            if let Some(ctrl_ev) = decode_controller_event(&wrapper.event) {
-                // Exclusion is unambiguous — the device is gone, so we
-                // unregister immediately. (handle_event's "node removed"
-                // arm requires a top-level `nodeId`, which the
-                // controller-scope event may omit, so we cover that gap
-                // here.) Inclusion is NOT handled here on purpose:
-                // zwave-js can't tell us what the device is until its
-                // interview completes — registering on NodeAdded would
-                // produce a placeholder with no command classes and no
-                // schema. We instead rely on the node-scope `node ready`
-                // path in handle_event, plus the explicit `rescan_nodes`
-                // manifest action for users who don't want to wait.
-                if let ControllerEvent::NodeRemoved { node_id } = &ctrl_ev {
-                    let device_id = node_device_id(*node_id);
-                    let plugin_id = publisher.plugin_id().to_string();
-                    if let Err(e) = publisher.unregister_device(&plugin_id, &device_id).await {
-                        warn!(node_id, error = %e, "unregister_device on NodeRemoved failed");
-                    } else {
-                        info!(node_id, device_id, "Unregistered node on exclusion");
-                    }
-                }
-                // Ignore send failures — broadcast returns an error only
-                // when there are no subscribers, which is the normal
-                // case between inclusion sessions.
-                let _ = event_tx.send(ctrl_ev);
+async fn on_controller_event(s: &Arc<Shared>, ev: &RawEvent) -> Result<()> {
+    match ev.event.as_str() {
+        "node added" => {
+            // Known now, published once its interview is done (`ready`).
+            if let Some(node) = ev.get("node").and_then(NodeState::from_value) {
+                info!(node_id = node.node_id, "Node added; interviewing");
+                s.net().nodes.insert(node.node_id, node);
             }
-            handle_event(wrapper.event, publisher, translator).await?
         }
-        ServerMsg::Result(r) if !r.success => {
-            warn!(
-                message_id = %r.message_id,
-                error_code = ?r.error_code,
-                result = ?r.result,
-                "zwave-js command failed"
-            );
+        "node removed" => {
+            let Some(node_id) = ev
+                .get("node")
+                .and_then(|n| n.get("nodeId"))
+                .and_then(Value::as_u64)
+                .map(|n| n as u32)
+            else {
+                return Ok(());
+            };
+            // RemoveNodeReason 3/4: replaced. The new device takes the same
+            // node id, so the homeCore device — its room, its automations —
+            // stays for it.
+            let reason = ev.get("reason").and_then(Value::as_u64);
+            if matches!(reason, Some(3 | 4)) {
+                info!(node_id, "Node replaced; its device is kept for the new one");
+                return Ok(());
+            }
+            forget_node(s, node_id).await?;
+        }
+        "rebuild routes progress" | "heal network progress" => {
+            if let Some(p) = ev.get("progress").and_then(Value::as_object) {
+                let mut net = s.net();
+                net.rebuilding = true;
+                net.rebuild_progress = p
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("pending").to_string()))
+                    .collect();
+            }
+        }
+        "rebuild routes done" | "heal network done" => {
+            let mut net = s.net();
+            net.rebuilding = false;
+            net.rebuild_finished = Some(Utc::now());
+            if let Some(p) = ev.get("result").and_then(Value::as_object) {
+                net.rebuild_progress = p
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("done").to_string()))
+                    .collect();
+            }
+        }
+        "inclusion started" => s.net().inclusion = Some("including".into()),
+        "exclusion started" => s.net().inclusion = Some("excluding".into()),
+        "inclusion stopped" | "exclusion stopped" | "inclusion failed" | "exclusion failed"
+        | "inclusion aborted" => s.net().inclusion = Some("idle".into()),
+        "statistics updated" => {
+            if let Some(st) = ev.get("statistics") {
+                let mut net = s.net();
+                if net.controller.is_object() {
+                    net.controller["statistics"] = st.clone();
+                }
+            }
         }
         _ => {}
     }
     Ok(())
 }
 
-async fn handle_event(
-    ev: crate::types::RawEvent,
-    publisher: &DevicePublisher,
-    translator: &Translator,
-) -> Result<()> {
-    let node_id = match ev.node_id {
-        Some(id) => id,
-        None => return Ok(()),
+/// A node that left the network: its device goes from homeCore.
+pub async fn forget_node(s: &Shared, node_id: u32) -> Result<()> {
+    let device_id = node_device_id(node_id);
+    s.net().nodes.remove(&node_id);
+    s.translator.forget_node(node_id);
+    s.names.forget_node(node_id);
+    s.cleaned
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&node_id);
+    let plugin_id = s.publisher.plugin_id().to_string();
+    s.publisher
+        .unregister_device(&plugin_id, &device_id)
+        .await?;
+    info!(node_id, device_id, "Node left the network; device removed");
+    Ok(())
+}
+
+async fn on_node_event(s: &Arc<Shared>, ev: &RawEvent) -> Result<()> {
+    let Some(node_id) = ev.node_id else {
+        return Ok(());
     };
     let device_id = node_device_id(node_id);
-
     match ev.event.as_str() {
-        "value updated" | "value added" => {
-            if let Some(args_val) = ev.args {
-                if let Ok(args) = serde_json::from_value::<ValueUpdatedArgs>(args_val) {
-                    let pk_str = args.property_key.as_ref().and_then(property_key_str);
-                    let pk = pk_str.as_deref();
-                    if translator.is_unpublished(args.command_class, &args.property) {
-                        return Ok(());
-                    }
-                    let pairs = match translator.translate(
-                        node_id,
-                        args.command_class,
-                        args.endpoint,
-                        &args.property,
-                        pk,
-                        &args.new_value,
-                    ) {
-                        Some(pairs) => pairs,
-                        None => {
-                            // Generic fallback — synthesise a stable attribute
-                            // name so unaliased values still land in homeCore.
-                            let attr = synthetic_attr_name(
-                                args.command_class,
-                                args.endpoint,
-                                &args.property,
-                                pk,
-                            );
-                            debug!(
-                                node_id,
-                                cc = args.command_class,
-                                prop = %args.property,
-                                prop_key = ?pk,
-                                synth_attr = %attr,
-                                value = ?args.new_value,
-                                "Unaliased value — publishing under synthetic name"
-                            );
-                            vec![(attr, args.new_value.clone())]
-                        }
-                    };
-                    // Skip null values — partial-merge semantics treat
-                    // null as "delete this attribute" on the homeCore
-                    // side, which would silently wipe whatever was there
-                    // (state_bridge::apply_partial_merge_patch). zwave-js
-                    // can fire `value updated` with a null `newValue` for
-                    // values that go idle or briefly drop out; we don't
-                    // want those to clear data.
-                    let patch: serde_json::Map<String, Value> =
-                        pairs.into_iter().filter(|(_, v)| !v.is_null()).collect();
-                    if patch.is_empty() {
-                        debug!(node_id, "Null value — skipping partial publish");
-                        return Ok(());
-                    }
-                    debug!(node_id, ?patch, "Value → publishing");
-                    publisher
-                        .publish_state_partial(&device_id, &Value::Object(patch))
-                        .await?;
-                }
+        "value updated" | "value added" | "value notification" => {
+            if let Some(args) = &ev.args {
+                on_value(s, node_id, args).await?;
             }
         }
-
-        // A value's unit or supported states changed (a sensor switched
-        // scale). Later readings convert from the new one.
+        "value removed" => {
+            if let Some(args) = &ev.args {
+                on_value_removed(s, node_id, args).await?;
+            }
+        }
         "metadata updated" => {
-            if let Some(args) = ev.args {
-                let cc = args.get("commandClass").and_then(Value::as_u64);
-                let ep = args.get("endpoint").and_then(Value::as_u64).unwrap_or(0);
-                let prop = args.get("property").map(|p| match p {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                });
-                let pk = args.get("propertyKey").and_then(property_key_str);
-                if let (Some(cc), Some(prop), Some(meta)) = (cc, prop, args.get("metadata")) {
-                    translator.learn_metadata(
-                        node_id,
-                        cc as u32,
-                        ep as u32,
-                        &prop,
-                        pk.as_deref(),
-                        meta,
-                    );
+            if let Some(args) = &ev.args {
+                on_metadata(s, node_id, args);
+            }
+        }
+        "notification" => {
+            let cc = ev.get("ccId").and_then(Value::as_u64);
+            if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                n.last_seen = Some(json!(Utc::now().to_rfc3339()));
+            }
+            if let (Some(113), Some(args)) = (cc, &ev.args) {
+                if let Some(e) = lock::from_notification(args) {
+                    publish_lock_event(s, node_id, e).await?;
                 }
             }
         }
-
+        "statistics updated" => {
+            if let Some(st) = ev.get("statistics") {
+                if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                    if let Some(seen) = st.get("lastSeen") {
+                        n.last_seen = Some(seen.clone());
+                    }
+                    n.statistics = Some(st.clone());
+                }
+            }
+        }
+        "dead" | "alive" | "sleep" | "wake up" => {
+            let status = match ev.event.as_str() {
+                "dead" => 3,
+                "alive" => 4,
+                "sleep" => 1,
+                _ => 2,
+            };
+            if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                n.status = Some(status);
+                if status != 3 {
+                    n.last_seen = Some(json!(Utc::now().to_rfc3339()));
+                }
+            }
+            // Asleep is normal for a battery device; only dead is offline.
+            if status != 1 {
+                s.publisher
+                    .publish_availability(&device_id, status != 3)
+                    .await?;
+            }
+            info!(node_id, event = %ev.event, "Node status");
+        }
         "node status changed" => {
-            // NodeStatus: 0=Unknown, 1=Asleep, 2=Awake, 3=Dead, 4=Alive.
-            // Battery sensors regularly go Asleep between readings — that is normal
-            // operation, not an outage.  Only Dead (3) means the node is unreachable.
             let status = ev
                 .args
                 .as_ref()
                 .and_then(|a| a.get("status"))
-                .and_then(|s| s.as_u64());
-            let available = !matches!(status, Some(3));
-            publisher
-                .publish_availability(&device_id, available)
+                .and_then(Value::as_u64);
+            if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                n.status = status.and_then(|v| u8::try_from(v).ok());
+            }
+            s.publisher
+                .publish_availability(&device_id, status != Some(3))
                 .await?;
-            info!(node_id, ?status, available, "Node status changed");
         }
-
-        // Direct node lifecycle events forwarded by zwave-js-server
-        "dead" => {
-            publisher.publish_availability(&device_id, false).await?;
-            info!(node_id, "Node dead");
+        // The interview is done: now the node can be described (H1 — the
+        // event is `ready`, not "node ready").
+        "ready" => {
+            let parsed = ev.node_state.as_ref().and_then(NodeState::from_value);
+            let node = match parsed {
+                Some(n) => n,
+                None => match refresh_node(s, node_id).await {
+                    Ok(n) => n,
+                    Err(e) => bail!("a ready node could not be read: {e}"),
+                },
+            };
+            s.net().nodes.insert(node_id, node.clone());
+            publish_node(s, &node).await?;
+            info!(node_id, "Node ready — published");
         }
-        "alive" | "wake up" => {
-            publisher.publish_availability(&device_id, true).await?;
-            info!(node_id, event = %ev.event, "Node alive/awake");
-        }
-        "sleep" => {
-            // Sleeping is normal for battery devices — keep current availability,
-            // do not mark offline.
-            debug!(node_id, "Node sleeping (battery device)");
-        }
-
-        "node ready" => {
-            if let Some(ns_val) = ev.node_state {
-                if let Some(node) = NodeState::from_value(&ns_val) {
-                    publish_node(publisher, &node, translator).await?;
-                    info!(node_id, "Node ready — published full state");
+        "interview stage completed" => {
+            if let Some(stage) = ev.get("stageName") {
+                if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                    n.interview_stage = Some(stage.clone());
                 }
             }
         }
-
-        "node name updated" => {
-            if let Some(name) = ev.name {
-                let display_name = if name.is_empty() { &device_id } else { &name };
-                // A rename knows the new name and nothing else about the node.
-                // Omitting `device_type` leaves what core already stored alone,
-                // which is right — re-asserting "zwave" here is what used to
-                // undo the real type after every rename.
-                publisher
-                    .register_device_full(&device_id, display_name, None, None, None)
-                    .await?;
-                let patch = json!({ "name": name });
-                publisher.publish_state_partial(&device_id, &patch).await?;
-                debug!(node_id, %name, "Node name updated");
+        "interview completed" => {
+            if let Some(n) = s.net().nodes.get_mut(&node_id) {
+                n.interview_stage = Some(json!("Complete"));
             }
         }
-
-        "node location updated" => {
-            if let Some(loc) = ev.location {
-                let patch = json!({ "location": loc });
-                publisher.publish_state_partial(&device_id, &patch).await?;
-                debug!(node_id, %loc, "Node location updated");
-            }
-        }
-
-        "node removed" => {
-            let plugin_id = publisher.plugin_id().to_string();
-            publisher.unregister_device(&plugin_id, &device_id).await?;
-            info!(node_id, "Node removed and unregistered");
-        }
-
-        _ => {
-            debug!(event = %ev.event, node_id, "Unhandled event");
-        }
+        _ => debug!(event = %ev.event, node_id, "Unhandled node event"),
     }
     Ok(())
 }
 
+async fn on_value(s: &Arc<Shared>, node_id: u32, args: &Value) -> Result<()> {
+    let Ok(a) = serde_json::from_value::<ValueUpdatedArgs>(args.clone()) else {
+        return Ok(());
+    };
+    // A lock's code: not held, not logged, not published.
+    if crate::types::is_code_value(a.command_class, &a.property) {
+        return Ok(());
+    }
+    let pk = a.property_key.as_ref().and_then(property_key_str);
+    if let Some(n) = s.net().nodes.get_mut(&node_id) {
+        // It reported, so it was heard.
+        n.last_seen = Some(json!(Utc::now().to_rfc3339()));
+        n.upsert_value(NodeValue {
+            command_class: a.command_class,
+            endpoint: a.endpoint,
+            property: a.property.clone(),
+            property_key: a.property_key.clone(),
+            value: Some(a.new_value.clone()),
+            metadata: args.get("metadata").cloned(),
+        });
+    }
+    // A v1 lock alarm: the type, then its level.
+    if a.command_class == 113 && matches!(a.property.as_str(), "alarmType" | "alarmLevel") {
+        if let Some(e) = v1_alarm(s, node_id, &a) {
+            publish_lock_event(s, node_id, e).await?;
+        }
+        return Ok(());
+    }
+    // A slot's code switched on or off, or cleared: its name may go.
+    if a.command_class == 99 && a.property == "userIdStatus" {
+        if let (Some(slot), Some(0)) = (
+            pk.as_deref().and_then(|p| p.parse::<u32>().ok()),
+            a.new_value.as_u64(),
+        ) {
+            if s.names.of(node_id).contains_key(&slot) {
+                s.names.set(node_id, slot, None);
+                republish_schema(s, node_id).await;
+            }
+        }
+        return Ok(());
+    }
+    // Raw nulls (a value going idle, briefly unknown) are not published: a
+    // null in a partial deletes the attribute. A null the translation means
+    // ("a lock in an unknown state") is.
+    if a.new_value.is_null() {
+        return Ok(());
+    }
+    let pairs = value_pairs(
+        node_id,
+        a.command_class,
+        a.endpoint,
+        &a.property,
+        pk.as_deref(),
+        &a.new_value,
+        &s.translator,
+    );
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let cause = s.cause(node_id, &keys, false);
+    let patch: Map<String, Value> = pairs.into_iter().collect();
+    let patch = Value::Object(patch);
+    let device_id = node_device_id(node_id);
+    s.publish_caused(node_id, &patch, cause).await?;
+    update_alerts(s, &device_id, &patch).await;
+    Ok(())
+}
+
+/// A v1 alarm's type and level arrive as two value updates; decode once both
+/// are in.
+fn v1_alarm(s: &Shared, node_id: u32, a: &ValueUpdatedArgs) -> Option<LockEvent> {
+    let mut held = s.alarm_types.lock().unwrap_or_else(|e| e.into_inner());
+    let n = a.new_value.as_u64()?;
+    if a.property == "alarmType" {
+        held.insert(node_id, (n, Instant::now()));
+        return None;
+    }
+    let (kind, at) = held.remove(&node_id)?;
+    if at.elapsed() > Duration::from_secs(3) {
+        return None;
+    }
+    lock::from_v1_alarm(kind, n)
+}
+
+async fn publish_lock_event(s: &Shared, node_id: u32, e: LockEvent) -> Result<()> {
+    let device_id = node_device_id(node_id);
+    let mut patch = e.patch(&Utc::now().to_rfc3339());
+    match e.action {
+        "jammed" => patch["jammed"] = json!(true),
+        "locked" | "unlocked" => patch["jammed"] = json!(false),
+        _ => {}
+    }
+    info!(node_id, action = e.action, method = ?e.method, slot = ?e.slot, "Lock event");
+    // A lock or unlock "by radio" right after homeCore asked for one is
+    // homeCore's: say who.
+    let cause = (e.method == Some("rf"))
+        .then(|| s.cause(node_id, &["locked"], false))
+        .flatten();
+    s.publish_caused(node_id, &patch, cause).await?;
+    update_alerts(s, &device_id, &patch).await;
+    Ok(())
+}
+
+async fn on_value_removed(s: &Shared, node_id: u32, args: &Value) -> Result<()> {
+    let Ok(a) = serde_json::from_value::<ValueUpdatedArgs>(args.clone()) else {
+        return Ok(());
+    };
+    let key = crate::types::value_key(
+        a.command_class,
+        a.endpoint,
+        &a.property,
+        a.property_key.as_ref(),
+    );
+    let removed = s
+        .net()
+        .nodes
+        .get_mut(&node_id)
+        .and_then(|n| n.remove_value(&key));
+    let pk = a.property_key.as_ref().and_then(property_key_str);
+    let probe = removed
+        .and_then(|v| v.value)
+        .filter(|v| !v.is_null())
+        .unwrap_or(json!(0));
+    let names: Vec<String> = value_pairs(
+        node_id,
+        a.command_class,
+        a.endpoint,
+        &a.property,
+        pk.as_deref(),
+        &probe,
+        &s.translator,
+    )
+    .into_iter()
+    .map(|(k, _)| k)
+    .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let patch: Map<String, Value> = names.into_iter().map(|k| (k, Value::Null)).collect();
+    s.publisher
+        .publish_state_partial(&node_device_id(node_id), &Value::Object(patch))
+        .await?;
+    Ok(())
+}
+
+fn on_metadata(s: &Shared, node_id: u32, args: &Value) {
+    let cc = args.get("commandClass").and_then(Value::as_u64);
+    let ep = args.get("endpoint").and_then(Value::as_u64).unwrap_or(0);
+    let prop = args.get("property").map(|p| match p {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
+    let pk = args.get("propertyKey").and_then(property_key_str);
+    let (Some(cc), Some(prop), Some(meta)) = (cc, prop, args.get("metadata")) else {
+        return;
+    };
+    s.translator
+        .learn_metadata(node_id, cc as u32, ep as u32, &prop, pk.as_deref(), meta);
+    if let Some(n) = s.net().nodes.get_mut(&node_id) {
+        let key = crate::types::value_key(cc as u32, ep as u32, &prop, args.get("propertyKey"));
+        match n.values.iter_mut().find(|v| v.key() == key) {
+            Some(v) => v.metadata = Some(meta.clone()),
+            None if !crate::types::is_code_value(cc as u32, &prop) => n.values.push(NodeValue {
+                command_class: cc as u32,
+                endpoint: ep as u32,
+                property: prop,
+                property_key: args.get("propertyKey").cloned(),
+                value: None,
+                metadata: Some(meta.clone()),
+            }),
+            None => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// node.set_value
+// Device commands
 // ---------------------------------------------------------------------------
 
-fn set_value_msg(msg_id: &str, cmd: &SetValueCmd) -> Value {
-    let w = &cmd.write;
+/// Take device commands as they come, each on its own task so a slow lock
+/// does not hold up a switch.
+async fn command_intake(s: Arc<Shared>, mut cmd_rx: mpsc::Receiver<(String, Value)>) {
+    while let Some((device_id, cmd)) = cmd_rx.recv().await {
+        let s = s.clone();
+        tokio::spawn(async move { execute_command(&s, &device_id, &cmd).await });
+    }
+}
+
+/// The `node.set_value` for one write.
+pub fn set_value_msg(node_id: u32, w: &translator::Write) -> Value {
     let mut value_id = json!({
         "commandClass": w.command_class,
         "endpoint": w.endpoint,
@@ -1164,117 +1180,228 @@ fn set_value_msg(msg_id: &str, cmd: &SetValueCmd) -> Value {
         value_id["propertyKey"] = pk.clone();
     }
     let mut msg = json!({
-        "messageId": msg_id,
         "command": "node.set_value",
-        "nodeId": cmd.node_id,
+        "nodeId": node_id,
         "valueId": value_id,
         "value": w.value,
     });
-    // zwave-js `SetValueAPIOptions` — a fade's `transitionDuration`.
     if let Some(options) = &w.options {
         msg["options"] = options.clone();
     }
     msg
 }
 
-async fn send_set_value(ws_tx: &mut WsSink, cmd: &SetValueCmd) -> Result<()> {
-    let msg_id = format!("hc-sv-{}", Uuid::new_v4());
-    let msg = set_value_msg(&msg_id, cmd);
-    // Log the exact JSON so we can compare against the zwave-js-server protocol spec.
-    let raw_json = serde_json::to_string(&msg).unwrap_or_default();
-    info!(node_id = cmd.node_id, cc = cmd.write.command_class, prop = %cmd.write.property, value = ?cmd.write.value, json = %raw_json, "Sending node.set_value");
-    ws_send(ws_tx, &msg).await?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command dispatch loop — reads SDK command channel, translates to SetValueCmd
-// ---------------------------------------------------------------------------
-
-async fn cmd_dispatch_loop(
-    cmd_rx: &mut mpsc::Receiver<(String, Value)>,
-    sv_tx: &mpsc::Sender<SetValueCmd>,
-    translator: &Translator,
-) -> Result<()> {
-    loop {
-        match cmd_rx.recv().await {
-            Some((device_id, cmd)) => {
-                handle_cmd(&device_id, &cmd, translator, sv_tx).await;
-            }
-            None => bail!("SDK command channel closed"),
-        }
+/// Send one `node.set_value` and say how it went. A code's value is never in
+/// the answer's error.
+pub async fn set_value(s: &Shared, node_id: u32, w: &translator::Write) -> Result<(), String> {
+    info!(
+        node_id,
+        cc = w.command_class,
+        endpoint = w.endpoint,
+        property = %w.property,
+        "Sending node.set_value"
+    );
+    if w.command_class != 99 {
+        debug!(node_id, value = %w.value, "node.set_value value");
     }
-}
-
-async fn handle_cmd(
-    device_id: &str,
-    cmd: &Value,
-    translator: &Translator,
-    sv_tx: &mpsc::Sender<SetValueCmd>,
-) {
-    // device_id format: "zwave_{nodeId}"
-    let node_id: u32 = match device_id
-        .strip_prefix("zwave_")
-        .and_then(|s| s.parse().ok())
+    match s
+        .client
+        .request(set_value_msg(node_id, w), SET_VALUE_TIMEOUT)
+        .await
     {
-        Some(id) => id,
-        None => return, // not a zwave device — ignore
-    };
-    info!(node_id, "Received cmd from HomeCore");
+        Ok(answer) => zwclient::set_value_outcome(&answer),
+        Err(e) => Err(e.message),
+    }
+}
 
-    let obj = match cmd.as_object() {
-        Some(o) => o,
-        None => return,
+async fn execute_command(s: &Shared, device_id: &str, cmd: &Value) {
+    let Some(node_id) = node_of_device(device_id) else {
+        return;
     };
-
-    // HomeCore command metadata keys (`_hc`, top-level `correlation_id`) are
-    // not device attributes — skip them when tallying dispatch outcomes so
-    // the "nothing dispatched" warn doesn't fire on metadata-only noise.
-    // `transition_ms` rides along with the writes it fades rather than being
-    // written itself.
-    let mut dispatched = 0usize;
-    let (writes, unrecognised) = translator.commands(node_id, obj);
-    for write in writes {
-        let sv_cmd = SetValueCmd { node_id, write };
-        if sv_tx.send(sv_cmd).await.is_err() {
-            warn!("WS task gone; dropping cmd");
-        } else {
-            dispatched += 1;
+    let Some(obj) = cmd.as_object() else {
+        return;
+    };
+    if let Some(action) = obj.get("action").and_then(Value::as_str) {
+        let r = device_action(s, node_id, action, obj).await;
+        report(s, device_id, action, r).await;
+        return;
+    }
+    let (writes, unrecognised) = s.translator.commands(node_id, obj);
+    if writes.is_empty() {
+        if !unrecognised.is_empty() {
+            warn!(node_id, attributes = ?unrecognised, "Nothing in the command can be written to this device");
+            report(
+                s,
+                device_id,
+                "set",
+                Err(format!(
+                    "this device can't be set to {}",
+                    unrecognised.join(", ")
+                )),
+            )
+            .await;
+        }
+        return;
+    }
+    let operation = writes
+        .iter()
+        .map(|w| w.attribute.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    // Wait a moment for a connection that is coming back — no longer.
+    if !s.client.wait_ready(COMMAND_TTL).await {
+        report(
+            s,
+            device_id,
+            &operation,
+            Err("Z-Wave JS is not connected, so it was not sent".into()),
+        )
+        .await;
+        return;
+    }
+    s.recent.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        node_id,
+        (
+            cmd.clone(),
+            writes.iter().map(|w| w.attribute.clone()).collect(),
+            Instant::now(),
+        ),
+    );
+    let mut failed = Vec::new();
+    for w in &writes {
+        if let Err(e) = set_value(s, node_id, w).await {
+            failed.push(format!("{}: {e}", w.attribute));
         }
     }
+    let mut result = if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    };
+    if result.is_ok() && !unrecognised.is_empty() {
+        result = Err(format!(
+            "this device can't be set to {}",
+            unrecognised.join(", ")
+        ));
+    }
+    report(s, device_id, &operation, result).await;
+}
 
-    if dispatched == 0 && !unrecognised.is_empty() {
-        // The command had a payload but no attribute mapped to a Z-Wave
-        // writable. Likely a shape mismatch between sender and this plugin.
-        // Surfacing as warn makes silent drops visible.
-        warn!(
-            node_id,
-            attributes = ?unrecognised,
-            "Command had no writable attributes — nothing was dispatched to Z-Wave"
-        );
-    } else if !unrecognised.is_empty() {
-        debug!(
-            attributes = ?unrecognised,
-            "Some command attributes had no write target (others dispatched)"
-        );
+/// A device action (`{"action": …}`) on a node.
+async fn device_action(
+    s: &Shared,
+    node_id: u32,
+    action: &str,
+    obj: &Map<String, Value>,
+) -> Result<(), String> {
+    match action {
+        "set_code_enabled" => {
+            let slot = obj
+                .get("slot")
+                .and_then(num_u64)
+                .ok_or("set_code_enabled needs 'slot'")?;
+            let enabled = obj
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("set_code_enabled needs 'enabled' (true or false)")?;
+            if !s.client.wait_ready(COMMAND_TTL).await {
+                return Err("Z-Wave JS is not connected, so it was not sent".into());
+            }
+            crate::actions::set_code_enabled(s, node_id, slot as u32, enabled).await
+        }
+        other => Err(format!("unknown action \"{other}\"")),
+    }
+}
+
+fn num_u64(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// A failure's kind, for `plugin_command_result`.
+pub fn error_code(e: &str) -> &'static str {
+    let l = e.to_ascii_lowercase();
+    if l.contains("not connected") {
+        "not_connected"
+    } else if l.contains("did not answer") || l.contains("closed before") {
+        "no_answer"
+    } else if l.contains("unknown action") {
+        "unknown_action"
+    } else if l.contains("needs") || l.contains("can't be set") || l.contains("does not take") {
+        "invalid_params"
+    } else {
+        "rejected"
+    }
+}
+
+/// Say how a command went: on the device (`last_command_error`, null once
+/// one succeeds) and as a `plugin_command_result` event.
+pub async fn report(s: &Shared, device_id: &str, operation: &str, result: Result<(), String>) {
+    if let Err(e) = &result {
+        warn!(device_id, operation, error = %e, "Command failed");
+    }
+    let now = result.as_ref().err().cloned();
+    let changed = {
+        let mut held = s.last_errors.lock().unwrap_or_else(|e| e.into_inner());
+        let before = held.insert(device_id.to_string(), now.clone());
+        before.flatten() != now
+    };
+    if changed {
+        let _ = s
+            .publisher
+            .publish_state_partial(device_id, &json!({ "last_command_error": now }))
+            .await;
+        // homeCore takes any state as a sign of life; while Z-Wave JS is
+        // away, say again that the device is not reachable.
+        if !s.client.is_ready() {
+            let _ = s.publisher.publish_availability(device_id, false).await;
+        }
+    }
+    let mut payload = json!({
+        "plugin_id": s.publisher.plugin_id(),
+        "device_id": device_id,
+        "operation": operation,
+        "success": result.is_ok(),
+    });
+    if let Err(e) = &result {
+        payload["error"] = json!(e);
+        payload["error_code"] = json!(error_code(e));
+    }
+    if let Err(e) = s
+        .publisher
+        .publish_event("plugin_command_result", &payload)
+        .await
+    {
+        debug!(device_id, error = %e, "Could not publish the command result");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tests — startup primary-state value refresh
+// Tests
 // ---------------------------------------------------------------------------
+
+/// What other modules' tests need from here.
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    pub fn state_of(node: &NodeState, translator: &Translator) -> Value {
+        let state = build_state(node, translator);
+        let mut all = state.as_object().cloned().unwrap_or_default();
+        all.extend(retired_state(node, translator, &state));
+        Value::Object(all)
+    }
+}
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use serde_json::json;
 
-    fn node(j: serde_json::Value) -> NodeState {
-        serde_json::from_value(j).expect("test fixture must parse")
+    fn node(j: Value) -> NodeState {
+        NodeState::from_value(&j).expect("test fixture must parse")
     }
 
-    /// A node as zwave-js really sends it, trimmed to what matters here.
     fn classed(generic: &str, specific: &str) -> NodeState {
         node(json!({
             "nodeId": 1,
@@ -1285,10 +1412,6 @@ mod tests {
         }))
     }
 
-    /// **Every node used to register as `zwave`** — the protocol, not the
-    /// device. A lock, four outlets, a door sensor and a motion sensor all
-    /// arrived indistinguishable, while zwave-js had been sending the answer
-    /// on every one of them.
     #[test]
     fn the_class_decides_where_it_is_decisive() {
         assert_eq!(
@@ -1306,7 +1429,6 @@ mod tests {
             device_type_for(&classed("Static Controller", "PC Controller"), &json!({})),
             Some("gateway")
         );
-        // A garage door opener is Entry Control too, and is not a lock.
         assert_eq!(
             device_type_for(
                 &classed("Entry Control", "Secure Barrier Add-on"),
@@ -1323,8 +1445,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn what_the_node_reports_breaks_the_tie_the_class_cannot() {
+        let sensor = classed("Notification Sensor", "Notification Sensor");
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "open": true })),
+            Some("contact_sensor")
+        );
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "motion": false, "tampered": false })),
+            Some("motion_sensor")
+        );
+        assert_eq!(
+            device_type_for(&sensor, &json!({ "illuminance": 40 })),
+            Some("sensor")
+        );
+        // A lock reports its door too, and is still a lock.
+        let bare = node(json!({ "nodeId": 7 }));
+        assert_eq!(
+            device_type_for(&bare, &json!({ "locked": true, "open": false })),
+            Some("lock")
+        );
+    }
+
+    #[test]
+    fn a_node_that_has_not_been_interviewed_claims_nothing() {
+        let bare = node(json!({ "nodeId": 7 }));
+        assert_eq!(device_type_for(&bare, &json!({})), None);
+    }
+
     /// Every retired spelling is cleared, along with the raw names of values
-    /// that now have a shared one — and nothing the node publishes now.
+    /// that now have a shared one or are not state — and nothing the node
+    /// publishes now.
     #[test]
     fn retired_names_are_cleared_and_current_ones_kept() {
         let n = node(json!({
@@ -1333,8 +1485,9 @@ mod tests {
                 { "commandClass": 38, "endpoint": 0, "property": "currentValue", "value": 50 },
                 { "commandClass": 68, "endpoint": 0, "property": "mode", "value": 1 },
                 { "commandClass": 102, "endpoint": 0, "property": "targetState", "value": 255 },
-                { "commandClass": 99, "endpoint": 0, "property": "userCode", "propertyKey": 1, "value": "1234" },
-                { "commandClass": 112, "endpoint": 0, "property": "3", "value": 7 }
+                { "commandClass": 99, "endpoint": 0, "property": "userIdStatus", "propertyKey": 1, "value": 1 },
+                { "commandClass": 112, "endpoint": 0, "property": 3, "value": 7 },
+                { "commandClass": 114, "endpoint": 0, "property": "manufacturerId", "value": 99 }
             ]
         }));
         let t = Translator::new();
@@ -1347,340 +1500,136 @@ mod tests {
             names,
             vec![
                 "battery",
+                "bolt_status",
                 "brightness",
                 "cc102_targetstate",
+                "cc112_3",
+                "cc114_manufacturerid",
                 "cc38_currentvalue",
                 "cc68_mode",
-                "cc99_usercode_pk1",
+                "cc99_useridstatus_pk1",
                 "co2_ppm",
                 "contact_open",
+                "door_status",
+                "latch_status",
+                "location",
                 "mode",
+                "name",
                 "tamper",
                 "target_temp",
             ]
         );
         assert!(cleared.values().all(Value::is_null));
-        // Still published: untouched.
-        for kept in ["brightness_pct", "on", "fan_mode", "cc112_3"] {
+        for kept in ["brightness_pct", "on", "fan_mode"] {
             assert!(state.get(kept).is_some(), "{kept}");
             assert!(!cleared.contains_key(kept), "{kept}");
         }
+        // NOISE: none of these are state any more.
+        for gone in ["cc112_3", "cc114_manufacturerid", "name"] {
+            assert!(state.get(gone).is_none(), "{gone}");
+        }
     }
 
-    /// A fade rides along as zwave-js set-value options; a write without one
-    /// sends none.
+    /// M10: a node's name and room are not published as state.
+    #[test]
+    fn name_and_location_are_not_state() {
+        let n = node(json!({
+            "nodeId": 4, "name": "Plug - Office AC", "location": "Office",
+            "values": [ { "commandClass": 37, "endpoint": 0, "property": "currentValue", "value": true } ]
+        }));
+        let t = Translator::new();
+        t.learn_node(&n);
+        let state = build_state(&n, &t);
+        assert_eq!(state, json!({ "on": true }));
+        assert_eq!(display_name(&n), "Plug - Office AC");
+        let unnamed = node(json!({ "nodeId": 4, "label": "ZEN15" }));
+        assert_eq!(display_name(&unnamed), "ZEN15");
+        assert_eq!(display_name(&node(json!({ "nodeId": 4 }))), "zwave_4");
+    }
+
     #[test]
     fn set_value_carries_the_fade_as_options() {
-        let mut cmd = SetValueCmd {
-            node_id: 4,
-            write: translator::Write {
-                command_class: 38,
-                endpoint: 0,
-                property: "targetValue".into(),
-                property_key: None,
-                value: json!(99),
-                options: Some(json!({ "transitionDuration": "2s" })),
-            },
+        let mut w = translator::Write {
+            command_class: 38,
+            endpoint: 0,
+            property: "targetValue".into(),
+            property_key: None,
+            value: json!(99),
+            options: Some(json!({ "transitionDuration": "2s" })),
+            attribute: "brightness_pct".into(),
         };
-        let msg = set_value_msg("m", &cmd);
+        let msg = set_value_msg(4, &w);
         assert_eq!(msg["command"], "node.set_value");
         assert_eq!(msg["value"], 99);
         assert_eq!(msg["options"], json!({ "transitionDuration": "2s" }));
         assert!(msg["valueId"].get("propertyKey").is_none());
-        cmd.write.options = None;
-        cmd.write.property_key = Some(json!(1));
-        let msg = set_value_msg("m", &cmd);
+        w.options = None;
+        w.property_key = Some(json!(1));
+        w.endpoint = 2;
+        let msg = set_value_msg(4, &w);
         assert!(msg.get("options").is_none());
         assert_eq!(msg["valueId"]["propertyKey"], 1);
+        assert_eq!(msg["valueId"]["endpoint"], 2);
     }
 
-    /// **A door sensor and a motion sensor share both class labels** on the
-    /// reference network — both are "Notification Sensor"/"Notification
-    /// Sensor". Only what they publish tells them apart.
+    /// M9: only mains-powered nodes are polled at startup — a lock is not.
     #[test]
-    fn what_the_node_reports_breaks_the_tie_the_class_cannot() {
-        let sensor = classed("Notification Sensor", "Notification Sensor");
-        assert_eq!(
-            device_type_for(&sensor, &json!({ "open": true })),
-            Some("contact_sensor")
-        );
-        assert_eq!(
-            device_type_for(&sensor, &json!({ "motion": false, "tampered": false })),
-            Some("motion_sensor")
-        );
-        // Reporting neither is still a sensor, which is more than "zwave" said.
-        assert_eq!(
-            device_type_for(&sensor, &json!({ "illuminance": 40 })),
-            Some("sensor")
-        );
+    fn only_mains_nodes_are_polled() {
+        let mains = node(json!({ "nodeId": 1, "isListening": true }));
+        let lock =
+            node(json!({ "nodeId": 2, "isListening": false, "isFrequentListening": "1000ms" }));
+        let sensor =
+            node(json!({ "nodeId": 3, "isListening": false, "isFrequentListening": false }));
+        let controller =
+            node(json!({ "nodeId": 1, "isListening": true, "isControllerNode": true }));
+        assert!(should_poll(&mains));
+        assert!(!should_poll(&lock));
+        assert!(!should_poll(&sensor));
+        assert!(!should_poll(&controller));
     }
 
-    /// An uninterviewed node has no class yet. Saying nothing leaves what core
-    /// already stored alone, so the registration after the interview fills it
-    /// in with no special path.
-    #[test]
-    fn a_node_that_has_not_been_interviewed_claims_nothing() {
-        let bare = node(json!({ "nodeId": 7 }));
-        assert_eq!(device_type_for(&bare, &json!({})), None);
-        assert_eq!(
-            device_type_for(&bare, &json!({ "locked": true })),
-            Some("lock")
-        );
-    }
-
-    fn val(cc: u32, ep: u32, prop: &str) -> serde_json::Value {
+    fn val(cc: u32, ep: u32, prop: &str) -> Value {
         json!({ "commandClass": cc, "endpoint": ep, "property": prop })
     }
 
-    fn node_with_values(node_id: u32, values: Vec<serde_json::Value>) -> NodeState {
-        node(json!({
-            "nodeId": node_id,
-            "isListening": true,
-            "values": values,
-        }))
-    }
-
-    // ---- should_poll_initial_values --------------------------------------
-
     #[test]
-    fn poll_eligible_when_mains_powered() {
-        let n = node(json!({ "nodeId": 1, "isListening": true }));
-        assert!(should_poll_initial_values(&n));
-    }
-
-    #[test]
-    fn poll_eligible_when_flirs_250ms() {
+    fn polls_cover_every_endpoint_and_only_primary_values() {
         let n = node(json!({
-            "nodeId": 1, "isListening": false, "isFrequentListening": "250ms"
+            "nodeId": 1, "isListening": true,
+            "values": [
+                val(37, 1, "currentValue"), val(37, 2, "currentValue"),
+                val(37, 0, "targetValue"), val(50, 0, "value"), val(98, 0, "currentMode")
+            ]
         }));
-        assert!(should_poll_initial_values(&n));
-    }
-
-    #[test]
-    fn poll_eligible_when_flirs_1000ms() {
-        let n = node(json!({
-            "nodeId": 1, "isListening": false, "isFrequentListening": "1000ms"
-        }));
-        assert!(should_poll_initial_values(&n));
-    }
-
-    #[test]
-    fn poll_skipped_when_sleeping_battery() {
-        let n = node(json!({
-            "nodeId": 1, "isListening": false, "isFrequentListening": false
-        }));
-        assert!(!should_poll_initial_values(&n));
-    }
-
-    #[test]
-    fn poll_skipped_when_flirs_field_null() {
-        let n = node(json!({
-            "nodeId": 1, "isListening": false, "isFrequentListening": null
-        }));
-        assert!(!should_poll_initial_values(&n));
-    }
-
-    #[test]
-    fn poll_skipped_when_both_fields_missing() {
-        // Be conservative when zwave-js omits the metadata.
-        let n = node(json!({ "nodeId": 1 }));
-        assert!(!should_poll_initial_values(&n));
-    }
-
-    // ---- primary_state_values_to_poll: each TARGET command class ---------
-
-    #[test]
-    fn matches_binary_switch() {
-        let n = node_with_values(1, vec![val(37, 0, "currentValue")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(37, 0, "currentValue".into())]
-        );
-    }
-
-    #[test]
-    fn matches_multilevel_switch() {
-        let n = node_with_values(1, vec![val(38, 0, "currentValue")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(38, 0, "currentValue".into())]
-        );
-    }
-
-    #[test]
-    fn matches_thermostat_mode() {
-        let n = node_with_values(1, vec![val(64, 0, "mode")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(64, 0, "mode".into())]
-        );
-    }
-
-    #[test]
-    fn matches_thermostat_operating_state() {
-        let n = node_with_values(1, vec![val(66, 0, "state")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(66, 0, "state".into())]
-        );
-    }
-
-    #[test]
-    fn matches_thermostat_setpoint() {
-        let n = node_with_values(1, vec![val(67, 0, "setpoint")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(67, 0, "setpoint".into())]
-        );
-    }
-
-    #[test]
-    fn matches_thermostat_fan_mode() {
-        let n = node_with_values(1, vec![val(68, 0, "mode")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(68, 0, "mode".into())]
-        );
-    }
-
-    #[test]
-    fn matches_door_lock() {
-        let n = node_with_values(1, vec![val(98, 0, "currentMode")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(98, 0, "currentMode".into())]
-        );
-    }
-
-    #[test]
-    fn matches_barrier_operator() {
-        let n = node_with_values(1, vec![val(102, 0, "currentState")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(102, 0, "currentState".into())]
-        );
-    }
-
-    #[test]
-    fn matches_color_switch() {
-        // Color Switch is CC 51; 117 is Protection.
-        let n = node_with_values(1, vec![val(51, 0, "currentColor")]);
-        assert_eq!(
-            primary_state_values_to_poll(&n),
-            vec![(51, 0, "currentColor".into())]
-        );
-    }
-
-    // ---- primary_state_values_to_poll: false-positive guards -------------
-
-    #[test]
-    fn ignores_target_value_property() {
-        // Target values are commands, not state; only currentValue is state.
-        let n = node_with_values(1, vec![val(37, 0, "targetValue"), val(38, 0, "duration")]);
-        assert!(primary_state_values_to_poll(&n).is_empty());
-    }
-
-    #[test]
-    fn ignores_unrelated_command_class() {
-        // CC 50 (Meter) intentionally not in TARGETS — meter reports come
-        // unsolicited and don't drift like actuator state.
-        let n = node_with_values(1, vec![val(50, 0, "value")]);
-        assert!(primary_state_values_to_poll(&n).is_empty());
-    }
-
-    // ---- multi-endpoint coverage -----------------------------------------
-
-    #[test]
-    fn matches_every_endpoint_for_multi_endpoint_devices() {
-        // Dual-relay smart plug: same (cc, prop) on endpoints 1 and 2.
-        let n = node_with_values(
-            1,
-            vec![val(37, 1, "currentValue"), val(37, 2, "currentValue")],
-        );
         assert_eq!(
             primary_state_values_to_poll(&n),
             vec![
                 (37, 1, "currentValue".into()),
                 (37, 2, "currentValue".into()),
+                (98, 0, "currentMode".into()),
             ]
         );
     }
 
-    // ---- mixed value list -------------------------------------------------
+    #[test]
+    fn device_ids_round_trip() {
+        assert_eq!(node_device_id(5), "zwave_5");
+        assert_eq!(node_of_device("zwave_5"), Some(5));
+        assert_eq!(node_of_device("hue_5"), None);
+        assert_eq!(node_of_device("zwave_x"), None);
+    }
 
     #[test]
-    fn extracts_only_targets_from_mixed_value_list() {
-        let n = node_with_values(
-            1,
-            vec![
-                val(37, 0, "currentValue"), // match
-                val(37, 0, "targetValue"),  // ignore
-                val(50, 0, "value"),        // ignore (Meter)
-                val(98, 0, "currentMode"),  // match
-            ],
+    fn errors_have_kinds() {
+        assert_eq!(
+            error_code("Z-Wave JS is not connected, so it was not sent"),
+            "not_connected"
         );
-        let got = primary_state_values_to_poll(&n);
-        assert_eq!(got.len(), 2);
-        assert!(got.contains(&(37, 0, "currentValue".into())));
-        assert!(got.contains(&(98, 0, "currentMode".into())));
-    }
-
-    #[test]
-    fn empty_value_list_yields_no_targets() {
-        let n = node_with_values(1, vec![]);
-        assert!(primary_state_values_to_poll(&n).is_empty());
-    }
-
-    // ---- plan_primary_state_refresh: counter bookkeeping -----------------
-
-    #[test]
-    fn plan_counts_skipped_battery_and_eligible_no_targets() {
-        let nodes = vec![
-            // 1: mains + has switch → polled
-            node(json!({
-                "nodeId": 1, "isListening": true,
-                "values": [val(37, 0, "currentValue")]
-            })),
-            // 2: FLiRS + has lock → polled
-            node(json!({
-                "nodeId": 2, "isListening": false, "isFrequentListening": "250ms",
-                "values": [val(98, 0, "currentMode")]
-            })),
-            // 3: mains, only meter → eligible_no_targets
-            node(json!({
-                "nodeId": 3, "isListening": true,
-                "values": [val(50, 0, "value")]
-            })),
-            // 4: sleeping battery → skipped_battery
-            node(json!({
-                "nodeId": 4, "isListening": false, "isFrequentListening": false,
-                "values": [val(38, 0, "currentValue")]
-            })),
-            // 5: missing power-class metadata → skipped_battery (conservative)
-            node(json!({ "nodeId": 5 })),
-        ];
-
-        let plan = plan_primary_state_refresh(&nodes);
-
-        assert_eq!(plan.polls.len(), 2);
-        assert_eq!(plan.polls[0].0, 1);
-        assert_eq!(plan.polls[1].0, 2);
-        assert_eq!(plan.skipped_battery, 2);
-        assert_eq!(plan.eligible_no_targets, 1);
-    }
-
-    #[test]
-    fn plan_handles_empty_node_list() {
-        let plan = plan_primary_state_refresh(&[]);
-        assert_eq!(plan, PollPlan::default());
-    }
-
-    // ---- POLL_DELAY guard -------------------------------------------------
-
-    #[test]
-    fn poll_delay_is_200ms() {
-        // Sentinel — protects against accidental tightening that would
-        // saturate the Z-Wave radio on startup.
-        assert_eq!(POLL_DELAY, Duration::from_millis(200));
+        assert_eq!(
+            error_code("Z-Wave JS did not answer within 25 s"),
+            "no_answer"
+        );
+        assert_eq!(error_code("unknown action \"x\""), "unknown_action");
+        assert_eq!(error_code("on: the device did not do it"), "rejected");
     }
 }
