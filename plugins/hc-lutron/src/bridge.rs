@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{DeviceKind, LutronConfig};
 use crate::devices::{DeviceEntry, SceneEntry, TimeclockEntry};
 use crate::lip::connection::{connect, send_cmd, send_keepalive};
+use crate::lip::liveness::Liveness;
 use crate::lip::protocol::{
     button_for_led_component, cmd_device_action, cmd_timeclock_enable, cmd_timeclock_execute,
     is_led_state, led_component_for_button, led_component_for_phantom_button, query_device_led,
@@ -201,8 +202,11 @@ impl Bridge {
         // Channel for hold timer fire events: (keypad_id, button_component)
         let (hold_tx, mut hold_rx) = mpsc::channel::<(u32, u32)>(32);
 
-        let mut keepalive = tokio::time::interval(Duration::from_secs(60));
-        keepalive.tick().await; // skip immediate first tick
+        // Whether the repeater is still there: a half-open connection
+        // otherwise looks connected for ~15 minutes.
+        let mut alive = Liveness::new(std::time::Instant::now());
+        let mut watch = tokio::time::interval(Duration::from_secs(1));
+        watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         info!(
             "Bridge event loop running ({} devices, {} scenes)",
@@ -215,6 +219,7 @@ impl Bridge {
                 // ── LIP events from the RA2 repeater ──────────────────────
                 result = reader.read_message() => {
                     let msg = result?;
+                    alive.heard(std::time::Instant::now());
                     self.handle_lip_message(msg, &write_tx, &hold_tx).await;
                 }
 
@@ -234,8 +239,15 @@ impl Bridge {
                 }
 
                 // ── Keepalive heartbeat ───────────────────────────────────
-                _ = keepalive.tick() => {
-                    send_keepalive(&write_tx).await?;
+                _ = watch.tick() => {
+                    let now = std::time::Instant::now();
+                    if let Some(why) = alive.check(now) {
+                        anyhow::bail!("{why}");
+                    }
+                    if alive.keepalive_due(now) {
+                        send_keepalive(&write_tx).await?;
+                        alive.sent_keepalive(now);
+                    }
                 }
             }
         }
