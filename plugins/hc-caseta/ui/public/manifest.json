@@ -1,0 +1,23 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-caseta-page" },
+		{ "slot": "device.panel", "element": "hc-caseta-pico", "device_types": ["pico_remote"] },
+		{
+			"slot": "device.card",
+			"element": "hc-caseta-pico-card",
+			"device_types": ["pico_remote"],
+			"forms": ["standard", "compact"]
+		},
+		{ "slot": "rule.step", "element": "hc-caseta-step", "device_types": ["scene", "pico_remote"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-caseta-scenes",
+			"label": "Caséta scenes",
+			"description": "the Smart Bridge's scenes you choose, to tap",
+			"forms": ["standard", "large", "compact"],
+			"settings": "hc-caseta-scenes-settings"
+		}
+	]
+}

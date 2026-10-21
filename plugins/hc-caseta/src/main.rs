@@ -3,13 +3,17 @@ mod config;
 mod devices;
 mod import;
 mod lip;
+mod memory;
+mod pico;
 mod schema;
+mod session;
+mod ui_actions;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -124,7 +128,8 @@ async fn try_start(
     // Conditions for the plugin page, not only the log. Taken before run()
     // consumes the client.
     let notices = client.notices();
-    let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<bridge::Command>(256);
+    let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(1);
 
     // Enable management protocol (heartbeat + remote config/log commands).
     let mgmt = client
@@ -176,26 +181,6 @@ async fn try_start(
         },
     ));
 
-    // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
-    // we register devices.
-    let cmd_tx_clone = cmd_tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = client
-            .run_managed(
-                move |device_id, payload| {
-                    let _ = cmd_tx_clone.try_send((device_id, payload));
-                },
-                mgmt,
-            )
-            .await
-        {
-            error!(error = %e, "SDK event loop exited with error");
-        }
-    });
-
-    // Brief yield to let the eventloop connect before publishing.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // --- Build device registry --------------------------------------------------
     // A row with no `kind` is one the operator imported but has not classified.
     // Skipping it keeps the rest of the house working — the alternative, a hard
@@ -217,112 +202,88 @@ async fn try_start(
         })
         .collect();
 
+    // Scenes keep the id their phantom button was first given, through
+    // renames in the Lutron app.
+    let memory_path = memory::Memory::path_for(config_path);
+    let mut memory = memory::Memory::load(&memory_path);
+    let (scene_ids, remembered) = devices::scene_ids(&cfg.scenes, &memory.scene_ids);
+    memory.scene_ids.extend(remembered);
+    memory.save(&memory_path);
     let scenes: Vec<SceneEntry> = cfg
         .scenes
         .iter()
-        .map(|s| SceneEntry::new(s.clone()))
+        .zip(scene_ids)
+        .map(|(s, id)| SceneEntry::with_id(s.clone(), id))
         .collect();
 
-    let live: std::collections::HashSet<String> = devices
-        .iter()
-        .map(|d| d.hc_id.clone())
-        .chain(scenes.iter().map(|s| s.hc_id.clone()))
-        .collect();
+    // What the page lists, from the settings: each device's kind and each
+    // scene's button. Readable by anyone who can see devices, unlike the
+    // settings file.
+    let mut layout = ui_actions::Layout {
+        host: cfg.caseta.host.clone(),
+        port: cfg.caseta.port,
+        ..Default::default()
+    };
+    for d in &devices {
+        let kind = d.kind.word().to_string();
+        layout.kinds.insert(d.hc_id.clone(), kind);
+        layout.order.push(d.hc_id.clone());
+    }
+    for s in &scenes {
+        layout.scenes.insert(
+            s.hc_id.clone(),
+            (
+                s.config.name.clone(),
+                s.config.bridge_id,
+                s.config.button_component,
+            ),
+        );
+    }
+    let status = ui_actions::handle(layout);
 
-    // --- Register all devices with HomeCore ------------------------------------
-    for dev in &devices {
-        if let Err(e) = publisher
-            .register_device_full(
-                &dev.hc_id,
-                &dev.config.name,
-                Some(dev.homecore_device_type()),
-                dev.config.area.as_deref(),
-                None,
+    // The page's quick actions — is the bridge connected, what has it heard,
+    // reconnect — answered from what the bridge loop last knew.
+    let status_handle = status.clone();
+    let mgmt = mgmt
+        .with_capabilities(ui_actions::capabilities())
+        .with_custom_handler(move |cmd| {
+            let action = cmd["action"].as_str()?;
+            ui_actions::run(action, &status_handle, &reconnect_tx)
+        });
+
+    // Its own screens: the built `ui/` folder it carries, served from here.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
+
+    // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
+    // we register devices.
+    let cmd_tx_clone = cmd_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = client
+            .run_managed(
+                move |device_id, payload| {
+                    // Stamped with when it arrived, so one that waits out a
+                    // reconnect is refused rather than sent late.
+                    if cmd_tx_clone
+                        .try_send((device_id, payload, Instant::now()))
+                        .is_err()
+                    {
+                        warn!("Command queue full — dropped a command");
+                    }
+                },
+                mgmt,
             )
             .await
         {
-            warn!(hc_id = %dev.hc_id, error = %e, "Failed to register device");
+            error!(error = %e, "SDK event loop exited with error");
         }
-        if let Err(e) = publisher.subscribe_commands(&dev.hc_id).await {
-            error!(hc_id = %dev.hc_id, error = %e, "Failed to subscribe commands");
-        }
-        if let Err(e) = publisher.publish_availability(&dev.hc_id, true).await {
-            warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish availability");
-        }
-        // A Pico's buttons, which the integration report has always known.
-        if let Some(schema) = crate::schema::device_schema_json(&dev.config) {
-            if let Err(e) = publisher
-                .register_device_schema_json(&dev.hc_id, &schema)
-                .await
-            {
-                warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish device schema");
-            }
-        }
-        // Names this device no longer publishes (`brightness`, `occupancy`),
-        // removed from the retained state.
-        if let Some(gone) = crate::schema::retired_state(&dev.config) {
-            if let Err(e) = publisher.publish_state_partial(&dev.hc_id, &gone).await {
-                warn!(hc_id = %dev.hc_id, error = %e, "Failed to clear retired state");
-            }
-        }
-        if let Some(cat) = crate::schema::button_catalogue(&dev.config) {
-            if let Err(e) = publisher.publish_state_partial(&dev.hc_id, &cat).await {
-                warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish button catalogue");
-            }
-        }
-    }
+    });
 
-    // --- Register scenes with HomeCore -----------------------------------------
-    for scene in &scenes {
-        if let Err(e) = publisher
-            .register_device_full(
-                &scene.hc_id,
-                &scene.config.name,
-                Some("scene"),
-                scene.config.area.as_deref(),
-                None,
-            )
-            .await
-        {
-            warn!(hc_id = %scene.hc_id, error = %e, "Failed to register scene");
-        }
-        if let Err(e) = publisher.subscribe_commands(&scene.hc_id).await {
-            error!(hc_id = %scene.hc_id, error = %e, "Failed to subscribe scene commands");
-        }
-        if let Err(e) = publisher.publish_availability(&scene.hc_id, true).await {
-            warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene availability");
-        }
-        // Caséta has no LED reporting, so a scene is a trigger and nothing
-        // more — but a client still needs to be told that much to offer it.
-        if let Err(e) = publisher
-            .register_device_schema_json(&scene.hc_id, &crate::schema::scene_schema_json())
-            .await
-        {
-            warn!(hc_id = %scene.hc_id, error = %e, "Failed to publish scene schema");
-        }
-        // Activation used to leave an unconfirmed `on: true` that nothing
-        // ever reset; a scene here reports nothing, so it is removed.
-        if let Err(e) = publisher
-            .publish_state_partial(&scene.hc_id, &serde_json::json!({ "on": null }))
-            .await
-        {
-            warn!(hc_id = %scene.hc_id, error = %e, "Failed to clear scene state");
-        }
-    }
+    // Brief yield to let the eventloop connect before publishing.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    info!(
-        devices = devices.len(),
-        scenes = scenes.len(),
-        "All devices and scenes registered with HomeCore"
-    );
-
-    // Reconcile against the SDK-tracked set: anything from a prior
-    // session that's no longer in [[devices]] / [[scenes]] gets unregistered.
-    if let Err(e) = publisher.reconcile_devices(live).await {
-        warn!(error = %e, "reconcile_devices failed");
-    }
-
-    // --- Build and run bridge ---------------------------------------------------
     if cfg.caseta.host.trim().is_empty() {
         notices.raise(
             PluginNotice::error(
@@ -338,8 +299,26 @@ async fn try_start(
         );
     }
 
-    let mut bridge = bridge::Bridge::new(devices, scenes, publisher, cfg.caseta.clone(), notices);
-    bridge.run(cmd_rx).await;
+    let mut bridge = bridge::Bridge::new(
+        devices,
+        scenes,
+        publisher.clone(),
+        cfg.caseta.clone(),
+        notices,
+        status,
+        (memory, memory_path),
+    );
+
+    // --- Register all devices and scenes with HomeCore ---------------------------
+    let live = bridge.register_all().await;
+
+    // Reconcile against the SDK-tracked set: anything from a prior
+    // session that's no longer in [[devices]] / [[scenes]] gets unregistered.
+    if let Err(e) = publisher.reconcile_devices(live).await {
+        warn!(error = %e, "reconcile_devices failed");
+    }
+
+    bridge.run(cmd_rx, reconnect_rx).await;
     Ok(())
 }
 

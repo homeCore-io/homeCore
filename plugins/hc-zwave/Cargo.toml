@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Z-Wave locks, dimmers, switches and sensors, through a zwave-js server"
 repository  = "https://github.com/homeCore-io/hc-zwave"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Z-Wave"
+
 [[bin]]
 name = "hc-zwave"
 path = "src/main.rs"

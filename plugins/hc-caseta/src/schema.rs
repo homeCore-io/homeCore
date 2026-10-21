@@ -5,11 +5,13 @@
 //! used their *existence* to recognise a Pico and then dropped the numbers —
 //! so a rule editor asking "which button?" had nothing to offer.
 //!
-//! A Pico declares no actions: over LIP it is genuinely read-only
-//! (`translate_command` produces nothing for it), and a declared action would
-//! be a control that does nothing. Everything else declares exactly what
-//! `translate_command` takes and `translate_output_state` reports — the two
-//! are checked against each other in the tests below.
+//! A Pico declares its buttons — the configured ones, the ones a press
+//! taught, or the usual five — what it reports when one is used (`button_N`,
+//! and `pushed` / `held` / `released` for homeCore's button trigger), and one
+//! action, `press`, which presses a button as if by hand. Everything else
+//! declares exactly what `translate_command` takes and
+//! `translate_output_state` reports — the two are checked against each other
+//! in the tests below.
 
 use std::collections::HashMap;
 
@@ -20,7 +22,10 @@ use plugin_sdk_rs::types::schema::{
 };
 use serde_json::Value;
 
+use plugin_sdk_rs::device_actions::{Param, Source};
+
 use crate::config::{DeviceConfig, DeviceKind};
+use crate::devices::DeviceEntry;
 
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     AttributeSchema {
@@ -111,9 +116,39 @@ fn output_attributes(kind: &DeviceKind) -> Option<Vec<(String, AttributeSchema)>
     }
 }
 
-/// A shade's momentary verbs, which are not attribute writes.
+/// `last_command_error`: why the last command did not happen, in words; null
+/// once one does. Diagnostic, out of the way.
+fn last_command_error() -> (String, AttributeSchema) {
+    (
+        "last_command_error".into(),
+        AttributeSchema {
+            category: Some(AttributeCategory::Diagnostic),
+            ..ro(AttributeKind::String, "Last command error")
+        },
+    )
+}
+
+/// A shade's momentary verbs, and a dimmer's ramp, which are not attribute
+/// writes.
 fn output_actions(kind: &DeviceKind) -> Vec<Action> {
     match kind {
+        DeviceKind::Dimmer => vec![
+            Action::new("raise")
+                .label("Start brightening")
+                .category("Level")
+                .icon("arrow-up")
+                .sentence("start brightening {device}"),
+            Action::new("lower")
+                .label("Start dimming")
+                .category("Level")
+                .icon("arrow-down")
+                .sentence("start dimming {device}"),
+            Action::new("stop")
+                .label("Stop brightening or dimming")
+                .category("Level")
+                .icon("stop")
+                .sentence("stop {device} brightening or dimming"),
+        ],
         DeviceKind::Shade => vec![
             Action::new("raise")
                 .label("Raise the shade")
@@ -143,7 +178,10 @@ fn output_actions(kind: &DeviceKind) -> Vec<Action> {
 /// value nothing will ever confirm.
 pub fn scene_schema_json() -> Value {
     with_actions(
-        &DeviceSchema::default(),
+        &DeviceSchema {
+            attributes: [last_command_error()].into_iter().collect(),
+            ..Default::default()
+        },
         vec![Action::new("activate")
             .label("Activate the scene")
             .category("Scenes")
@@ -153,41 +191,95 @@ pub fn scene_schema_json() -> Value {
 }
 
 /// The schema for one device, or `None` for a row whose kind is unset.
-pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
-    // `kind` is optional: a row whose kind is unset is skipped at startup
-    // rather than taking the plugin offline, so it may be None here.
-    let kind = cfg.kind.as_ref()?;
+pub fn device_schema_json(dev: &DeviceEntry) -> Option<Value> {
+    let kind = &dev.kind;
 
     if let Some(attrs) = output_attributes(kind) {
+        let mut attrs: HashMap<String, AttributeSchema> = attrs.into_iter().collect();
+        if *kind != DeviceKind::OccupancySensor {
+            let (k, v) = last_command_error();
+            attrs.insert(k, v);
+        }
         let schema = DeviceSchema {
-            attributes: attrs.into_iter().collect(),
+            attributes: attrs,
             ..Default::default()
         };
         return Some(with_actions(&schema, output_actions(kind)));
     }
 
-    if cfg.buttons.is_empty() {
-        return None;
-    }
+    // A Pico.
+    let labels = dev.buttons_with_labels();
+    let named = || -> Vec<AttributeOption> {
+        labels
+            .iter()
+            .map(|(b, name)| AttributeOption::new(b.to_string()).labelled(name.clone()))
+            .collect()
+    };
+    let which = |display: &str| AttributeSchema {
+        options: Some(named()),
+        ..ro(AttributeKind::Integer, display)
+    };
 
     let mut attrs: HashMap<String, AttributeSchema> = HashMap::new();
     attrs.insert(
         "available_buttons".into(),
-        ro(AttributeKind::Json, "Buttons"),
+        AttributeSchema {
+            category: Some(AttributeCategory::Diagnostic),
+            ..ro(AttributeKind::Json, "Buttons")
+        },
     );
-    for b in &cfg.buttons {
+    for (b, name) in &labels {
         attrs.insert(
             format!("button_{b}"),
-            ro(AttributeKind::String, &format!("Button {b}")),
+            AttributeSchema {
+                options: Some(
+                    ["press", "hold", "release"]
+                        .into_iter()
+                        .map(AttributeOption::from)
+                        .collect(),
+                ),
+                ..ro(AttributeKind::Enum, name)
+            },
         );
     }
+    // homeCore's button trigger reads these: the button's number, set for a
+    // moment as it happens and cleared at once, so the same button twice is
+    // two events.
+    attrs.insert("pushed".into(), which("Button pushed"));
+    attrs.insert("held".into(), which("Button held"));
+    attrs.insert("released".into(), which("Button released"));
+    attrs.insert("last_button".into(), which("Last button"));
+    attrs.insert(
+        "last_button_name".into(),
+        ro(AttributeKind::String, "Last button pressed"),
+    );
+    let (k, v) = last_command_error();
+    attrs.insert(k, v);
 
     Some(with_actions(
         &DeviceSchema {
             attributes: attrs,
             ..Default::default()
         },
-        vec![],
+        vec![Action::new("press")
+            .label("Press a button")
+            .category("Buttons")
+            .icon("remote")
+            .description(
+                "Presses and releases the button as if by hand: the bridge does what it \
+                 is paired to in the Lutron app.",
+            )
+            .sentence("press {button} on {device}")
+            .param(
+                Param::int("button")
+                    .label("Button")
+                    .required()
+                    .options_from(
+                        Source::attribute("available_buttons")
+                            .label_key("name")
+                            .value_key("number"),
+                    ),
+            )],
     ))
 }
 
@@ -204,14 +296,37 @@ pub fn retired_state(cfg: &DeviceConfig) -> Option<Value> {
     Some(serde_json::json!({ key: null }))
 }
 
-/// The button catalogue a Pico publishes about itself.
-pub fn button_catalogue(cfg: &DeviceConfig) -> Option<Value> {
-    // `kind` is optional: a row whose kind is unset is skipped at startup
-    // rather than taking the plugin offline, so it may be None here.
-    if cfg.kind != Some(DeviceKind::Pico) || cfg.buttons.is_empty() {
+/// The button catalogue a Pico publishes about itself: `[{number, name}]`,
+/// the shape hc-lutron publishes, so a screen or rule editor reads either.
+pub fn button_catalogue(dev: &DeviceEntry) -> Option<Value> {
+    if dev.kind != DeviceKind::Pico {
         return None;
     }
-    Some(serde_json::json!({ "available_buttons": cfg.buttons }))
+    let list: Vec<Value> = dev
+        .buttons_with_labels()
+        .into_iter()
+        .map(|(number, name)| serde_json::json!({ "number": number, "name": name }))
+        .collect();
+    Some(serde_json::json!({ "available_buttons": list }))
+}
+
+/// A Pico at rest: every button released and no event standing. Published
+/// at registration and after every reconnect, so a press the plugin missed
+/// the release of (`button_5: "press"` for good) cannot block the next one.
+pub fn pico_at_rest(dev: &DeviceEntry) -> Value {
+    let mut patch = serde_json::Map::new();
+    // A button it turned out not to have (learned from a press) leaves the
+    // state: every Pico component number it lacks is cleared.
+    for b in (1..=18).filter(|b| !dev.buttons.contains(b)) {
+        patch.insert(format!("button_{b}"), Value::Null);
+    }
+    for b in &dev.buttons {
+        patch.insert(format!("button_{b}"), Value::from("release"));
+    }
+    for k in ["pushed", "held", "released"] {
+        patch.insert(k.into(), Value::Null);
+    }
+    Value::Object(patch)
 }
 
 #[cfg(test)]
@@ -229,14 +344,19 @@ mod output_schema_tests {
             fade_secs: None,
             invert_position: false,
             buttons: vec![],
+            button_names: vec![],
         }
+    }
+
+    fn ent(kind: DeviceKind) -> DeviceEntry {
+        DeviceEntry::new(cfg(kind)).expect("a device")
     }
 
     /// The mirror of the declaration: every speed offered is one the command
     /// path takes.
     #[test]
     fn a_fan_declares_every_speed_it_accepts_and_no_others() {
-        let v = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        let v = device_schema_json(&ent(DeviceKind::FanControl)).expect("a schema");
         let offered: Vec<String> = v["attributes"]["speed"]["options"]
             .as_array()
             .expect("options")
@@ -260,11 +380,11 @@ mod output_schema_tests {
 
     #[test]
     fn a_dimmer_and_a_switch_declare_what_they_take() {
-        let d = device_schema_json(&cfg(DeviceKind::Dimmer)).expect("a schema");
+        let d = device_schema_json(&ent(DeviceKind::Dimmer)).expect("a schema");
         assert_eq!(d["attributes"]["brightness_pct"]["writable"], true);
         assert_eq!(d["attributes"]["brightness_pct"]["unit"], "%");
 
-        let s = device_schema_json(&cfg(DeviceKind::Switch)).expect("a schema");
+        let s = device_schema_json(&ent(DeviceKind::Switch)).expect("a schema");
         assert_eq!(s["attributes"]["on"]["writable"], true);
         assert!(!s["attributes"]
             .as_object()
@@ -275,7 +395,7 @@ mod output_schema_tests {
     /// Position is an attribute; raising and lowering are verbs.
     #[test]
     fn a_shade_declares_its_position_and_its_three_verbs() {
-        let v = device_schema_json(&cfg(DeviceKind::Shade)).expect("a schema");
+        let v = device_schema_json(&ent(DeviceKind::Shade)).expect("a schema");
         assert_eq!(v["attributes"]["position"]["writable"], true);
 
         let ids: Vec<&str> = v["actions"]
@@ -300,7 +420,7 @@ mod output_schema_tests {
     /// published.
     #[test]
     fn an_occupancy_sensor_declares_occupied_only() {
-        let v = device_schema_json(&cfg(DeviceKind::OccupancySensor)).expect("a schema");
+        let v = device_schema_json(&ent(DeviceKind::OccupancySensor)).expect("a schema");
         let attrs = v["attributes"].as_object().expect("attributes");
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs["occupied"]["writable"], false);
@@ -317,7 +437,7 @@ mod output_schema_tests {
     /// `transition_ms` writable beside a dimmer's level, no raw `brightness`.
     #[test]
     fn levels_are_declared_as_the_vocabulary_has_them() {
-        let d = device_schema_json(&cfg(DeviceKind::Dimmer)).expect("a schema");
+        let d = device_schema_json(&ent(DeviceKind::Dimmer)).expect("a schema");
         let attrs = d["attributes"].as_object().expect("attributes");
         assert!(!attrs.contains_key("brightness"));
         assert_eq!(attrs["brightness_pct"]["kind"], "float");
@@ -334,9 +454,9 @@ mod output_schema_tests {
             assert!(attrs.contains_key(k), "{k} is published but not declared");
         }
 
-        let f = device_schema_json(&cfg(DeviceKind::FanControl)).expect("a schema");
+        let f = device_schema_json(&ent(DeviceKind::FanControl)).expect("a schema");
         assert_eq!(f["attributes"]["speed_pct"]["kind"], "float");
-        let s = device_schema_json(&cfg(DeviceKind::Shade)).expect("a schema");
+        let s = device_schema_json(&ent(DeviceKind::Shade)).expect("a schema");
         assert_eq!(s["attributes"]["position"]["kind"], "float");
     }
 
@@ -357,7 +477,9 @@ mod output_schema_tests {
     #[test]
     fn a_scene_offers_activation_and_reads_nothing() {
         let v = scene_schema_json();
-        assert!(v["attributes"].as_object().expect("attributes").is_empty());
+        let attrs = v["attributes"].as_object().expect("attributes");
+        assert_eq!(attrs.len(), 1, "only why a run failed");
+        assert_eq!(attrs["last_command_error"]["category"], "diagnostic");
         assert_eq!(v["actions"][0]["id"], "activate");
     }
 }
@@ -366,8 +488,8 @@ mod output_schema_tests {
 mod tests {
     use super::*;
 
-    fn pico(buttons: Vec<u32>) -> DeviceConfig {
-        DeviceConfig {
+    fn pico(buttons: Vec<u32>) -> DeviceEntry {
+        DeviceEntry::new(DeviceConfig {
             integration_id: 5,
             name: "Kitchen Pico".into(),
             kind: Some(DeviceKind::Pico),
@@ -375,52 +497,72 @@ mod tests {
             fade_secs: None,
             invert_position: false,
             buttons,
-        }
+            button_names: vec![],
+        })
+        .expect("a Pico")
     }
 
     #[test]
-    fn a_pico_publishes_its_buttons_and_no_actions() {
+    fn a_pico_declares_its_buttons_events_and_press() {
         let v = device_schema_json(&pico(vec![2, 3, 4, 5, 6])).unwrap();
-        assert!(v["attributes"]["available_buttons"].is_object());
-        assert!(v["attributes"]["button_4"].is_object());
-        assert!(
-            v.get("actions").is_none(),
-            "a Caséta Pico is read-only over LIP"
+        let a = &v["attributes"];
+        assert!(a["available_buttons"].is_object());
+        assert_eq!(a["button_4"]["display_name"], "Off");
+        for k in ["pushed", "held", "released", "last_button"] {
+            assert_eq!(a[k]["kind"], "integer", "{k}");
+            assert_eq!(a[k]["options"][0]["value"], "2");
+            assert_eq!(a[k]["options"][0]["label"], "On");
+        }
+        assert_eq!(a["last_command_error"]["category"], "diagnostic");
+        assert_eq!(v["actions"][0]["id"], "press");
+    }
+
+    /// No buttons configured is the usual 5-button Pico, not "no schema" —
+    /// "Holiday Lights Remote 1" had nothing at all to offer a rule.
+    #[test]
+    fn no_buttons_means_the_usual_five() {
+        let v = button_catalogue(&pico(vec![])).unwrap();
+        let names: Vec<&str> = v["available_buttons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["On", "Favorite", "Off", "Raise", "Lower"]);
+        assert!(device_schema_json(&pico(vec![])).unwrap()["attributes"]["button_6"].is_object());
+    }
+
+    /// The same shape hc-lutron publishes: `[{number, name}]`.
+    #[test]
+    fn the_catalogue_is_numbers_and_names() {
+        let v = button_catalogue(&pico(vec![2, 4])).unwrap();
+        assert_eq!(
+            v["available_buttons"],
+            serde_json::json!([{"number": 2, "name": "On"}, {"number": 4, "name": "Off"}])
         );
     }
 
-    /// A config imported before the numbers were carried through publishes
-    /// nothing rather than an empty list that looks like "no buttons".
     #[test]
-    fn no_buttons_means_no_schema() {
-        assert!(device_schema_json(&pico(vec![])).is_none());
-        assert!(button_catalogue(&pico(vec![])).is_none());
+    fn a_pico_at_rest_has_every_button_released_and_no_event() {
+        let v = pico_at_rest(&pico(vec![8, 9, 10, 11]));
+        assert_eq!(v["button_8"], "release");
+        assert_eq!(v["button_11"], "release");
+        assert!(v["pushed"].is_null() && v.get("pushed").is_some());
+        assert!(
+            v.get("button_2").is_some_and(Value::is_null),
+            "not its button"
+        );
     }
 
     #[test]
     fn a_dimmer_gets_a_dimmers_schema_not_a_picos() {
-        // Buttons belong to the Pico that has them. A dimmer with a stray
-        // button list still declares a dimmer.
         let mut d = pico(vec![2]);
-        d.kind = Some(DeviceKind::Dimmer);
+        d.kind = DeviceKind::Dimmer;
+        d.config.kind = Some(DeviceKind::Dimmer);
         let v = device_schema_json(&d).expect("a schema");
         let attrs = v["attributes"].as_object().expect("attributes");
         assert!(attrs.contains_key("brightness_pct"));
         assert!(!attrs.contains_key("available_buttons"));
-    }
-
-    #[test]
-    fn a_row_with_no_kind_declares_nothing() {
-        // An unset kind is skipped at startup rather than taking the plugin
-        // offline, so it reaches here and must not guess.
-        let mut d = pico(vec![2]);
-        d.kind = None;
-        assert!(device_schema_json(&d).is_none());
-    }
-
-    #[test]
-    fn the_catalogue_is_the_button_list() {
-        let v = button_catalogue(&pico(vec![2, 4])).unwrap();
-        assert_eq!(v["available_buttons"], serde_json::json!([2, 4]));
+        assert!(button_catalogue(&d).is_none());
     }
 }

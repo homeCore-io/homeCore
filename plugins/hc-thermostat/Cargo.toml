@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Software thermostats that read temperature sensors and drive a switch to a setpoint"
 repository  = "https://github.com/homeCore-io/hc-thermostat"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Thermostat"
+
 [[bin]]
 name = "hc-thermostat"
 path = "src/main.rs"

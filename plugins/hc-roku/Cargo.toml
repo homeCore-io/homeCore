@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Roku streaming players and Roku TVs, over the External Control Protocol"
 repository  = "https://github.com/homeCore-io/hc-roku"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Roku"
+
 [[bin]]
 name = "hc-roku"
 path = "src/main.rs"

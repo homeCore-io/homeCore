@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "Philips Hue lights, groups and scenes, via the Hue bridge"
 repository  = "https://github.com/homeCore-io/hc-hue"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Hue"
+
 [[bin]]
 name = "hc-hue"
 path = "src/main.rs"

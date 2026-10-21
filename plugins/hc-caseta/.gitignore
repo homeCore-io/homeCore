@@ -25,3 +25,4 @@ config/config.dev.toml
 #.idea/
 logs/
 config/.published-device-ids.json
+config/.caseta-memory.json

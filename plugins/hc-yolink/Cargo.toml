@@ -6,6 +6,10 @@ license     = "MIT OR Apache-2.0"
 description = "YoLink sensors, locks and plugs, through a YS1606 local hub or the YoLink cloud"
 repository  = "https://github.com/homeCore-io/hc-yolink"
 
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "YoLink"
+
 [[bin]]
 name = "hc-yolink"
 path = "src/main.rs"

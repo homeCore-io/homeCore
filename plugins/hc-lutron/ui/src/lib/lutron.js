@@ -102,13 +102,13 @@ export async function since(hc, deviceId, attribute) {
 	return r.ok && r.data.length ? r.data.at(-1).at : null;
 }
 
-/** Every `DeviceStateChanged` trigger in a rule, wherever it sits. */
-function triggersOf(rule) {
+/** Every `kind` trigger (`DeviceStateChanged`, `ButtonEvent`) in a rule, wherever it sits. */
+function triggersOf(rule, kind = 'DeviceStateChanged') {
 	const found = [];
 	const walk = (v) => {
 		if (!v || typeof v !== 'object') return;
 		if (Array.isArray(v)) return v.forEach(walk);
-		if (v.DeviceStateChanged) found.push(v.DeviceStateChanged);
+		if (v[kind]) found.push(v[kind]);
 		for (const [k, x] of Object.entries(v)) if (k === 'trigger' || k === 'triggers' || k === 'Any' || k === 'any') walk(x);
 	};
 	walk(rule.trigger);
@@ -116,14 +116,16 @@ function triggersOf(rule) {
 	return found;
 }
 
-/** The automations that start when `button` on `deviceId` is used. */
+/** The automations that start when `button` on `deviceId` is used: on its
+ * `button_N`, or a button trigger for it (or for any of its buttons). */
 export function automationsOn(rules, deviceId, button) {
-	return rules.filter((r) =>
-		triggersOf(r).some(
-			(t) =>
-				t.attribute === `button_${button}` &&
-				(t.device_id === deviceId || (Array.isArray(t.device_ids) && t.device_ids.includes(deviceId)))
-		)
+	return rules.filter(
+		(r) =>
+			triggersOf(r).some(
+				(t) =>
+					t.attribute === `button_${button}` &&
+					(t.device_id === deviceId || (Array.isArray(t.device_ids) && t.device_ids.includes(deviceId)))
+			) || triggersOf(r, 'ButtonEvent').some((t) => t.device_id === deviceId && (t.button_number == null || Number(t.button_number) === button))
 	);
 }
 

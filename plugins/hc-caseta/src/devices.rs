@@ -18,6 +18,76 @@ pub struct DeviceEntry {
     /// The last level above zero the bridge reported, so `{"on": true}`
     /// restores it rather than jumping to full (a dimmer) or half (a fan).
     pub last_level: Option<f64>,
+    /// The state last published from the bridge's own reports — what a
+    /// refused command's optimistic echo is put back to.
+    pub confirmed: Option<Value>,
+    /// A Pico's buttons as they are now: configured, learned from a press,
+    /// or the usual 5-button layout. Empty for anything else.
+    pub buttons: Vec<u32>,
+}
+
+/// The usual Pico: On, Favorite, Off, Raise, Lower — what a Pico with no
+/// buttons configured is taken to be until it presses something else.
+pub const FIVE_BUTTON: [u32; 5] = [2, 3, 4, 5, 6];
+
+/// The 4-button scene Pico's buttons.
+pub const FOUR_BUTTON_SCENE: [u32; 4] = [8, 9, 10, 11];
+
+/// What a Pico button nobody named is called, by its component number — the
+/// names hc-lutron gives the same buttons, and for the 4-button scene Pico
+/// the ones the Lutron app shows.
+pub fn usual_button_name(component: u32) -> String {
+    match component {
+        2 => "On".into(),
+        3 => "Favorite".into(),
+        4 => "Off".into(),
+        5 => "Raise".into(),
+        6 => "Lower".into(),
+        8 => "Button 1".into(),
+        9 => "Button 2".into(),
+        10 => "Button 3".into(),
+        11 => "Off".into(),
+        n => format!("Button {n}"),
+    }
+}
+
+/// A Pico's buttons from its configuration: the list given, else the usual
+/// 5-button layout.
+pub fn configured_buttons(cfg: &DeviceConfig) -> Vec<u32> {
+    if cfg.buttons.is_empty() {
+        FIVE_BUTTON.to_vec()
+    } else {
+        let mut b = cfg.buttons.clone();
+        b.sort_unstable();
+        b.dedup();
+        b
+    }
+}
+
+/// What a press of `component` says about a Pico believed to have `current`,
+/// or `None` when it is one of them already.
+///
+/// A press of 8–11 is a 4-button scene Pico; a press of 2–6 on a Pico taken
+/// for a 4-button one is a 5-button Pico after all; anything else is added.
+/// A 2-button Pico (2 and 4) cannot be told from a 5-button one this way —
+/// both have those buttons — so it is set in Settings.
+pub fn learn_buttons(current: &[u32], component: u32) -> Option<Vec<u32>> {
+    if current.contains(&component) || component == 0 {
+        return None;
+    }
+    let only = |set: &[u32]| current.iter().all(|b| set.contains(b));
+    let mut next = if FOUR_BUTTON_SCENE.contains(&component) && only(&FIVE_BUTTON) {
+        FOUR_BUTTON_SCENE.to_vec()
+    } else if FIVE_BUTTON.contains(&component) && only(&FOUR_BUTTON_SCENE) {
+        FIVE_BUTTON.to_vec()
+    } else {
+        let mut v = current.to_vec();
+        v.push(component);
+        v
+    };
+    next.sort_unstable();
+    next.dedup();
+    Some(next)
 }
 
 /// A LIP zone level (0–100, hundredths) as `brightness_pct` / `speed_pct`.
@@ -47,8 +117,11 @@ pub fn command_fade_secs(cmd: &Value, default_secs: f64) -> f64 {
 }
 
 /// The named fan speed a level falls in — the Maestro table's bands.
+///
+/// Rounded up, so a level between 0 and 1 — a fan that is running — is
+/// `low`, never `off`.
 pub fn fan_speed(level: f64) -> &'static str {
-    match level as u32 {
+    match level.clamp(0.0, 100.0).ceil() as u32 {
         0 => "off",
         1..=25 => "low",
         26..=50 => "medium",
@@ -75,12 +148,50 @@ impl DeviceEntry {
     pub fn new(config: DeviceConfig) -> Option<Self> {
         let kind = config.kind.clone()?;
         let hc_id = format!("caseta_{}", config.integration_id);
+        let buttons = if kind == DeviceKind::Pico {
+            configured_buttons(&config)
+        } else {
+            vec![]
+        };
         Some(Self {
             config,
             hc_id,
             kind,
             last_level: None,
+            confirmed: None,
+            buttons,
         })
+    }
+
+    /// Each of a Pico's buttons with its name: the one configured for it,
+    /// else its usual name.
+    pub fn buttons_with_labels(&self) -> Vec<(u32, String)> {
+        // `button_names` follows `buttons` in the order they were written.
+        let given: std::collections::HashMap<u32, &str> = self
+            .config
+            .buttons
+            .iter()
+            .zip(&self.config.button_names)
+            .map(|(&b, n)| (b, n.trim()))
+            .filter(|(_, n)| !n.is_empty())
+            .collect();
+        self.buttons
+            .iter()
+            .map(|&b| {
+                let name = given
+                    .get(&b)
+                    .map_or_else(|| usual_button_name(b), |n| n.to_string());
+                (b, name)
+            })
+            .collect()
+    }
+
+    /// The name of one button, as `buttons_with_labels` has it.
+    pub fn button_name(&self, component: u32) -> String {
+        self.buttons_with_labels()
+            .into_iter()
+            .find(|(b, _)| *b == component)
+            .map_or_else(|| usual_button_name(component), |(_, n)| n)
     }
 
     /// Note a level the bridge reported; only a level above zero is one
@@ -181,6 +292,13 @@ impl DeviceEntry {
 
         match self.kind {
             DeviceKind::Dimmer => {
+                // A level ramping until told to stop: the same OUTPUT actions
+                // a shade's travel uses.
+                for (verb, action) in [("raise", 2), ("lower", 3), ("stop", 4)] {
+                    if cmd[verb].as_bool() == Some(true) {
+                        return vec![cmd_shade_action(id, action)];
+                    }
+                }
                 // `brightness` is not read: its scale (0–255 or 0–100) was
                 // guessed from the number, and 50 meant two different levels.
                 let level = if let Some(b) = cmd["brightness_pct"].as_f64() {
@@ -245,8 +363,15 @@ impl DeviceEntry {
                 vec![cmd_set_level(id, level, 0.0)]
             }
 
-            // Pico and OccupancySensor are read-only.
-            DeviceKind::Pico | DeviceKind::OccupancySensor => vec![],
+            // A Pico is pressed as if by hand: press, then release (the
+            // release is sent separately, a moment later — see the bridge).
+            DeviceKind::Pico => match cmd["press"].as_u64() {
+                Some(b) if self.buttons.contains(&(b as u32)) => {
+                    vec![crate::lip::protocol::cmd_device_action(id, b as u32, 3)]
+                }
+                _ => vec![],
+            },
+            DeviceKind::OccupancySensor => vec![],
         }
     }
 }
@@ -258,15 +383,65 @@ impl DeviceEntry {
 /// A phantom button on the Smart Bridge, published to homeCore as a scene.
 pub struct SceneEntry {
     pub config: SceneConfig,
-    /// `caseta_scene_{name_slug}`
+    /// `caseta_scene_{name_slug}` — of the name it had when first seen; see
+    /// [`scene_ids`].
     pub hc_id: String,
 }
 
 impl SceneEntry {
-    pub fn new(config: SceneConfig) -> Self {
-        let hc_id = config.hc_id();
+    pub fn with_id(config: SceneConfig, hc_id: String) -> Self {
         Self { config, hc_id }
     }
+}
+
+/// A scene's lasting key: the phantom button it is, not its name.
+pub fn scene_key(cfg: &SceneConfig) -> String {
+    format!("{}:{}", cfg.bridge_id, cfg.button_component)
+}
+
+/// Each scene's device id, keyed by its phantom button rather than its name.
+///
+/// The id was always `caseta_scene_{slug of the name}`, so renaming a scene
+/// in the Lutron app (and re-importing) made a new device and stranded every
+/// automation on the old one. Now the id a button was first given is
+/// remembered (`known`, `bridge_id:button` → id) and kept through renames;
+/// a button seen for the first time gets the slug of its name, which is what
+/// every existing scene already has — so nothing changes id on upgrade. Two
+/// buttons whose names slug alike get the button number added to the second.
+///
+/// Returns the ids, in `scenes` order, and the map to remember.
+pub fn scene_ids(
+    scenes: &[SceneConfig],
+    known: &std::collections::BTreeMap<String, String>,
+) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut remembered = std::collections::BTreeMap::new();
+    // Remembered ones first, so a new scene can't take a renamed one's id.
+    for s in scenes {
+        if let Some(id) = known.get(&scene_key(s)) {
+            taken.insert(id.clone());
+        }
+    }
+    let ids = scenes
+        .iter()
+        .map(|s| {
+            let key = scene_key(s);
+            let id = match known.get(&key) {
+                Some(id) => id.clone(),
+                None => {
+                    let mut id = s.hc_id();
+                    if taken.contains(&id) {
+                        id = format!("{id}_{}", s.button_component);
+                    }
+                    taken.insert(id.clone());
+                    id
+                }
+            };
+            remembered.insert(key, id.clone());
+            id
+        })
+        .collect();
+    (ids, remembered)
 }
 
 #[cfg(test)]
@@ -283,8 +458,141 @@ mod tests {
             fade_secs: None,
             invert_position: false,
             buttons: vec![],
+            button_names: vec![],
         })
         .expect("a device")
+    }
+
+    fn pico(buttons: Vec<u32>, names: Vec<&str>) -> DeviceEntry {
+        DeviceEntry::new(DeviceConfig {
+            integration_id: 9,
+            name: "Remote".into(),
+            kind: Some(DeviceKind::Pico),
+            area: None,
+            fade_secs: None,
+            invert_position: false,
+            buttons,
+            button_names: names.into_iter().map(String::from).collect(),
+        })
+        .expect("a Pico")
+    }
+
+    /// "Holiday Lights Remote 1" has no buttons configured: it is the usual
+    /// 5-button Pico, named as hc-lutron names the same buttons.
+    #[test]
+    fn a_pico_with_no_buttons_is_the_usual_five_button() {
+        let p = pico(vec![], vec![]);
+        assert_eq!(p.buttons, FIVE_BUTTON);
+        let names: Vec<String> = p
+            .buttons_with_labels()
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(names, ["On", "Favorite", "Off", "Raise", "Lower"]);
+    }
+
+    #[test]
+    fn configured_buttons_and_names_win() {
+        let p = pico(vec![4, 2], vec!["Lights off", ""]);
+        assert_eq!(p.buttons, [2, 4]);
+        assert_eq!(p.button_name(4), "Lights off");
+        assert_eq!(p.button_name(2), "On", "a blank name keeps the usual one");
+        let s = pico(vec![8, 9, 10, 11], vec!["Bright", "Entertain", "Relax"]);
+        assert_eq!(s.button_name(8), "Bright");
+        assert_eq!(s.button_name(11), "Off");
+    }
+
+    /// A press of 8–11 on a Pico taken for a 5-button one is a 4-button
+    /// scene Pico; a press of a known button teaches nothing.
+    #[test]
+    fn presses_teach_a_picos_layout() {
+        assert_eq!(
+            learn_buttons(&FIVE_BUTTON, 9),
+            Some(FOUR_BUTTON_SCENE.to_vec())
+        );
+        assert_eq!(learn_buttons(&FIVE_BUTTON, 2), None);
+        assert_eq!(
+            learn_buttons(&FOUR_BUTTON_SCENE, 3),
+            Some(FIVE_BUTTON.to_vec())
+        );
+        assert_eq!(learn_buttons(&[2, 4], 5), Some(vec![2, 4, 5]));
+        assert_eq!(learn_buttons(&[2, 4], 8), Some(FOUR_BUTTON_SCENE.to_vec()));
+        assert_eq!(learn_buttons(&[2, 4, 5, 6], 12), Some(vec![2, 4, 5, 6, 12]));
+    }
+
+    #[test]
+    fn a_pico_press_is_a_device_press_of_one_of_its_buttons() {
+        let p = pico(vec![], vec![]);
+        assert_eq!(
+            p.translate_command(&json!({"press": 3}), 0.0),
+            vec!["#DEVICE,9,3,3"]
+        );
+        assert!(p.translate_command(&json!({"press": 9}), 0.0).is_empty());
+        assert!(p.translate_command(&json!({"on": true}), 0.0).is_empty());
+    }
+
+    #[test]
+    fn a_dimmer_ramps_and_stops() {
+        let d = dev(DeviceKind::Dimmer);
+        assert_eq!(
+            d.translate_command(&json!({"raise": true}), 0.0),
+            vec!["#OUTPUT,7,2"]
+        );
+        assert_eq!(
+            d.translate_command(&json!({"lower": true}), 0.0),
+            vec!["#OUTPUT,7,3"]
+        );
+        assert_eq!(
+            d.translate_command(&json!({"stop": true}), 0.0),
+            vec!["#OUTPUT,7,4"]
+        );
+    }
+
+    fn scene(name: &str, button: u32) -> SceneConfig {
+        SceneConfig {
+            name: name.into(),
+            bridge_id: 1,
+            button_component: button,
+            area: None,
+        }
+    }
+
+    /// The house's four scenes keep the ids their automations use, and a
+    /// rename in the Lutron app keeps the id it had.
+    #[test]
+    fn scene_ids_survive_upgrade_and_rename() {
+        let house = [
+            scene("Solstice Lights Off", 2),
+            scene("Solstice Lights On", 1),
+            scene("Sonos Play", 3),
+            scene("Sonos Stop", 4),
+        ];
+        let (ids, known) = scene_ids(&house, &Default::default());
+        assert_eq!(
+            ids,
+            [
+                "caseta_scene_solstice_lights_off",
+                "caseta_scene_solstice_lights_on",
+                "caseta_scene_sonos_play",
+                "caseta_scene_sonos_stop"
+            ]
+        );
+        let renamed = [scene("Speakers Play", 3), scene("Sonos Play", 9)];
+        let (ids, _) = scene_ids(&renamed, &known);
+        assert_eq!(
+            ids[0], "caseta_scene_sonos_play",
+            "renamed, same button, same id"
+        );
+        assert_eq!(
+            ids[1], "caseta_scene_sonos_play_9",
+            "a new button never takes it"
+        );
+    }
+
+    #[test]
+    fn a_running_fan_below_one_percent_is_low() {
+        assert_eq!(fan_speed(0.5), "low");
+        assert_eq!(fan_speed(0.0), "off");
     }
 
     #[test]

@@ -1,0 +1,7 @@
+dist
+node_modules
+package-lock.json
+# Copied verbatim from hc-lutron (see src/lib/shared.test.js), so they keep
+# hc-lutron's formatting rather than this folder's.
+src/Pico.svelte
+src/lib/lutron.js
