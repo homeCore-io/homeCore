@@ -1,0 +1,15 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-roku-page" },
+		{ "slot": "device.panel", "element": "hc-roku-panel", "device_types": ["media_player"] },
+		{
+			"slot": "device.card",
+			"element": "hc-roku-card",
+			"device_types": ["media_player"],
+			"forms": ["standard", "large", "compact"]
+		},
+		{ "slot": "rule.step", "element": "hc-roku-step", "device_types": ["media_player"] }
+	]
+}

@@ -6134,7 +6134,6 @@ pub async fn get_plugin_ui_file(
     Path((id, build, file)): Path<(String, String, String)>,
 ) -> axum::response::Response {
     use axum::http::header;
-    use base64::Engine;
     let not_found =
         |why: &str| (StatusCode::NOT_FOUND, Json(json!({ "error": why }))).into_response();
     let ui = {
@@ -6157,51 +6156,10 @@ pub async fn get_plugin_ui_file(
     if !hc_types::plugin_ui::relative_path(&file) {
         return not_found("no such file");
     }
-    let Some(ref rpc) = s.management_rpc else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "plugins can't be asked" })),
-        )
-            .into_response();
+    let bytes = match fetch_plugin_file(&s, &id, "ui_file", &file).await {
+        Ok(b) => b,
+        Err((code, body)) => return (code, Json(body)).into_response(),
     };
-    let mut bytes: Vec<u8> = Vec::new();
-    loop {
-        let reply = match rpc
-            .request(
-                &id,
-                "ui_file",
-                Some(json!({ "file": file, "offset": bytes.len(), "max": UI_CHUNK })),
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) if e.contains("not found") || e.contains("no such") => return not_found(&e),
-            Err(e) => {
-                return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response()
-            }
-        };
-        let piece = reply["data"].as_str().unwrap_or("");
-        match base64::engine::general_purpose::STANDARD.decode(piece) {
-            Ok(b) => bytes.extend_from_slice(&b),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "the plugin sent a bad piece" })),
-                )
-                    .into_response()
-            }
-        }
-        if bytes.len() > UI_FILE_MAX {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "the file is too large" })),
-            )
-                .into_response();
-        }
-        if reply["done"].as_bool() != Some(false) || piece.is_empty() {
-            break;
-        }
-    }
     let ext = file.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let content_type = match ext.as_str() {
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -6222,6 +6180,121 @@ pub async fn get_plugin_ui_file(
                 "private, max-age=31536000, immutable",
             ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Ask a running plugin for one of its files over the management channel —
+/// `ui_file` (its UI) or `plugin_file` (files it keeps while it runs) — in
+/// pieces, and put them together. The error is the status and body to send.
+async fn fetch_plugin_file(
+    s: &AppState,
+    id: &str,
+    request: &str,
+    file: &str,
+) -> Result<Vec<u8>, (StatusCode, Value)> {
+    use base64::Engine;
+    let Some(ref rpc) = s.management_rpc else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "error": "plugins can't be asked" }),
+        ));
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let reply = match rpc
+            .request(
+                id,
+                request,
+                Some(json!({ "file": file, "offset": bytes.len(), "max": UI_CHUNK })),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.contains("not found") || e.contains("no such") => {
+                return Err((StatusCode::NOT_FOUND, json!({ "error": e })))
+            }
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, json!({ "error": e }))),
+        };
+        let piece = reply["data"].as_str().unwrap_or("");
+        match base64::engine::general_purpose::STANDARD.decode(piece) {
+            Ok(b) => bytes.extend_from_slice(&b),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    json!({ "error": "the plugin sent a bad piece" }),
+                ))
+            }
+        }
+        if bytes.len() > UI_FILE_MAX {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": "the file is too large" }),
+            ));
+        }
+        if reply["done"].as_bool() != Some(false) || piece.is_empty() {
+            return Ok(bytes);
+        }
+    }
+}
+
+/// The largest file a plugin keeps that is passed through: pictures, not media.
+const PLUGIN_FILE_MAX: usize = 4 * 1024 * 1024;
+
+/// `GET /plugins/{id}/files/{file}` — a file a running plugin keeps while it
+/// runs (a channel's icon, a cached picture), asked of the plugin and passed
+/// through; nothing is kept here. Pictures only. **A file's name is its
+/// identity**: a plugin writes a new name when the contents change (hc-roku
+/// names an icon by channel and version), so the answer is cached for good.
+pub async fn get_plugin_file(
+    State(s): State<AppState>,
+    _: DevicesRead,
+    Path((id, file)): Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::header;
+    let not_found =
+        |why: &str| (StatusCode::NOT_FOUND, Json(json!({ "error": why }))).into_response();
+    let running = {
+        let map = s.plugins.read().await;
+        matches!(map.get(&id), Some(r) if r.status == "active")
+    };
+    if !running {
+        return not_found("that plugin isn't running");
+    }
+    if !hc_types::plugin_ui::relative_path(&file) {
+        return not_found("no such file");
+    }
+    let ext = file.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let content_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return not_found("not a kind of file a plugin passes on"),
+    };
+    let bytes = match fetch_plugin_file(&s, &id, "plugin_file", &file).await {
+        Ok(b) => b,
+        Err((code, body)) => return (code, Json(body)).into_response(),
+    };
+    if bytes.len() > PLUGIN_FILE_MAX {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "the file is too large" })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
         ],
         bytes,
     )

@@ -12,7 +12,8 @@
 
 use plugin_sdk_rs::device_actions::{Action, Param, Source};
 
-use crate::keys::ALL_KEYS;
+use crate::keys::{keys_for, KEY_LABELS};
+use crate::state::Caps;
 
 /// A repeat count, for the keys that accept one.
 ///
@@ -35,7 +36,9 @@ fn key_action(id: &str, label: &str, icon: &str, sentence: &str) -> Action {
         .param(count())
 }
 
-pub fn device_actions() -> Vec<Action> {
+/// What this device can be told to do — a soundbar no tuner, inputs or
+/// channel keys; the remote finder only where the device has one.
+pub fn device_actions(caps: &Caps) -> Vec<Action> {
     let mut out = vec![
         // ── Power ────────────────────────────────────────────────────────
         //
@@ -83,19 +86,26 @@ pub fn device_actions() -> Vec<Action> {
             .label("Stop")
             .category("Transport")
             .icon("stop")
-            .description("ECP has no stop; this leaves playback via Back.")
+            .description(
+                "ECP has no stop; this leaves playback with Back. On an input or live TV \
+                 there is nothing to stop, and it does nothing.",
+            )
             .sentence("stop {device}"),
-        Action::new("next")
-            .label("Skip forward")
+        // Roku's ◀◀ and ▶▶ scan through what is playing — there is no "next
+        // track" on a Roku, so these are named for what they do.
+        Action::new("rewind")
+            .label("Rewind")
             .category("Transport")
-            .icon("skip-next")
-            .sentence("skip {device} forward")
+            .icon("rewind")
+            .description("Scans back through what is playing; each press is one step faster.")
+            .sentence("rewind {device}")
             .param(count()),
-        Action::new("previous")
-            .label("Skip back")
+        Action::new("fast_forward")
+            .label("Fast-forward")
             .category("Transport")
-            .icon("skip-previous")
-            .sentence("skip {device} back")
+            .icon("fast-forward")
+            .description("Scans forward through what is playing; each press is one step faster.")
+            .sentence("fast-forward {device}")
             .param(count()),
         Action::new("instant_replay")
             .label("Instant replay")
@@ -143,11 +153,12 @@ pub fn device_actions() -> Vec<Action> {
             .sentence("toggle mute on {device}"),
         // ── Apps and inputs ──────────────────────────────────────────────
         Action::new("launch_app")
-            .label("Launch a channel")
+            .label("Open a channel")
             .category("Apps")
             .icon("apps")
             .writes("source")
-            .sentence("launch {app} on {device}")
+            .description("Turns the Roku on first if it is off.")
+            .sentence("open {app} on {device}")
             .param(
                 Param::enum_("app")
                     .label("Channel")
@@ -159,10 +170,15 @@ pub fn device_actions() -> Vec<Action> {
                     ),
             ),
         Action::new("select_source")
-            .label("Select a source")
+            .label(if caps.is_tv {
+                "Switch input or channel"
+            } else {
+                "Select a source"
+            })
             .category("Apps")
             .icon("input")
             .writes("source")
+            .description("Turns the Roku on first if it is off.")
             .sentence("switch {device} to {source}")
             .param(
                 Param::enum_("source")
@@ -180,40 +196,12 @@ pub fn device_actions() -> Vec<Action> {
             .description("ECP cannot install unattended; this opens the Channel Store page.")
             .sentence("open the store page for {app_id} on {device}")
             .param(Param::string("app_id").label("Channel id").required()),
-        // ── Live TV ──────────────────────────────────────────────────────
-        Action::new("channel_up")
-            .label("Channel up")
-            .category("Live TV")
-            .icon("channel-up")
-            .sentence("step {device} up {count} channel(s)")
-            .param(count()),
-        Action::new("channel_down")
-            .label("Channel down")
-            .category("Live TV")
-            .icon("channel-down")
-            .sentence("step {device} down {count} channel(s)")
-            .param(count()),
-        Action::new("tune")
-            .label("Tune to a channel")
-            .category("Live TV")
-            .icon("tv")
-            .writes("tv_channel")
-            .sentence("tune {device} to {channel}")
-            .param(
-                Param::string("channel")
-                    .label("Channel")
-                    .required()
-                    .options_from(
-                        Source::attribute("available_tv_channels")
-                            .label_key("name")
-                            .value_key("number"),
-                    ),
-            ),
         // ── Text entry ───────────────────────────────────────────────────
         Action::new("text")
             .label("Type text")
             .category("Text")
             .icon("keyboard")
+            .description("Types into whatever box is on screen; up to 200 characters.")
             .sentence("type {text} on {device}")
             .param(Param::string("text").label("Text").required())
             .param(
@@ -223,28 +211,77 @@ pub fn device_actions() -> Vec<Action> {
             ),
     ];
 
+    if caps.is_tv {
+        out.push(
+            Action::new("channel_up")
+                .label("Channel up")
+                .category("Live TV")
+                .icon("channel-up")
+                .sentence("step {device} up {count} channel(s)")
+                .param(count()),
+        );
+        out.push(
+            Action::new("channel_down")
+                .label("Channel down")
+                .category("Live TV")
+                .icon("channel-down")
+                .sentence("step {device} down {count} channel(s)")
+                .param(count()),
+        );
+        out.push(
+            Action::new("tune")
+                .label("Tune to a channel")
+                .category("Live TV")
+                .icon("tv")
+                .writes("tv_channel")
+                .sentence("tune {device} to {channel}")
+                .param(
+                    Param::string("channel")
+                        .label("Channel")
+                        .required()
+                        .options_from(
+                            Source::attribute("available_tv_channels")
+                                .label_key("name")
+                                .value_key("number"),
+                        ),
+                ),
+        );
+    }
+
     // ── Raw keys ─────────────────────────────────────────────────────────
     //
     // The escape hatch, and the reason the named navigation actions above can
-    // stay a short, readable list: anything ECP accepts is reachable here.
+    // stay a short, readable list: anything this device has is reachable here.
+    let keys = keys_for(caps.is_tv, caps.find_remote);
     let key_param = || {
         Param::enum_("key")
-            .label("Key")
+            .label("Button")
             .required()
-            .options(ALL_KEYS.iter().copied())
+            .labelled_options(
+                keys.iter()
+                    .map(|k| {
+                        let label = KEY_LABELS
+                            .iter()
+                            .find(|(x, _)| x == k)
+                            .map(|(_, l)| *l)
+                            .unwrap_or(k);
+                        (*k, label)
+                    })
+                    .collect::<Vec<_>>(),
+            )
     };
     out.push(
         Action::new("key")
-            .label("Press a remote key")
+            .label("Press a button")
             .category("Remote")
             .icon("remote")
-            .sentence("press {key} on {device}")
+            .sentence("press {key} {count} time(s) on {device}")
             .param(key_param())
             .param(count()),
     );
     out.push(
         Action::new("key_hold")
-            .label("Hold a remote key")
+            .label("Hold a button")
             .category("Remote")
             .icon("remote")
             .sentence("hold {key} on {device}")
@@ -259,7 +296,7 @@ pub fn device_actions() -> Vec<Action> {
     );
     out.push(
         Action::new("key_down")
-            .label("Press and hold a key down")
+            .label("Press and hold a button down")
             .category("Remote")
             .icon("remote")
             .sentence("hold {key} down on {device}")
@@ -267,7 +304,7 @@ pub fn device_actions() -> Vec<Action> {
     );
     out.push(
         Action::new("key_up")
-            .label("Release a held key")
+            .label("Release a held button")
             .category("Remote")
             .icon("remote")
             .sentence("release {key} on {device}")
@@ -283,16 +320,19 @@ pub fn device_actions() -> Vec<Action> {
         ("down", "Down", "press Down {count} time(s) on {device}"),
         ("left", "Left", "press Left {count} time(s) on {device}"),
         ("right", "Right", "press Right {count} time(s) on {device}"),
-        ("info", "Info / options", "press Info on {device}"),
+        ("info", "Options (✱)", "press Options on {device}"),
         ("enter", "Enter", "press Enter on {device}"),
         ("backspace", "Backspace", "press Backspace on {device}"),
-        (
-            "find_remote",
-            "Find my remote",
-            "make {device} find its remote",
-        ),
     ] {
         out.push(key_action(id, label, "remote", sentence));
+    }
+    if caps.find_remote {
+        out.push(key_action(
+            "find_remote",
+            "Find the remote",
+            "remote",
+            "make {device}'s remote beep",
+        ));
     }
 
     out
@@ -306,11 +346,8 @@ const ALIASES: &[&str] = &[
     "turn_off",
     "toggle_power",
     "toggle_play_pause",
-    "next_track",
     "forward",
-    "fast_forward",
-    "previous_track",
-    "rewind",
+    "ff",
     "replay",
     "toggle_mute",
     "volume_mute",
@@ -413,9 +450,18 @@ mod tests {
         out
     }
 
+    /// Every action any Roku can be offered: a TV with a remote finder.
+    fn all() -> Vec<Action> {
+        device_actions(&Caps {
+            is_tv: true,
+            find_remote: true,
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn the_dispatcher_is_fully_accounted_for() {
-        let declared: HashSet<String> = device_actions()
+        let declared: HashSet<String> = all()
             .iter()
             .map(|a| a.build()["id"].as_str().unwrap().to_string())
             .collect();
@@ -448,7 +494,7 @@ mod tests {
     #[test]
     fn nothing_is_declared_that_the_dispatcher_would_reject() {
         let arms: HashSet<String> = dispatcher_arms().into_iter().collect();
-        for a in device_actions() {
+        for a in all() {
             let id = a.build()["id"].as_str().unwrap().to_string();
             assert!(
                 arms.contains(&id),
@@ -461,7 +507,7 @@ mod tests {
     /// Every action reads as a sentence, or a rule using it shows raw JSON.
     #[test]
     fn every_action_has_phrasing_naming_the_device() {
-        for a in device_actions() {
+        for a in all() {
             let v = a.build();
             let id = v["id"].as_str().unwrap();
             let s = v["sentence"]
@@ -474,7 +520,7 @@ mod tests {
     /// A placeholder that names no parameter interpolates to nothing.
     #[test]
     fn sentence_placeholders_resolve_to_real_params() {
-        for a in device_actions() {
+        for a in all() {
             let v = a.build();
             let id = v["id"].as_str().unwrap();
             let params: HashSet<String> = v["params"]
@@ -501,10 +547,59 @@ mod tests {
         }
     }
 
+    /// M11: a soundbar is offered no tuner and no input keys; the remote
+    /// finder only where the device has one.
+    #[test]
+    fn a_soundbar_gets_no_tv_actions_and_find_remote_only_where_supported() {
+        let ids = |caps: &Caps| -> Vec<String> {
+            device_actions(caps)
+                .iter()
+                .map(|a| a.build()["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let bar = ids(&Caps {
+            find_remote: true,
+            ..Default::default()
+        });
+        for tv in ["tune", "channel_up", "channel_down"] {
+            assert!(!bar.contains(&tv.to_string()), "{tv}");
+        }
+        assert!(bar.contains(&"find_remote".to_string()));
+        let office = ids(&Caps {
+            is_tv: true,
+            ..Default::default()
+        });
+        assert!(office.contains(&"tune".to_string()));
+        assert!(!office.contains(&"find_remote".to_string()));
+        let keys = device_actions(&Caps::default())
+            .iter()
+            .find(|a| a.build()["id"] == "key")
+            .unwrap()
+            .build()["params"][0]["options"]
+            .to_string();
+        assert!(
+            !keys.contains("InputHDMI1") && keys.contains("VolumeUp"),
+            "{keys}"
+        );
+    }
+
+    /// M7: ◀◀/▶▶ scan; nothing on a Roku skips, so nothing claims to.
+    #[test]
+    fn nothing_offers_a_skip() {
+        for a in all() {
+            let v = a.build();
+            let words = format!("{} {}", v["id"], v["label"]).to_lowercase();
+            assert!(
+                !words.contains("skip") && !words.contains("next"),
+                "{words}"
+            );
+        }
+    }
+
     /// A required enum with neither options nor a source is an empty dropdown.
     #[test]
     fn every_enum_param_can_be_filled() {
-        for a in device_actions() {
+        for a in all() {
             let v = a.build();
             let id = v["id"].as_str().unwrap();
             for p in v["params"].as_array().unwrap_or(&vec![]) {

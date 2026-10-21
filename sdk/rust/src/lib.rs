@@ -785,6 +785,27 @@ impl DevicePublisher {
 /// recognise. Installed via [`ManagementHandle::with_custom_handler`].
 type CustomActionHandler = Arc<dyn Fn(&Value) -> Option<Value> + Send + Sync>;
 
+/// What an asynchronous action handler answers with: the reply, later.
+pub type AsyncActionFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>;
+
+/// Boxed handler for management actions answered asynchronously. Installed
+/// via [`ManagementHandle::with_async_handler`].
+type AsyncActionHandler = Arc<dyn Fn(&Value) -> Option<AsyncActionFuture> + Send + Sync>;
+
+/// Management actions the SDK answers itself; neither kind of custom handler
+/// sees them.
+const BUILT_IN_ACTIONS: &[&str] = &[
+    "ping",
+    "ui_file",
+    "plugin_file",
+    "get_config",
+    "set_config",
+    "set_log_level",
+    "cancel",
+    "respond",
+    "upload_chunk",
+];
+
 /// Handle returned by [`PluginClient::enable_management`].
 ///
 /// Pass this to [`PluginClient::run_managed`] to automatically handle
@@ -795,6 +816,7 @@ pub struct ManagementHandle {
     config_path: Option<String>,
     log_level_handle: Option<hc_logging::LogLevelHandle>,
     custom_handler: Option<CustomActionHandler>,
+    async_handler: Option<AsyncActionHandler>,
     /// Capability manifest, published retained on
     /// `homecore/plugins/{id}/capabilities` after the first CONNACK.
     capabilities: Option<hc_types::Capabilities>,
@@ -815,6 +837,8 @@ pub struct ManagementHandle {
     ui: Option<hc_types::plugin_ui::PluginUi>,
     /// Where the UI's files are, when the plugin serves them.
     ui_dir: Option<std::path::PathBuf>,
+    /// Files the plugin keeps while it runs, served by `plugin_file`.
+    files_dir: Option<std::path::PathBuf>,
     /// Callback invoked with the plugin's durable learned-state document
     /// (`homecore/plugins/{id}/state`, retained + owned by core) whenever it
     /// arrives — once shortly after connect, and again on any core-side change.
@@ -840,6 +864,51 @@ impl ManagementHandle {
         F: Fn(&Value) -> Option<Value> + Send + Sync + 'static,
     {
         self.custom_handler = Some(Arc::new(f));
+        self
+    }
+
+    /// Install a handler for actions answered **asynchronously** — ones that
+    /// talk to a device, which must not hold up the MQTT loop or a runtime
+    /// thread while they wait.
+    ///
+    /// Return `Some(future)` to handle the action (its value is the reply; the
+    /// SDK fills in `request_id`), or `None` to pass it on to the
+    /// [custom handler](Self::with_custom_handler) and then to the "unknown
+    /// action" error. Each request already runs on a task of its own, so a
+    /// slow one holds up nothing else. The SDK's built-in actions (`ping`,
+    /// `get_config`, …) are never passed to it.
+    ///
+    /// ```ignore
+    /// mgmt.with_async_handler(move |cmd| {
+    ///     (cmd["action"] == "status").then(|| {
+    ///         let b = bridge.clone();
+    ///         Box::pin(async move { b.status().await }) as AsyncActionFuture
+    ///     })
+    /// })
+    /// ```
+    pub fn with_async_handler<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Value) -> Option<AsyncActionFuture> + Send + Sync + 'static,
+    {
+        self.async_handler = Some(Arc::new(f));
+        self
+    }
+
+    /// Serve files the plugin keeps while it runs — pictures it fetched from
+    /// its devices, say — from `dir`. homeCore passes them to the app at
+    /// `GET /plugins/{id}/files/{path}` (pictures only), asking for them here
+    /// (`plugin_file`, in pieces); a plugin's screens make that address with
+    /// `host.fileUrl(path)`.
+    ///
+    /// **A file's name is its identity**: the app caches each one for good,
+    /// so write a new name when the contents change (hc-roku names an icon by
+    /// channel and version). Nothing outside `dir` is ever served.
+    pub fn with_files_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        let dir = dir.into();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(dir = %dir.display(), error = %e, "The plugin's files folder can't be made");
+        }
+        self.files_dir = Some(dir);
         self
     }
 
@@ -1590,12 +1659,14 @@ impl PluginClient {
             config_path,
             log_level_handle,
             custom_handler: None,
+            async_handler: None,
             capabilities: None,
             config_schema: None,
             config_descriptor: None,
             alert_kinds: Vec::new(),
             ui: None,
             ui_dir: None,
+            files_dir: None,
             state_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -2107,6 +2178,19 @@ async fn dispatch_action(mgmt: &ManagementHandle, client: &AsyncClient, cmd: &Va
         return dispatch_streaming_action(mgmt, client, streaming_action, cmd).await;
     }
 
+    // An action answered later, on this task.
+    if !BUILT_IN_ACTIONS.contains(&action.as_str()) {
+        if let Some(fut) = mgmt.async_handler.as_ref().and_then(|h| h(cmd)) {
+            let mut resp = fut.await;
+            if !resp.is_object() {
+                resp = json!({ "status": "ok", "result": resp });
+            }
+            resp["request_id"] =
+                Value::String(cmd["request_id"].as_str().unwrap_or("").to_string());
+            return resp;
+        }
+    }
+
     // Fall through to synchronous built-ins + custom handler.
     handle_management_cmd(mgmt, cmd)
 }
@@ -2207,12 +2291,18 @@ fn handle_management_cmd(mgmt: &ManagementHandle, cmd: &Value) -> Value {
             "request_id": request_id,
             "status": "ok",
         }),
-        // A piece of one of the UI's files, for homeCore to pass on.
-        "ui_file" => {
+        // A piece of one of the UI's files — or of a file the plugin keeps
+        // while it runs — for homeCore to pass on.
+        "ui_file" | "plugin_file" => {
             use base64::Engine;
-            let Some(ref dir) = mgmt.ui_dir else {
+            let (dir, none) = if action == "ui_file" {
+                (&mgmt.ui_dir, "no such file: this plugin serves no UI")
+            } else {
+                (&mgmt.files_dir, "no such file: this plugin keeps no files")
+            };
+            let Some(ref dir) = dir else {
                 return serde_json::json!({
-                    "request_id": request_id, "status": "error", "error": "no such file: this plugin serves no UI",
+                    "request_id": request_id, "status": "error", "error": none,
                 });
             };
             let file = cmd["file"].as_str().unwrap_or("");
@@ -2497,5 +2587,125 @@ mod notice_tests {
         let json = serde_json::to_string(&n.current()).unwrap();
         let back: Vec<PluginNotice> = serde_json::from_str(&json).unwrap();
         assert_eq!(back[0].remedy.as_deref(), Some("set bind_addr"));
+    }
+}
+
+#[cfg(test)]
+mod async_and_files_tests {
+    use super::*;
+
+    fn bare() -> ManagementHandle {
+        ManagementHandle {
+            plugin_id: "plugin.test".into(),
+            config_path: None,
+            log_level_handle: None,
+            custom_handler: None,
+            async_handler: None,
+            capabilities: None,
+            config_schema: None,
+            config_descriptor: None,
+            alert_kinds: Vec::new(),
+            ui: None,
+            ui_dir: None,
+            files_dir: None,
+            state_handler: None,
+            streaming_actions: Arc::new(HashMap::new()),
+            active_streams: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn client() -> AsyncClient {
+        let (c, _el) = AsyncClient::new(MqttOptions::new("t", "127.0.0.1", 1), 8);
+        c
+    }
+
+    /// An action answered later is answered with its own reply and the
+    /// request's id; one it passes on reaches the synchronous handler.
+    #[tokio::test]
+    async fn an_async_handler_answers_and_passes_on_what_it_does_not_take() {
+        let mgmt = bare()
+            .with_async_handler(|cmd| {
+                (cmd["action"] == "slow").then(|| {
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        json!({ "status": "ok", "answer": 42 })
+                    }) as AsyncActionFuture
+                })
+            })
+            .with_custom_handler(|cmd| {
+                (cmd["action"] == "quick").then(|| json!({ "status": "ok" }))
+            });
+        let c = client();
+        let r =
+            dispatch_management_cmd(&mgmt, &c, &json!({ "action": "slow", "request_id": "r1" }))
+                .await;
+        assert_eq!(
+            (r["answer"].as_i64(), r["request_id"].as_str()),
+            (Some(42), Some("r1"))
+        );
+        let r =
+            dispatch_management_cmd(&mgmt, &c, &json!({ "action": "quick", "request_id": "r2" }))
+                .await;
+        assert_eq!(r["status"], "ok");
+        let r =
+            dispatch_management_cmd(&mgmt, &c, &json!({ "action": "other", "request_id": "r3" }))
+                .await;
+        assert_eq!(r["status"], "error");
+    }
+
+    /// The built-in actions never reach a plugin's handler, however eager.
+    #[tokio::test]
+    async fn built_in_actions_never_reach_the_async_handler() {
+        let mgmt = bare().with_async_handler(|_| {
+            Some(Box::pin(async { json!({ "status": "hijacked" }) }) as AsyncActionFuture)
+        });
+        let r = dispatch_management_cmd(
+            &mgmt,
+            &client(),
+            &json!({ "action": "ping", "request_id": "p" }),
+        )
+        .await;
+        assert_eq!(r["status"], "ok");
+    }
+
+    /// Files the plugin keeps are served from their folder and nowhere else;
+    /// a plugin with none says so.
+    #[tokio::test]
+    async fn plugin_files_come_from_their_folder_only() {
+        use base64::Engine;
+        let dir = std::env::temp_dir().join(format!("hc-files-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("icons/12-5.1.png"), b"PNGDATA").unwrap();
+        let c = client();
+        let none = dispatch_management_cmd(
+            &bare(),
+            &c,
+            &json!({ "action": "plugin_file", "file": "icons/12-5.1.png" }),
+        )
+        .await;
+        assert!(none["error"].as_str().unwrap().contains("no such file"));
+
+        let mgmt = bare().with_files_dir(&dir);
+        let r = dispatch_management_cmd(
+            &mgmt,
+            &c,
+            &json!({ "action": "plugin_file", "file": "icons/12-5.1.png" }),
+        )
+        .await;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(r["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            (data.as_slice(), r["done"].as_bool()),
+            (&b"PNGDATA"[..], Some(true))
+        );
+        let out = dispatch_management_cmd(
+            &mgmt,
+            &c,
+            &json!({ "action": "plugin_file", "file": "../etc/passwd" }),
+        )
+        .await;
+        assert_eq!(out["status"], "error");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -23,11 +23,15 @@ pub async fn discover_devices_streaming(ctx: StreamContext, bridge: Arc<Bridge>)
     ctx.progress(
         Some(10),
         Some("searching"),
-        Some("Broadcasting SSDP M-SEARCH for roku:ecp"),
+        Some(if bridge.discovery_enabled() {
+            "Broadcasting SSDP M-SEARCH for roku:ecp, and asking the known addresses"
+        } else {
+            "Asking the listed and known addresses (network discovery is off)"
+        }),
     )
     .await?;
 
-    let hits = bridge.ssdp_only_sweep().await;
+    let hits = bridge.sweep_candidates().await;
     ctx.progress(
         Some(50),
         Some("identifying"),
@@ -78,19 +82,20 @@ pub async fn discover_devices_streaming(ctx: StreamContext, bridge: Arc<Bridge>)
     // sweep that misses a device homeCore is talking to every ten
     // seconds must not be reported as an empty network — that reads as a
     // fault when the truth is one lost UDP packet.
-    let seen: Vec<String> = entries
+    let seen: Vec<(String, u64)> = entries
         .iter()
-        .filter_map(|e| e["host"].as_str().map(str::to_string))
+        .filter_map(|e| Some((e["host"].as_str()?.to_string(), e["port"].as_u64()?)))
         .collect();
     let mut missed = 0usize;
-    for (hc_id, host) in bridge.managed_hosts().await {
-        if seen.contains(&host) {
+    for (hc_id, host, port) in bridge.managed_hosts().await {
+        if seen.contains(&(host.clone(), u64::from(port))) {
             continue;
         }
         missed += 1;
         let entry = json!({
             "hc_id": hc_id,
             "host": host,
+            "port": port,
             "status": "already_managed",
             "note": "did not answer this sweep; still being polled",
         });

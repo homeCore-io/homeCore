@@ -37,16 +37,19 @@ app_refresh_interval_secs  = 3600  # installed channels + TV channel lineup
 # ── Control ─────────────────────────────────────────────────────────────
 # A Roku TV that is fully off has no network stack, so `power_on` has
 # nothing to reach over HTTP. With this on, an unreachable device is sent
-# a Wake-on-LAN magic packet to the MAC learned while it was last online.
+# a Wake-on-LAN magic packet to the MACs learned while it answered (kept
+# across restarts), on the broadcast address and the TV's /24 subnet.
 wake_on_lan  = true
-key_hold_ms  = 500   # default duration of a `key_hold` command
+key_hold_ms  = 500   # default duration of a `key_hold` command (at most 10 000)
 type_delay_ms = 50   # gap between characters when sending text; Roku's
                      # on-screen keyboards drop keys sent faster than this
 
 # ── Devices ─────────────────────────────────────────────────────────────
 # Optional. Add a block to pin a device's homeCore id (so rules keep
 # working no matter what discovery decides), to reach a Roku SSDP can't
-# see, or to run with discovery_enabled = false.
+# see, or to run with discovery_enabled = false — then these are the whole
+# list, and a Roku that moves is looked for only at the listed and
+# last-known addresses (no multicast).
 #
 #[[devices]]
 #host  = "10.0.10.40"

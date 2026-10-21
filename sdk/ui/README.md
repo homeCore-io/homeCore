@@ -33,7 +33,8 @@ Build the components into one ES module, everything they need inside it
 Write them in anything that makes custom elements — Svelte (with
 `customElement`), Lit, plain classes. Each element is given a `host` (see
 `index.d.ts`): the plugin's devices, live; commands, its actions and queries;
-files sent to an action (`upload`); a small store the app keeps for its
+files sent to an action (`upload`); where a picture the plugin keeps is
+(`fileUrl` — the app after 0.1.27); a small store the app keeps for its
 screens (`store`); its settings; homeCore's API as the viewer (`fetch`); the
 units the person reads in (`units` — °F or °C, US or metric; app 0.1.21 and
 later); the app's confirm and navigation; and the app's look. A panel is also given its

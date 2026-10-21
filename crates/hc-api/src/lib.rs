@@ -1526,6 +1526,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugins/{id}/ui/{build}/{*file}",
             get(handlers::get_plugin_ui_file),
         )
+        .route(
+            "/plugins/{id}/files/{*file}",
+            get(handlers::get_plugin_file),
+        )
         .route("/plugins/install", post(handlers::install_plugin))
         .route(
             "/plugin-runtimes",
