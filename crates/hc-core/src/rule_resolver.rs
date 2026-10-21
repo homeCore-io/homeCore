@@ -186,6 +186,11 @@ fn resolve_action(action: &mut Action, devices: &[DeviceState]) -> Result<()> {
 }
 
 pub fn compile_rule(rule: &Rule, devices: &[DeviceState]) -> Result<Rule> {
+    // Kept after the time rule it started from was deleted: held off until
+    // it is given another trigger.
+    if let Some(why) = crate::alert_links::deleted_trigger(rule) {
+        anyhow::bail!(why);
+    }
     let mut compiled = rule.clone();
     compiled.error = None;
 

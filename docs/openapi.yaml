@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.90"
+  version: "0.1.91"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -1347,6 +1347,12 @@ paths:
     put:
       operationId: replaceAutomation
       summary: Replace an automation rule (full update)
+      description: |
+        A rule that can't run — it names a deleted device, or a trigger names
+        a deleted alert rule (`rule_id` `DELETED:{id}`) — is refused with 422
+        while `enabled` is true. Saved turned off, it is kept, with `error`
+        saying why, so its steps can be changed before it is given another
+        trigger. A rule that can run is saved with no `error`.
       tags: [automations]
       security:
         - bearerAuth: []
@@ -1371,6 +1377,9 @@ paths:
     patch:
       operationId: patchAutomation
       summary: Update enabled state and/or priority only
+      description: |
+        Turning on a rule that can't run (a deleted device, or its alert rule
+        deleted) is refused with 422, and nothing is written.
       tags: [automations]
       security:
         - bearerAuth: []
@@ -1398,6 +1407,8 @@ paths:
                 $ref: "#/components/schemas/Rule"
         "404":
           $ref: "#/components/responses/NotFound"
+        "422":
+          description: It can't run, so it can't be turned on; `error` says why
 
     delete:
       operationId: deleteAutomation
@@ -2992,17 +3003,126 @@ paths:
     delete:
       operationId: deleteAlertRule
       summary: Delete an alert time rule
-      description: Its alerts clear. Needs `automations:write`.
+      description: |
+        Its alerts clear. Needs `automations:write`.
+
+        A rule that starts automations (a trigger whose filter names its
+        `rule_id`) is not deleted until the caller says what becomes of them —
+        without `automations` the answer is 409, listing them, and nothing
+        changes. With it, an automation that has another trigger keeps running
+        on that one and only loses the rule's (`kept`); one the rule alone
+        started is deleted (`automations=delete`) or kept turned off
+        (`automations=disable`), its trigger's `rule_id` becoming
+        `DELETED:{id}` and its `error` "its alert was deleted — choose another
+        trigger or delete it". It can't be turned on again until it is given
+        another trigger.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AlertRuleId"
+        - name: automations
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [delete, disable]
+          description: What becomes of the automations only this rule starts.
+      responses:
+        "200":
+          description: Deleted, with what became of its automations (when `automations` was given)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, disabled, kept]
+                properties:
+                  deleted:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationRef" }
+                  disabled:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationRef" }
+                  kept:
+                    type: array
+                    description: Had another trigger; only this rule's went.
+                    items: { $ref: "#/components/schemas/AutomationRef" }
+        "204":
+          description: Deleted; it started no automations
+        "400":
+          description: "`automations` is neither `delete` nor `disable`"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: It starts automations and `automations` wasn't given; nothing changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, automations]
+                properties:
+                  error:
+                    type: string
+                  automations:
+                    type: array
+                    items: { $ref: "#/components/schemas/AlertRuleStarts" }
+
+  /alert-rules/{id}/automations:
+    get:
+      operationId: listAlertRuleAutomations
+      summary: The automations an alert time rule starts
+      description: |
+        Each automation with a trigger naming this rule, and whether it has
+        another trigger to keep running on if the rule is deleted. What a
+        `DELETE` would ask about. Needs `automations:read`.
       tags: [alerts]
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/AlertRuleId"
       responses:
-        "204":
-          description: Deleted
+        "200":
+          description: Automations it starts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlertRuleStarts"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /alerts/automations:
+    get:
+      operationId: listAlertAutomations
+      summary: Which automations alerts start
+      description: |
+        Every automation with an alert trigger (`AlertRaised`, `AlertCleared`,
+        `AlertAcknowledged`, `AlertActiveFor`), worked out from its triggers
+        each time — one written by hand is found as surely as one made from an
+        alert. Automations that watch a device directly are not listed.
+
+        Each trigger lists the sources whose alerts its filter could match:
+        `rule:{id}` (a time rule), `kind:{kind}` (homeCore's own: wet, smoke,
+        offline, jammed, low_battery) and `plugin:{plugin_id}/{topic}` (a kind
+        a plugin declared). It is `waiting` when none of them can raise one
+        now: `off` (its time rule turned off, or its plugin kind set not to
+        show), `ignored` (someone ignored those alerts) or `deleted` (its time
+        rule is gone). An automation is `waiting` when it is on but every
+        trigger it has is waiting — it won't run, because its alert can't
+        happen. Needs `automations:read`.
+      tags: [alerts]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Automations alerts start
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AutomationAlerts"
 
   /events/stream:
     get:
@@ -9934,6 +10054,9 @@ components:
         key:
           type: string
           description: A plugin's alert — what it is about within its kind, e.g. `17.0.0`.
+        device_plugin_id:
+          type: string
+          description: The plugin the alert's device belongs to, for every kind — what an `AlertFilter`'s `plugin_id` matches for homeCore's own kinds.
         action:
           type: object
           required: [label, id]
@@ -9965,6 +10088,108 @@ components:
             at:
               type: string
               format: date-time
+
+    AutomationRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    AlertRuleStarts:
+      type: object
+      required: [id, name, enabled, keeps_running]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        enabled:
+          type: boolean
+        keeps_running:
+          type: boolean
+          description: It has another trigger, and runs on without this rule's.
+
+    AutomationAlerts:
+      type: object
+      required: [id, name, enabled, links, other_triggers, waiting, alert_deleted]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        enabled:
+          type: boolean
+        links:
+          type: array
+          description: Its alert triggers.
+          items:
+            type: object
+            required: [index, when, filter, sources]
+            properties:
+              index:
+                type: integer
+                description: Which trigger — 0 is `trigger`, then `triggers` in order.
+              when:
+                type: string
+                enum: [raised, cleared, acknowledged, active_for]
+              minutes:
+                type: integer
+                description: For `active_for`.
+              filter:
+                $ref: "#/components/schemas/AlertFilter"
+              sources:
+                type: array
+                items:
+                  type: string
+                example: ["rule:430be070-844a-4dd0-8cf2-28dfb188eb97"]
+              waiting:
+                type: string
+                enum: [off, ignored, deleted]
+                description: Why none of its sources can raise it now; absent while one can.
+        other_triggers:
+          type: integer
+          description: How many of its triggers are something else.
+        waiting:
+          type: boolean
+          description: On, but every trigger it has is an alert that can't be raised now.
+        alert_deleted:
+          type: boolean
+          description: Kept, turned off, when the time rule it started from was deleted.
+
+    AlertFilter:
+      type: object
+      description: Which alerts a trigger, check or step means. Every field narrows; empty means any alert.
+      properties:
+        kind:
+          type: string
+          enum: [wet, smoke, offline, jammed, low_battery, rule, plugin]
+        plugin_id:
+          type: string
+          description: |
+            Only this plugin's — the alerts it raised, and homeCore's own about
+            its devices: `wet` with `plugin.yolink` is any YoLink leak sensor,
+            those added later included.
+        topic:
+          type: string
+          description: Only this kind of plugin alert.
+        device_ids:
+          type: array
+          items:
+            type: string
+        min_severity:
+          type: string
+          enum: [info, warning, error, critical]
+        key:
+          type: string
+        rule_id:
+          type: string
+          description: Only this time rule's. `DELETED:{id}` once that rule was deleted and the automation kept.
 
     AlertKindSetting:
       type: object

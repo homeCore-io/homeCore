@@ -88,6 +88,12 @@ pub struct Alert {
     /// A plugin's alert: the one thing to do about it ("Update…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<AlertAction>,
+    /// The plugin the alert's device belongs to, whatever raised it — so an
+    /// automation can mean "any YoLink leak sensor" ([`AlertFilter::plugin_id`])
+    /// without listing them. Unlike `plugin_id`, set for homeCore's own kinds
+    /// and time rules' too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_plugin_id: Option<String>,
 }
 
 /// The button on a plugin's alert: one of the device's own actions, or one of
@@ -225,7 +231,9 @@ pub struct AlertFilter {
     /// Only this kind (`plugin` for any plugin's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<AlertKind>,
-    /// Only this plugin's.
+    /// Only this plugin's: the alerts it raised, and homeCore's own about its
+    /// devices — `wet` with `plugin.yolink` is any YoLink leak sensor, those
+    /// added later included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
     /// Only this kind of plugin alert (`firmware_update`).
@@ -240,10 +248,19 @@ pub struct AlertFilter {
     /// Only the one about this (`17.0.0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// Only one of a time rule's.
+    /// Only one of a time rule's. `DELETED:{id}` once that rule is deleted and
+    /// the automation was kept: it matches nothing, and the automation is
+    /// held off until it is given another trigger ([`DELETED_RULE`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
 }
+
+/// What an [`AlertFilter::rule_id`] becomes when its rule is deleted and an
+/// automation it started is kept, turned off: `DELETED:{id}`.
+pub const DELETED_RULE: &str = "DELETED:";
+
+/// Why an automation kept after its alert rule was deleted can't run.
+pub const ALERT_DELETED: &str = "its alert was deleted — choose another trigger or delete it";
 
 /// How serious, as a number to compare: info 0 … critical 3.
 pub fn severity_rank(s: AlertSeverity) -> u8 {
@@ -256,12 +273,20 @@ pub fn severity_rank(s: AlertSeverity) -> u8 {
 }
 
 impl AlertFilter {
+    /// Names a time rule that has since been deleted.
+    pub fn rule_deleted(&self) -> bool {
+        self.rule_id
+            .as_deref()
+            .is_some_and(|r| r.starts_with(DELETED_RULE))
+    }
+
     pub fn matches(&self, a: &Alert) -> bool {
         let same = |want: &Option<String>, have: &Option<String>| {
             want.as_deref().is_none_or(|w| have.as_deref() == Some(w))
         };
+        let plugin = a.plugin_id.as_deref().or(a.device_plugin_id.as_deref());
         self.kind.is_none_or(|k| k == a.kind)
-            && same(&self.plugin_id, &a.plugin_id)
+            && self.plugin_id.as_deref().is_none_or(|w| plugin == Some(w))
             && same(&self.topic, &a.topic)
             && same(&self.key, &a.key)
             && same(&self.rule_id, &a.rule_id)
@@ -665,6 +690,7 @@ mod tests {
             topic: None,
             key: None,
             action: None,
+            device_plugin_id: None,
         }
     }
 
@@ -762,6 +788,41 @@ mod tests {
             &alert(AlertKind::Offline, "d", None),
             now + chrono::Duration::hours(2)
         ));
+    }
+
+    #[test]
+    fn a_plugin_filter_means_its_devices_for_homecores_own_kinds_too() {
+        let leak = |plugin: &str| Alert {
+            device_plugin_id: Some(plugin.into()),
+            ..alert(AlertKind::Wet, "dishwasher", None)
+        };
+        let any_yolink_leak = AlertFilter {
+            kind: Some(AlertKind::Wet),
+            plugin_id: Some("plugin.yolink".into()),
+            ..Default::default()
+        };
+        assert!(any_yolink_leak.matches(&leak("plugin.yolink")));
+        assert!(!any_yolink_leak.matches(&leak("plugin.zwave")));
+        // An alert from before the field: not this plugin's.
+        assert!(!any_yolink_leak.matches(&alert(AlertKind::Wet, "dishwasher", None)));
+        // A plugin's own alert still matches by the plugin that raised it.
+        let fw = Alert {
+            plugin_id: Some("plugin.wled".into()),
+            topic: Some("firmware_update".into()),
+            ..alert(AlertKind::Plugin, "wled_1", None)
+        };
+        let wled = AlertFilter {
+            plugin_id: Some("plugin.wled".into()),
+            ..Default::default()
+        };
+        assert!(wled.matches(&fw));
+        // A deleted rule's placeholder matches nothing.
+        let gone = AlertFilter {
+            rule_id: Some(format!("{DELETED_RULE}r1")),
+            ..Default::default()
+        };
+        assert!(gone.rule_deleted());
+        assert!(!gone.matches(&alert(AlertKind::Rule, "x", Some("r1"))));
     }
 
     #[test]

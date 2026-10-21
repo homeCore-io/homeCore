@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
+pub mod alert_links;
 pub mod alerts;
 pub mod battery_watcher;
 pub mod calendar_store;

@@ -468,6 +468,7 @@ pub fn desired(
                 topic: None,
                 key: None,
                 action: None,
+                device_plugin_id: Some(d.plugin_id.clone()),
             };
 
         // ---- offline ----
@@ -595,6 +596,7 @@ pub fn desired(
                 topic: None,
                 key: None,
                 action: None,
+                device_plugin_id: Some(d.plugin_id.clone()),
             });
         }
     }
@@ -669,6 +671,7 @@ pub fn from_plugins(
                     topic: Some(pa.topic.clone()),
                     key: pa.key.clone(),
                     action: pa.action.clone(),
+                    device_plugin_id: Some(plugin_id.clone()),
                 },
             );
         }

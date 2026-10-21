@@ -2402,6 +2402,7 @@ mod alert_step_tests {
                 params: serde_json::json!({ "version": "17.0.0" }),
                 confirm: true,
             }),
+            device_plugin_id: Some("plugin.wled".into()),
         }
     }
 
