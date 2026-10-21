@@ -2776,6 +2776,7 @@ mod tests {
             topic: topic.map(Into::into),
             key: topic.map(|_| "17.0.0".into()),
             action: None,
+            device_plugin_id: Some("plugin.wled".into()),
         }
     }
 

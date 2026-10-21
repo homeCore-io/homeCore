@@ -2952,7 +2952,7 @@ fn actions_reference_device(actions: &[Action], device_id: &str, devices: &[Devi
 /// Tell every client which rules changed (H2's rule): each as written —
 /// what `GET /automations/{id}` returns — or that it's gone. Two admins, or
 /// an admin and a file edit, then never overwrite each other unseen.
-async fn announce_rules(s: &AppState, ids: &[Uuid]) {
+pub(crate) async fn announce_rules(s: &AppState, ids: &[Uuid]) {
     let written: Vec<Rule> = match (&s.source_rules_handle, &s.rules_handle) {
         (Some(h), _) | (None, Some(h)) => h.read().await.clone(),
         (None, None) => return,
@@ -3194,8 +3194,18 @@ pub async fn update_automation(
 
     rule.id = id;
 
+    // A rule that can't run is refused — unless it is being saved turned off,
+    // as one kept after its alert was deleted is while someone changes its
+    // steps: then it is kept, saying why. One that can run carries no error.
     let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
-        Ok(rule) => rule,
+        Ok(compiled) => {
+            rule.error = None;
+            compiled
+        }
+        Err(e) if !rule.enabled => {
+            rule.error = Some(e.to_string());
+            rule.clone()
+        }
         Err(e) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -8398,6 +8408,24 @@ pub async fn patch_automation(
         rule.priority = priority;
     }
 
+    // Checked before anything is written: turning on a rule that can't run
+    // (a device deleted, its alert deleted) is refused and changes nothing.
+    // Turned off, it is kept as it is, saying why.
+    let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+        Ok(compiled) => compiled,
+        Err(e) if !rule.enabled => {
+            rule.error = Some(e.to_string());
+            rule.clone()
+        }
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
     // Persist to file.
     if let Some(fs) = &s.rule_file_store {
         if let Err(e) = fs.write_rule(&rule) {
@@ -8418,16 +8446,6 @@ pub async fn patch_automation(
     }
 
     if let Some(rh) = &s.rules_handle {
-        let compiled_rule = match rule_resolver::compile_rule_for_store(&s.store, &rule).await {
-            Ok(rule) => rule,
-            Err(e) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        };
         let mut rules = rh.write().await;
         if let Some(pos) = rules.iter().position(|r| r.id == id) {
             rules[pos] = compiled_rule;

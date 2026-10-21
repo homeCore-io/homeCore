@@ -1359,6 +1359,14 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/alerts/{id}/press", post(alert_handlers::press_alert))
         .route("/alerts/kinds", get(alert_handlers::list_alert_kinds))
         .route(
+            "/alerts/automations",
+            get(alert_handlers::list_alert_automations),
+        )
+        .route(
+            "/alert-rules/{id}/automations",
+            get(alert_handlers::alert_rule_automations),
+        )
+        .route(
             "/alerts/kinds/{plugin_id}/{topic}",
             put(alert_handlers::put_alert_kind),
         )

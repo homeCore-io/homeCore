@@ -16,13 +16,14 @@
 //! device's action, and `plugins:write` besides for a plugin's.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use chrono::Utc;
 use hc_auth::{Actor, Claims};
+use hc_core::alert_links::{self, Detached};
 use hc_types::alert::{AlertActionTarget, AlertIgnore, AlertRule, AlertTopicSetting};
 use serde_json::json;
 use uuid::Uuid;
@@ -109,24 +110,233 @@ pub async fn put_alert_rule(
     Json(rule).into_response()
 }
 
-/// `DELETE /alert-rules/{id}` — its alerts clear on the engine's next pass.
+/// What becomes of the automations a deleted rule started.
+#[derive(serde::Deserialize, Default)]
+pub struct DeleteRuleQuery {
+    /// `delete`: they go too. `disable`: they stay, turned off and marked
+    /// "its alert was deleted". Either way one with another trigger keeps
+    /// running on that and only loses the rule's.
+    #[serde(default)]
+    automations: Option<String>,
+}
+
+/// `DELETE /alert-rules/{id}[?automations=delete|disable]` — its alerts clear
+/// on the engine's next pass. A rule that starts automations isn't deleted
+/// until the caller says what becomes of them: without `automations`, a 409
+/// lists them, and nothing changes.
 pub async fn delete_alert_rule(
     State(s): State<AppState>,
     _: AutomationsWrite,
     Path(id): Path<String>,
+    Query(q): Query<DeleteRuleQuery>,
 ) -> impl IntoResponse {
-    match s.store.delete_alert_rule(&id).await {
-        Ok(true) => {
-            wake(&s);
-            StatusCode::NO_CONTENT.into_response()
+    match s.store.get_alert_rule(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such rule" })),
+            )
+                .into_response()
         }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "no such rule" })),
-        )
-            .into_response(),
+        Err(e) => return failed(e),
+    }
+    let keep = match q.automations.as_deref() {
+        None => None,
+        Some("delete") => Some(false),
+        Some("disable") => Some(true),
+        Some(other) => {
+            return invalid(format!(
+                "`automations` is `delete` or `disable`, not `{other}`"
+            ))
+        }
+    };
+    let started = started_by(&s, &id).await;
+    let mut report = json!({ "deleted": [], "disabled": [], "kept": [] });
+    if !started.is_empty() {
+        let Some(keep) = keep else {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "it starts automations: say whether they go too (?automations=delete) or stay turned off (?automations=disable)",
+                    "automations": started.iter().map(|r| starts_json(r, &id)).collect::<Vec<_>>(),
+                })),
+            )
+                .into_response();
+        };
+        let mut changed = Vec::new();
+        for mut rule in started {
+            let name = rule.name.clone();
+            let outcome = alert_links::detach(&mut rule, &id, keep);
+            let done = match outcome {
+                Detached::Untouched => continue,
+                Detached::Delete => remove_rule(&s, rule.id).await.map(|_| "deleted"),
+                Detached::TurnedOff => store_rule(&s, rule.clone()).await.map(|_| "disabled"),
+                Detached::LostTriggers => store_rule(&s, rule.clone()).await.map(|_| "kept"),
+            };
+            match done {
+                Ok(list) => {
+                    if let Some(a) = report[list].as_array_mut() {
+                        a.push(json!({ "id": rule.id, "name": name }));
+                    }
+                    changed.push(rule.id);
+                }
+                Err(e) => {
+                    crate::handlers::announce_rules(&s, &changed).await;
+                    return failed(e);
+                }
+            }
+        }
+        crate::handlers::announce_rules(&s, &changed).await;
+    }
+    match s.store.delete_alert_rule(&id).await {
+        Ok(_) => {
+            wake(&s);
+            if keep.is_some() {
+                Json(report).into_response()
+            } else {
+                StatusCode::NO_CONTENT.into_response()
+            }
+        }
         Err(e) => failed(e),
     }
+}
+
+/// The automations with a trigger naming this time rule.
+async fn started_by(s: &AppState, alert_rule_id: &str) -> Vec<hc_types::rule::Rule> {
+    let Some(h) = &s.source_rules_handle else {
+        return Vec::new();
+    };
+    h.read()
+        .await
+        .iter()
+        .filter(|r| alert_links::starts_from_rule(r, alert_rule_id))
+        .cloned()
+        .collect()
+}
+
+fn starts_json(r: &hc_types::rule::Rule, alert_rule_id: &str) -> serde_json::Value {
+    json!({
+        "id": r.id,
+        "name": r.name,
+        "enabled": r.enabled,
+        // It has another trigger, and runs on without this rule's.
+        "keeps_running": alert_links::keeps_running_without(r, alert_rule_id),
+    })
+}
+
+/// `GET /alert-rules/{id}/automations` — what deleting it would touch: each
+/// automation with a trigger naming it, and whether it has another.
+pub async fn alert_rule_automations(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.store.get_alert_rule(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such rule" })),
+            )
+                .into_response()
+        }
+        Err(e) => return failed(e),
+    }
+    let list: Vec<_> = started_by(&s, &id)
+        .await
+        .iter()
+        .map(|r| starts_json(r, &id))
+        .collect();
+    Json(list).into_response()
+}
+
+/// `GET /alerts/automations` — every automation with an alert trigger: for
+/// each trigger what can raise its alert (`rule:{id}`, `kind:{kind}`,
+/// `plugin:{plugin_id}/{topic}`) and whether it is waiting because none can
+/// now; for the automation, whether it is waiting, and whether it was kept
+/// when its rule was deleted. Worked out from the triggers each time.
+pub async fn list_alert_automations(
+    State(s): State<AppState>,
+    _: AutomationsRead,
+) -> impl IntoResponse {
+    let rules = match s.store.list_alert_rules().await {
+        Ok(r) => r,
+        Err(e) => return failed(e),
+    };
+    let topics = match s.store.list_alert_topic_settings().await {
+        Ok(t) => t,
+        Err(e) => return failed(e),
+    };
+    let ignores = match s.store.list_alert_ignores().await {
+        Ok(i) => i,
+        Err(e) => return failed(e),
+    };
+    let devices = match s.store.list_devices().await {
+        Ok(d) => d,
+        Err(e) => return failed(e),
+    };
+    let kinds = s
+        .alerts
+        .as_ref()
+        .map(|a| a.plugin_kinds())
+        .unwrap_or_default();
+    let automations = match &s.source_rules_handle {
+        Some(h) => h.read().await.clone(),
+        None => Vec::new(),
+    };
+    let sources = alert_links::Sources {
+        rules: &rules,
+        kinds: &kinds,
+        topics: &topics,
+        ignores: &ignores,
+        devices: &devices,
+        now: Utc::now(),
+    };
+    Json(sources.automations(&automations)).into_response()
+}
+
+/// Write an automation changed on a rule's behalf: its file, and the live
+/// rules. One that can't run (its alert deleted) is held off with why.
+async fn store_rule(s: &AppState, rule: hc_types::rule::Rule) -> anyhow::Result<()> {
+    if let Some(fs) = &s.rule_file_store {
+        fs.write_rule(&rule)?;
+    }
+    if let Some(h) = &s.source_rules_handle {
+        let mut rules = h.write().await;
+        if let Some(r) = rules.iter_mut().find(|r| r.id == rule.id) {
+            *r = rule.clone();
+        }
+    }
+    if let Some(h) = &s.rules_handle {
+        let compiled = match hc_core::rule_resolver::compile_rule_for_store(&s.store, &rule).await {
+            Ok(c) => c,
+            Err(e) => {
+                let mut held = rule.clone();
+                held.enabled = false;
+                held.error = Some(e.to_string());
+                held
+            }
+        };
+        let mut rules = h.write().await;
+        if let Some(r) = rules.iter_mut().find(|r| r.id == rule.id) {
+            *r = compiled;
+        }
+    }
+    Ok(())
+}
+
+async fn remove_rule(s: &AppState, id: Uuid) -> anyhow::Result<()> {
+    if let Some(fs) = &s.rule_file_store {
+        fs.delete_rule(id)?;
+    }
+    if let Some(h) = &s.source_rules_handle {
+        h.write().await.retain(|r| r.id != id);
+    }
+    if let Some(h) = &s.rules_handle {
+        h.write().await.retain(|r| r.id != id);
+    }
+    Ok(())
 }
 
 /// A person's name for an alert's record: who they signed in as, or the
