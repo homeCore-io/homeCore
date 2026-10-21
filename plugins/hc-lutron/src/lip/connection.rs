@@ -32,8 +32,11 @@ impl LipReader {
     /// Accumulates bytes until:
     /// - buffer ends with `\n`  (event lines, login prompts)
     /// - buffer ends with `> ` AND starts with `G` (GNET> prompt)
+    ///
+    /// Cancel-safe: the bridge loop selects on this against timers, so a read
+    /// dropped mid-line keeps what it had in `buf` and the next call carries
+    /// on from there rather than losing the start of the line.
     pub async fn read_message(&mut self) -> Result<LipMessage> {
-        self.buf.clear();
         loop {
             let mut byte = [0u8; 1];
             let n = self
@@ -59,6 +62,7 @@ impl LipReader {
 
             if done {
                 let line = s.trim_end_matches(['\r', '\n', ' ']).trim().to_string();
+                self.buf.clear();
                 if !line.is_empty() {
                     debug!(raw = %line, "LIP recv");
                 }
@@ -102,8 +106,11 @@ pub async fn connect(
     password: &str,
 ) -> Result<(LipReader, mpsc::Sender<String>)> {
     info!(host, port, "Connecting to Lutron RA2 repeater");
-    let stream = TcpStream::connect((host, port))
+    // A host that drops packets would otherwise hold the connect for the
+    // kernel's SYN retries, about two minutes.
+    let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host, port)))
         .await
+        .map_err(|_| anyhow::anyhow!("TCP connect to {host}:{port} timed out"))?
         .with_context(|| format!("TCP connect to {host}:{port} failed"))?;
 
     let (read_half, write_half) = stream.into_split();
