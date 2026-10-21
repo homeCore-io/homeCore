@@ -47,6 +47,8 @@
  * (app 0.1.21): `units` — without it, show the schema's own units. Later
  * still (the app after 0.1.25): a `device.card` class's `accepts` — an older app shows
  * the plugin's card for every device of the slot's types.
+ * Later (the app after 0.1.27): `fileUrl` — without it, draw no picture the
+ * plugin keeps.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -128,6 +130,14 @@ export interface Host {
 	 * (`/automations`). For what the rest of `host` doesn't cover.
 	 */
 	fetch(path: string, init?: RequestInit): Promise<Response>;
+
+	/**
+	 * Where a picture the plugin keeps while it runs is — a channel's icon,
+	 * say: `path` in its files folder (`icons/837-2.23.png`). For an `<img
+	 * src>`; the browser keeps it for good, as the plugin names a file by what
+	 * is in it. Absent before the app after 0.1.27.
+	 */
+	fileUrl?(path: string): string;
 
 	/**
 	 * One of the plugin's manifest actions, sent a file (up to 32 MiB) — the

@@ -92,11 +92,41 @@ impl DeviceInfo {
         self.get("power-mode").unwrap_or("PowerOn")
     }
 
-    /// True only for `PowerOn`. `Ready`/`PowerOff` are standby (ECP still
-    /// answers), `DisplayOff` is a TV with the panel off but audio live,
-    /// `Headless` is a TV mid-boot.
+    /// On: `PowerOn`, and `DisplayOff` — a TV with its screen off and its
+    /// sound still playing (Roku's "screen off" for listening), which is on
+    /// for every purpose but the picture. `Ready`/`PowerOff` are standby (ECP
+    /// still answers), `Headless` is a TV mid-boot.
     pub fn is_powered_on(&self) -> bool {
-        self.power_mode() == "PowerOn"
+        matches!(self.power_mode(), "PowerOn" | "DisplayOff")
+    }
+
+    /// A flag the device may not report at all: `None` when it doesn't (an
+    /// older Roku OS), rather than a `false` it never said.
+    pub fn flag_opt(&self, key: &str) -> Option<bool> {
+        match self.get(key)? {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn software_version(&self) -> Option<&str> {
+        self.get("software-version").filter(|s| !s.is_empty())
+    }
+
+    /// What it is, as a person would say it: "TCL 65R625" for a TV whose
+    /// model name is a part number, "Roku Smart Soundbar 9101X" for one whose
+    /// model name already says who made it.
+    pub fn model_words(&self) -> Option<String> {
+        let field = |k: &str| self.get(k).map(str::trim).filter(|s| !s.is_empty());
+        let name = field("model-name")?;
+        match (field("vendor-name"), field("model-number")) {
+            (Some(v), _) if !name.to_lowercase().contains(&v.to_lowercase()) => {
+                Some(format!("{v} {name}"))
+            }
+            (_, Some(n)) if !name.contains(n) => Some(format!("{name} {n}")),
+            _ => Some(name.to_string()),
+        }
     }
 
     pub fn is_tv(&self) -> bool {
@@ -117,7 +147,9 @@ impl DeviceInfo {
     pub fn ecp_control_enabled(&self) -> bool {
         match self.get("ecp-setting-mode") {
             None | Some("") => true,
-            Some(mode) => mode.eq_ignore_ascii_case("enabled"),
+            Some(mode) => ["enabled", "default", "permissive"]
+                .iter()
+                .any(|m| mode.eq_ignore_ascii_case(m)),
         }
     }
 
@@ -150,17 +182,30 @@ impl DeviceInfo {
 }
 
 /// One entry from `query/apps` / `query/active-app`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct App {
     pub id: String,
     pub name: String,
     /// `appl` (channel), `tvin` (TV input), `ssvr` (screensaver).
     /// Absent on pre-installed apps in older firmware.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub app_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
+/// A name as a person types it: Roku puts non-breaking spaces in its input
+/// names (`"HDMI\u{a0}1"`), which look like spaces and match nothing typed.
+pub fn plain_name(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl App {
+    /// [`plain_name`] of its name.
+    pub fn plain_name(&self) -> String {
+        plain_name(&self.name)
+    }
+
     /// TV inputs are apps with reserved ids (`tvinput.hdmi1`,
     /// `tvinput.dtv`, `tvinput.av1`) — launching one switches the TV's
     /// input, which is why the plugin surfaces them separately from
@@ -170,7 +215,7 @@ impl App {
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        let mut v = serde_json::json!({ "id": self.id, "name": self.name });
+        let mut v = serde_json::json!({ "id": self.id, "name": self.plain_name() });
         if let Some(t) = &self.app_type {
             v["type"] = serde_json::Value::String(t.clone());
         }
@@ -354,7 +399,7 @@ impl EcpClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("image/png")
             .to_string();
-        Ok((ct, resp.bytes().await?.to_vec()))
+        Ok((ct, read_limited(resp, MAX_ICON_BYTES, &url).await?))
     }
 
     /// `GET /query/app-state/{app_id}` — `active` | `background` |
@@ -474,7 +519,8 @@ impl EcpClient {
     async fn get_text(&self, path: &str) -> Result<String> {
         let url = format!("{}/{}", self.base, path);
         let resp = self.send(self.http.get(&url), &url).await?;
-        Ok(resp.text().await?)
+        let bytes = read_limited(resp, MAX_QUERY_BYTES, &url).await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     async fn post_empty(&self, path: &str) -> Result<()> {
@@ -500,6 +546,27 @@ impl EcpClient {
             s => Err(anyhow!("ECP request to {url} returned HTTP {s}")),
         }
     }
+}
+
+/// The most a query answer may be. A Roku's channel list is ~10 KB and its
+/// device-info ~4 KB; anything near this is not a Roku.
+pub const MAX_QUERY_BYTES: usize = 1024 * 1024;
+/// The most a channel icon may be (Roku's are 290×218 PNGs, ~10–40 KB).
+pub const MAX_ICON_BYTES: usize = 256 * 1024;
+
+/// Read a body, refusing one larger than `max` rather than holding it all.
+async fn read_limited(mut resp: reqwest::Response, max: usize, url: &str) -> Result<Vec<u8>> {
+    if resp.content_length().is_some_and(|n| n as usize > max) {
+        return Err(anyhow!("{url} answered with more than {max} bytes"));
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if out.len() + chunk.len() > max {
+            return Err(anyhow!("{url} answered with more than {max} bytes"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 /// Append `?k=v&k=v` with both halves percent-encoded.
@@ -719,6 +786,54 @@ mod tests {
         assert!(parse_device_info("<device-info/>")
             .unwrap()
             .ecp_control_enabled());
+    }
+
+    /// `DisplayOff` is a TV with its screen off and its sound on: on.
+    #[test]
+    fn screen_off_is_still_on() {
+        let xml = DEVICE_INFO.replace("PowerOn", "DisplayOff");
+        assert!(parse_device_info(&xml).unwrap().is_powered_on());
+        let xml = DEVICE_INFO.replace("PowerOn", "Headless");
+        assert!(!parse_device_info(&xml).unwrap().is_powered_on());
+    }
+
+    #[test]
+    fn a_flag_it_never_reported_is_unknown_not_false() {
+        let d = parse_device_info(DEVICE_INFO).unwrap();
+        assert_eq!(d.flag_opt("supports-find-remote"), Some(false));
+        assert_eq!(d.flag_opt("supports-audio-volume-control"), None);
+    }
+
+    /// The house's two kinds of model name: a TV's part number wants its
+    /// maker, a soundbar's name wants its model number.
+    #[test]
+    fn models_read_as_a_person_says_them() {
+        let tv = parse_device_info(
+            "<device-info><vendor-name>TCL</vendor-name><model-name>65R625</model-name>\
+             <model-number>A108X</model-number></device-info>",
+        )
+        .unwrap();
+        assert_eq!(tv.model_words().as_deref(), Some("TCL 65R625"));
+        let bar = parse_device_info(
+            "<device-info><vendor-name>Roku</vendor-name><model-name>Roku Smart Soundbar</model-name>\
+             <model-number>9101X</model-number></device-info>",
+        )
+        .unwrap();
+        assert_eq!(
+            bar.model_words().as_deref(),
+            Some("Roku Smart Soundbar 9101X")
+        );
+    }
+
+    #[test]
+    fn default_and_permissive_allow_control_and_limited_does_not() {
+        for (mode, ok) in [("default", true), ("permissive", true), ("limited", false)] {
+            let d = parse_device_info(&format!(
+                "<device-info><ecp-setting-mode>{mode}</ecp-setting-mode></device-info>"
+            ))
+            .unwrap();
+            assert_eq!(d.ecp_control_enabled(), ok, "{mode}");
+        }
     }
 
     #[test]
@@ -1019,6 +1134,23 @@ mod http_tests {
             err.to_string().contains("Control by mobile apps"),
             "unhelpful error: {err}"
         );
+    }
+
+    /// A device that answers with far more than a Roku ever sends is
+    /// refused, not read into memory whole.
+    #[tokio::test]
+    async fn oversized_answers_are_refused() {
+        let (client, _log) = crate::testutil::scripted(|_, path| {
+            if path.starts_with("/query/icon/") {
+                (200, "x".repeat(MAX_ICON_BYTES + 1))
+            } else {
+                (200, "<device-info/>".into())
+            }
+        })
+        .await;
+        let err = client.icon("12").await.unwrap_err().to_string();
+        assert!(err.contains("more than"), "{err}");
+        assert!(client.device_info().await.is_ok());
     }
 
     #[tokio::test]

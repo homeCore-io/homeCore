@@ -261,6 +261,40 @@ the web app and keeps none. Each element is handed the app's `host` — the
 plugin's devices, commands, actions, settings and the app's look; its types are
 `core/sdk/ui` (`@homecore/plugin-ui`). `plugins/hc-ecowitt/ui` is a complete one.
 
+### Pictures it keeps
+
+Pictures a plugin fetches while it runs — a channel's icon from a Roku — can't
+be in the built UI. Keep them in a folder and serve it:
+
+```rust
+mgmt = mgmt.with_files_dir(config_dir.join(".roku-files"));
+```
+
+homeCore passes them to the app at `GET /plugins/{id}/files/{path}` (pictures
+only), asking the SDK for them in pieces (`plugin_file`); a screen makes the
+address with `host.fileUrl("icons/837-2.23.png")`. **A file's name is its
+identity**: the browser keeps each for good, so write a new name when the
+contents change (hc-roku names an icon by channel and version). homeCore 0.1.92
+and later.
+
+## Actions answered later
+
+`with_custom_handler` answers on the task the request arrived on, and must not
+block it. An action that talks to a device answers asynchronously instead:
+
+```rust
+mgmt = mgmt.with_async_handler(move |cmd| {
+    (cmd["action"] == "status").then(|| {
+        let b = bridge.clone();
+        Box::pin(async move { b.status().await }) as AsyncActionFuture
+    })
+});
+```
+
+`Some(future)` takes the action (its value is the reply; the SDK adds
+`request_id`), `None` passes it on to the custom handler. The SDK's own actions
+(`ping`, `get_config`, …) never reach it. hc-roku's are all answered this way.
+
 ## Files sent to an action
 
 `POST /plugins/{id}/upload/{action}` sends a file to one of your manifest

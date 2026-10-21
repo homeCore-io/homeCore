@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.91"
+  version: "0.1.92"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -3340,6 +3340,37 @@ paths:
           description: The plugin carries another build now (its `build` is in the body)
         "502":
           description: The plugin didn't answer, or sent a bad piece
+
+  /plugins/{id}/files/{file}:
+    get:
+      operationId: getPluginFile
+      summary: A picture a running plugin keeps, passed through
+      description: |
+        A file a plugin keeps while it runs — a channel's icon, say — asked of
+        the plugin over the management channel (`plugin_file`, in pieces) and
+        passed through; homeCore keeps nothing. Pictures only (`png`, `jpg`,
+        `webp`, `gif`), up to 4 MiB. A plugin names a file by what is in it
+        (hc-roku: channel and version), so the answer may be cached for good.
+        A plugin's screens make the address with `host.fileUrl(path)`.
+
+        Needs only `devices:read`. Added in core 0.1.92.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: file
+          in: path
+          required: true
+          description: A path inside the plugin's files folder (`icons/837-2.23.png`).
+          schema: { type: string }
+      responses:
+        "200":
+          description: The picture, with its content type; cacheable for good
+        "404":
+          description: The plugin isn't running, keeps no files, or has no such file
+        "502":
+          description: The plugin didn't answer, sent a bad piece, or the file is too large
 
   /plugins/{id}/upload/{action}:
     post:

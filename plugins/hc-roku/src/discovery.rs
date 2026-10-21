@@ -121,19 +121,20 @@ pub async fn ssdp_search(timeout: Duration, repeats: u8) -> Result<Vec<SsdpHit>>
     Ok(hits)
 }
 
-/// Build a hit from a raw SSDP reply, falling back to the packet's source
-/// address when `LOCATION` is missing or unparsable — a device that
-/// answered is reachable whether or not its header is well-formed.
+/// Build a hit from a raw SSDP reply. **The address is where the packet came
+/// from**, never what its `LOCATION` claims: anything on the network can
+/// answer an M-SEARCH, and a reply naming some other host would have the
+/// plugin poll — and send keypresses to — an address of the replier's
+/// choosing. `LOCATION` only supplies the port, and only when it names the
+/// sender itself.
 fn hit_from_response(resp: &str, src: SocketAddr) -> Option<SsdpHit> {
     let location = header(resp, "location").unwrap_or_default();
-    let fallback_host = src.ip().to_string();
-    let (host, port) = match Url::parse(&location) {
-        Ok(u) => (
-            u.host_str().unwrap_or(&fallback_host).to_string(),
-            u.port().unwrap_or(crate::ecp::DEFAULT_PORT),
-        ),
-        Err(_) => (fallback_host, crate::ecp::DEFAULT_PORT),
-    };
+    let host = src.ip().to_string();
+    let port = Url::parse(&location)
+        .ok()
+        .filter(|u| u.host_str() == Some(host.as_str()))
+        .and_then(|u| u.port())
+        .unwrap_or(crate::ecp::DEFAULT_PORT);
     Some(SsdpHit {
         host,
         port,
@@ -178,13 +179,14 @@ fn serial_from_usn(usn: &str) -> Option<String> {
 ///
 /// A Roku TV that is *fully* off (not standby) drops its network stack,
 /// so `POST /keypress/PowerOn` has nothing to answer it — WoL is the only
-/// way back. Devices advertise support via `supports-wake-on-wlan` in
-/// `device-info`, which the plugin caches while the device is reachable
-/// precisely so it can be used once it is not.
+/// way back. The MACs are learned while the device answers and kept across
+/// restarts, precisely so they can be used once it does not.
 ///
-/// Broadcast to port 9 (discard) on 255.255.255.255; the packet never
-/// leaves the local segment, so this cannot reach anything routable.
-pub async fn wake_on_lan(mac: &str) -> Result<()> {
+/// Sent to port 9 on 255.255.255.255 and, when the device's address is
+/// known, to its subnet's broadcast too (taken as a /24): some routers and
+/// access points drop the all-ones broadcast but pass the directed one.
+/// Neither leaves the local segment.
+pub async fn wake_on_lan(mac: &str, host: Option<&str>) -> Result<()> {
     let bytes = parse_mac(mac)?;
     let mut packet = vec![0xFFu8; 6];
     for _ in 0..16 {
@@ -193,8 +195,24 @@ pub async fn wake_on_lan(mac: &str) -> Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     socket.set_broadcast(true)?;
     socket.send_to(&packet, (Ipv4Addr::BROADCAST, 9)).await?;
+    if let Some(b) = host.and_then(subnet_broadcast) {
+        if let Err(e) = socket.send_to(&packet, (b, 9)).await {
+            debug!(mac, to = %b, error = %e, "Directed Wake-on-LAN broadcast failed");
+        }
+    }
     debug!(mac, "Wake-on-LAN magic packet sent");
     Ok(())
+}
+
+/// The /24 broadcast address of an IPv4 host (`10.0.10.69` → `10.0.10.255`).
+/// Loopback has none.
+fn subnet_broadcast(host: &str) -> Option<Ipv4Addr> {
+    let ip: Ipv4Addr = host.parse().ok()?;
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_broadcast() {
+        return None;
+    }
+    let [a, b, c, _] = ip.octets();
+    Some(Ipv4Addr::new(a, b, c, 255))
 }
 
 fn parse_mac(mac: &str) -> Result<[u8; 6]> {
@@ -254,6 +272,26 @@ usn: uuid:roku:ecp:P0A070000007\r\n\r\n";
     #[test]
     fn status_line_does_not_end_the_header_scan() {
         assert_eq!(header(REPLY, "st").as_deref(), Some("roku:ecp"));
+    }
+
+    /// A reply that names another host is still about the sender: the
+    /// plugin talks to where the packet came from.
+    #[test]
+    fn the_address_is_where_the_reply_came_from() {
+        let reply = "HTTP/1.1 200 OK\r\nST: roku:ecp\r\nLocation: http://10.9.9.9:8888/\r\n\
+USN: uuid:roku:ecp:X1\r\n\r\n";
+        let hit = hit_from_response(reply, src()).unwrap();
+        assert_eq!((hit.host.as_str(), hit.port), ("192.168.1.134", 8060));
+    }
+
+    #[test]
+    fn wake_on_lan_also_goes_to_the_subnet() {
+        assert_eq!(
+            subnet_broadcast("10.0.10.69"),
+            Some(Ipv4Addr::new(10, 0, 10, 255))
+        );
+        assert_eq!(subnet_broadcast("127.0.0.1"), None);
+        assert_eq!(subnet_broadcast("roku.local"), None);
     }
 
     /// A malformed LOCATION must not lose the device — it answered, so
@@ -351,9 +389,25 @@ mod live {
         println!("player: {:?}", snap.player);
         println!("apps: {}", snap.apps.len());
         println!("tv_channels: {}", snap.tv_channels.len());
+        let caps = snap
+            .device_info
+            .as_ref()
+            .map(crate::state::Caps::from_info)
+            .unwrap_or_default();
+        let doc = crate::state::to_json(
+            &snap,
+            &crate::state::Extras {
+                caps: &caps,
+                muted: false,
+                last_error: None,
+                serial: None,
+                icon: &|_| None,
+                launches: &Default::default(),
+            },
+        );
         println!(
             "state doc:\n{}",
-            serde_json::to_string_pretty(&crate::state::to_json(&snap)).unwrap()
+            serde_json::to_string_pretty(&doc).unwrap()
         );
     }
 }

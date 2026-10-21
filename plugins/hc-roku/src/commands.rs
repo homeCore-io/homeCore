@@ -21,6 +21,7 @@
 //! device is already where the caller wants it. That makes them
 //! idempotent, which is what a rule firing twice needs.
 
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -28,34 +29,71 @@ use serde_json::{json, Map, Value};
 use tracing::{debug, warn};
 
 use crate::discovery;
-use crate::ecp::{App, DeviceInfo, EcpClient};
+use crate::ecp::{App, EcpClient, EcpError};
 use crate::keys;
+use crate::state::Caps;
+
+/// The most a held key is held: a remote's own auto-repeat, not a stuck key.
+pub const MAX_HOLD_MS: u64 = 10_000;
+/// The most typed in one go — a search, a code. Each character is a request.
+pub const MAX_TEXT_CHARS: usize = 200;
+
+/// The order attribute writes run in, whatever order they arrived in: power
+/// first (and a wait for the Roku to wake), then what to show, then the rest.
+/// `{"source": "Netflix", "on": true}` must turn the TV on before it opens
+/// Netflix — JSON object order is no order at all.
+pub const ATTRIBUTE_ORDER: &[&str] = &[
+    "on",
+    "source",
+    "app",
+    "app_id",
+    "app_name",
+    "tv_channel",
+    "muted",
+    "mute",
+    "state",
+    "key",
+    "text",
+];
 
 /// What the executor knows about the device it is acting on.
 pub struct CommandContext<'a> {
     /// Installed apps + TV inputs, for resolving `source: "Netflix"`.
     pub apps: &'a [App],
-    pub device_info: Option<&'a DeviceInfo>,
+    pub caps: &'a Caps,
     /// Last published `state` attribute — see the module note on `Play`.
     pub playback_state: &'a str,
     /// Whether the plugin believes the device is muted. ECP cannot report
     /// mute, so this is tracked from the presses the plugin sent; a mute
     /// result carries the new value back as `"muted"`.
     pub muted: bool,
-    /// False when the last poll failed; switches `power_on` to
-    /// Wake-on-LAN, since a device that isn't answering can't be told to
-    /// turn on over HTTP.
-    pub reachable: bool,
+    /// Whether the last poll reached it, and whether it was on. Both change as
+    /// a command turns the device on, so a launch after `on: true` in the same
+    /// command doesn't turn it on twice.
+    pub reachable: AtomicBool,
+    pub powered: AtomicBool,
+    /// An HDMI/AV input or live TV is on screen: there is no playback to stop.
+    pub on_input: bool,
     pub wake_on_lan: bool,
+    /// MACs learned while it answered (kept across restarts), for
+    /// Wake-on-LAN, and its address, for the subnet broadcast.
+    pub macs: &'a [String],
+    pub host: &'a str,
     /// How long `key_hold` presses a key when the caller doesn't say.
     pub default_hold: Duration,
     /// Gap between `Lit_` keys when typing text.
     pub type_delay: Duration,
+    /// How long to wait for a Roku to say it is on after PowerOn, and after a
+    /// Wake-on-LAN packet for it to answer at all.
+    pub wake_timeout: Duration,
+    /// After it says it is on, before launching anything: the home screen is
+    /// still drawing, and a launch sent into that is dropped.
+    pub power_settle: Duration,
 }
 
-/// Execute one homeCore command. The returned value is a short
-/// description of what was sent, used by the management actions'
-/// responses and by the debug log.
+/// Execute one homeCore command. The returned value says what was sent; for
+/// attribute writes it lists each key `applied` and each that `failed`, with
+/// why — one key failing does not stop the others.
 pub async fn execute(client: &EcpClient, cmd: &Value, ctx: &CommandContext<'_>) -> Result<Value> {
     match cmd.get("action").and_then(Value::as_str) {
         Some(action) => run_action(client, action, cmd, ctx).await,
@@ -69,10 +107,14 @@ pub fn mute_press_needed(tracked: bool, wanted: bool) -> bool {
     tracked != wanted
 }
 
-/// Attribute-style commands. Each recognised key is rewritten into the
-/// action it means and dispatched; unrecognised keys are reported rather
-/// than silently dropped, because a typo'd attribute otherwise looks like
-/// a device that ignores commands.
+/// Whether an error is the Roku refusing control (HTTP 403).
+pub fn is_forbidden(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<EcpError>(), Some(EcpError::Forbidden))
+}
+
+/// Attribute-style commands, in [`ATTRIBUTE_ORDER`]. Each recognised key is
+/// rewritten into the action it means and dispatched; unrecognised keys are
+/// reported rather than silently dropped.
 async fn run_attributes(
     client: &EcpClient,
     cmd: &Value,
@@ -82,14 +124,21 @@ async fn run_attributes(
         bail!("command payload must be a JSON object");
     };
 
+    let mut keys: Vec<&String> = obj.keys().filter(|k| !is_metadata_key(k)).collect();
+    keys.sort_by_key(|k| {
+        ATTRIBUTE_ORDER
+            .iter()
+            .position(|o| o == k)
+            .unwrap_or(ATTRIBUTE_ORDER.len())
+    });
+
     let mut applied = Vec::new();
     let mut unknown = Vec::new();
-    let mut muted = None;
+    let mut failed = Map::new();
+    let mut out = json!({});
 
-    for (key, value) in obj {
-        if is_metadata_key(key) {
-            continue;
-        }
+    for key in keys {
+        let value = &obj[key.as_str()];
         let rewritten: Option<Value> = match key.as_str() {
             "on" => match value.as_bool() {
                 Some(true) => Some(json!({ "action": "power_on" })),
@@ -127,17 +176,28 @@ async fn run_attributes(
         match rewritten {
             Some(sub) => {
                 let action = sub["action"].as_str().unwrap_or_default().to_string();
-                let result = run_action(client, &action, &sub, ctx).await?;
-                if let Some(m) = result.get("muted").and_then(Value::as_bool) {
-                    muted = Some(m);
+                match run_action(client, &action, &sub, ctx).await {
+                    Ok(result) => {
+                        for carried in ["muted", "launched"] {
+                            if let Some(v) = result.get(carried) {
+                                out[carried] = v.clone();
+                            }
+                        }
+                        applied.push(key.clone());
+                    }
+                    Err(e) => {
+                        if is_forbidden(&e) {
+                            out["forbidden"] = json!(true);
+                        }
+                        failed.insert(key.clone(), json!(e.to_string()));
+                    }
                 }
-                applied.push(key.clone());
             }
             None => unknown.push(key.clone()),
         }
     }
 
-    if applied.is_empty() {
+    if applied.is_empty() && failed.is_empty() {
         bail!(
             "no recognised attributes in command (saw: {})",
             unknown.join(", ")
@@ -146,11 +206,37 @@ async fn run_attributes(
     if !unknown.is_empty() {
         warn!(?unknown, "Ignored unrecognised attributes in Roku command");
     }
-    let mut out = json!({ "applied": applied, "ignored": unknown });
-    if let Some(m) = muted {
-        out["muted"] = json!(m);
+    out["applied"] = json!(applied);
+    out["ignored"] = json!(unknown);
+    if !failed.is_empty() {
+        out["failed"] = Value::Object(failed);
     }
     Ok(out)
+}
+
+/// What failed in an attribute write, in words: `"source: …; muted: …"`.
+pub fn failures(result: &Value) -> Option<String> {
+    let failed = result.get("failed")?.as_object()?;
+    (!failed.is_empty()).then(|| {
+        failed
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// Turn it on first when a launch reaches a Roku that is off — a TV in
+/// standby otherwise ignores it, or opens the channel with the screen dark.
+async fn ensure_on(client: &EcpClient, ctx: &CommandContext<'_>) -> Result<()> {
+    if ctx.reachable.load(Relaxed) && ctx.powered.load(Relaxed) {
+        return Ok(());
+    }
+    if !ctx.reachable.load(Relaxed) && !ctx.wake_on_lan {
+        // Nothing to wake it with: try the launch, which says why it failed.
+        return Ok(());
+    }
+    power_on(client, ctx).await.map(|_| ())
 }
 
 async fn run_action(
@@ -167,10 +253,12 @@ async fn run_action(
         "power_on" | "turn_on" => power_on(client, ctx).await,
         "power_off" | "turn_off" => {
             client.keypress("PowerOff").await?;
+            ctx.powered.store(false, Relaxed);
             Ok(json!({ "sent": "PowerOff" }))
         }
         "power_toggle" | "toggle_power" => {
             client.keypress("Power").await?;
+            ctx.powered.store(!ctx.powered.load(Relaxed), Relaxed);
             Ok(json!({ "sent": "Power" }))
         }
 
@@ -195,16 +283,19 @@ async fn run_action(
             client.keypress("Play").await?;
             Ok(json!({ "sent": "Play" }))
         }
-        // ECP has no stop. `Back` leaves playback and returns to the
-        // app's own UI, which is the closest equivalent a remote has.
+        // ECP has no stop. `Back` leaves playback and returns to the app's
+        // own UI — but on an HDMI input or live TV, Back leaves the input
+        // for the home screen, which is not "stop", so there it does nothing.
         "stop" => {
+            if ctx.on_input {
+                return Ok(json!({ "skipped": "an input or live TV has nothing to stop" }));
+            }
             client.keypress("Back").await?;
             Ok(json!({ "sent": "Back", "note": "ECP has no stop; Back exits playback" }))
         }
-        "next" | "next_track" | "forward" | "fast_forward" => {
-            press_repeated(client, "Fwd", cmd).await
-        }
-        "previous" | "previous_track" | "rewind" => press_repeated(client, "Rev", cmd).await,
+        // ◀◀ and ▶▶ scan; a Roku has no "next".
+        "fast_forward" | "forward" | "ff" => press_repeated(client, "Fwd", cmd).await,
+        "rewind" => press_repeated(client, "Rev", cmd).await,
         "instant_replay" | "replay" => {
             client.keypress("InstantReplay").await?;
             Ok(json!({ "sent": "InstantReplay" }))
@@ -212,10 +303,17 @@ async fn run_action(
 
         // ── Navigation ───────────────────────────────────────────────
         "home" | "back" | "select" | "up" | "down" | "left" | "right" | "info" | "enter"
-        | "backspace" | "find_remote" => {
+        | "backspace" => {
             let key = keys::resolve(&normalized)
                 .ok_or_else(|| anyhow!("no ECP key for '{normalized}'"))?;
             press_repeated(client, &key, cmd).await
+        }
+        "find_remote" => {
+            if !ctx.caps.find_remote {
+                bail!("this Roku has no remote finder");
+            }
+            client.keypress("FindRemote").await?;
+            Ok(json!({ "sent": "FindRemote" }))
         }
 
         // ── Volume ───────────────────────────────────────────────────
@@ -248,14 +346,27 @@ async fn run_action(
         ),
 
         // ── Live TV ──────────────────────────────────────────────────
-        "channel_up" => press_repeated(client, "ChannelUp", cmd).await,
-        "channel_down" => press_repeated(client, "ChannelDown", cmd).await,
+        "channel_up" | "channel_down" => {
+            if !ctx.caps.is_tv {
+                bail!("this Roku has no tuner");
+            }
+            let key = if normalized == "channel_up" {
+                "ChannelUp"
+            } else {
+                "ChannelDown"
+            };
+            press_repeated(client, key, cmd).await
+        }
         "tune" | "set_channel" => {
+            if !ctx.caps.is_tv {
+                bail!("this Roku has no tuner");
+            }
             let channel = cmd
                 .get("channel")
                 .or_else(|| cmd.get("tv_channel"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("tune requires string 'channel' (e.g. \"14.3\")"))?;
+            ensure_on(client, ctx).await?;
             // Tuning is a deep link into the tuner app, not a key press:
             // ChannelUp/Down can only step, they can't target.
             client
@@ -270,6 +381,7 @@ async fn run_action(
                 .ok_or_else(|| anyhow!("launch_app requires 'app' (id or name)"))?;
             let app_id = resolve_app_id(&wanted, ctx.apps)?;
             let params = launch_params(cmd);
+            ensure_on(client, ctx).await?;
             client.launch(&app_id, &params).await?;
             Ok(json!({ "launched": app_id, "params": params_to_json(&params) }))
         }
@@ -278,10 +390,12 @@ async fn run_action(
                 .ok_or_else(|| anyhow!("select_source requires 'source'"))?;
             // "home" isn't an app — it's the Home key.
             if wanted.eq_ignore_ascii_case("home") || wanted.eq_ignore_ascii_case("roku") {
+                ensure_on(client, ctx).await?;
                 client.keypress("Home").await?;
                 return Ok(json!({ "sent": "Home" }));
             }
             let app_id = resolve_app_id(&wanted, ctx.apps)?;
+            ensure_on(client, ctx).await?;
             client.launch(&app_id, &[]).await?;
             Ok(json!({ "launched": app_id }))
         }
@@ -295,9 +409,7 @@ async fn run_action(
             }))
         }
         // `exit_app` and `app_state` are developer-mode endpoints
-        // (Roku OS 13.0+). They answer 403 on a retail device, which the
-        // ECP client reports as a "control by mobile apps" hint — the
-        // right nudge for the common cause, if not the only one.
+        // (Roku OS 13.0+). They answer 403 on a retail device.
         "exit_app" => {
             let app_id = string_param(cmd, &["app_id", "app", "id"])
                 .ok_or_else(|| anyhow!("exit_app requires 'app_id'"))?;
@@ -317,9 +429,9 @@ async fn run_action(
         "key" | "press" | "keypress" => {
             let raw =
                 string_param(cmd, &["key", "name"]).ok_or_else(|| anyhow!("key requires 'key'"))?;
-            let key = keys::resolve(&raw)
-                .ok_or_else(|| anyhow!("unknown Roku key '{raw}'; see ALL_KEYS"))?;
+            let key = resolve_key(&raw, ctx)?;
             if let Some(ms) = cmd.get("hold_ms").and_then(Value::as_u64) {
+                let ms = bounded_hold(ms);
                 client.key_hold(&key, Duration::from_millis(ms)).await?;
                 return Ok(json!({ "held": key, "hold_ms": ms }));
             }
@@ -328,10 +440,11 @@ async fn run_action(
         "key_hold" | "hold" => {
             let raw = string_param(cmd, &["key", "name"])
                 .ok_or_else(|| anyhow!("key_hold requires 'key'"))?;
-            let key = keys::resolve(&raw).ok_or_else(|| anyhow!("unknown Roku key '{raw}'"))?;
+            let key = resolve_key(&raw, ctx)?;
             let hold = cmd
                 .get("hold_ms")
                 .and_then(Value::as_u64)
+                .map(bounded_hold)
                 .map(Duration::from_millis)
                 .unwrap_or(ctx.default_hold);
             client.key_hold(&key, hold).await?;
@@ -340,20 +453,23 @@ async fn run_action(
         "key_down" | "keydown" => {
             let raw = string_param(cmd, &["key", "name"])
                 .ok_or_else(|| anyhow!("key_down requires 'key'"))?;
-            let key = keys::resolve(&raw).ok_or_else(|| anyhow!("unknown Roku key '{raw}'"))?;
+            let key = resolve_key(&raw, ctx)?;
             client.keydown(&key).await?;
             Ok(json!({ "keydown": key }))
         }
         "key_up" | "keyup" => {
             let raw = string_param(cmd, &["key", "name"])
                 .ok_or_else(|| anyhow!("key_up requires 'key'"))?;
-            let key = keys::resolve(&raw).ok_or_else(|| anyhow!("unknown Roku key '{raw}'"))?;
+            let key = resolve_key(&raw, ctx)?;
             client.keyup(&key).await?;
             Ok(json!({ "keyup": key }))
         }
         "text" | "type" | "send_text" => {
             let text = string_param(cmd, &["text", "value", "keyword"])
                 .ok_or_else(|| anyhow!("text requires 'text'"))?;
+            if text.chars().count() > MAX_TEXT_CHARS {
+                bail!("text is longer than {MAX_TEXT_CHARS} characters");
+            }
             let n = client.type_text(&text, ctx.type_delay).await?;
             // Submitting is opt-in: a search box wants Enter, a login
             // form wants the caller to move focus first.
@@ -390,38 +506,66 @@ async fn run_action(
     }
 }
 
-/// Power on, routing around a device that isn't answering.
+/// A key this device has: a soundbar has no tuner keys, and only some
+/// Rokus can find their remote.
+fn resolve_key(raw: &str, ctx: &CommandContext<'_>) -> Result<String> {
+    let key = keys::resolve(raw).ok_or_else(|| anyhow!("unknown Roku key '{raw}'"))?;
+    if keys::tv_only(&key) && !ctx.caps.is_tv {
+        bail!("this Roku has no {key} — it isn't a TV");
+    }
+    if key == "FindRemote" && !ctx.caps.find_remote {
+        bail!("this Roku has no remote finder");
+    }
+    Ok(key)
+}
+
+fn bounded_hold(ms: u64) -> u64 {
+    ms.clamp(50, MAX_HOLD_MS)
+}
+
+/// Wait for the Roku to say it is on, then a moment more for its home screen.
+/// Returns whether it did.
+async fn wait_awake(client: &EcpClient, ctx: &CommandContext<'_>) -> bool {
+    let deadline = tokio::time::Instant::now() + ctx.wake_timeout;
+    loop {
+        if let Ok(info) = client.device_info().await {
+            ctx.reachable.store(true, Relaxed);
+            if info.is_powered_on() {
+                ctx.powered.store(true, Relaxed);
+                tokio::time::sleep(ctx.power_settle).await;
+                return true;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Power on, routing around a device that isn't answering, and wait for it.
 ///
-/// A Roku TV that is fully off has no network stack, so the ECP
-/// `PowerOn` key has nothing to arrive at — Wake-on-LAN is the only path
-/// back, using the MAC cached from `device-info` while the device was
-/// still reachable.
+/// A Roku TV that is fully off has no network stack, so the ECP `PowerOn`
+/// key has nothing to arrive at — Wake-on-LAN is the only path back, using
+/// the MACs learned while it still answered (kept across restarts).
 async fn power_on(client: &EcpClient, ctx: &CommandContext<'_>) -> Result<Value> {
-    if ctx.reachable {
+    if ctx.reachable.load(Relaxed) || !ctx.wake_on_lan {
+        // Unreachable without Wake-on-LAN: still try, since "unreachable" is
+        // only as fresh as the last poll.
         client.keypress("PowerOn").await?;
-        return Ok(json!({ "sent": "PowerOn" }));
+        let awake = wait_awake(client, ctx).await;
+        return Ok(json!({ "sent": "PowerOn", "awake": awake }));
     }
 
-    if !ctx.wake_on_lan {
-        // Still try ECP: "unreachable" is only as fresh as the last poll,
-        // and the device may have come back since.
-        client.keypress("PowerOn").await?;
-        return Ok(json!({ "sent": "PowerOn" }));
-    }
-
-    let macs = ctx
-        .device_info
-        .map(DeviceInfo::wake_macs)
-        .unwrap_or_default();
-    if macs.is_empty() {
+    if ctx.macs.is_empty() {
         bail!(
-            "device is unreachable and no MAC address has been learned yet — \
-             it must be polled successfully at least once before Wake-on-LAN can be used"
+            "the Roku isn't answering and no MAC address is known for it — it must answer \
+             once before Wake-on-LAN can reach it"
         );
     }
     let mut woken = Vec::new();
-    for mac in &macs {
-        match discovery::wake_on_lan(mac).await {
+    for mac in ctx.macs {
+        match discovery::wake_on_lan(mac, Some(ctx.host)).await {
             Ok(()) => woken.push(mac.clone()),
             Err(e) => warn!(mac, error = %e, "Wake-on-LAN send failed"),
         }
@@ -429,10 +573,17 @@ async fn power_on(client: &EcpClient, ctx: &CommandContext<'_>) -> Result<Value>
     if woken.is_empty() {
         bail!(
             "Wake-on-LAN failed for every known MAC ({})",
-            macs.join(", ")
+            ctx.macs.join(", ")
         );
     }
-    Ok(json!({ "wake_on_lan": woken }))
+    // A woken TV boots to standby on some models: once it answers, press
+    // PowerOn too.
+    let answered = wait_awake(client, ctx).await || ctx.reachable.load(Relaxed);
+    if answered && !ctx.powered.load(Relaxed) {
+        client.keypress("PowerOn").await?;
+        wait_awake(client, ctx).await;
+    }
+    Ok(json!({ "wake_on_lan": woken, "awake": ctx.powered.load(Relaxed) }))
 }
 
 /// Send `key` once, or `count` times with a short gap.
@@ -496,10 +647,7 @@ fn string_param(cmd: &Value, names: &[&str]) -> Option<String> {
 /// matches nothing, and the user is told their TV has no such input while
 /// looking at it in the picker.
 fn fold_name(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    crate::ecp::plain_name(s).to_lowercase()
 }
 
 /// Resolve an app reference to an ECP app id.
@@ -746,7 +894,9 @@ mod tests {
 mod http_tests {
     use super::*;
     use crate::ecp;
-    use crate::testutil::{paths, stub};
+    use crate::testutil::{paths, scripted, stub};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     fn apps_fixture() -> Vec<App> {
         ecp::parse_apps(
@@ -758,17 +908,284 @@ mod http_tests {
         .unwrap()
     }
 
+    static TV: Caps = Caps {
+        is_tv: true,
+        is_stick: false,
+        find_remote: true,
+        private_listening: None,
+        wake_on_wlan: None,
+        tv_power_control: None,
+        audio_volume_control: None,
+    };
+    static BAR: Caps = Caps {
+        is_tv: false,
+        is_stick: false,
+        find_remote: true,
+        private_listening: None,
+        wake_on_wlan: None,
+        tv_power_control: None,
+        audio_volume_control: None,
+    };
+
     fn ctx<'a>(apps: &'a [App], playback: &'a str) -> CommandContext<'a> {
         CommandContext {
             apps,
-            device_info: None,
+            caps: &TV,
             playback_state: playback,
             muted: false,
-            reachable: true,
+            reachable: AtomicBool::new(true),
+            powered: AtomicBool::new(true),
+            on_input: false,
             wake_on_lan: false,
+            macs: &[],
+            host: "127.0.0.1",
             default_hold: Duration::from_millis(500),
             type_delay: Duration::ZERO,
+            wake_timeout: Duration::ZERO,
+            power_settle: Duration::ZERO,
         }
+    }
+
+    const READY: &str = "<device-info><power-mode>Ready</power-mode></device-info>";
+    const ON: &str = "<device-info><power-mode>PowerOn</power-mode></device-info>";
+
+    /// M6: power first, whatever order the keys came in, and a wait for the
+    /// Roku to say it is on before the launch — a TV in standby drops a launch.
+    #[tokio::test]
+    async fn power_comes_first_and_the_launch_waits_for_it() {
+        let on = Arc::new(AtomicBool::new(false));
+        let on2 = Arc::clone(&on);
+        let (client, log) = scripted(move |_, path| {
+            if path == "/keypress/PowerOn" {
+                on2.store(true, Ordering::SeqCst);
+            }
+            if path == "/query/device-info" {
+                return (
+                    200,
+                    if on2.load(Ordering::SeqCst) {
+                        ON
+                    } else {
+                        READY
+                    }
+                    .into(),
+                );
+            }
+            (200, String::new())
+        })
+        .await;
+        let apps = apps_fixture();
+        let c = CommandContext {
+            powered: AtomicBool::new(false),
+            wake_timeout: Duration::from_secs(2),
+            ..ctx(&apps, "idle")
+        };
+        let r = execute(
+            &client,
+            &json!({"source": "Netflix", "muted": true, "on": true}),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            paths(&log),
+            vec![
+                "/keypress/PowerOn",
+                "/query/device-info",
+                "/launch/12",
+                "/keypress/VolumeMute"
+            ]
+        );
+        assert_eq!(r["applied"], json!(["on", "source", "muted"]));
+        assert_eq!(r["launched"], "12");
+    }
+
+    /// A TV fully off (not answering) with Wake-on-LAN on but no MAC learned
+    /// yet: said plainly, and nothing is sent anywhere.
+    #[tokio::test]
+    async fn waking_without_a_known_mac_says_why() {
+        let (client, log) = stub(0, 200, "").await;
+        let apps = apps_fixture();
+        let c = CommandContext {
+            reachable: AtomicBool::new(false),
+            powered: AtomicBool::new(false),
+            wake_on_lan: true,
+            ..ctx(&apps, "idle")
+        };
+        let err = execute(&client, &json!({"on": true}), &c).await.unwrap();
+        assert!(failures(&err).unwrap().contains("no MAC address"), "{err}");
+        assert!(paths(&log).is_empty());
+    }
+
+    /// A launch alone on a TV that is off turns it on first.
+    #[tokio::test]
+    async fn launching_on_a_tv_that_is_off_turns_it_on_first() {
+        let (client, log) = scripted(|_, path| {
+            (
+                200,
+                if path == "/query/device-info" {
+                    ON.into()
+                } else {
+                    String::new()
+                },
+            )
+        })
+        .await;
+        let apps = apps_fixture();
+        let c = CommandContext {
+            powered: AtomicBool::new(false),
+            ..ctx(&apps, "idle")
+        };
+        execute(&client, &json!({"action": "launch_app", "app": "12"}), &c)
+            .await
+            .unwrap();
+        assert_eq!(
+            paths(&log),
+            vec!["/keypress/PowerOn", "/query/device-info", "/launch/12"]
+        );
+    }
+
+    /// M6: one key failing does not drop the rest, and says which and why.
+    #[tokio::test]
+    async fn one_failed_key_does_not_stop_the_others() {
+        let (client, log) = scripted(|_, _| (200, String::new())).await;
+        let apps = apps_fixture();
+        let r = execute(
+            &client,
+            &json!({"source": "Nonesuch", "muted": true}),
+            &ctx(&apps, "idle"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paths(&log), vec!["/keypress/VolumeMute"]);
+        assert_eq!(r["applied"], json!(["muted"]));
+        let said = failures(&r).unwrap();
+        assert!(
+            said.starts_with("source: no installed app matches"),
+            "{said}"
+        );
+    }
+
+    /// H2: a 403 is told apart, so the bridge can raise the alert.
+    #[tokio::test]
+    async fn a_refusal_is_marked_as_one() {
+        let (client, _log) = scripted(|_, _| (403, String::new())).await;
+        let apps = apps_fixture();
+        let r = execute(&client, &json!({"key": "Home"}), &ctx(&apps, "idle"))
+            .await
+            .unwrap();
+        assert_eq!(r["forbidden"], true);
+        let e = execute(&client, &json!({"action": "home"}), &ctx(&apps, "idle"))
+            .await
+            .unwrap_err();
+        assert!(is_forbidden(&e));
+    }
+
+    /// `stop` on HDMI 1 would press Back — which leaves the input for the
+    /// home screen. There is nothing to stop.
+    #[tokio::test]
+    async fn stop_on_an_input_sends_nothing() {
+        let (client, log) = stub(0, 200, "").await;
+        let apps = apps_fixture();
+        let c = CommandContext {
+            on_input: true,
+            ..ctx(&apps, "idle")
+        };
+        let r = execute(&client, &json!({"action": "stop"}), &c)
+            .await
+            .unwrap();
+        assert!(paths(&log).is_empty());
+        assert!(r["skipped"].is_string());
+    }
+
+    /// A soundbar has no tuner and no inputs to step through.
+    #[tokio::test]
+    async fn a_soundbar_refuses_tuner_keys_without_sending() {
+        let (client, log) = stub(0, 200, "").await;
+        let apps = apps_fixture();
+        let c = CommandContext {
+            caps: &BAR,
+            ..ctx(&apps, "idle")
+        };
+        for cmd in [
+            json!({"action": "tune", "channel": "7.1"}),
+            json!({"action": "channel_up"}),
+            json!({"action": "key", "key": "InputHDMI1"}),
+        ] {
+            assert!(execute(&client, &cmd, &c).await.is_err(), "{cmd}");
+        }
+        assert!(paths(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_remote_only_where_there_is_one() {
+        let (client, log) = stub(1, 200, "").await;
+        let apps = apps_fixture();
+        let none = Caps {
+            find_remote: false,
+            ..TV.clone()
+        };
+        let c = CommandContext {
+            caps: &none,
+            ..ctx(&apps, "idle")
+        };
+        assert!(execute(&client, &json!({"action": "find_remote"}), &c)
+            .await
+            .is_err());
+        execute(
+            &client,
+            &json!({"action": "find_remote"}),
+            &ctx(&apps, "idle"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paths(&log), vec!["/keypress/FindRemote"]);
+    }
+
+    /// Bounded: a hold is a remote's auto-repeat, not a stuck key; typing is
+    /// one request a character.
+    #[tokio::test]
+    async fn holds_and_text_are_bounded() {
+        assert_eq!(bounded_hold(999_999), MAX_HOLD_MS);
+        assert_eq!(bounded_hold(1), 50);
+        let (client, log) = stub(0, 200, "").await;
+        let apps = apps_fixture();
+        let long = "x".repeat(MAX_TEXT_CHARS + 1);
+        assert!(execute(
+            &client,
+            &json!({"action": "text", "text": long}),
+            &ctx(&apps, "idle")
+        )
+        .await
+        .is_err());
+        assert!(paths(&log).is_empty());
+    }
+
+    /// M7: ◀◀ and ▶▶ scan; "next" is not a Roku action.
+    #[tokio::test]
+    async fn scan_keys_are_named_for_what_they_do() {
+        let (client, log) = stub(2, 200, "").await;
+        let apps = apps_fixture();
+        execute(
+            &client,
+            &json!({"action": "fast_forward"}),
+            &ctx(&apps, "playing"),
+        )
+        .await
+        .unwrap();
+        execute(
+            &client,
+            &json!({"action": "rewind"}),
+            &ctx(&apps, "playing"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paths(&log), vec!["/keypress/Fwd", "/keypress/Rev"]);
+        let (client, _) = stub(0, 200, "").await;
+        assert!(
+            execute(&client, &json!({"action": "next"}), &ctx(&apps, "playing"))
+                .await
+                .is_err()
+        );
     }
 
     /// `Play` is a toggle. Sending it to something already playing

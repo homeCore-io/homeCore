@@ -53,6 +53,56 @@ pub const ALL_KEYS: &[&str] = &[
     "InputAV1",
 ];
 
+/// Each key in words, for a picker: what the button on the remote is called.
+pub const KEY_LABELS: &[(&str, &str)] = &[
+    ("Home", "Home"),
+    ("Back", "Back"),
+    ("Select", "OK"),
+    ("Left", "Left"),
+    ("Right", "Right"),
+    ("Up", "Up"),
+    ("Down", "Down"),
+    ("Info", "Options (✱)"),
+    ("Play", "Play / pause"),
+    ("Rev", "Rewind"),
+    ("Fwd", "Fast-forward"),
+    ("InstantReplay", "Instant replay"),
+    ("Backspace", "Backspace"),
+    ("Enter", "Enter"),
+    ("Search", "Search"),
+    ("FindRemote", "Find the remote"),
+    ("VolumeUp", "Volume up"),
+    ("VolumeDown", "Volume down"),
+    ("VolumeMute", "Mute"),
+    ("PowerOff", "Power off"),
+    ("PowerOn", "Power on"),
+    ("Power", "Power (toggle)"),
+    ("ChannelUp", "Channel up"),
+    ("ChannelDown", "Channel down"),
+    ("InputTuner", "Live TV input"),
+    ("InputHDMI1", "HDMI 1"),
+    ("InputHDMI2", "HDMI 2"),
+    ("InputHDMI3", "HDMI 3"),
+    ("InputHDMI4", "HDMI 4"),
+    ("InputAV1", "AV input"),
+];
+
+/// Only a TV has a tuner and inputs to switch.
+pub fn tv_only(key: &str) -> bool {
+    key.starts_with("Channel") || key.starts_with("Input")
+}
+
+/// The keys a device has: a soundbar no tuner or inputs, and the remote
+/// finder only where the device says it can.
+pub fn keys_for(is_tv: bool, find_remote: bool) -> Vec<&'static str> {
+    ALL_KEYS
+        .iter()
+        .copied()
+        .filter(|k| is_tv || !tv_only(k))
+        .filter(|k| find_remote || *k != "FindRemote")
+        .collect()
+}
+
 /// Resolve a caller-supplied key name to ECP's spelling.
 ///
 /// Accepts the canonical name in any case (`home`, `HOME`, `Home`), a
@@ -157,6 +207,17 @@ pub fn encode_key_path(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_has_words_and_a_soundbar_has_no_tuner_keys() {
+        for k in ALL_KEYS {
+            assert!(KEY_LABELS.iter().any(|(x, _)| x == k), "{k}");
+        }
+        let bar = keys_for(false, true);
+        assert!(bar.contains(&"VolumeUp") && bar.contains(&"FindRemote"));
+        assert!(!bar.iter().any(|k| tv_only(k)));
+        assert!(!keys_for(true, false).contains(&"FindRemote"));
+    }
 
     #[test]
     fn aliases_resolve_to_ecp_spelling() {

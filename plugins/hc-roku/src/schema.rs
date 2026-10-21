@@ -1,10 +1,9 @@
 //! The device capability schema homeCore serves at
-//! `GET /api/v1/devices/{id}/schema`.
+//! `GET /api/v1/devices/{id}/schema` — one per device, from what it is.
 //!
-//! This is what tells a UI which controls to draw. Only attributes a
-//! *person* would act on are listed: the state document also carries the
-//! firmware dump, the app catalogue and the stream format, none of which
-//! belong on a remote-control panel.
+//! A soundbar has no tuner, so it gets no `tv_channel`; a TV does. The
+//! schema is built from the device's capabilities ([`Caps`]) and republished
+//! only when they change.
 //!
 //! Note what is deliberately absent. There is no `volume` slider, because
 //! ECP has no absolute volume — it exposes VolumeUp/Down/Mute key presses
@@ -23,6 +22,8 @@ use plugin_sdk_rs::types::schema::{
     StateLabel,
 };
 
+use crate::state::Caps;
+
 fn attr(
     kind: AttributeKind,
     writable: bool,
@@ -38,7 +39,24 @@ fn attr(
     }
 }
 
-pub fn device_schema() -> DeviceSchema {
+fn diagnostic(a: AttributeSchema) -> AttributeSchema {
+    AttributeSchema {
+        category: Some(AttributeCategory::Diagnostic),
+        ..a
+    }
+}
+
+fn flag(display: &str, on: &str, off: &str) -> AttributeSchema {
+    diagnostic(AttributeSchema {
+        states: Some(BoolStates {
+            when_true: StateLabel::new(on),
+            when_false: StateLabel::new(off),
+        }),
+        ..attr(AttributeKind::Bool, false, display, None)
+    })
+}
+
+pub fn device_schema(caps: &Caps) -> DeviceSchema {
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
 
     a.insert(
@@ -75,47 +93,33 @@ pub fn device_schema() -> DeviceSchema {
         "source".into(),
         // Writable free-form rather than an enum: the option list is the
         // device's own `available_sources`, which varies per device and
-        // changes when a channel is installed, so it cannot be baked in
-        // here.
+        // changes when a channel is installed.
         attr(AttributeKind::String, true, "Source", None),
-    );
-    a.insert(
-        "tv_channel".into(),
-        attr(AttributeKind::String, true, "TV channel", None),
     );
     a.insert(
         "media_title".into(),
         attr(AttributeKind::String, false, "Now playing", None),
     );
-
     let mut position = attr(AttributeKind::Integer, false, "Position", None);
     position.unit = Some("s".into());
     a.insert("media_position".into(), position);
-
+    // When `media_position` was true: a screen counts on from there while it
+    // plays, so the position is only republished when it jumps.
+    a.insert(
+        "media_position_updated_at".into(),
+        diagnostic(attr(AttributeKind::String, false, "Position as of", None)),
+    );
     let mut duration = attr(AttributeKind::Integer, false, "Duration", None);
     duration.unit = Some("s".into());
     a.insert("media_duration".into(), duration);
-
     a.insert(
         "media_description".into(),
         attr(AttributeKind::String, false, "Programme description", None),
     );
     a.insert(
-        "tv_channel_name".into(),
-        attr(AttributeKind::String, false, "TV channel name", None),
+        "media_format".into(),
+        diagnostic(attr(AttributeKind::Json, false, "Stream format", None)),
     );
-    for (name, display) in [
-        ("media_format", "Stream format"),
-        ("tv_channel_info", "TV channel detail"),
-    ] {
-        a.insert(
-            name.into(),
-            AttributeSchema {
-                category: Some(AttributeCategory::Diagnostic),
-                ..attr(AttributeKind::Json, false, display, None)
-            },
-        );
-    }
     a.insert(
         "app_name".into(),
         attr(AttributeKind::String, false, "Channel", None),
@@ -124,33 +128,35 @@ pub fn device_schema() -> DeviceSchema {
         "power_mode".into(),
         attr(AttributeKind::String, false, "Power mode", None),
     );
-    a.insert(
-        "available_sources".into(),
-        attr(AttributeKind::Json, false, "Available sources", None),
-    );
-    a.insert(
-        "available_apps".into(),
-        attr(AttributeKind::Json, false, "Installed channels", None),
-    );
-    a.insert(
-        "available_inputs".into(),
-        attr(AttributeKind::Json, false, "TV inputs", None),
-    );
-    a.insert(
-        "available_tv_channels".into(),
-        attr(AttributeKind::Json, false, "TV channel lineup", None),
-    );
+    for (name, display) in [
+        ("available_sources", "Available sources"),
+        ("available_apps", "Installed channels"),
+        ("available_inputs", "TV inputs"),
+    ] {
+        a.insert(name.into(), attr(AttributeKind::Json, false, display, None));
+    }
 
-    // **What the box *is*, as opposed to what it is doing.** These were
-    // published and declared nowhere, so a client listing a Roku's attributes
-    // rendered them as ordinary booleans — "Not supports_find_remote" beside
-    // whether it was playing. They advertise the integration's reach and do
-    // not change while you watch, which is what `diagnostic` means.
-    //
-    // `supports_*` is claimed by the shared lexicon; `is_*` and
-    // `ecp_control_enabled` are ECP's own spelling and are marked here,
-    // because only this plugin knows they are hardware facts rather than
-    // readings that happen to start with "is".
+    if caps.is_tv {
+        a.insert(
+            "tv_channel".into(),
+            attr(AttributeKind::String, true, "TV channel", None),
+        );
+        a.insert(
+            "tv_channel_name".into(),
+            attr(AttributeKind::String, false, "TV channel name", None),
+        );
+        a.insert(
+            "tv_channel_info".into(),
+            diagnostic(attr(AttributeKind::Json, false, "TV channel detail", None)),
+        );
+        a.insert(
+            "available_tv_channels".into(),
+            attr(AttributeKind::Json, false, "TV channel lineup", None),
+        );
+    }
+
+    // **What the box *is*, as opposed to what it is doing.** They advertise
+    // the integration's reach and do not change while you watch.
     for (name, display, on, off) in [
         ("is_tv", "Is a TV", "a TV", "not a TV"),
         ("is_tv_input", "Is a TV input", "an input", "not an input"),
@@ -167,90 +173,61 @@ pub fn device_schema() -> DeviceSchema {
             "supported",
             "unsupported",
         ),
+        // ECP's `supports-wake-on-wlan`: over Wi-Fi. A wired TV wakes over
+        // Ethernet whatever this says.
         (
-            "supports_wake_on_lan",
-            "Wake on LAN",
+            "supports_wake_on_wlan",
+            "Wake over Wi-Fi",
             "supported",
             "unsupported",
         ),
+        // A Roku *player* switching its TV on and off over HDMI-CEC. Null on a
+        // Roku TV, which is the TV.
         (
             "supports_tv_power_control",
-            "TV power control",
+            "Switches its TV on and off",
             "supported",
             "unsupported",
         ),
+        // Whether the device has a volume of its own (a TV, a soundbar) or
+        // passes the volume keys on to the TV. The keys work either way; no
+        // Roku reports a level.
         (
             "supports_audio_volume_control",
-            "Volume control",
-            "supported",
-            "unsupported",
+            "Volume of its own",
+            "its own",
+            "the TV's",
         ),
         (
             "ecp_control_enabled",
-            "External control",
-            "enabled",
+            "Phone control",
+            "allowed",
             "disabled",
         ),
     ] {
-        a.insert(
-            name.into(),
-            AttributeSchema {
-                states: Some(BoolStates {
-                    when_true: StateLabel::new(on),
-                    when_false: StateLabel::new(off),
-                }),
-                category: Some(AttributeCategory::Diagnostic),
-                ..attr(AttributeKind::Bool, false, display, None)
-            },
-        );
+        a.insert(name.into(), flag(display, on, off));
     }
-
-    // **What the box is, promoted out of `device_info` and declared nowhere.**
-    // `insert_device_info` lifts these so a rule can ask "is this a TV?"
-    // without digging through the nested blob — and then the schema stopped
-    // at the controls, so a client had eleven strings it could show and not
-    // name. All identity, none of it a reading.
     for (name, display) in [
-        ("friendly_name", "Name on the device"),
-        ("model_name", "Model"),
-        ("model_number", "Model number"),
         ("serial_number", "Serial number"),
-        ("software_version", "Firmware"),
         ("network_type", "Network"),
-        ("device_info", "Device info"),
-    ] {
-        let kind = if name == "device_info" {
-            AttributeKind::Json
-        } else {
-            AttributeKind::String
-        };
-        a.insert(
-            name.into(),
-            AttributeSchema {
-                category: Some(AttributeCategory::Diagnostic),
-                ..attr(kind, false, display, None)
-            },
-        );
-    }
-
-    // What is on screen, beside the app it belongs to. `app_id` is the id the
-    // `launch_app` action takes; the rest describe the running channel.
-    for (name, display) in [
         ("app_id", "Channel id"),
         ("app_type", "Channel type"),
         ("app_version", "Channel version"),
         ("player_state", "Player state"),
-        ("screensaver_name", "Screensaver"),
+        // Why the last command to this Roku failed; null once one succeeds.
+        ("last_command_error", "Last command error"),
     ] {
         a.insert(
             name.into(),
-            attr(AttributeKind::String, false, display, None),
+            diagnostic(attr(AttributeKind::String, false, display, None)),
         );
     }
+    a.insert(
+        "screensaver_name".into(),
+        attr(AttributeKind::String, false, "Screensaver", None),
+    );
 
-    // These four *are* readings — they change while you watch — and were
-    // undeclared for the same reason. Headphones get plugged in, a
-    // screensaver starts, a stream fails or turns out to be live.
+    // Readings — they change while you watch.
     for (name, display, on, off) in [
         (
             "headphones_connected",
@@ -281,69 +258,72 @@ pub fn device_schema() -> DeviceSchema {
     }
 }
 
+/// The schema with its actions, as published on the device's schema topic.
+pub fn published(caps: &Caps) -> serde_json::Value {
+    plugin_sdk_rs::device_actions::with_actions(
+        &device_schema(caps),
+        crate::actions::device_actions(caps),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    /// Every boolean names both of its states.
-    ///
-    /// A boolean attribute is two events, not one: a client given only one
-    /// name offers one row, and the other direction needs a Not gate wrapped
-    /// round the trigger. Half-declaring is worse than not declaring, because
-    /// the client's own fallback lexicon is skipped for an attribute that then
-    /// has no second name.
-    #[test]
-    fn every_boolean_names_both_of_its_states() {
-        let schemas = [("roku", device_schema())];
-        for (label, schema) in schemas {
-            for (name, attr) in &schema.attributes {
-                if !matches!(attr.kind, AttributeKind::Bool) {
-                    continue;
-                }
-                let s = attr
-                    .states
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("{label}.{name} is a bool with no state names"));
-                assert!(!s.when_true.label.is_empty(), "{label}.{name}");
-                assert!(!s.when_false.label.is_empty(), "{label}.{name}");
-                assert_ne!(
-                    s.when_true.label, s.when_false.label,
-                    "{label}.{name} names both states the same thing"
-                );
-            }
+    fn tv() -> Caps {
+        Caps {
+            is_tv: true,
+            find_remote: true,
+            ..Default::default()
         }
     }
-    use super::*;
+
+    /// Every boolean names both of its states.
+    #[test]
+    fn every_boolean_names_both_of_its_states() {
+        for (name, attr) in &device_schema(&tv()).attributes {
+            if !matches!(attr.kind, AttributeKind::Bool) {
+                continue;
+            }
+            let s = attr
+                .states
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} is a bool with no state names"));
+            assert!(!s.when_true.label.is_empty(), "{name}");
+            assert!(!s.when_false.label.is_empty(), "{name}");
+            assert_ne!(s.when_true.label, s.when_false.label, "{name}");
+        }
+    }
 
     /// Every writable attribute must have a command path in
     /// `commands::run_attributes`, or the UI renders a control that
     /// silently does nothing.
     #[test]
     fn writable_attributes_are_all_commandable() {
-        let schema = device_schema();
-        let writable: Vec<&String> = schema
-            .attributes
-            .iter()
-            .filter(|(_, v)| v.writable)
-            .map(|(k, _)| k)
-            .collect();
-        for key in writable {
-            assert!(
-                matches!(
-                    key.as_str(),
-                    "state" | "on" | "muted" | "source" | "tv_channel"
-                ),
-                "{key} is writable in the schema but has no attribute-style command",
-            );
+        for (key, v) in &device_schema(&tv()).attributes {
+            if v.writable {
+                assert!(
+                    crate::commands::ATTRIBUTE_ORDER.contains(&key.as_str()),
+                    "{key} is writable in the schema but has no attribute-style command",
+                );
+            }
         }
     }
 
-    /// ECP reports no volume level and offers no seek, so neither may be
-    /// advertised as writable — a slider bound to nothing is worse than
-    /// no slider.
     #[test]
     fn unsupported_controls_are_not_advertised() {
-        let schema = device_schema();
+        let schema = device_schema(&tv());
         assert!(!schema.attributes.contains_key("volume"));
         assert!(!schema.attributes["media_position"].writable);
+    }
+
+    /// M11: a soundbar has no tuner — no TV channel to set or read.
+    #[test]
+    fn a_soundbar_has_no_tv_attributes() {
+        let bar = device_schema(&Caps::default());
+        for k in crate::state::TV_KEYS {
+            assert!(!bar.attributes.contains_key(*k), "{k}");
+        }
+        assert!(device_schema(&tv()).attributes["tv_channel"].writable);
     }
 }

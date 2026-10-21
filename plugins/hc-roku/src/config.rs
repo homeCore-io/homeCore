@@ -124,7 +124,8 @@ pub fn config_descriptor() -> serde_json::Value {
                         .min(60)
                         .help(
                             "The installed-channel and TV-channel catalogues only \
-                             change when someone adds a channel or re-scans the tuner.",
+                             change when someone adds a channel or re-scans the tuner. \
+                             Read in standby too, and kept across restarts.",
                         ),
                 ),
         )
@@ -138,8 +139,8 @@ pub fn config_descriptor() -> serde_json::Value {
                             "A Roku TV that is fully off has no network stack, so \
                              the power-on command has nothing to reach. When this \
                              is on, powering on an unreachable device sends a \
-                             magic packet to the MAC learned while it was last \
-                             online.",
+                             magic packet to the MACs learned while it answered \
+                             — kept across restarts.",
                         ),
                 )
                 .field(

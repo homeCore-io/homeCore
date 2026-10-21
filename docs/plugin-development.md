@@ -16,7 +16,7 @@ it wrong.
 | A plugin to copy | `plugins/hc-plugin-template` |
 | A complete plugin with screens, cards, a step form, uploads, alerts | `plugins/hc-wled` (+ `ui/`) |
 | A plugin with a page, a panel and cards in plain Svelte JS | `plugins/hc-ecowitt` (+ `ui/`) |
-| Discovery, durable identity, streaming actions | `plugins/hc-roku` |
+| Discovery, durable identity, one ordered worker per device, kept icons | `plugins/hc-roku` (+ `ui/`) |
 | A plugin that reads devices it doesn't own | `plugins/hc-thermostat` |
 | The capability-action conventions, one demo each | `plugins/hc-captest` |
 | Rust SDK reference | `sdk/rust/README.md` |
@@ -147,6 +147,8 @@ Declared on the **capability manifest** (`with_capabilities`), each with a
 label, a description, a params schema (a JSON-schema subset), a
 `requires_role` (`ReadOnly`, `User`, `Admin`), optional `timeout_ms`, `stream`
 (live stages over SSE), `concurrency`, and `danger` (a screen asks first).
+Answer an action that talks to a device with `with_async_handler` (a future),
+not `with_custom_handler`, which must not block.
 
 - `POST /plugins/{id}/command` runs an action (its declared role applies);
   `ReadOnly` actions also answer on `POST /plugins/{id}/query`, which needs
@@ -226,6 +228,17 @@ to the app at `GET /plugins/{id}/ui/{build}/{file}` and keeps none; the browser
 caches each build for good. A stopped plugin offers no screens; the app falls
 back to its generic ones whenever a plugin's screen is missing or won't load.
 
+### Pictures the plugin keeps
+
+Pictures fetched from devices while the plugin runs (hc-roku's channel icons)
+can't be in the built UI. Keep them in a folder and serve it —
+`mgmt.with_files_dir(dir)` — and the app gets them at
+`GET /plugins/{id}/files/{path}` (pictures only, through the plugin as
+`plugin_file`, in pieces); a screen makes that address with
+`host.fileUrl(path)`. **A file's name is its identity**: it is cached for good,
+so name a file by what is in it (hc-roku: channel and version). Rust SDK only
+for now; never send pictures as data URIs over the management channel.
+
 ### The `host`
 
 Every element gets a `host` (types: `sdk/ui/index.d.ts`), scoped to the plugin:
@@ -236,6 +249,7 @@ Every element gets a `host` (types: `sdk/ui/index.d.ts`), scoped to the plugin:
 - `config` — its settings file (admins), `restartPlugin()`;
 - `store` — JSON documents the web app keeps for its screens (≤ 2 MiB each);
 - `fetch(path)` — homeCore's API as the viewer, for the rest;
+- `fileUrl(path)` — where a picture the plugin keeps while it runs is (below);
 - `ui` — the app's `confirm`, `openDevice`, `navigate`;
 - `me` — who is using it (`can(scope)`, `isAdmin`);
 - `theme.sheet` — the app's parts as a stylesheet, to adopt into the shadow
@@ -368,6 +382,8 @@ point — not the SDKs, which pass slots through.
 | Alerts (`set_alerts`, alert kinds) | ✓ | ✓ | ✓ | ✓ |
 | Own screens (`with_ui_dir`, `ui_file`) | ✓ | ✓ | ✓ | ✓ |
 | Files to actions (`upload_chunk`) | ✓ | — | — | — |
+| Pictures it keeps (`with_files_dir`, `plugin_file`) | ✓ | — | — | — |
+| Actions answered asynchronously (`with_async_handler`) | ✓ | — | — | — |
 
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release; none is on a package registry yet (see

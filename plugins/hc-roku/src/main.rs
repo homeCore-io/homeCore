@@ -8,37 +8,27 @@ mod config;
 mod discovery;
 mod discovery_action;
 mod ecp;
+mod icons;
 mod keys;
 mod schema;
 mod state;
 #[cfg(test)]
 mod testutil;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use plugin_sdk_rs::{PluginClient, PluginConfig};
+use plugin_sdk_rs::{AsyncActionFuture, PluginClient, PluginConfig};
 use serde_json::json;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use bridge::{Bridge, MgmtRequest};
+use bridge::Bridge;
 use config::RokuConfig;
 
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_DELAY_SECS: u64 = 30;
-
-/// How long the SDK's synchronous management handler waits for the
-/// bridge to answer before giving up.
-///
-/// This handler runs on the MQTT event loop, so the wait blocks it — the
-/// bound is what stops one unreachable Roku from stalling heartbeats and
-/// every other management command. Core's own action window is longer
-/// than this, so a timeout here still produces a real error response
-/// rather than a silent 504.
-const MGMT_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[tokio::main]
 async fn main() {
@@ -125,22 +115,22 @@ async fn try_start(
     // Conditions for the plugin page, not only the log.
     let notices = client.notices();
     let state_writer = client.state_writer();
-    let devices: bridge::Devices = Arc::new(RwLock::new(HashMap::new()));
+    // Channel icons, kept beside the config and served to the screens.
+    let files_dir = sibling(config_path, ".roku-files");
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
-    let (mgmt_tx, mgmt_rx) = mpsc::channel::<MgmtRequest>(32);
 
     let bridge = Arc::new(Bridge::new(
         cfg.clone(),
         publisher.clone(),
         state_writer,
-        Arc::clone(&devices),
         notices,
+        &files_dir,
     ));
 
     // ── Management protocol ──────────────────────────────────────────
-    let mgmt_tx_for_handler = mgmt_tx.clone();
     let bridge_for_action = Arc::clone(&bridge);
+    let bridge_for_handler = Arc::clone(&bridge);
     let bridge_for_state = Arc::clone(&bridge);
 
     let mgmt = client
@@ -152,40 +142,30 @@ async fn try_start(
         )
         .await?
         .with_capabilities(capabilities_manifest())
-        .with_custom_handler(move |cmd| {
-            // The SDK's custom handler is synchronous, but every action
-            // here needs the bridge's device map and an HTTP round-trip.
-            // Rather than spin a nested runtime (and a second reqwest
-            // connection pool), hand the request to the bridge — which is
-            // already running on this process's runtime — and wait for
-            // its answer on a plain channel.
-            let action = cmd["action"].as_str()?;
-            if !HANDLED_ACTIONS.contains(&action) {
-                return None; // fall through to the SDK's unknown-action error
+        .with_alert_kinds(alert_kinds())
+        // Answered on their own tasks: several of them ask every Roku, and
+        // none may hold up the MQTT loop or a runtime thread while they wait.
+        .with_async_handler(move |cmd| {
+            let action = cmd["action"].as_str()?.to_string();
+            if !HANDLED_ACTIONS.contains(&action.as_str()) {
+                return None; // the SDK's unknown-action error
             }
-            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-            if mgmt_tx_for_handler
-                .try_send(MgmtRequest {
-                    cmd: cmd.clone(),
-                    reply: reply_tx,
-                })
-                .is_err()
-            {
-                return Some(json!({
-                    "status": "error",
-                    "error": "plugin is busy; management queue is full",
-                }));
-            }
-            match reply_rx.recv_timeout(MGMT_TIMEOUT) {
-                Ok(v) => Some(v),
-                Err(_) => Some(json!({
-                    "status": "error",
-                    "error": format!(
-                        "timed out after {}s waiting for the device to respond",
-                        MGMT_TIMEOUT.as_secs()
-                    ),
-                })),
-            }
+            let b = Arc::clone(&bridge_for_handler);
+            let cmd = cmd.clone();
+            Some(Box::pin(async move {
+                match action.as_str() {
+                    "status" => b.status().await,
+                    "list_devices" => b.list_devices().await,
+                    "refresh_catalog" => b.refresh_catalog(&cmd).await,
+                    "device_info" => b.device_info(&cmd).await,
+                    "send_command" => b.send_command(&cmd).await,
+                    "forget_device" => b.forget_device(&cmd).await,
+                    "forget_stale_devices" => b.forget_stale_devices().await,
+                    other => {
+                        json!({ "status": "error", "error": format!("unknown action '{other}'") })
+                    }
+                }
+            }) as AsyncActionFuture)
         })
         .with_streaming_action(plugin_sdk_rs::StreamingAction::new(
             "discover_devices",
@@ -194,18 +174,25 @@ async fn try_start(
                 async move { discovery_action::discover_devices_streaming(ctx, b).await }
             },
         ))
-        // Learned state: the serial → device-id map, so a discovered Roku
-        // keeps its identity across restarts and DHCP moves.
+        // Learned state: each Roku by serial — its id, address, MACs,
+        // capabilities, channels and launch counts — so it keeps its identity
+        // across restarts and DHCP moves, and its pickers are never empty.
         .with_state_handler(move |doc| {
             let b = Arc::clone(&bridge_for_state);
             tokio::spawn(async move { b.apply_learned_state(&doc).await });
-        });
+        })
+        .with_files_dir(&files_dir);
 
     let mgmt = match config::config_schema() {
         Some(schema) => mgmt.with_config_schema(schema),
         None => mgmt,
     };
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+    // Its own screens: the built `ui/` folder it carries, served from here.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
 
     // Start the SDK event loop BEFORE registering any device. The
     // rumqttc send channel holds 64 messages and each device costs four
@@ -240,8 +227,8 @@ async fn try_start(
         "hc-roku started"
     );
 
-    // Blocks until every channel closes.
-    bridge.run(cmd_rx, mgmt_rx).await;
+    // Blocks until the command channel closes.
+    bridge.run(cmd_rx).await;
     Ok(())
 }
 
@@ -249,19 +236,44 @@ async fn try_start(
 /// SDK so `ping` / `get_config` / `set_config` / `set_log_level` keep
 /// their built-in behaviour.
 const HANDLED_ACTIONS: &[&str] = &[
+    "status",
     "list_devices",
     "refresh_catalog",
     "device_info",
     "send_command",
-    "app_icon",
+    "forget_device",
     "forget_stale_devices",
 ];
 
 fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+    sibling(config_path, ".published-device-ids.json")
+}
+
+/// A file or folder beside the config.
+fn sibling(config_path: &str, name: &str) -> std::path::PathBuf {
     std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join(".published-device-ids.json")
+        .join(name)
+}
+
+/// The alerts this plugin raises. A Roku that stops answering is homeCore's
+/// own Offline alert, not repeated here.
+fn alert_kinds() -> Vec<plugin_sdk_rs::types::PluginAlertKind> {
+    use plugin_sdk_rs::types::{AlertSeverity, PluginAlertKind};
+    vec![PluginAlertKind {
+        topic: "ecp_control_disabled".into(),
+        label: "Roku refuses control".into(),
+        description: Some(
+            "The Roku's \"Control by mobile apps\" is disabled: homeCore sees what it \
+             plays but cannot press a button or open a channel. Fixed on the Roku: \
+             Settings › System › Advanced system settings › Control by mobile apps › \
+             Network access: Default (or Permissive). Clears once a command goes through."
+                .into(),
+        ),
+        severity: AlertSeverity::Warning,
+        default_on: true,
+    }]
 }
 
 /// Plugin-wide capability manifest.
@@ -280,16 +292,37 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
         plugin_id: String::new(),
         actions: vec![
             Action {
+                id: "status".into(),
+                label: "Status".into(),
+                description: Some(
+                    "Each Roku as the plugin knows it, from memory — its address and \
+                     network, model, Roku OS, whether it allows phone control, its \
+                     channel and input counts, what it shows, and the last command \
+                     error — and when the plugin last looked for Rokus. Asks no Roku \
+                     anything."
+                        .into(),
+                ),
+                params: None,
+                result: Some(json!({ "rokus": { "type": "array" } })),
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::ReadOnly,
+                timeout_ms: Some(5_000),
+                danger: false,
+            },
+            Action {
                 id: "discover_devices".into(),
                 label: "Discover Rokus".into(),
                 description: Some(
-                    "Broadcast an SSDP `roku:ecp` search and stream each device \
-                     as it answers, then query it directly for its serial and \
-                     name. Also probes every address under `manual_hosts`. \
-                     Devices are registered as they are found when \
-                     `auto_add_discovered` is on. SSDP is link-local, so this \
-                     only reaches the subnet homeCore is on — use \
-                     `manual_hosts` for anything across a VLAN."
+                    "Look for Rokus now: an SSDP `roku:ecp` search (with discovery on), \
+                     plus every address under `manual_hosts` and every address a Roku \
+                     was configured or last seen at, each asked for its serial. A Roku \
+                     that moved is found again by its serial and keeps its id. New \
+                     ones are registered when discovery and `auto_add_discovered` are \
+                     on. SSDP is link-local — use `manual_hosts` across a VLAN."
                         .into(),
                 ),
                 params: None,
@@ -338,14 +371,14 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 label: "Refresh channels + inputs".into(),
                 description: Some(
                     "Re-read the installed-channel list, TV inputs, and (on a \
-                     Roku TV) the tuner's channel lineup from every managed \
-                     device, and republish them on device state. These are \
-                     normally read on a slow timer, so run this after \
-                     installing a channel or re-scanning for TV channels \
-                     instead of waiting."
+                     Roku TV) the tuner's channel lineup — from one Roku (`hc_id`) \
+                     or every one — and republish them, fetching any new channel's \
+                     icon. Normally read on a slow timer, standby included."
                         .into(),
                 ),
-                params: None,
+                params: Some(json!({
+                    "hc_id": { "type": "string", "description": "One Roku; every one when absent" },
+                })),
                 result: Some(json!({ "devices": { "type": "object" } })),
                 stream: false,
                 cancelable: false,
@@ -360,13 +393,15 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 id: "device_info".into(),
                 label: "Device info".into(),
                 description: Some(
-                    "Raw `query/device-info` from every managed device — model, \
-                     firmware, MACs, power mode, and every capability flag the \
-                     device advertises. The diagnostic to reach for first when \
-                     a device behaves unexpectedly."
+                    "Raw `query/device-info` from one Roku (`hc_id`) or every one — \
+                     model, firmware, MACs, power mode, and every capability flag \
+                     the device advertises. The diagnostic to reach for first when \
+                     a device behaves unexpectedly; none of it is in device state."
                         .into(),
                 ),
-                params: None,
+                params: Some(json!({
+                    "hc_id": { "type": "string", "description": "One Roku; every one when absent" },
+                })),
                 result: Some(json!({ "devices": { "type": "object" } })),
                 stream: false,
                 cancelable: false,
@@ -401,52 +436,45 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: Some(20_000),
+                timeout_ms: Some(45_000),
                 danger: false,
             },
             Action {
-                id: "app_icon".into(),
-                label: "Get channel icon".into(),
+                id: "forget_device".into(),
+                label: "Forget a Roku".into(),
                 description: Some(
-                    "Fetch a channel's icon from the device as a data URI, for \
-                     rendering a source picker. Requires \"Control by mobile \
-                     apps\" to be enabled on the Roku."
+                    "For a Roku that is gone for good: it stops being managed, its \
+                     device is removed (with it, its place in automations), and it is \
+                     forgotten. One that is only switched off or unplugged comes back by \
+                     itself — leave it. A Roku listed in the settings is removed there."
                         .into(),
                 ),
                 params: Some(json!({
-                    "hc_id":  { "type": "string" },
-                    "app_id": { "type": "string", "description": "Channel id, e.g. \"12\"" },
+                    "hc_id": { "type": "string", "description": "The Roku's device id" },
                 })),
-                result: Some(json!({
-                    "data_uri": { "type": "string" },
-                    "content_type": { "type": "string" },
-                })),
+                result: Some(json!({ "forgotten": { "type": "string" } })),
                 stream: false,
                 cancelable: false,
                 concurrency: Concurrency::default(),
                 item_key: None,
                 item_operations: None,
-                requires_role: RequiresRole::User,
+                requires_role: RequiresRole::Admin,
                 timeout_ms: Some(15_000),
-                danger: false,
+                danger: true,
             },
             Action {
                 id: "forget_stale_devices".into(),
                 label: "Forget unreachable devices".into(),
                 description: Some(
-                    "Unregister every discovered device that is not answering \
-                     right now. Deliberately manual: a Roku that is merely \
-                     unplugged, or a TV that is fully powered off, looks exactly \
-                     like one that has been thrown away, so the plugin will not \
-                     do this on its own. Devices listed in `[[devices]]` are \
-                     never removed."
+                    "Forget every discovered Roku that is not answering right now. \
+                     Deliberately manual: a Roku that is merely unplugged, or a TV that \
+                     is fully powered off, looks exactly like one that has been thrown \
+                     away, so the plugin never does this on its own. Devices listed in \
+                     `[[devices]]` are never removed."
                         .into(),
                 ),
                 params: None,
-                result: Some(json!({
-                    "retired": { "type": "array" },
-                    "unreachable": { "type": "array" },
-                })),
+                result: Some(json!({ "retired": { "type": "array" } })),
                 stream: false,
                 cancelable: false,
                 concurrency: Concurrency::Single,
