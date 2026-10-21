@@ -31,6 +31,9 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 use crate::translator::Translator;
+use crate::types::NodeState;
+use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Role};
+use std::collections::BTreeMap;
 
 /// The unit for a canonical attribute, where the alias table fixes one.
 fn unit_for(name: &str) -> Option<&'static str> {
@@ -114,6 +117,13 @@ fn states_for(name: &str) -> BoolStates {
         "battery_low" => pair(("low", "goes low"), ("healthy", "recovers")),
         "sensor_active" => pair(("active", "activates"), ("idle", "goes idle")),
         "tilt" => pair(("tilted", "tilts"), ("level", "levels out")),
+        "jammed" => pair(("jammed", "jams"), ("free", "frees")),
+        "child_lock" => pair(
+            ("buttons locked", "locks its buttons"),
+            ("buttons working", "unlocks its buttons"),
+        ),
+        "overload" | "overcurrent" => pair(("overloaded", "overloads"), ("normal", "recovers")),
+        "intrusion" => pair(("intrusion", "detects an intrusion"), ("clear", "clears")),
         other => {
             // Mechanical, and still two rows — an unmapped boolean is far more
             // usable this way than behind a Not gate.
@@ -127,6 +137,19 @@ fn states_for(name: &str) -> BoolStates {
 }
 
 fn humanise(name: &str) -> String {
+    let known = match name {
+        "power_w" => Some("Power"),
+        "power_w_exported" => Some("Power sent back"),
+        "energy_kwh" => Some("Energy"),
+        "energy_kwh_exported" => Some("Energy sent back"),
+        "current_a" => Some("Current"),
+        "battery_pct" => Some("Battery"),
+        "brightness_pct" => Some("Brightness"),
+        _ => None,
+    };
+    if let Some(label) = known {
+        return label.to_string();
+    }
     let spaced = name.replace('_', " ");
     let mut c = spaced.chars();
     match c.next() {
@@ -189,6 +212,13 @@ pub fn describe(
         _ => None,
     };
     a.options = options.map(|o| o.into_iter().map(AttributeOption::new).collect());
+    if name == "lock_operation_type" {
+        a.options = Some(vec![
+            AttributeOption::new("1").labelled("Stays as it is"),
+            AttributeOption::new("2").labelled("Locks again by itself"),
+        ]);
+        a.category = Some(AttributeCategory::Config);
+    }
     // A node reports its battery and its name alongside whether it is locked.
     // Saying which of those is the point of the device is the difference
     // between a client leading with the lock and leading with the battery.
@@ -201,10 +231,114 @@ pub fn describe(
         // `[on, cc112_19, cc112_3, cc114_manufacturerid]`.
         is_synthetic_cc_name(name).then_some(AttributeCategory::Diagnostic)
     });
+    if matches!(
+        name,
+        "lock_timeout_secs" | "lock_auto_relock_secs" | "child_lock"
+    ) {
+        a.category = Some(AttributeCategory::Config);
+    }
     if matches!(value, Value::Bool(_)) {
         a.states = Some(states_for(name));
     }
     a
+}
+
+fn diagnostic(mut a: AttributeSchema) -> AttributeSchema {
+    a.category = Some(AttributeCategory::Diagnostic);
+    a
+}
+
+/// The full schema for a node: what it reported, plus what every device can
+/// say (`last_command_error`) and, on a lock, its lock events and its
+/// `set_code_enabled` action — with the code slots named by who they are for.
+///
+/// `None` for a node that has reported nothing yet (still interviewing) and
+/// is not a lock.
+pub fn node_schema(
+    node: &NodeState,
+    state: &Value,
+    translator: &Translator,
+    names: &BTreeMap<u32, String>,
+) -> Option<Value> {
+    let empty = Map::new();
+    let obj = state.as_object().unwrap_or(&empty);
+    let lock = translator.info(node.node_id).lock;
+    if obj.is_empty() && !lock {
+        return None;
+    }
+    let mut schema = schema_for_state(node.node_id, obj, translator);
+    let a = &mut schema.attributes;
+    a.insert(
+        "last_command_error".into(),
+        diagnostic(
+            AttributeSchema::read_only(AttributeKind::String).labelled("Last command error"),
+        ),
+    );
+    if !lock {
+        return serde_json::to_value(&schema).ok();
+    }
+    let slot_options: Vec<AttributeOption> = names
+        .iter()
+        .map(|(slot, who)| {
+            AttributeOption::new(slot.to_string()).labelled(format!("Code {slot} · {who}"))
+        })
+        .collect();
+    let mut jammed = AttributeSchema::read_only(AttributeKind::Bool).labelled("Jammed");
+    jammed.states = Some(states_for("jammed"));
+    a.entry("jammed".into()).or_insert(jammed);
+    let mut action = AttributeSchema::read_only(AttributeKind::Enum).labelled("Last lock event");
+    action.options = Some(
+        crate::lock::ACTIONS
+            .iter()
+            .map(|(v, l)| AttributeOption::new(*v).labelled(*l))
+            .collect(),
+    );
+    a.insert("last_lock_action".into(), action);
+    let mut method = AttributeSchema::read_only(AttributeKind::Enum).labelled("How");
+    method.options = Some(
+        crate::lock::METHODS
+            .iter()
+            .map(|(v, l)| AttributeOption::new(*v).labelled(*l))
+            .collect(),
+    );
+    a.insert("last_lock_method".into(), method);
+    let mut slot = AttributeSchema::read_only(AttributeKind::Integer).labelled("Code used");
+    if !slot_options.is_empty() {
+        slot.options = Some(slot_options);
+    }
+    a.insert("last_lock_slot".into(), slot);
+    a.insert(
+        "last_lock_event".into(),
+        diagnostic(
+            AttributeSchema::read_only(AttributeKind::Json).labelled("Last lock event, in full"),
+        ),
+    );
+    let slot_param = Param::int("slot")
+        .label("Code")
+        .required()
+        .range(1.0, 250.0);
+    let slot_param = if names.is_empty() {
+        slot_param
+    } else {
+        slot_param.labelled_options(
+            names
+                .iter()
+                .map(|(slot, who)| (slot.to_string(), format!("{slot} · {who}"))),
+        )
+    };
+    let actions = vec![Action::new("set_code_enabled")
+        .label("Turn a code on or off")
+        .description(
+            "Turn one of the lock's codes on or off. Off keeps it on the lock, so it can be \
+             turned back on — the cleaner's code only on Tuesdays. Codes themselves are set on \
+             the lock's Codes tab, never in an automation.",
+        )
+        .category("Codes")
+        .sentence("turn code {slot} on {device} {enabled}")
+        .requires_role(Role::Admin)
+        .param(slot_param)
+        .param(Param::bool_("enabled").label("On").required().default(true))];
+    Some(with_actions(&schema, actions))
 }
 
 /// The schema for a node that reported [`state`].
@@ -229,6 +363,7 @@ pub fn schema_for_state(
 /// An empty schema is a claim ("this device has no attributes"); silence is
 /// not, and a freshly-included node whose interview has not finished reports
 /// nothing at all.
+#[cfg(test)]
 pub fn schema_json(node_id: u32, state: &Value, translator: &Translator) -> Option<Value> {
     let obj = state.as_object()?;
     if obj.is_empty() {
@@ -299,7 +434,7 @@ mod tests {
     /// writable shared name has somewhere to go.
     fn translator() -> Translator {
         let t = Translator::new();
-        let node: NodeState = serde_json::from_value(json!({
+        let node = NodeState::from_value(&json!({
             "nodeId": NODE,
             "values": [
                 { "commandClass": 38, "endpoint": 0, "property": "currentValue", "value": 10 },

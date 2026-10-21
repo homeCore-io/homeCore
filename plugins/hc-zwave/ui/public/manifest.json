@@ -1,0 +1,17 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-zwave-page" },
+		{ "slot": "device.panel", "element": "hc-zwave-panel" },
+		{ "slot": "device.card", "element": "hc-zwave-lock-card", "device_types": ["lock"], "forms": ["standard", "compact", "large"] },
+		{ "slot": "rule.step", "element": "hc-zwave-step", "device_types": ["lock"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-zwave-network",
+			"label": "Z-Wave network",
+			"description": "how many Z-Wave devices answer, and the ones that need something: not answering, a low battery, a weak signal",
+			"forms": ["standard", "large"]
+		}
+	]
+}
