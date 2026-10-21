@@ -33,6 +33,13 @@ use plugin_sdk_rs::types::schema::{
 };
 use serde_json::Value;
 
+use crate::speaker::Caps;
+
+/// The speakers this plugin knows, `(device id, name)`, for naming a group's
+/// leader: `group_coordinator` is a device id, and with these as its options
+/// every client says "Office-1" instead of `sonos_office_1`.
+pub type Roster<'a> = &'a [(String, String)];
+
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
     AttributeSchema {
         kind,
@@ -67,7 +74,7 @@ fn ro_unit(kind: AttributeKind, display: &str, unit: &str) -> AttributeSchema {
     a
 }
 
-fn attributes() -> DeviceSchema {
+fn attributes(caps: Caps, roster: Roster) -> DeviceSchema {
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
     let mut playback = ro(AttributeKind::Enum, "Playback");
     playback.options = Some(
@@ -102,17 +109,92 @@ fn attributes() -> DeviceSchema {
             ("in order", "stops shuffling"),
         ),
     );
-    a.insert("repeat".into(), ro(AttributeKind::String, "Repeat"));
+    let mut repeat = ro(AttributeKind::Enum, "Repeat");
+    repeat.options = Some(
+        [
+            ("none", "off"),
+            ("one", "this track"),
+            ("all", "everything"),
+        ]
+        .into_iter()
+        .map(|(v, l)| AttributeOption {
+            value: v.into(),
+            label: Some(l.into()),
+            icon: None,
+        })
+        .collect(),
+    );
+    a.insert("repeat".into(), repeat);
+    a.insert(
+        "crossfade".into(),
+        ro_bool(
+            "Crossfade",
+            ("crossfading", "starts crossfading"),
+            ("not crossfading", "stops crossfading"),
+        ),
+    );
+    // When the group's sleep timer stops the music; null with none set.
+    a.insert(
+        "sleep_timer_ends_at".into(),
+        ro(AttributeKind::String, "Sleep timer ends"),
+    );
+    // An input, when one is playing — `TV`, `Line-in` — said as a person
+    // reads it, like any media player's `source`.
+    a.insert("source".into(), ro(AttributeKind::String, "Input"));
+    if caps.home_theater {
+        a.insert(
+            "night_mode".into(),
+            ro_bool("Night mode", ("on", "turns on"), ("off", "turns off")),
+        );
+        a.insert(
+            "speech_enhancement".into(),
+            ro_bool(
+                "Speech enhancement",
+                ("on", "turns on"),
+                ("off", "turns off"),
+            ),
+        );
+    }
     a.insert("bass".into(), ro(AttributeKind::Integer, "Bass"));
     a.insert("treble".into(), ro(AttributeKind::Integer, "Treble"));
     a.insert(
         "loudness".into(),
         ro_bool("Loudness", ("on", "turns on"), ("off", "turns off")),
     );
-    a.insert(
-        "group_coordinator".into(),
-        ro(AttributeKind::String, "Group leader"),
+    // A device id, said as the speaker's name.
+    let mut leader = ro(AttributeKind::String, "Group leader");
+    if !roster.is_empty() {
+        leader.options = Some(
+            roster
+                .iter()
+                .map(|(id, name)| AttributeOption {
+                    value: id.clone(),
+                    label: Some(name.clone()),
+                    icon: None,
+                })
+                .collect(),
+        );
+    }
+    a.insert("group_coordinator".into(), leader);
+    // The whole group's volume, on every speaker in a group of two or more;
+    // null alone. `set_group_volume` sets it.
+    let mut gv = ro_unit(AttributeKind::Integer, "Group volume", "%");
+    gv.min = Some(0.0);
+    gv.max = Some(100.0);
+    a.insert("group_volume".into(), gv);
+    // A radio station has no track to skip; a screen says "Live" instead.
+    let mut kind = ro(AttributeKind::Enum, "Playing");
+    kind.options = Some(
+        [("radio", "a radio station"), ("track", "a track")]
+            .into_iter()
+            .map(|(v, l)| AttributeOption {
+                value: v.into(),
+                label: Some(l.into()),
+                icon: None,
+            })
+            .collect(),
     );
+    a.insert("media_kind".into(), kind);
     a.insert(
         "available_favorites".into(),
         ro(AttributeKind::Json, "Favourites"),
@@ -156,6 +238,17 @@ fn attributes() -> DeviceSchema {
     ] {
         a.insert(name.into(), diagnostic(ro(AttributeKind::Json, display)));
     }
+    // When `media_position` was true: a screen moves it on from there, so it
+    // is only published again when it jumps — not every minute it plays.
+    a.insert(
+        "media_position_updated_at".into(),
+        diagnostic(ro(AttributeKind::String, "Position as of")),
+    );
+    // Why the last command to this speaker failed; null once one succeeds.
+    a.insert(
+        "last_command_error".into(),
+        diagnostic(ro(AttributeKind::String, "Last command error")),
+    );
     DeviceSchema {
         attributes: a,
         ..Default::default()
@@ -171,8 +264,8 @@ fn volume_param() -> Param {
         .default(30)
 }
 
-pub fn device_actions() -> Vec<Action> {
-    vec![
+pub fn device_actions(caps: Caps) -> Vec<Action> {
+    let mut actions = vec![
         // ── Transport ────────────────────────────────────────────────────
         Action::new("play")
             .label("Play")
@@ -225,6 +318,29 @@ pub fn device_actions() -> Vec<Action> {
             .writes("volume")
             .sentence("set the volume of {device} to {volume}")
             .param(volume_param()),
+        Action::new("set_group_volume")
+            .label("Set group volume")
+            .category("Volume")
+            .icon("volume-up")
+            .writes("group_volume")
+            .description(
+                "The whole group's volume, keeping each speaker's balance. On a \
+                 speaker on its own, its volume.",
+            )
+            .sentence("set the group volume of {device} to {volume}")
+            .param(volume_param()),
+        Action::new("volume_up")
+            .label("Volume up")
+            .category("Volume")
+            .icon("volume-up")
+            .sentence("turn {device} up by {step}")
+            .param(step_param()),
+        Action::new("volume_down")
+            .label("Volume down")
+            .category("Volume")
+            .icon("volume-down")
+            .sentence("turn {device} down by {step}")
+            .param(step_param()),
         Action::new("set_mute")
             .label("Mute / unmute")
             .category("Volume")
@@ -252,6 +368,28 @@ pub fn device_actions() -> Vec<Action> {
                     .required()
                     .options(["none", "one", "all"])
                     .default("all"),
+            ),
+        Action::new("set_crossfade")
+            .label("Crossfade")
+            .category("Playback mode")
+            .icon("shuffle")
+            .writes("crossfade")
+            .sentence("set crossfade on {device} to {crossfade}")
+            .param(Param::bool_("crossfade").label("Crossfade").default(true)),
+        Action::new("set_sleep_timer")
+            .label("Sleep timer")
+            .category("Playback mode")
+            .icon("timer")
+            .writes("sleep_timer_ends_at")
+            .description("Stop the music after this many minutes; 0 cancels the timer.")
+            .sentence("stop {device} in {minutes} minutes")
+            .param(
+                Param::int("minutes")
+                    .label("Minutes")
+                    .unit("min")
+                    .range(0.0, 1439.0)
+                    .required()
+                    .default(30),
             ),
         // ── Audio EQ ─────────────────────────────────────────────────────
         //
@@ -306,6 +444,14 @@ pub fn device_actions() -> Vec<Action> {
                     .label("Favourite")
                     .required()
                     .options_from(Source::attribute("available_favorites")),
+            )
+            // Optional: set on this speaker first, even when the favourite
+            // plays on its group's coordinator.
+            .param(
+                Param::int("volume")
+                    .label("At volume")
+                    .unit("%")
+                    .range(0.0, 100.0),
             ),
         Action::new("play_playlist")
             .label("Play a playlist")
@@ -350,12 +496,85 @@ pub fn device_actions() -> Vec<Action> {
             .category("Grouping")
             .icon("ungroup")
             .sentence("remove {device} from its group"),
-    ]
+        // The group as a whole, on the speaker that leads it: the listed
+        // speakers join, everyone else in its group leaves. One step for an
+        // automation instead of a join each and an unjoin for the rest.
+        Action::new("group")
+            .label("Play together with…")
+            .category("Grouping")
+            .icon("group")
+            .description(
+                "Make this speaker's group exactly the speakers listed — they \
+                 join, the rest of its group leaves. None plays it on its own.",
+            )
+            .sentence("play {device}'s music on {members} too")
+            .param(
+                Param::device_ref("members").label("Speakers").options_from(
+                    Source::devices()
+                        .plugin_id("plugin.sonos")
+                        .facet("media_player")
+                        .exclude_self(),
+                ),
+            ),
+    ];
+    if caps.home_theater {
+        actions.push(
+            Action::new("set_night_mode")
+                .label("Night mode")
+                .category("Audio EQ")
+                .icon("equalizer")
+                .writes("night_mode")
+                .description("Quieter loud parts and clearer quiet ones, for late-night TV.")
+                .sentence("set night mode on {device} to {night_mode}")
+                .param(Param::bool_("night_mode").label("Night mode").default(true)),
+        );
+        actions.push(
+            Action::new("set_speech_enhancement")
+                .label("Speech enhancement")
+                .category("Audio EQ")
+                .icon("equalizer")
+                .writes("speech_enhancement")
+                .sentence("set speech enhancement on {device} to {speech_enhancement}")
+                .param(
+                    Param::bool_("speech_enhancement")
+                        .label("Speech enhancement")
+                        .default(true),
+                ),
+        );
+    }
+    let sources = caps.sources();
+    if !sources.is_empty() {
+        actions.push(
+            Action::new("select_source")
+                .label("Switch input")
+                .category("Content")
+                .icon("input")
+                .writes("source")
+                .sentence("switch {device} to {source}")
+                .param(
+                    Param::enum_("source")
+                        .label("Input")
+                        .required()
+                        .options(sources.clone())
+                        .default(sources[0]),
+                ),
+        );
+    }
+    actions
 }
 
-/// The full schema published on `homecore/devices/{id}/schema`.
-pub fn device_schema_json() -> Value {
-    with_actions(&attributes(), device_actions())
+fn step_param() -> Param {
+    Param::int("step")
+        .label("By")
+        .unit("%")
+        .range(1.0, 100.0)
+        .default(5)
+}
+
+/// The full schema published on `homecore/devices/{id}/schema`, for a speaker
+/// with these inputs and switches, in a household of these speakers.
+pub fn device_schema_json(caps: Caps, roster: Roster) -> Value {
+    with_actions(&attributes(caps, roster), device_actions(caps))
 }
 
 /// Aliases the dispatcher accepts for an action declared under another name.
@@ -383,7 +602,7 @@ mod tests {
     /// has no second name.
     #[test]
     fn every_boolean_names_both_of_its_states() {
-        let schemas = [("sonos", attributes())];
+        let schemas = [("sonos", attributes(ALL, &[]))];
         for (label, schema) in schemas {
             for (name, attr) in &schema.attributes {
                 if !matches!(attr.kind, AttributeKind::Bool) {
@@ -404,6 +623,50 @@ mod tests {
     }
     use super::*;
     use std::collections::HashSet;
+
+    /// A soundbar with a line-in too: every action there is.
+    const ALL: Caps = Caps {
+        home_theater: true,
+        line_in: true,
+    };
+
+    #[test]
+    fn a_plain_speaker_is_not_offered_a_soundbars_switches() {
+        let ids: Vec<String> = device_actions(Caps::default())
+            .iter()
+            .map(|a| a.build()["id"].as_str().unwrap().to_string())
+            .collect();
+        for id in ["set_night_mode", "set_speech_enhancement", "select_source"] {
+            assert!(!ids.contains(&id.to_string()), "{id}");
+        }
+        let a = attributes(Caps::default(), &[]).attributes;
+        assert!(!a.contains_key("night_mode"));
+        let line_in = device_actions(Caps {
+            home_theater: false,
+            line_in: true,
+        });
+        let select = line_in
+            .iter()
+            .map(|a| a.build())
+            .find(|a| a["id"] == "select_source")
+            .expect("a line-in can be selected");
+        assert_eq!(select["params"][0]["options"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_group_leader_is_said_by_name() {
+        let roster = vec![
+            ("sonos_office_1".to_string(), "Office-1".to_string()),
+            ("sonos_bathroom".to_string(), "Bathroom".to_string()),
+        ];
+        let a = attributes(Caps::default(), &roster).attributes;
+        let opts = a["group_coordinator"].options.as_ref().unwrap();
+        assert_eq!(opts[0].value, "sonos_office_1");
+        assert_eq!(opts[0].label.as_deref(), Some("Office-1"));
+        // The whole schema serialises, actions and all.
+        let v = device_schema_json(ALL, &roster);
+        assert!(v["actions"].as_array().unwrap().len() > 20);
+    }
 
     fn dispatcher_arms() -> Vec<String> {
         let src = include_str!("speaker.rs");
@@ -450,14 +713,15 @@ mod tests {
 
     #[test]
     fn the_dispatcher_is_fully_accounted_for() {
-        let declared: HashSet<String> = device_actions()
+        let declared: HashSet<String> = device_actions(ALL)
             .iter()
             .map(|a| a.build()["id"].as_str().unwrap().to_string())
             .collect();
         let aliases: HashSet<&str> = ALIASES.iter().copied().collect();
         let excluded: HashSet<&str> = NOT_DECLARED.iter().map(|(k, _)| *k).collect();
 
-        let arms = dispatcher_arms();
+        let mut arms = dispatcher_arms();
+        arms.extend(crate::bridge::BRIDGE_ACTIONS.iter().map(|a| a.to_string()));
         assert!(
             arms.len() > 15,
             "parsed only {} arms — the extraction broke, not the coverage",
@@ -477,8 +741,11 @@ mod tests {
 
     #[test]
     fn nothing_is_declared_that_the_dispatcher_would_reject() {
-        let arms: HashSet<String> = dispatcher_arms().into_iter().collect();
-        for a in device_actions() {
+        let arms: HashSet<String> = dispatcher_arms()
+            .into_iter()
+            .chain(crate::bridge::BRIDGE_ACTIONS.iter().map(|a| a.to_string()))
+            .collect();
+        for a in device_actions(ALL) {
             let id = a.build()["id"].as_str().unwrap().to_string();
             assert!(
                 arms.contains(&id),
@@ -491,7 +758,7 @@ mod tests {
     /// anything else would be a promise it cannot keep.
     #[test]
     fn only_volume_and_muted_are_writable() {
-        for (name, a) in attributes().attributes {
+        for (name, a) in attributes(ALL, &[]).attributes {
             let expected = matches!(name.as_str(), "volume" | "muted");
             assert_eq!(a.writable, expected, "{name}");
         }
@@ -499,7 +766,7 @@ mod tests {
 
     #[test]
     fn media_facts_have_one_name_each() {
-        let a = attributes().attributes;
+        let a = attributes(ALL, &[]).attributes;
         for name in [
             "media_title",
             "media_artist",
@@ -527,7 +794,7 @@ mod tests {
     /// audio_eq enrichment nothing consumed.
     #[test]
     fn the_legacy_capability_arrays_are_fully_superseded() {
-        let declared: HashSet<String> = device_actions()
+        let declared: HashSet<String> = device_actions(ALL)
             .iter()
             .map(|a| a.build()["id"].as_str().unwrap().to_string())
             .collect();
@@ -566,7 +833,7 @@ mod tests {
 
     #[test]
     fn every_action_has_phrasing_naming_the_device() {
-        for a in device_actions() {
+        for a in device_actions(ALL) {
             let v = a.build();
             let id = v["id"].as_str().unwrap();
             let s = v["sentence"]
@@ -578,7 +845,7 @@ mod tests {
 
     #[test]
     fn sentence_placeholders_resolve_to_real_params() {
-        for a in device_actions() {
+        for a in device_actions(ALL) {
             let v = a.build();
             let id = v["id"].as_str().unwrap();
             let params: HashSet<String> = v["params"]

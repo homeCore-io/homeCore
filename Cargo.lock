@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "hc-sonos"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1868,6 +1868,7 @@ dependencies = [
  "futures",
  "plugin-sdk-rs",
  "roxmltree 0.18.1",
+ "rupnp",
  "schemars",
  "serde",
  "serde_json",

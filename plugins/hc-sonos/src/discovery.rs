@@ -3,6 +3,11 @@
 //! Runs continuously, sending newly-found `sonor::Speaker` objects through
 //! a channel.  Speakers that are already known (same UUID) are deduplicated
 //! by the bridge.
+//!
+//! SSDP can be switched off (`[sonos] ssdp = false`): then nothing is sent to
+//! the multicast group and only `manual_hosts` are contacted. A test setup
+//! with stand-in speakers needs that — a sweep finds whatever real speakers
+//! share the network.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -21,16 +26,40 @@ use tracing::{debug, info, warn};
 /// than waiting for the next periodic tick. SSDP is finicky on
 /// dual-NIC hosts and behind some Wi-Fi routers; a one-click rescan
 /// lets ops nudge it instead of restarting the plugin.
+/// When the last sweep finished (RFC 3339), shared with the `status` action.
+#[derive(Clone, Default)]
+pub struct LastSweep(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl LastSweep {
+    pub fn get(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+    fn now(&self) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = Some(chrono::Utc::now().to_rfc3339());
+        }
+    }
+}
+
 pub fn spawn(
+    last_sweep: LastSweep,
     discovery_interval: Duration,
     discovery_timeout: Duration,
+    ssdp: bool,
     manual_hosts: Vec<String>,
     tx: mpsc::Sender<sonor::Speaker>,
     mut rescan_rx: mpsc::Receiver<()>,
 ) {
+    if !ssdp {
+        info!(
+            manual_hosts = manual_hosts.len(),
+            "SSDP discovery is off (ssdp = false): contacting manual hosts only"
+        );
+    }
     tokio::spawn(async move {
         loop {
-            run_once(&discovery_timeout, &manual_hosts, &tx).await;
+            run_once(&discovery_timeout, ssdp, &manual_hosts, &tx).await;
+            last_sweep.now();
             tokio::select! {
                 _ = tokio::time::sleep(discovery_interval) => {}
                 sig = rescan_rx.recv() => {
@@ -50,10 +79,25 @@ pub fn spawn(
 
 pub(crate) async fn run_once(
     timeout: &Duration,
+    ssdp: bool,
     manual_hosts: &[String],
     tx: &mpsc::Sender<sonor::Speaker>,
 ) {
     // ── SSDP ─────────────────────────────────────────────────────────────────
+    if ssdp {
+        ssdp_sweep(timeout, tx).await;
+    }
+
+    // ── Manual hosts ──────────────────────────────────────────────────────────
+    for speaker in probe_manual_hosts(timeout, manual_hosts).await {
+        if tx.send(speaker).await.is_err() {
+            return; // bridge dropped its receiver — exit
+        }
+    }
+}
+
+/// One SSDP M-SEARCH sweep. The only place this plugin touches multicast.
+async fn ssdp_sweep(timeout: &Duration, tx: &mpsc::Sender<sonor::Speaker>) {
     match sonor::discover(*timeout).await {
         Ok(stream) => {
             tokio::pin!(stream);
@@ -71,13 +115,23 @@ pub(crate) async fn run_once(
         }
         Err(e) => warn!(error = %e, "Failed to start SSDP discovery"),
     }
+}
 
-    // ── Manual hosts ──────────────────────────────────────────────────────────
-    for speaker in probe_manual_hosts(timeout, manual_hosts).await {
-        if tx.send(speaker).await.is_err() {
-            return; // bridge dropped its receiver — exit
-        }
+/// A manual host: `a.b.c.d`, on Sonos's port 1400, or `a.b.c.d:port`.
+pub fn parse_manual_host(host: &str) -> Option<(Ipv4Addr, u16)> {
+    let host = host.trim();
+    match host.rsplit_once(':') {
+        Some((ip, port)) => Some((ip.parse().ok()?, port.parse().ok().filter(|p| *p != 0)?)),
+        None => Some((host.parse().ok()?, 1400)),
     }
+}
+
+/// A speaker from its description document, on any port — `Speaker::from_ip`
+/// only knows 1400.
+async fn speaker_at(addr: Ipv4Addr, port: u16) -> anyhow::Result<Option<sonor::Speaker>> {
+    let url = format!("http://{addr}:{port}/xml/device_description.xml").parse()?;
+    let device = sonor::rupnp::Device::from_url(url).await?;
+    Ok(sonor::Speaker::from_device(device))
 }
 
 /// Probe every manual host concurrently, under our own deadline.
@@ -93,32 +147,48 @@ pub(crate) async fn run_once(
 /// of these tests pass or fail depending on whose LAN they ran on.
 async fn probe_manual_hosts(timeout: &Duration, manual_hosts: &[String]) -> Vec<sonor::Speaker> {
     let probes = manual_hosts.iter().map(|host| async move {
-        let addr: Ipv4Addr = match host.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(host, error = %e, "Invalid manual host IP; skipping");
-                return None;
-            }
+        let Some((addr, port)) = parse_manual_host(host) else {
+            warn!(
+                host,
+                "Invalid manual host (want a.b.c.d or a.b.c.d:port); skipping"
+            );
+            return None;
         };
-        match tokio::time::timeout(*timeout, sonor::Speaker::from_ip(addr)).await {
+        match tokio::time::timeout(*timeout, speaker_at(addr, port)).await {
             Ok(Ok(Some(speaker))) => {
-                info!(host, "Manual host speaker found");
+                // Once a minute, every sweep: worth saying the first time.
+                if first_time(host, true) {
+                    info!(host, "Manual host speaker found");
+                } else {
+                    debug!(host, "Manual host speaker found");
+                }
                 Some(speaker)
             }
             Ok(Ok(None)) => {
                 debug!(host, "Manual host returned no Sonos device");
                 None
             }
+            // Said once until it answers again: an asleep speaker would
+            // otherwise warn every minute, and the bridge already says it
+            // is offline.
             Ok(Err(e)) => {
-                warn!(host, error = %e, "Manual host probe failed");
+                if first_time(host, false) {
+                    warn!(host, error = %e, "Manual host probe failed");
+                } else {
+                    debug!(host, error = %e, "Manual host probe failed again");
+                }
                 None
             }
             Err(_) => {
-                warn!(
-                    host,
-                    timeout_secs = timeout.as_secs(),
-                    "Manual host did not answer within the discovery timeout"
-                );
+                if first_time(host, false) {
+                    warn!(
+                        host,
+                        timeout_secs = timeout.as_secs(),
+                        "Manual host did not answer within the discovery timeout"
+                    );
+                } else {
+                    debug!(host, "Manual host still not answering");
+                }
                 None
             }
         }
@@ -129,6 +199,19 @@ async fn probe_manual_hosts(timeout: &Duration, manual_hosts: &[String]) -> Vec<
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Whether this is news: the first answer from a host, or the first silence
+/// since it last answered.
+fn first_time(host: &str, answered: bool) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let mut g = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    g.insert(host.to_string(), answered) != Some(answered)
 }
 
 #[cfg(test)]
@@ -191,6 +274,29 @@ mod tests {
         assert!(probe_manual_hosts(&Duration::from_secs(1), &hosts)
             .await
             .is_empty());
+    }
+
+    #[test]
+    fn a_manual_host_may_carry_a_port() {
+        let lo = Ipv4Addr::new(127, 0, 0, 1);
+        assert_eq!(parse_manual_host("127.0.0.1"), Some((lo, 1400)));
+        assert_eq!(parse_manual_host(" 127.0.0.1:14001 "), Some((lo, 14001)));
+        assert_eq!(parse_manual_host("127.0.0.1:0"), None);
+        assert_eq!(parse_manual_host("127.0.0.1:http"), None);
+        assert_eq!(parse_manual_host("speaker.local"), None);
+    }
+
+    /// With SSDP off a sweep is the manual hosts and nothing else: none
+    /// configured, nothing found and nothing sent — and it returns at once
+    /// rather than listening for a multicast answer.
+    #[tokio::test]
+    async fn ssdp_off_contacts_only_the_manual_hosts() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let started = Instant::now();
+        run_once(&Duration::from_secs(5), false, &[], &tx).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(tx);
+        assert!(rx.recv().await.is_none());
     }
 
     #[tokio::test]

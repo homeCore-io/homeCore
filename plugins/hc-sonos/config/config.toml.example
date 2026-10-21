@@ -16,6 +16,10 @@ password = ""
 # Sonos discovery
 # ---------------------------------------------------------------------------
 [sonos]
+# Look for speakers with SSDP multicast. false: nothing is sent to the
+# multicast group, and only manual_hosts below are contacted.
+ssdp = true
+
 # How often to re-run SSDP discovery (seconds).
 discovery_interval_secs = 60
 
@@ -24,6 +28,7 @@ discovery_timeout_secs = 5
 
 # Optional: probe specific IPs in addition to SSDP.
 # Useful for speakers on a different VLAN or when SSDP is blocked.
+# An address may carry a port ("192.168.1.50:1400"); 1400 otherwise.
 # manual_hosts = ["192.168.1.50", "192.168.1.51"]
 
 # ---------------------------------------------------------------------------

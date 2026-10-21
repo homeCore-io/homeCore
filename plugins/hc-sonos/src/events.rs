@@ -24,8 +24,18 @@ pub struct AvtState {
     pub album: Option<String>,
     pub image_url: Option<String>,
     pub duration: Option<u32>, // seconds
+    /// `CurrentTrackDuration` was in the event — empty or 0:00:00 then
+    /// means *no* length (a stream), not "unchanged".
+    pub duration_present: bool,
     pub position: Option<u32>, // seconds
+    pub crossfade: Option<bool>,
     pub track_info_present: bool,
+    /// `AVTransportURI`: what the queue is — a stream, a queue, or
+    /// `x-rincon:` (another speaker's music, when grouped).
+    pub transport_uri: Option<String>,
+    /// `r:EnqueuedTransportURIMetaData`: what was queued — for a stream, the
+    /// station's name and logo.
+    pub enqueued: Option<TrackMetadata>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,13 +54,27 @@ pub struct RcState {
     pub bass: Option<i8>,
     pub treble: Option<i8>,
     pub loudness: Option<bool>,
+    /// A soundbar's night mode and speech enhancement (`DialogLevel`).
+    pub night_mode: Option<bool>,
+    pub speech_enhancement: Option<bool>,
+}
+
+/// A GroupRenderingControl NOTIFY: the group's volume, from its coordinator.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GroupRcState {
+    pub volume: Option<u16>,
+    pub muted: Option<bool>,
 }
 
 /// A parsed GENA NOTIFY payload.
 #[derive(Debug, Clone)]
 pub enum NotifyEvent {
-    Avt(AvtState),
+    Avt(Box<AvtState>),
     Rc(RcState),
+    GroupRc(GroupRcState),
+    /// ZoneGroupTopology changed: a speaker joined or left a group. The body
+    /// carries the whole topology; the bridge reads it fresh instead.
+    Topology,
 }
 
 // ── Public parsers ────────────────────────────────────────────────────────────
@@ -80,10 +104,23 @@ pub fn parse_avt(body: &str) -> Option<AvtState> {
                 }
             }
             "CurrentTrackDuration" => {
+                st.duration_present = true;
                 st.duration = child.attribute("val").and_then(parse_hms);
+            }
+            "CurrentCrossfadeMode" => {
+                st.crossfade = child.attribute("val").map(|v| v == "1");
             }
             "RelativeTimePosition" => {
                 st.position = child.attribute("val").and_then(parse_hms);
+            }
+            "AVTransportURI" => {
+                st.transport_uri = child.attribute("val").map(str::to_string);
+            }
+            "EnqueuedTransportURIMetaData" => {
+                st.enqueued = child
+                    .attribute("val")
+                    .filter(|v| !v.is_empty() && *v != "NOT_IMPLEMENTED")
+                    .and_then(parse_track_metadata);
             }
             "CurrentTrackMetaData" => {
                 st.track_info_present = true;
@@ -126,10 +163,31 @@ pub fn parse_rc(body: &str) -> Option<RcState> {
             "Loudness" if child.attribute("channel") == Some("Master") => {
                 st.loudness = child.attribute("val").map(|v| v == "1");
             }
+            "NightMode" => {
+                st.night_mode = child.attribute("val").map(|v| v == "1");
+            }
+            "DialogLevel" => {
+                st.speech_enhancement = child.attribute("val").map(|v| v == "1");
+            }
             _ => {}
         }
     }
     Some(st)
+}
+
+/// Parse a GroupRenderingControl NOTIFY body. Unlike the other two services
+/// its variables are plain properties, not a `LastChange` document.
+pub fn parse_grc(body: &str) -> Option<GroupRcState> {
+    let doc = roxmltree::Document::parse(body).ok()?;
+    let mut st = GroupRcState::default();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        match node.tag_name().name() {
+            "GroupVolume" => st.volume = node.text().and_then(|v| v.trim().parse().ok()),
+            "GroupMute" => st.muted = node.text().map(|v| v.trim() == "1"),
+            _ => {}
+        }
+    }
+    (st != GroupRcState::default()).then_some(st)
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -180,8 +238,8 @@ pub fn parse_track_metadata(didl: &str) -> Option<TrackMetadata> {
     Some(meta)
 }
 
-fn decode_play_mode(mode: &str) -> (bool, &'static str) {
-    match mode {
+pub fn decode_play_mode(mode: &str) -> (bool, &'static str) {
+    match mode.trim().to_ascii_uppercase().as_str() {
         "SHUFFLE_NOREPEAT" => (true, "none"),
         "SHUFFLE" => (true, "all"),
         "SHUFFLE_REPEAT_ONE" => (true, "one"),
@@ -275,5 +333,90 @@ mod streaming_art_tests {
             meta.album.as_deref(),
             Some("Blizzard of Ozz (40th Anniversary Expanded Edition)")
         );
+    }
+}
+
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+
+    #[test]
+    fn group_volume_arrives_as_plain_properties() {
+        let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">
+            <e:property><GroupVolume>14</GroupVolume></e:property>
+            <e:property><GroupMute>0</GroupMute></e:property>
+            <e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property>
+        </e:propertyset>"#;
+        assert_eq!(
+            parse_grc(body),
+            Some(GroupRcState {
+                volume: Some(14),
+                muted: Some(false)
+            })
+        );
+        assert_eq!(parse_grc("<e:propertyset xmlns:e=\"x\"/>"), None);
+    }
+
+    #[test]
+    fn the_transport_uri_says_what_is_queued() {
+        let inner = r#"<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/"><InstanceID val="0"><TransportState val="PLAYING"/><AVTransportURI val="x-rincon:RINCON_B1400"/></InstanceID></Event>"#;
+        let body = format!(
+            r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>{}</LastChange></e:property></e:propertyset>"#,
+            inner
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        );
+        let st = parse_avt(&body).expect("parses");
+        assert_eq!(st.transport_uri.as_deref(), Some("x-rincon:RINCON_B1400"));
+        assert_eq!(st.playback, Some("playing"));
+    }
+
+    fn avt_event(inner: &str) -> String {
+        format!(
+            r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>{}</LastChange></e:property></e:propertyset>"#,
+            inner
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        )
+    }
+
+    #[test]
+    fn a_streams_zero_length_is_said_and_crossfade_is_read() {
+        let body = avt_event(
+            r#"<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/"><InstanceID val="0"><CurrentTrackDuration val="0:00:00"/><CurrentCrossfadeMode val="1"/></InstanceID></Event>"#,
+        );
+        let st = parse_avt(&body).unwrap();
+        assert!(st.duration_present);
+        assert_eq!(st.duration, Some(0));
+        assert_eq!(st.crossfade, Some(true));
+        let quiet = parse_avt(&avt_event(
+            r#"<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/"><InstanceID val="0"><TransportState val="PLAYING"/></InstanceID></Event>"#,
+        ))
+        .unwrap();
+        assert!(!quiet.duration_present, "absent is not the same as none");
+    }
+
+    #[test]
+    fn a_soundbars_switches_arrive_with_rendering_control() {
+        let body = avt_event(
+            r#"<Event xmlns="urn:schemas-upnp-org:metadata-1-0/RCS/"><InstanceID val="0"><NightMode val="1"/><DialogLevel val="0"/><Volume channel="Master" val="22"/></InstanceID></Event>"#,
+        );
+        let rc = parse_rc(&body).unwrap();
+        assert_eq!(rc.night_mode, Some(true));
+        assert_eq!(rc.speech_enhancement, Some(false));
+        assert_eq!(rc.volume, Some(22));
+    }
+
+    #[test]
+    fn rubbish_is_nothing_not_a_panic() {
+        assert!(parse_avt("").is_none());
+        assert!(parse_avt("<not-closed").is_none());
+        assert!(parse_rc("<e:propertyset xmlns:e=\"x\"><e:property><LastChange>&lt;oops</LastChange></e:property></e:propertyset>").is_none());
+        assert!(parse_track_metadata("<DIDL-Lite/>").is_none());
+        assert_eq!(decode_play_mode("shuffle"), (true, "all"));
+        assert_eq!(decode_play_mode("SOMETHING_NEW"), (false, "none"));
     }
 }
