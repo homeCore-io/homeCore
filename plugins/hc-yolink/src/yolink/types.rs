@@ -63,18 +63,28 @@ impl ApiError {
     ///
     /// So it is neither "an error" nor "offline" on its own. It is a maybe, and
     /// only repetition tells the two apart. See
-    /// [`Bridge::get_state_retrying`](crate::bridge::Bridge).
+    /// `YolinkApi::get_device_state`.
     pub const DEVICE_UNREACHABLE: &'static str = "000201";
 
-    /// More than six requests to one device inside a minute. This one really is
-    /// a rate limit, and the fix really is to poll less often.
+    /// "Device is busy, try again later" — in practice more than six requests
+    /// to one device inside a minute. A rate limit: retried, but only after
+    /// [`RATE_LIMIT_BACKOFF`] at least.
     pub const DEVICE_RATE_LIMITED: &'static str = "020104";
+
+    /// The token the request carried is no good: invalid (`000103`, `000104`
+    /// for a hub token), expired (`010104`) or not accepted (`010103`).
+    /// Renewed once and the request sent again.
+    pub const TOKEN_REFUSED: [&'static str; 4] = ["000103", "000104", "010103", "010104"];
 
     /// Account-level throttling: "access denied due to reaching limits".
     pub const ACCOUNT_RATE_LIMITED: &'static str = "010301";
 
     pub fn is_device_unreachable(&self) -> bool {
         self.code == Self::DEVICE_UNREACHABLE
+    }
+
+    pub fn is_token_refused(&self) -> bool {
+        Self::TOKEN_REFUSED.contains(&self.code.as_str())
     }
 
     pub fn is_rate_limited(&self) -> bool {
@@ -98,6 +108,28 @@ pub fn is_device_unreachable(err: &anyhow::Error) -> bool {
 pub fn is_transient(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ApiError>()
         .is_some_and(ApiError::is_transient)
+}
+
+/// Is this a throttle (as opposed to a busy radio)?
+pub fn is_rate_limited(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ApiError>()
+        .is_some_and(ApiError::is_rate_limited)
+}
+
+/// The least a throttled request waits before it is sent again. YoLink counts
+/// requests per device per minute, so a retry a second or two later is
+/// throttled again and only adds to the count.
+pub const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long to wait before retry `attempt` (1, 2, …) after `err`: a busy radio
+/// 1 s then 2 s; a throttle 10 s then 20 s.
+pub fn retry_delay(err: &anyhow::Error, attempt: u32) -> std::time::Duration {
+    let base = if is_rate_limited(err) {
+        RATE_LIMIT_BACKOFF
+    } else {
+        std::time::Duration::from_secs(1)
+    };
+    base * (1 << attempt.saturating_sub(1).min(4))
 }
 
 impl Budp {
@@ -133,9 +165,12 @@ pub struct DeviceInfo {
     pub token: String,
 
     /// Hub / gateway this device is paired to
-    #[serde(rename = "parentDeviceId")]
-    #[allow(dead_code)]
+    #[serde(rename = "parentDeviceId", default)]
     pub parent_device_id: Option<String>,
+
+    /// YoLink's model number, e.g. `YS7804-UC`. Not in every listing.
+    #[serde(rename = "modelName", default)]
+    pub model_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +183,8 @@ pub struct YolinkReport {
     pub device_id: String,
     /// Event type: "StatusChange", "Alert", "Report", etc.
     pub event: String,
+    /// When the hub sent it (ms since the epoch), if it said.
+    pub time: Option<i64>,
     /// Raw event payload (device-type-specific)
     pub data: Value,
 }
@@ -233,6 +270,59 @@ mod tests {
             .unwrap_err();
             assert!(!is_device_unreachable(&err), "{code} is not unreachable");
         }
+    }
+
+    #[test]
+    fn token_codes_are_recognised() {
+        for code in ["000103", "010104", "010103"] {
+            let e = ApiError {
+                code: code.into(),
+                desc: String::new(),
+            };
+            assert!(e.is_token_refused(), "{code}");
+            assert!(!e.is_transient(), "{code} is renewed, not retried blindly");
+        }
+    }
+
+    /// 020104 waits at least ten seconds; the comment and the code agree.
+    #[test]
+    fn a_throttle_backs_off_ten_seconds_or_more() {
+        let busy = Budp {
+            code: "020104".into(),
+            desc: Some("Device is busy, try again later.".into()),
+            data: None,
+        }
+        .into_data()
+        .unwrap_err();
+        assert!(retry_delay(&busy, 1) >= std::time::Duration::from_secs(10));
+        assert!(retry_delay(&busy, 2) >= std::time::Duration::from_secs(20));
+        let radio = Budp {
+            code: "000201".into(),
+            desc: None,
+            data: None,
+        }
+        .into_data()
+        .unwrap_err();
+        assert_eq!(retry_delay(&radio, 1), std::time::Duration::from_secs(1));
+        assert_eq!(retry_delay(&radio, 2), std::time::Duration::from_secs(2));
+    }
+
+    /// The device list's model and hub, as the hub lists them.
+    #[test]
+    fn device_list_entry_parses_model_and_hub() {
+        let d: DeviceInfo = serde_json::from_value(serde_json::json!({
+            "deviceId": "aa00000000000001", "deviceUUID": "x", "token": "t",
+            "name": "Garage Freezer Temperature", "type": "THSensor",
+            "modelName": "YS8004-UC", "parentDeviceId": "aa000000000000ff"
+        }))
+        .unwrap();
+        assert_eq!(d.model_name.as_deref(), Some("YS8004-UC"));
+        assert_eq!(d.parent_device_id.as_deref(), Some("aa000000000000ff"));
+        let bare: DeviceInfo = serde_json::from_value(serde_json::json!({
+            "deviceId": "a", "token": "t", "name": "n", "type": "Outlet"
+        }))
+        .unwrap();
+        assert!(bare.model_name.is_none());
     }
 
     #[test]

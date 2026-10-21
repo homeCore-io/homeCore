@@ -39,7 +39,10 @@ units the person reads in (`units` — °F or °C, US or metric; app 0.1.21 and
 later); the app's confirm and navigation; and the app's look. A panel is also given its
 `deviceId`; a step form its `deviceIds` and `value`, and it answers with a
 `change` event carrying the whole step — its class may offer `accepts` and
-`describe` (the step in words, with `{devices}` where the names go).
+`describe` (the step in words, with `{devices}` where the names go). A
+card's class may offer `accepts(device)` too: say no and that device keeps
+the app's own card (hc-yolink draws its locks' and probes' cards, and leaves
+its room sensors the app's).
 
 Name your device's numbers in its schema (`options` on an integer attribute,
 `{value: "14", label: "Halloween 1"}`) and every screen and automation

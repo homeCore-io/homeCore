@@ -29,6 +29,11 @@
  * module): it is given `host` and `config`, and answers with a `change`
  * event whose `detail` is `{ config }` — saved with the page, by the app.
  *
+ * A `device.card` element's class may have a static `accepts(device)` —
+ * whether it draws this one of the slot's devices; when it says no, the app's
+ * own card is shown instead (a plugin's card for its temperature probes, say,
+ * leaving its room sensors the app's). Checked once its module has loaded.
+ *
  * A `rule.step` element's class may also have, as statics:
  * - `accepts(value)` — whether it can edit that step; when it says no, the
  *   editor's generic form is shown instead;
@@ -39,7 +44,9 @@
  * Added after the first release of version 1 (app 0.1.18): `fetch`,
  * `upload`, `store`, `Device.sw_version` and the `rule.step` slot. Check for
  * them (`typeof host.upload === 'function'`) to run on an older app. Later
- * (app 0.1.21): `units` — without it, show the schema's own units.
+ * (app 0.1.21): `units` — without it, show the schema's own units. Later
+ * still (the app after 0.1.25): a `device.card` class's `accepts` — an older app shows
+ * the plugin's card for every device of the slot's types.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -217,6 +224,11 @@ export interface PluginElement extends HTMLElement {
 	form?: 'compact' | 'standard' | 'large';
 	/** On a `dashboard.card` element, and its settings element. */
 	config?: Record<string, unknown>;
+}
+
+/** What a `device.card` element's class may say about a device. */
+export interface CardElementClass {
+	accepts?(device: Device): boolean;
 }
 
 /** What a `rule.step` element's class may offer the editor. */

@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
-use super::types::{Bddp, Budp, DeviceInfo};
+use super::types::{is_transient, retry_delay, ApiError, Bddp, Budp, DeviceInfo};
 use crate::auth::TokenManager;
 
 pub struct YolinkApi {
@@ -16,15 +16,19 @@ pub struct YolinkApi {
     http: Client,
 }
 
+/// What a call came back as, before its code is looked at.
+enum Reply {
+    Budp(Budp),
+    /// HTTP 401: the bearer token was refused before any BUDP was written.
+    Unauthorized,
+}
+
 impl YolinkApi {
     pub fn new(base_url: String, tokens: Arc<TokenManager>) -> Self {
         Self {
             base_url,
             tokens,
-            http: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("reqwest client build"),
+            http: crate::auth::http_client(),
         }
     }
 
@@ -32,6 +36,48 @@ impl YolinkApi {
     // Low-level caller
     // -----------------------------------------------------------------------
 
+    async fn send(
+        &self,
+        token: &str,
+        method: &str,
+        target_device: Option<&str>,
+        net_token: Option<&str>,
+        params: Option<&Value>,
+    ) -> Result<Reply> {
+        let body = Bddp {
+            time: now_ms(),
+            method,
+            msgid: Some(Uuid::new_v4().to_string()),
+            target_device,
+            token: net_token,
+            params: params.cloned(),
+        };
+        trace!(method, ?target_device, params = ?params, "YoLink API call");
+        let url = format!("{}/open/yolink/v2/api", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("HTTP request failed for method {method}"))?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            return Ok(Reply::Unauthorized);
+        }
+        let budp = resp
+            .error_for_status()
+            .with_context(|| format!("HTTP error for method {method}"))?
+            .json::<Budp>()
+            .await
+            .context("Response JSON parse failed")?;
+        trace!(method, code = %budp.code, data = ?budp.data, "YoLink API reply");
+        Ok(Reply::Budp(budp))
+    }
+
+    /// One call. A refused token (HTTP 401, or a token code in the BUDP) is
+    /// renewed once and the call sent again — once, so a hub that refuses
+    /// every token does not spin.
     async fn call(
         &self,
         method: &str,
@@ -39,35 +85,72 @@ impl YolinkApi {
         net_token: Option<&str>,
         params: Option<Value>,
     ) -> Result<Value> {
-        let user_token = self.tokens.get_token().await?;
-
-        let body = Bddp {
-            time: now_ms(),
-            method,
-            msgid: Some(Uuid::new_v4().to_string()),
-            target_device,
-            token: net_token,
-            params,
+        let token = self.tokens.get_token().await?;
+        let first = self
+            .send(&token, method, target_device, net_token, params.as_ref())
+            .await?;
+        let refused = match &first {
+            Reply::Unauthorized => true,
+            Reply::Budp(b) => ApiError {
+                code: b.code.clone(),
+                desc: String::new(),
+            }
+            .is_token_refused(),
         };
+        let reply = if refused {
+            warn!(
+                method,
+                "The YoLink hub refused the access token; renewing it once"
+            );
+            let token = self.tokens.renew_after_refusal(&token).await?;
+            self.send(&token, method, target_device, net_token, params.as_ref())
+                .await?
+        } else {
+            first
+        };
+        match reply {
+            Reply::Budp(b) => b.into_data(),
+            Reply::Unauthorized => Err(ApiError {
+                code: "401".into(),
+                desc: "the hub refused a freshly renewed token".into(),
+            }
+            .into()),
+        }
+    }
 
-        debug!(method, ?target_device, "YoLink API call");
-
-        let url = format!("{}/open/yolink/v2/api", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&user_token)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("HTTP request failed for method {method}"))?
-            .error_for_status()
-            .with_context(|| format!("HTTP error for method {method}"))?
-            .json::<Budp>()
-            .await
-            .context("Response JSON parse failed")?;
-
-        resp.into_data()
+    /// A call retried on the errors that clear by themselves: a busy radio
+    /// (1 s, 2 s) and a throttle (10 s, 20 s).
+    async fn call_retrying(
+        &self,
+        method: &str,
+        info: &DeviceInfo,
+        params: Option<Value>,
+    ) -> Result<Value> {
+        const ATTEMPTS: u32 = 3;
+        let mut last = None;
+        for attempt in 0..ATTEMPTS {
+            if let Some(e) = &last {
+                tokio::time::sleep(retry_delay(e, attempt)).await;
+            }
+            match self
+                .call(
+                    method,
+                    Some(&info.device_id),
+                    Some(&info.token),
+                    params.clone(),
+                )
+                .await
+            {
+                Ok(v) => return Ok(v),
+                Err(e) if is_transient(&e) => {
+                    debug!(device_id = %info.device_id, method, attempt = attempt + 1, error = %e,
+                        "YoLink call hit a transient error, retrying");
+                    last = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.expect("loop runs at least once and only stores on error"))
     }
 
     // -----------------------------------------------------------------------
@@ -94,39 +177,27 @@ impl YolinkApi {
     // Device-level methods
     // -----------------------------------------------------------------------
 
-    /// Fetch the current full state for a device.
-    /// The method is `{DeviceType}.getState`, e.g. "Outlet.getState".
+    /// The device's state now (`{Type}.getState`), retried on a busy radio or
+    /// a throttle. Exhausted retries on `000201` are what an unreachable
+    /// device looks like.
     pub async fn get_device_state(&self, info: &DeviceInfo) -> Result<Value> {
-        let method = format!("{}.getState", info.device_type);
-        self.call(&method, Some(&info.device_id), Some(&info.token), None)
+        self.call_retrying(&format!("{}.getState", info.device_type), info, None)
             .await
     }
 
-    /// Send a state-change command to a device.
-    /// The method is `{DeviceType}.setState`, e.g. "Outlet.setState".
-    pub async fn set_device_state(&self, info: &DeviceInfo, params: Value) -> Result<()> {
-        let method = format!("{}.setState", info.device_type);
-        self.call(
-            &method,
-            Some(&info.device_id),
-            Some(&info.token),
-            Some(params),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Send an arbitrary method to a device (for future device types that don't use setState).
-    #[allow(dead_code)]
+    /// `{Type}.{suffix}` with `params` — `setState`, `setAttributes`.
     pub async fn device_call(
         &self,
         info: &DeviceInfo,
         method_suffix: &str,
-        params: Option<Value>,
+        params: Value,
     ) -> Result<Value> {
-        let method = format!("{}.{}", info.device_type, method_suffix);
-        self.call(&method, Some(&info.device_id), Some(&info.token), params)
-            .await
+        self.call_retrying(
+            &format!("{}.{}", info.device_type, method_suffix),
+            info,
+            Some(params),
+        )
+        .await
     }
 }
 

@@ -22,11 +22,17 @@ password = "change_me"
 [yolink]
 # "local"  → YS1606 Local Hub (recommended — no cloud dependency)
 # "cloud"  → YS1603 / YS1605 (cloud MQTT + API)
+# Optional: left out, it is whichever credentials section below is present.
 mode = "local"
+
+# A battery sensor with no report for this long is shown offline ("not
+# reporting"), never as its last reading. YoLink sensors check in every few
+# hours; the default allows two missed check-ins.
+silent_after_mins = 540
 
 # How often to poll all devices for a full state refresh (seconds).
 # MQTT push events are the primary delivery mechanism; this is a safety true-up.
-poll_interval_secs = 300
+poll_interval_secs = 3600
 
 # How often to re-scan the hub's device inventory (seconds).
 # Separate from poll_interval_secs so newly-paired devices can be discovered
@@ -45,7 +51,8 @@ inventory_interval_secs = 300
 # a flat battery looks like from here.
 #
 # The strict rate limits are separate codes: 020104 (more than six requests to
-# one device in a minute) and 010301 (account-level throttling).
+# one device in a minute) and 010301 (account-level throttling); those are
+# retried after 10 s and then 20 s.
 poll_device_delay_ms = 1000
 
 # ---------------------------------------------------------------------------
