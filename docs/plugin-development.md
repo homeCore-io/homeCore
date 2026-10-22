@@ -384,6 +384,7 @@ point — not the SDKs, which pass slots through.
 | Files to actions (`upload_chunk`) | ✓ | — | — | — |
 | Pictures it keeps (`with_files_dir`, `plugin_file`) | ✓ | — | — | — |
 | Actions answered asynchronously (`with_async_handler`) | ✓ | — | — | — |
+| Other devices' availability (`subscribe_availability`) | ✓ | — | — | — |
 
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release; none is on a package registry yet (see

@@ -761,6 +761,28 @@ impl DevicePublisher {
         Ok(())
     }
 
+    /// Subscribe to whether a device this plugin does **not** own is online
+    /// (`homecore/devices/{id}/availability`, retained). Messages go to
+    /// [`ManagementHandle::with_availability_handler`]. Tracked, so a
+    /// reconnect restores it.
+    pub async fn subscribe_availability(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/availability");
+        self.client
+            .subscribe(&topic, QoS::AtLeastOnce)
+            .await
+            .context("DevicePublisher::subscribe_availability failed")?;
+        self.subscriptions.lock().unwrap().insert(topic);
+        Ok(())
+    }
+
+    /// Remove a subscription added with [`subscribe_availability`].
+    pub async fn unsubscribe_availability(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/availability");
+        let _ = self.client.unsubscribe(&topic).await;
+        self.subscriptions.lock().unwrap().remove(&topic);
+        Ok(())
+    }
+
     /// Create a `DevicePublisher` for use in unit tests.
     ///
     /// The underlying MQTT client is connected to `127.0.0.1:1883` and will
@@ -845,6 +867,10 @@ pub struct ManagementHandle {
     /// Set via [`ManagementHandle::with_state_handler`]; when present the SDK
     /// subscribes to that topic on connect.
     state_handler: Option<Arc<dyn Fn(Value) + Send + Sync>>,
+    /// Callback invoked with `(device_id, online)` for every availability
+    /// message on a topic subscribed with `subscribe_availability`. Set via
+    /// [`ManagementHandle::with_availability_handler`].
+    availability_handler: Option<Arc<dyn Fn(String, bool) + Send + Sync>>,
     /// Registered streaming action handlers, indexed by action id.
     streaming_actions: Arc<HashMap<String, StreamingAction>>,
     /// Live streams, keyed by `request_id`. Entries are added on
@@ -1011,6 +1037,24 @@ impl ManagementHandle {
         F: Fn(Value) + Send + Sync + 'static,
     {
         self.state_handler = Some(Arc::new(f));
+        self
+    }
+
+    /// Hear whether devices this plugin does **not** own are online: `f` gets
+    /// `(device_id, online)` for each `homecore/devices/{id}/availability`
+    /// message on a topic subscribed with
+    /// [`DevicePublisher::subscribe_availability`] (retained, so once at
+    /// subscribe and again on every change). `"online"` / `"offline"` (and
+    /// `true` / `false`) are read; anything else is ignored.
+    ///
+    /// For a plugin that acts on other plugins' devices — a thermostat must
+    /// not count a sensor that has gone offline, or wait for a switch that
+    /// cannot hear it.
+    pub fn with_availability_handler<F>(mut self, f: F) -> Self
+    where
+        F: Fn(String, bool) + Send + Sync + 'static,
+    {
+        self.availability_handler = Some(Arc::new(f));
         self
     }
 
@@ -1668,6 +1712,7 @@ impl PluginClient {
             ui_dir: None,
             files_dir: None,
             state_handler: None,
+            availability_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1736,6 +1781,18 @@ impl PluginClient {
         Ok(())
     }
 
+    /// Subscribe to whether a device this plugin does **not** own is online.
+    /// See [`DevicePublisher::subscribe_availability`].
+    pub async fn subscribe_availability(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/availability");
+        self.client
+            .subscribe(&topic, QoS::AtLeastOnce)
+            .await
+            .context("subscribe_availability failed")?;
+        self.subscriptions.lock().unwrap().insert(topic);
+        Ok(())
+    }
+
     // ── Event loop ───────────────────────────────────────────────────────
 
     /// Drive the MQTT event loop, calling `on_command` whenever a `cmd`
@@ -1795,112 +1852,119 @@ impl PluginClient {
             match self.eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => {
                     info!("Plugin connected to broker");
-                    // Subscribe to the system-wide TZ topic. Retained, so the
-                    // payload arrives within ms of connect; the message
-                    // handler below applies it via `hc_time::init`. Plugin
-                    // tracing init runs before this point, so the very first
-                    // log lines render in UTC and auto-swap once the message
-                    // lands. Use QoS 0 — late delivery is fine.
-                    if let Err(e) = self
-                        .client
-                        .subscribe("homecore/system/tz", QoS::AtMostOnce)
-                        .await
-                    {
-                        warn!(error = %e, "Failed to subscribe homecore/system/tz");
-                    }
-                    // Re-subscribe to all tracked topics on every (re)connect.
-                    // With clean_session=true, subscriptions are lost on reconnect.
-                    let topics: Vec<String> = subs.lock().unwrap().iter().cloned().collect();
-                    for topic in &topics {
-                        if let Err(e) = self
-                            .client
-                            .subscribe(topic.as_str(), QoS::AtLeastOnce)
+                    // On a task of its own, not here: everything below goes
+                    // through the client's request queue (64), which only this
+                    // loop drains. When the broker was not up at first, the
+                    // plugin's own subscribes have been queueing the whole time;
+                    // re-subscribing them all from inside the loop then fills
+                    // the queue and the loop waits on itself for ever — no
+                    // message is read again (hc-thermostat, every core restart).
+                    let client = self.client.clone();
+                    let subs = Arc::clone(&subs);
+                    let held_alerts = Arc::clone(&held_alerts);
+                    let mgmt = mgmt.clone();
+                    tokio::spawn(async move {
+                        // Subscribe to the system-wide TZ topic. Retained, so the
+                        // payload arrives within ms of connect; the message
+                        // handler below applies it via `hc_time::init`. Plugin
+                        // tracing init runs before this point, so the very first
+                        // log lines render in UTC and auto-swap once the message
+                        // lands. Use QoS 0 — late delivery is fine.
+                        if let Err(e) = client
+                            .subscribe("homecore/system/tz", QoS::AtMostOnce)
                             .await
                         {
-                            error!(topic, error = %e, "Failed to re-subscribe on reconnect");
+                            warn!(error = %e, "Failed to subscribe homecore/system/tz");
                         }
-                    }
-                    if !topics.is_empty() {
-                        info!(
-                            count = topics.len(),
-                            "Re-subscribed to {} topics",
-                            topics.len()
-                        );
-                    }
-                    // Say the alerts again: a restarted core's broker has
-                    // forgotten them.
-                    let alerts: Vec<(String, Vec<u8>)> = held_alerts
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|(t, p)| (t.clone(), p.clone()))
-                        .collect();
-                    for (topic, payload) in alerts {
-                        if let Err(e) = self
-                            .client
-                            .publish(&topic, QoS::AtLeastOnce, true, payload)
-                            .await
-                        {
-                            warn!(topic, error = %e, "Failed to republish alerts on reconnect");
+                        // Re-subscribe to all tracked topics on every (re)connect.
+                        // With clean_session=true, subscriptions are lost on reconnect.
+                        let topics: Vec<String> = subs.lock().unwrap().iter().cloned().collect();
+                        for topic in &topics {
+                            if let Err(e) = client.subscribe(topic.as_str(), QoS::AtLeastOnce).await
+                            {
+                                error!(topic, error = %e, "Failed to re-subscribe on reconnect");
+                            }
                         }
-                    }
-                    // Republish capability manifest retained, if declared.
-                    // Retained so late-joining core instances still see it.
-                    if let Some(ref mgmt) = mgmt {
-                        // Publish the manifest when the plugin declared capabilities
-                        // OR a config schema — the schema rides on the manifest, so a
-                        // schema-only plugin (no actions) still needs it published.
-                        if mgmt.capabilities.is_some()
-                            || mgmt.config_schema.is_some()
-                            || mgmt.config_descriptor.is_some()
-                            || !mgmt.alert_kinds.is_empty()
-                            || mgmt.ui.is_some()
-                        {
-                            let topic = format!("homecore/plugins/{}/capabilities", mgmt.plugin_id);
-                            // Synthesize an empty manifest for a schema-only plugin.
-                            let synthesized;
-                            let caps = match mgmt.capabilities {
-                                Some(ref c) => c,
-                                None => {
-                                    synthesized = hc_types::Capabilities {
-                                        spec: "1".into(),
-                                        plugin_id: mgmt.plugin_id.clone(),
-                                        actions: Vec::new(),
-                                    };
-                                    &synthesized
-                                }
-                            };
-                            // The config schema rides on the manifest JSON (core
-                            // extracts it from the raw payload).
-                            let manifest = build_capability_manifest(
-                                caps,
-                                mgmt.config_schema.as_ref(),
-                                mgmt.config_descriptor.as_ref(),
-                                &mgmt.alert_kinds,
-                                mgmt.ui.as_ref(),
+                        if !topics.is_empty() {
+                            info!(
+                                count = topics.len(),
+                                "Re-subscribed to {} topics",
+                                topics.len()
                             );
-                            if !manifest.is_null() {
-                                let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
-                                if let Err(e) = self
-                                    .client
-                                    .publish(&topic, QoS::AtLeastOnce, true, bytes)
-                                    .await
-                                {
-                                    warn!(error = %e, "Failed to publish capabilities");
+                        }
+                        // Say the alerts again: a restarted core's broker has
+                        // forgotten them.
+                        let alerts: Vec<(String, Vec<u8>)> = held_alerts
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|(t, p)| (t.clone(), p.clone()))
+                            .collect();
+                        for (topic, payload) in alerts {
+                            if let Err(e) = client
+                                .publish(&topic, QoS::AtLeastOnce, true, payload)
+                                .await
+                            {
+                                warn!(topic, error = %e, "Failed to republish alerts on reconnect");
+                            }
+                        }
+                        // Republish capability manifest retained, if declared.
+                        // Retained so late-joining core instances still see it.
+                        if let Some(ref mgmt) = mgmt {
+                            // Publish the manifest when the plugin declared capabilities
+                            // OR a config schema — the schema rides on the manifest, so a
+                            // schema-only plugin (no actions) still needs it published.
+                            if mgmt.capabilities.is_some()
+                                || mgmt.config_schema.is_some()
+                                || mgmt.config_descriptor.is_some()
+                                || !mgmt.alert_kinds.is_empty()
+                                || mgmt.ui.is_some()
+                            {
+                                let topic =
+                                    format!("homecore/plugins/{}/capabilities", mgmt.plugin_id);
+                                // Synthesize an empty manifest for a schema-only plugin.
+                                let synthesized;
+                                let caps = match mgmt.capabilities {
+                                    Some(ref c) => c,
+                                    None => {
+                                        synthesized = hc_types::Capabilities {
+                                            spec: "1".into(),
+                                            plugin_id: mgmt.plugin_id.clone(),
+                                            actions: Vec::new(),
+                                        };
+                                        &synthesized
+                                    }
+                                };
+                                // The config schema rides on the manifest JSON (core
+                                // extracts it from the raw payload).
+                                let manifest = build_capability_manifest(
+                                    caps,
+                                    mgmt.config_schema.as_ref(),
+                                    mgmt.config_descriptor.as_ref(),
+                                    &mgmt.alert_kinds,
+                                    mgmt.ui.as_ref(),
+                                );
+                                if !manifest.is_null() {
+                                    let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
+                                    if let Err(e) =
+                                        client.publish(&topic, QoS::AtLeastOnce, true, bytes).await
+                                    {
+                                        warn!(error = %e, "Failed to publish capabilities");
+                                    }
+                                } else {
+                                    warn!("Failed to serialise capabilities");
                                 }
-                            } else {
-                                warn!("Failed to serialise capabilities");
                             }
-                        }
 
-                        // Learned-state: subscribe to the retained doc core owns.
-                        if mgmt.state_handler.is_some() {
-                            let topic = format!("homecore/plugins/{}/state", mgmt.plugin_id);
-                            if let Err(e) = self.client.subscribe(&topic, QoS::AtLeastOnce).await {
-                                warn!(error = %e, "Failed to subscribe plugin state");
+                            // Learned-state: subscribe to the retained doc core owns.
+                            if mgmt.state_handler.is_some() {
+                                let topic = format!("homecore/plugins/{}/state", mgmt.plugin_id);
+                                if let Err(e) = client.subscribe(&topic, QoS::AtLeastOnce).await {
+                                    warn!(error = %e, "Failed to subscribe plugin state");
+                                }
                             }
                         }
-                    }
+                    });
                 }
                 Ok(rumqttc::Event::Incoming(Packet::Publish(p))) => {
                     let parts: Vec<&str> = p.topic.split('/').collect();
@@ -1940,6 +2004,24 @@ impl PluginClient {
                         match serde_json::from_slice::<Value>(&p.payload) {
                             Ok(cmd) => on_command(device_id, cmd),
                             Err(e) => warn!(topic = %p.topic, error = %e, "Non-JSON cmd payload"),
+                        }
+                        continue;
+                    }
+
+                    // homecore/devices/{id}/availability — another device's, for
+                    // a plugin that subscribed with `subscribe_availability`.
+                    if parts.len() == 4
+                        && parts[0] == "homecore"
+                        && parts[1] == "devices"
+                        && parts[3] == "availability"
+                    {
+                        if let Some(handler) =
+                            mgmt.as_ref().and_then(|m| m.availability_handler.as_ref())
+                        {
+                            match parse_availability(&p.payload) {
+                                Some(online) => handler(parts[2].to_string(), online),
+                                None => debug!(topic = %p.topic, "Unreadable availability payload"),
+                            }
                         }
                         continue;
                     }
@@ -2043,6 +2125,18 @@ impl PluginClient {
                 }
             }
         }
+    }
+}
+
+/// An availability payload: `online` / `offline`, or `true` / `false` (also as
+/// JSON strings). Empty — a cleared retained topic — and anything else is
+/// `None`.
+pub fn parse_availability(payload: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(payload).ok()?.trim().trim_matches('"');
+    match text.to_ascii_lowercase().as_str() {
+        "online" | "true" => Some(true),
+        "offline" | "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -2474,6 +2568,24 @@ mod device_snapshot_path_tests {
 }
 
 #[cfg(test)]
+mod availability_tests {
+    use super::parse_availability;
+
+    /// Core and every SDK publish the words; a hand-written retained message
+    /// may be a bool or quoted. A cleared topic is not "offline".
+    #[test]
+    fn availability_is_read_from_the_words_and_bools() {
+        assert_eq!(parse_availability(b"online"), Some(true));
+        assert_eq!(parse_availability(b"offline"), Some(false));
+        assert_eq!(parse_availability(b" Online\n"), Some(true));
+        assert_eq!(parse_availability(b"true"), Some(true));
+        assert_eq!(parse_availability(b"\"offline\""), Some(false));
+        assert_eq!(parse_availability(b""), None);
+        assert_eq!(parse_availability(b"maybe"), None);
+    }
+}
+
+#[cfg(test)]
 mod config_schema_tests {
     use super::*;
 
@@ -2609,6 +2721,7 @@ mod async_and_files_tests {
             ui_dir: None,
             files_dir: None,
             state_handler: None,
+            availability_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }

@@ -1,32 +1,30 @@
-//! What a virtual thermostat reports and what it can be told to do.
-//!
-//! This plugin published no [`DeviceSchema`] before, so every client inferred
-//! each attribute from its observed value — a bool became a switch, a number
-//! became a slider, and the attribute's meaning came from a lexicon keyed on
-//! its name.
+//! What a thermostat reports and what it can be told to do.
 //!
 //! Names follow the shared vocabulary (`hc_types::device_vocabulary`):
-//! `temperature`, `setpoint` (both °C), `hvac_mode` and `hvac_action`.
+//! `temperature`, `setpoint` (both °C), `hvac_mode` and `hvac_action`. The
+//! rest are its own.
 //!
-//! **Two things are writable**: `{"setpoint": 21}` and `{"hvac_mode": "heat"}`
-//! are handled as attribute writes by `on_device_command`. Everything else is
-//! reported only and changes through a declared action
-//! (`{"action": "set_hysteresis", "value": 1.0}`).
+//! **Two things are writable**: `{"setpoint": 21}` and `{"hvac_mode": "cool"}`.
+//! Everything else is reported only and changes through a declared action
+//! (`{"action": "hold", "setpoint": 19, "for_secs": 7200}`).
 //!
-//! Only what `Runtime::state_payload` actually emits appears here; the tests
-//! walk that function and fail if the two drift apart.
+//! **Per thermostat**, because the modes are: an AC or a fan offers `cool` and
+//! `off`, a heater `heat` and `off`.
+//!
+//! Only what `controller::state_payload` emits appears here; the tests walk
+//! that function and fail if the two drift apart.
 
+use crate::config::{Kind, MAX_GUARD_SECS, MAX_HYSTERESIS, SETPOINT_RANGE};
+use crate::controller::MAX_HOLD_SECS;
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param};
 use plugin_sdk_rs::types::schema::{
-    AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
+    AttributeCategory, AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema,
+    StateLabel,
 };
 use plugin_sdk_rs::DevicePublisher;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// A read-only attribute, labelled for display.
-///
-/// Most attributes on a thermostat are read-only — see the module note.
 fn ro(kind: AttributeKind, label: &str) -> AttributeSchema {
     AttributeSchema::read_only(kind).labelled(label)
 }
@@ -37,133 +35,256 @@ fn ro_unit(kind: AttributeKind, label: &str, unit: &str) -> AttributeSchema {
     a
 }
 
-fn ro_enum(label: &str, options: &[&str]) -> AttributeSchema {
+fn ro_enum(label: &str, options: &[(&str, &str)]) -> AttributeSchema {
     let mut a = ro(AttributeKind::Enum, label);
-    a.options = Some(options.iter().copied().map(AttributeOption::from).collect());
+    a.options = Some(
+        options
+            .iter()
+            .map(|(v, l)| AttributeOption::new(*v).labelled(*l))
+            .collect(),
+    );
     a
 }
 
-/// The `hvac_mode`s a virtual thermostat can be in.
-pub const MODES: &[&str] = &["heat", "cool", "off"];
+fn in_cat(mut a: AttributeSchema, c: AttributeCategory) -> AttributeSchema {
+    a.category = Some(c);
+    a
+}
+
+fn yes_no(a: AttributeSchema, t: (&str, &str), f: (&str, &str)) -> AttributeSchema {
+    a.with_states(BoolStates {
+        when_true: StateLabel::verbed(t.0, t.1),
+        when_false: StateLabel::verbed(f.0, f.1),
+    })
+}
+
+/// What `reason` says, in words.
+pub const REASONS: &[(&str, &str)] = &[
+    ("cooling", "Cooling"),
+    ("heating", "Heating"),
+    ("idle_in_band", "Idle"),
+    ("waiting_min_off", "Waiting — short-cycle guard"),
+    ("waiting_min_on", "Waiting to stop — short-cycle guard"),
+    ("override", "Left alone — switched by hand"),
+    ("sensors_stale", "No current reading"),
+    ("actuator_not_responding", "Switch not responding"),
+    ("max_run_exceeded", "Longest run reached"),
+    ("no_switch", "No switch chosen"),
+    ("off", "Off"),
+];
+
+fn mode_label(m: &str) -> &'static str {
+    match m {
+        "heat" => "Heat",
+        "cool" => "Cool",
+        _ => "Off",
+    }
+}
 
 /// The attribute half of the schema.
-fn attributes() -> HashMap<String, AttributeSchema> {
+fn attributes(kind: Kind) -> HashMap<String, AttributeSchema> {
+    use AttributeCategory::{Config, Diagnostic};
+    use AttributeKind::{Bool, Enum, Float, Integer, Json, String as Text};
+    let running = if kind == Kind::Heater {
+        ("heating", "Heating")
+    } else {
+        ("cooling", "Cooling")
+    };
     let mut a: HashMap<String, AttributeSchema> = HashMap::new();
+    let mut put = |k: &str, v: AttributeSchema| {
+        a.insert(k.to_string(), v);
+    };
 
-    // -- what it is doing right now ------------------------------------------
-    a.insert(
-        "temperature".into(),
-        ro_unit(AttributeKind::Float, "Temperature", "°C"),
+    // -- what it is doing --------------------------------------------------
+    // Bookkeeping (today's counts, when a hold ends, whether the switch
+    // confirmed) is diagnostic: readable and usable in rules, but not each
+    // change listed as something that happened.
+    put("temperature", ro_unit(Float, "Temperature", "°C"));
+    put(
+        "hvac_action",
+        // What the switch is confirmed to be doing, not what it was asked.
+        ro_enum("Doing now", &[("idle", "Idle"), running, ("off", "Off")]),
     );
-    a.insert(
-        "hvac_action".into(),
-        // What the actuator is doing for it now, not what it would like to.
-        ro_enum("Doing now", &["idle", "heating", "cooling", "off"]),
+    put("reason", in_cat(ro_enum("Why", REASONS), Diagnostic));
+    put("hold_setpoint", ro_unit(Float, "Holding at", "°C"));
+    put("hold_until", in_cat(ro(Text, "Holding until"), Diagnostic));
+    put(
+        "override_until",
+        in_cat(ro(Text, "Left alone until"), Diagnostic),
     );
-    a.insert(
-        "sensors_stale".into(),
-        // Its sensors have stopped reporting, so it holds the actuator as it
-        // is. A rule wants to catch that.
-        ro(AttributeKind::Bool, "Sensors stale").with_states(BoolStates {
-            when_true: StateLabel::verbed("sensors stale", "loses its sensors"),
-            when_false: StateLabel::verbed("sensors reporting", "hears its sensors again"),
-        }),
+    put(
+        "sensors_stale",
+        yes_no(
+            ro(Bool, "No current reading"),
+            ("no current reading", "loses its readings"),
+            ("reading", "has a reading again"),
+        ),
     );
-    a.insert(
-        "settled".into(),
-        // A boolean is two events. Without both names a client offers "settled"
-        // and pushes "still waiting" behind a Not gate.
-        ro(AttributeKind::Bool, "Settled").with_states(BoolStates {
-            when_true: StateLabel::verbed("settled", "settles"),
-            when_false: StateLabel::verbed("waiting for sensors", "starts waiting for sensors"),
-        }),
+    put("sensor_readings", in_cat(ro(Json, "Readings"), Diagnostic));
+    put(
+        "actuator_state",
+        yes_no(
+            ro(Bool, "Switch"),
+            ("on", "turns its switch on"),
+            ("off", "turns its switch off"),
+        ),
     );
-    a.insert(
-        "actuator_state".into(),
-        ro(AttributeKind::Bool, "Actuator").with_states(BoolStates {
-            when_true: StateLabel::verbed("on", "turns on"),
-            when_false: StateLabel::verbed("off", "turns off"),
-        }),
+    put(
+        "actuator_confirmed",
+        in_cat(
+            yes_no(
+                ro(Bool, "Switch confirmed"),
+                ("confirmed", "hears its switch confirm"),
+                ("not confirmed", "waits for its switch to confirm"),
+            ),
+            Diagnostic,
+        ),
     );
-    a.insert(
-        "pending_call".into(),
-        // What it will do once the short-cycle lockout ends, in
-        // `hvac_action`'s words; absent when nothing waits.
-        ro_enum("Waiting to start", &["idle", "heating", "cooling"]),
+    put(
+        "actuator_online",
+        yes_no(
+            ro(Bool, "Switch online"),
+            ("switch online", "hears its switch again"),
+            ("switch offline", "loses its switch"),
+        ),
     );
-    a.insert(
-        "actuator_last_change".into(),
-        ro(AttributeKind::String, "Actuator last changed"),
+    put(
+        "pending_call",
+        in_cat(ro_enum("Waiting to start", &[running]), Diagnostic),
     );
-    a.insert(
-        "lockout_until".into(),
-        ro(AttributeKind::String, "Short-cycle lockout until"),
+    put(
+        "lockout_until",
+        in_cat(ro(Text, "Short-cycle guard until"), Diagnostic),
     );
-    a.insert(
-        "actuator_last_error".into(),
-        ro(AttributeKind::Json, "Last actuator error"),
+    put(
+        "actuator_last_change",
+        in_cat(ro(Text, "Switch last changed"), Diagnostic),
     );
-    a.insert(
-        "last_update".into(),
-        ro(AttributeKind::String, "Last update"),
+    put("on_since", in_cat(ro(Text, "On since"), Diagnostic));
+    put(
+        "last_command_error",
+        in_cat(ro(Text, "Last command error"), Diagnostic),
+    );
+    put(
+        "today_from",
+        in_cat(ro(Text, "Today counted from"), Diagnostic),
+    );
+    put(
+        "run_secs_today",
+        in_cat(ro_unit(Integer, "Ran today", "s"), Diagnostic),
+    );
+    put(
+        "cycles_today",
+        in_cat(ro(Integer, "Times on today"), Diagnostic),
+    );
+    put(
+        "longest_run_secs_today",
+        in_cat(ro_unit(Integer, "Longest run today", "s"), Diagnostic),
+    );
+    put(
+        "settled",
+        in_cat(
+            yes_no(
+                ro(Bool, "Settled"),
+                ("settled", "settles"),
+                ("starting", "starts"),
+            ),
+            Diagnostic,
+        ),
     );
 
-    // -- how it is configured -------------------------------------------------
-    // The setpoint and the mode take attribute writes; the rest change through
-    // `set_*` actions.
-    let mut setpoint = AttributeSchema::new(AttributeKind::Float).labelled("Setpoint");
+    // -- what it is set to -------------------------------------------------
+    let mut setpoint = AttributeSchema::new(Float).labelled("Target");
     setpoint.unit = Some("°C".into());
-    a.insert("setpoint".into(), setpoint);
-    let mut mode = AttributeSchema::new(AttributeKind::Enum).labelled("Mode");
-    mode.options = Some(MODES.iter().copied().map(AttributeOption::from).collect());
-    a.insert("hvac_mode".into(), mode);
-    // A width in degrees Celsius, not a temperature: no `°C` unit, or an app
-    // showing °F would add 32 to it.
-    a.insert(
-        "hysteresis".into(),
-        ro(AttributeKind::Float, "Deadband (°C difference)"),
+    setpoint.min = Some(*SETPOINT_RANGE.start());
+    setpoint.max = Some(*SETPOINT_RANGE.end());
+    setpoint.step = Some(0.5);
+    put("setpoint", setpoint);
+    let mut mode = AttributeSchema::new(Enum).labelled("Mode");
+    mode.options = Some(
+        kind.modes()
+            .iter()
+            .map(|m| AttributeOption::new(*m).labelled(mode_label(m)))
+            .collect(),
     );
-    a.insert(
-        "aggregation".into(),
-        ro_enum("Sensor aggregation", &["average", "min", "max"]),
+    put("hvac_mode", mode);
+    put(
+        "kind",
+        in_cat(
+            ro_enum(
+                "Runs",
+                &[("ac", "An AC"), ("heater", "A heater"), ("fan", "A fan")],
+            ),
+            Config,
+        ),
     );
-    a.insert("sensor_ids".into(), ro(AttributeKind::Json, "Sensors"));
-    a.insert(
-        "sensor_attribute".into(),
-        ro(AttributeKind::String, "Sensor attribute"),
+    // A width in °C, not a temperature: no `°C` unit, or an app showing °F
+    // would add 32 to it.
+    put(
+        "hysteresis",
+        in_cat(ro(Float, "Swing (°C difference)"), Config),
     );
-    a.insert(
-        "actuator_device_id".into(),
-        ro(AttributeKind::String, "Actuator device"),
+    put(
+        "aggregation",
+        in_cat(
+            ro_enum(
+                "Combine sensors by",
+                &[
+                    ("average", "Average"),
+                    ("min", "Coldest"),
+                    ("max", "Warmest"),
+                ],
+            ),
+            Config,
+        ),
     );
-    a.insert(
-        "min_on_secs".into(),
-        ro_unit(AttributeKind::Integer, "Minimum on time", "s"),
+    put("sensor_ids", in_cat(ro(Json, "Sensors"), Config));
+    put(
+        "sensor_attribute",
+        in_cat(ro(Text, "Sensor attribute"), Diagnostic),
     );
-    a.insert(
-        "min_off_secs".into(),
-        ro_unit(AttributeKind::Integer, "Minimum off time", "s"),
+    put("actuator_device_id", in_cat(ro(Text, "Switch"), Config));
+    for (k, l) in [
+        ("min_on_secs", "Once on, stays on at least"),
+        ("min_off_secs", "Once off, stays off at least"),
+        ("max_run_secs", "Longest run"),
+        ("sensor_timeout_secs", "A sensor goes quiet after"),
+        ("override_secs", "Switched by hand, left alone for"),
+    ] {
+        put(k, in_cat(ro_unit(Integer, l, "s"), Config));
+    }
+    put(
+        "on_stale",
+        in_cat(
+            ro_enum(
+                "With no reading",
+                &[("off", "Turn it off"), ("hold", "Leave it")],
+            ),
+            Config,
+        ),
     );
-
     a
 }
 
-/// The commands `on_device_command` actually accepts, and nothing else.
-fn actions() -> Vec<Action> {
+fn target_param(name: &str) -> Param {
+    Param::float(name)
+        .label("Target")
+        // °C, said as the unit so an app shows it in the person's own.
+        .unit("°C")
+        .range(*SETPOINT_RANGE.start(), *SETPOINT_RANGE.end())
+        .step(0.5)
+        .required()
+}
+
+/// The commands `Controller::on_command` actually takes, and nothing else.
+fn actions(kind: Kind) -> Vec<Action> {
     vec![
         Action::new("set_setpoint")
-            .label("Set the target temperature")
+            .label("Set the target")
             .category("Thermostat")
-            // Stands in for the reading, so a screen starts the field at it.
             .writes("setpoint")
             .sentence("set {device} to {value}")
-            .param(
-                // °C, said as the unit so an app shows it in the person's own.
-                Param::float("value")
-                    .label("Target temperature")
-                    .unit("°C")
-                    .required(),
-            ),
+            .param(target_param("value")),
         Action::new("set_mode")
             .label("Set the mode")
             .category("Thermostat")
@@ -171,138 +292,218 @@ fn actions() -> Vec<Action> {
             .sentence("set {device} to {value}")
             .param(
                 Param::enum_("value")
-                    .options(MODES.iter().copied())
+                    .labelled_options(kind.modes().iter().map(|m| (*m, mode_label(m))))
                     .label("Mode")
                     .required(),
             ),
+        Action::new("hold")
+            .label("Hold a different target for a while")
+            .description("Then it goes back to its usual target by itself.")
+            .category("Thermostat")
+            .sentence("hold {device} at {setpoint} for {for_secs}")
+            .param(target_param("setpoint"))
+            .param(
+                Param::duration("for_secs")
+                    .label("For")
+                    .unit("s")
+                    .range(60.0, MAX_HOLD_SECS as f64)
+                    .default(7200)
+                    .required(),
+            ),
+        Action::new("resume")
+            .label("Back to the usual target")
+            .description("Ends a hold, or a hand-flip override, now.")
+            .category("Thermostat")
+            .sentence("put {device} back to its usual target"),
+        Action::new("start_now")
+            .label("Start now anyway")
+            .description("Skips the short-cycle guard once.")
+            .category("Thermostat")
+            .sentence("start {device} now, past its short-cycle guard"),
+        Action::new("resync")
+            .label("Send the switch what it should be")
+            .description("Sends on or off again now, even if it seems so already.")
+            .category("Thermostat")
+            .sentence("send {device}'s switch what it should be"),
         Action::new("set_hysteresis")
-            .label("Set the hysteresis band")
+            .label("Set the swing")
             .category("Tuning")
             .writes("hysteresis")
-            .param(Param::float("value").label("Hysteresis").required()),
+            .sentence("set {device}'s swing to {value} °C")
+            .param(
+                Param::float("value")
+                    .label("Swing (°C difference)")
+                    .range(0.0, MAX_HYSTERESIS)
+                    .step(0.1)
+                    .required(),
+            ),
         Action::new("set_aggregation")
-            .label("Set how multiple sensors combine")
+            .label("Set how several sensors combine")
             .category("Tuning")
             .writes("aggregation")
+            .sentence("make {device} combine its sensors by {value}")
             .param(
                 Param::enum_("value")
-                    .options(["average", "min", "max"])
-                    .label("Aggregation")
+                    .labelled_options([
+                        ("average", "Average"),
+                        ("min", "Coldest"),
+                        ("max", "Warmest"),
+                    ])
+                    .label("Combine by")
                     .required(),
             ),
         Action::new("set_short_cycle")
             .label("Set the short-cycle guards")
             .category("Tuning")
-            .param(Param::int("min_on_secs").label("Minimum on time"))
-            .param(Param::int("min_off_secs").label("Minimum off time")),
+            .sentence("set {device}'s short-cycle guards")
+            .param(
+                Param::duration("min_on_secs")
+                    .label("Once on, stays on at least")
+                    .unit("s")
+                    .range(0.0, MAX_GUARD_SECS as f64),
+            )
+            .param(
+                Param::duration("min_off_secs")
+                    .label("Once off, stays off at least")
+                    .unit("s")
+                    .range(0.0, MAX_GUARD_SECS as f64),
+            ),
         Action::new("set_sensors")
             .label("Choose the sensors")
             .category("Setup")
             .writes("sensor_ids")
-            .param(Param::string("sensor_ids").label("Sensor device ids, comma-separated"))
-            .param(Param::string("attribute").label("Sensor attribute (°C)")),
+            .sentence("make {device} read {sensor_ids}")
+            .param(
+                Param::string("sensor_ids")
+                    .label("Sensor device ids, comma-separated")
+                    .required(),
+            ),
         Action::new("set_actuator")
-            .label("Choose what it switches")
+            .label("Choose the switch")
+            .description(
+                "A plug or switch — a device with an on/off that isn't a lock or a \
+                 thermostat. The old one is turned off first if it was running.",
+            )
             .category("Setup")
             .writes("actuator_device_id")
-            // `on_cmd` / `off_cmd` (JSON payloads) are taken too, but have
-            // no control to declare them with; they belong in the config file.
-            .param(Param::device_ref("device_id").label("Actuator device")),
+            .sentence("make {device} switch {device_id}")
+            .param(
+                Param::device_ref("device_id")
+                    .label("Plug or switch")
+                    .required(),
+            ),
         Action::new("recalculate")
             .label("Re-evaluate now")
-            .category("Thermostat"),
+            .category("Thermostat")
+            .sentence("re-evaluate {device}"),
     ]
 }
 
-/// The schema every thermostat device publishes. All thermostats are the same
-/// shape, so there is one.
-pub fn device_schema_json() -> Value {
+/// A thermostat's schema: its modes are its kind's.
+#[cfg(test)]
+pub fn device_schema(kind: Kind) -> DeviceSchema {
+    serde_json::from_value(device_schema_json(kind)).expect("schema round-trips")
+}
+
+pub fn device_schema_json(kind: Kind) -> Value {
     with_actions(
         &DeviceSchema {
-            attributes: attributes(),
+            attributes: attributes(kind),
             ..Default::default()
         },
-        actions(),
+        actions(kind),
     )
 }
 
 /// Publish the retained schema for a thermostat device.
-///
-/// Retained on purpose: a client connecting long after this plugin last ran
-/// still learns what the device's attributes mean.
-pub async fn publish(publisher: &DevicePublisher, device_id: &str) -> anyhow::Result<()> {
+pub async fn publish(
+    publisher: &DevicePublisher,
+    device_id: &str,
+    kind: Kind,
+) -> anyhow::Result<()> {
     publisher
-        .register_device_schema_json(device_id, &device_schema_json())
+        .register_device_schema_json(device_id, &device_schema_json(kind))
         .await
 }
+
+/// Every command the controller takes by `action`.
+#[cfg(test)]
+pub const HANDLED: &[&str] = &[
+    "set_setpoint",
+    "set_mode",
+    "hold",
+    "resume",
+    "start_now",
+    "resync",
+    "set_hysteresis",
+    "set_aggregation",
+    "set_short_cycle",
+    "set_sensors",
+    "set_actuator",
+    "recalculate",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn schema() -> DeviceSchema {
-        serde_json::from_value(device_schema_json()).expect("schema round-trips")
-    }
+    const KINDS: [Kind; 3] = [Kind::Ac, Kind::Heater, Kind::Fan];
 
-    /// Every boolean names both of its states.
-    ///
-    /// A boolean attribute is two events, not one: a client given only one name
-    /// offers one row, and the other direction needs a Not gate wrapped round
-    /// the trigger.
     #[test]
-    fn every_boolean_names_both_of_its_states() {
-        for (name, attr) in &schema().attributes {
-            if !matches!(attr.kind, AttributeKind::Bool) {
-                continue;
-            }
-            let s = attr
-                .states
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} is a bool with no state names"));
-            assert!(!s.when_true.label.is_empty(), "{name}");
-            assert_ne!(s.when_true.label, s.when_false.label, "{name}");
+    fn the_schema_is_conformant() {
+        for k in KINDS {
+            plugin_sdk_rs::conformance::check_device_schema(&device_schema(k)).assert_ok();
         }
     }
 
-    /// Only what `on_device_command` takes as an attribute write is writable.
-    /// A writable declaration for anything else renders a control whose every
-    /// use is silently dropped.
+    /// Only what the controller takes as an attribute write is writable.
     #[test]
     fn only_the_setpoint_and_mode_are_writable() {
-        for (name, attr) in &schema().attributes {
+        for (name, attr) in &device_schema(Kind::Ac).attributes {
             let expected = matches!(name.as_str(), "setpoint" | "hvac_mode");
             assert_eq!(attr.writable, expected, "{name}");
         }
     }
 
-    /// Temperatures are declared in °C, as the vocabulary has them.
+    /// H8: an AC offers Cool and Off; a heater Heat and Off.
     #[test]
-    fn temperatures_are_celsius() {
-        let a = schema().attributes;
-        for name in ["temperature", "setpoint"] {
-            assert_eq!(a[name].unit.as_deref(), Some("°C"), "{name}");
-        }
+    fn the_modes_are_the_kinds() {
+        let modes = |k: Kind| -> Vec<String> {
+            device_schema(k).attributes["hvac_mode"]
+                .options
+                .clone()
+                .unwrap()
+                .into_iter()
+                .map(|o| o.value)
+                .collect()
+        };
+        assert_eq!(modes(Kind::Ac), ["cool", "off"]);
+        assert_eq!(modes(Kind::Fan), ["cool", "off"]);
+        assert_eq!(modes(Kind::Heater), ["heat", "off"]);
     }
 
-    /// The schema must not drift from what the device actually publishes.
-    ///
-    /// `Runtime::state_payload` is the authority; this asserts the declared set
-    /// matches it exactly in both directions. An attribute declared but never
-    /// published is a control for something that does not exist; one published
-    /// but not declared is the inference this schema exists to replace.
+    #[test]
+    fn temperatures_are_celsius_and_the_swing_is_not_one() {
+        let a = device_schema(Kind::Ac).attributes;
+        for name in ["temperature", "setpoint", "hold_setpoint"] {
+            assert_eq!(a[name].unit.as_deref(), Some("°C"), "{name}");
+        }
+        assert_eq!(a["hysteresis"].unit, None);
+    }
+
+    /// The schema must not drift from what the device publishes.
     #[test]
     fn the_declared_attributes_are_exactly_what_is_published() {
-        let published = crate::bridge::sample_state_payload();
+        let published = crate::controller::sample_state_payload();
         let published: std::collections::HashSet<&str> = published
             .as_object()
             .expect("state payload is an object")
             .keys()
             .map(|s| s.as_str())
             .collect();
-        let declared = schema().attributes;
+        let declared = device_schema(Kind::Ac).attributes;
         let declared: std::collections::HashSet<&str> =
             declared.keys().map(|s| s.as_str()).collect();
-
         let missing: Vec<_> = published.difference(&declared).collect();
         let extra: Vec<_> = declared.difference(&published).collect();
         assert!(
@@ -312,25 +513,28 @@ mod tests {
         assert!(extra.is_empty(), "declared but never published: {extra:?}");
     }
 
-    /// Every declared action is one `on_device_command` actually handles.
+    /// Every declared action is one the controller handles, and back.
     #[test]
-    fn every_action_is_a_command_the_bridge_accepts() {
-        const HANDLED: &[&str] = &[
-            "set_setpoint",
-            "set_mode",
-            "set_hysteresis",
-            "set_aggregation",
-            "set_short_cycle",
-            "set_sensors",
-            "set_actuator",
-            "recalculate",
-        ];
-        for a in &schema().actions {
-            assert!(
-                HANDLED.contains(&a.id.as_str()),
-                "{} is declared but the bridge does not handle it",
-                a.id
-            );
+    fn every_action_is_a_command_the_controller_takes() {
+        let declared: Vec<String> = device_schema(Kind::Ac)
+            .actions
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        for a in &declared {
+            assert!(HANDLED.contains(&a.as_str()), "{a} declared, not handled");
+        }
+        for h in HANDLED {
+            assert!(declared.iter().any(|a| a == h), "{h} handled, not declared");
+        }
+    }
+
+    /// Every `reason` the controller can give is named.
+    #[test]
+    fn every_reason_has_words() {
+        let src = include_str!("controller.rs");
+        for (code, _) in REASONS {
+            assert!(src.contains(&format!("\"{code}\"")), "{code}");
         }
     }
 }

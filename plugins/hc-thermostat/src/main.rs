@@ -1,51 +1,97 @@
-//! hc-thermostat — virtual thermostat plugin for homeCore.
+//! hc-thermostat — software thermostats for homeCore: a temperature sensor
+//! switches a plug or switch to hold a room at a temperature.
+//!
+//! # Startup, in order
+//!
+//! 1. Read the config — every thermostat that can run; the rest are said.
+//! 2. Connect; start the SDK event loop.
+//! 3. Subscribe to every sensor's and switch's state **and availability**, and
+//!    to our own retained state from the last run.
+//! 4. Wait (briefly) for learned state, then for every subscribed device to
+//!    speak. Until then the controller only listens.
+//! 5. Start: register every thermostat, then one settling pass.
+//!
+//! On SIGTERM or Ctrl-C every heater this plugin may have left running is
+//! turned off before it exits.
 
 use anyhow::Result;
-use plugin_sdk_rs::types::PluginNotice;
-use plugin_sdk_rs::{PluginClient, PluginConfig};
+use plugin_sdk_rs::{AsyncActionFuture, PluginClient, PluginConfig};
+use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
 mod bridge;
 mod config;
 mod control;
+mod controller;
 mod schema;
 
-use bridge::{BridgeHandle, BridgeTask};
-use config::Config;
+use bridge::{Bridge, Event, Mgmt};
+use controller::Controller;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_DELAY_SECS: u64 = 60;
+/// How long to wait for the broker to say anything at all (a slow connect —
+/// homeCore itself just started), then for learned state, then for every
+/// subscribed device to speak.
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
+const LEARNED_WAIT: Duration = Duration::from_secs(2);
+const SYNC_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
-    // Accept either `hc-thermostat --config PATH` or `hc-thermostat PATH`.
-    // Default to `config/config.toml` (relative to the working directory).
+    // `hc-thermostat --config PATH` or `hc-thermostat PATH`.
     let config_path = parse_flag("--config")
         .or_else(|| std::env::args().nth(1).filter(|a| !a.starts_with("--")))
         .unwrap_or_else(|| "config/config.toml".to_string());
 
-    // Load [logging] bootstrap first so file logging is up before config
-    // parse errors (otherwise a bad config silently goes only to stderr).
+    // `[logging]` first, so a config problem is logged to the file too.
     let (_log_guard, log_level_handle, mqtt_log_handle) = init_logging_bootstrap(&config_path);
 
-    let cfg = match Config::load(&config_path) {
-        Ok(c) => c,
+    let loaded = match bridge::load(&config_path) {
+        Ok(l) => l,
         Err(e) => {
+            // Only a file that isn't TOML, or a `[homecore]` that can't be read:
+            // without them it can't reach homeCore to say anything.
             error!(error = %e, path = %config_path, "Failed to load config");
             std::process::exit(1);
         }
     };
 
-    info!(version = VERSION, plugin_id = %cfg.homecore.plugin_id, "Starting hc-thermostat");
+    info!(
+        version = VERSION,
+        plugin_id = %loaded.config.homecore.plugin_id,
+        thermostats = loaded.config.thermostats.len(),
+        skipped = loaded.skipped.len(),
+        "Starting hc-thermostat"
+    );
 
-    if let Err(e) = run(cfg, config_path, log_level_handle, mqtt_log_handle).await {
-        error!(error = %e, "Plugin exited with error");
-        std::process::exit(1);
+    for attempt in 1..=MAX_ATTEMPTS {
+        match run(
+            loaded.clone(),
+            &config_path,
+            log_level_handle.clone(),
+            mqtt_log_handle.clone(),
+        )
+        .await
+        {
+            Ok(()) => return,
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                error!(error = %e, attempt, "Startup failed; retrying in {RETRY_DELAY_SECS} s");
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+            }
+            Err(e) => {
+                error!(error = %e, "Startup failed after {MAX_ATTEMPTS} attempts; exiting");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
-/// Read `[logging]` from the config file (best-effort, tolerating errors) so
-/// tracing is initialized before we strictly validate the full config.
 fn init_logging_bootstrap(
     config_path: &str,
 ) -> (
@@ -70,8 +116,6 @@ fn init_logging_bootstrap(
     )
 }
 
-/// Extract `--flag value` from argv for an arbitrary flag name. Returns the
-/// value if the flag was provided.
 fn parse_flag(flag: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     let idx = args.iter().position(|a| a == flag)?;
@@ -79,447 +123,399 @@ fn parse_flag(flag: &str) -> Option<String> {
 }
 
 async fn run(
-    cfg: Config,
-    config_path: String,
+    loaded: config::Loaded,
+    config_path: &str,
     log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
-    // 1. Connect to broker.
-    let sdk_config = PluginConfig {
+    let cfg = loaded.config.clone();
+    let client = PluginClient::connect(PluginConfig {
         broker_host: cfg.homecore.broker_host.clone(),
         broker_port: cfg.homecore.broker_port,
         plugin_id: cfg.homecore.plugin_id.clone(),
         password: cfg.homecore.password.clone(),
-    };
-    let client = PluginClient::connect(sdk_config)
-        .await?
-        // Cross-restart device tracking: SDK mirrors every register/
-        // unregister to disk so `bridge.register_all`'s reconcile call
-        // can clean up thermostats removed from config while the
-        // plugin was offline.
-        .with_device_persistence(published_ids_path(&config_path));
-
-    // 2. Activate MQTT log forwarding now that we're connected.
+    })
+    .await?
+    // Cross-restart device tracking, so a thermostat removed while the plugin
+    // was stopped is unregistered at start.
+    .with_device_persistence(sibling(config_path, ".published-device-ids.json"));
     mqtt_log_handle.connect(
         client.mqtt_client(),
         &cfg.homecore.plugin_id,
         &cfg.logging.log_forward_level,
     );
 
-    // 3. Bridge task channel — used by management custom handlers to poke the
-    //    control loop from the synchronous callback context.
-    let (bridge_tx, mut bridge_rx) = bridge::bridge_task_channel();
+    let (tx, rx) = mpsc::unbounded_channel::<Event>();
+    let learned_seen = Arc::new(AtomicBool::new(false));
+    // Anything at all from the broker: the waits below count from here, so a
+    // slow connect can't make the plugin start before it has heard anything.
+    let heard_any = Arc::new(AtomicBool::new(false));
 
-    // 3b. Sync-readable thermostat snapshot. The bridge writes into it after
-    // any config mutation; the SDK's sync custom command handler reads from
-    // it when answering `get_thermostats`. Shared Arc lets both sides point
-    // at the same Vec.
-    let snapshot: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // 4. Management: enable heartbeat + config/log protocol + custom commands.
-    //
-    // The SDK calls custom handlers SYNCHRONOUSLY inside the MQTT event loop.
-    // Any blocking here stalls publishes (including the management response)
-    // and causes the API caller to time out. So:
-    //   - Commands that just trigger async work → try_send + return "queued"
-    //   - Commands that need to return data (get_thermostats) → read from
-    //     the bridge's sync-readable snapshot (std::sync::Mutex)
-    let bridge_tx_for_mgmt = bridge_tx.clone();
-    let snapshot_handle = snapshot.clone();
     let mgmt = client
         .enable_management(
             cfg.homecore.heartbeat_secs,
             Some(VERSION.to_string()),
-            Some(config_path.clone()),
+            Some(config_path.to_string()),
             Some(log_level_handle),
         )
         .await?
-        .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
-            "recalculate_all" => {
-                // `force: true` re-issues actuator commands unconditionally,
-                // not just on transition. Recovery path for the cached-vs-
-                // physical-reality drift after a restart (THERM-RESTART-1).
-                let force = cmd.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-                let task = if force {
-                    BridgeTask::RecalculateAllForce
-                } else {
-                    BridgeTask::RecalculateAll
-                };
-                let _ = bridge_tx_for_mgmt.try_send(task);
-                Some(serde_json::json!({ "status": "ok", "force": force }))
-            }
-            "reload_config" => {
-                let _ = bridge_tx_for_mgmt.try_send(BridgeTask::ReloadConfig);
-                Some(serde_json::json!({ "status": "ok" }))
-            }
-            "add_thermostat" => {
-                let entry_val = cmd.get("config")?.clone();
-                let entry: config::ThermostatEntry = match serde_json::from_value(entry_val) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        return Some(serde_json::json!({
-                            "status": "error",
-                            "error": format!("invalid thermostat config: {e}"),
-                        }));
+        .with_capabilities(capabilities())
+        .with_alert_kinds(alert_kinds())
+        .with_async_handler({
+            let tx = tx.clone();
+            move |cmd| {
+                let m = Mgmt::of(cmd)?;
+                let tx = tx.clone();
+                Some(Box::pin(async move {
+                    let m = match m {
+                        Ok(m) => m,
+                        Err(e) => return json!({ "status": "error", "error": e }),
+                    };
+                    let (rtx, rrx) = oneshot::channel();
+                    if tx.send(Event::Mgmt(m, rtx)).is_err() {
+                        return json!({ "status": "error", "error": "the plugin is stopping" });
                     }
-                };
-                let id = entry.id.clone();
-                if bridge_tx_for_mgmt
-                    .try_send(BridgeTask::AddThermostat {
-                        entry: Box::new(entry),
-                    })
-                    .is_err()
-                {
-                    return Some(serde_json::json!({
-                        "status": "error",
-                        "error": "bridge queue full",
-                    }));
-                }
-                Some(serde_json::json!({ "status": "queued", "id": id }))
+                    rrx.await.unwrap_or_else(
+                        |_| json!({ "status": "error", "error": "the plugin is stopping" }),
+                    )
+                }) as AsyncActionFuture)
             }
-            "remove_thermostat" => {
-                let Some(id) = cmd.get("id").and_then(|v| v.as_str()) else {
-                    return Some(serde_json::json!({
-                        "status": "error",
-                        "error": "missing `id`",
-                    }));
-                };
-                if bridge_tx_for_mgmt
-                    .try_send(BridgeTask::RemoveThermostat { id: id.to_string() })
-                    .is_err()
-                {
-                    return Some(serde_json::json!({
-                        "status": "error",
-                        "error": "bridge queue full",
-                    }));
-                }
-                Some(serde_json::json!({ "status": "queued", "id": id }))
-            }
-            "get_thermostats" => {
-                // Sync read from the shadow snapshot — no bridge round-trip.
-                let list = snapshot_handle
-                    .lock()
-                    .ok()
-                    .map(|g| g.clone())
-                    .unwrap_or_default();
-                Some(serde_json::json!({ "status": "ok", "thermostats": list }))
-            }
-            _ => None,
         })
-        .with_capabilities(plugin_sdk_rs::types::Capabilities {
-            spec: "1".into(),
-            // SDK fills plugin_id from the configured client id.
-            plugin_id: String::new(),
-            actions: vec![
-                plugin_sdk_rs::types::Action {
-                    id: "recalculate_all".into(),
-                    label: "Recalculate all".into(),
-                    description: Some(
-                        "Re-evaluate every thermostat against its current sensor \
-                         readings. Useful after editing setpoints or sensor \
-                         topology by hand. Pass `force: true` to re-issue \
-                         actuator commands unconditionally — recovery path \
-                         when the cached actuator state has drifted from \
-                         physical reality (e.g. after an appliance restart)."
-                            .into(),
-                    ),
-                    params: Some(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "force": {
-                                "type": "boolean",
-                                "default": false,
-                                "description": "Re-issue actuator commands \
-                                                unconditionally, ignoring \
-                                                cached actuator_state. Use to \
-                                                recover from cached-vs-physical \
-                                                drift after a restart."
-                            }
-                        }
-                    })),
-                    result: None,
-                    stream: false,
-                    cancelable: false,
-                    concurrency: plugin_sdk_rs::types::Concurrency::default(),
-                    item_key: None,
-                    item_operations: None,
-                    requires_role: plugin_sdk_rs::types::RequiresRole::User,
-                    timeout_ms: None,
-                    danger: false,
-                },
-                plugin_sdk_rs::types::Action {
-                    id: "reload_config".into(),
-                    label: "Reload config".into(),
-                    description: Some(
-                        "Re-read config.toml from disk and rebuild the \
-                         thermostat set. Subscriptions are re-established and a \
-                         recalculate is scheduled."
-                            .into(),
-                    ),
-                    params: None,
-                    result: None,
-                    stream: false,
-                    cancelable: false,
-                    concurrency: plugin_sdk_rs::types::Concurrency::default(),
-                    item_key: None,
-                    item_operations: None,
-                    requires_role: plugin_sdk_rs::types::RequiresRole::User,
-                    timeout_ms: None,
-                    danger: false,
-                },
-            ],
-        });
-
-    // 5. Create bridge + device publisher handle.
-    let publisher = client.device_publisher();
-    // Conditions for the plugin page, not only the log.
-    let notices = client.notices();
-    let mqtt_client = client.mqtt_client();
-    let state_writer = client.state_writer();
-    // Whether this plugin has anything to drive, said on the plugin page.
-    // Read from the live set every time rather than decided at startup:
-    // thermostats can be added, removed and reloaded over the management
-    // protocol without a restart, and a notice is current state.
-    async fn refresh_thermostat_notice(
-        bridge: &BridgeHandle,
-        notices: &plugin_sdk_rs::PluginNotices,
-    ) {
-        if bridge.get_thermostats().await.is_empty() {
-            notices.raise(
-                PluginNotice::warning(
-                    "no_thermostats_configured",
-                    "No thermostats are defined, so this plugin publishes no devices.",
-                )
-                .with_remedy(
-                    "Add one under Configuration. A thermostat here is virtual: it \
-                     drives an existing switch or relay device from an existing \
-                     temperature sensor, so have both device ids to hand.",
-                ),
-            );
-        } else {
-            notices.clear("no_thermostats_configured");
-        }
-    }
-
-    let bridge = BridgeHandle::new(
-        &cfg,
-        publisher.clone(),
-        mqtt_client,
-        &config_path,
-        snapshot.clone(),
-        state_writer,
-    )
-    .await?;
-    refresh_thermostat_notice(&bridge, &notices).await;
-    let bridge = Arc::new(bridge);
-
-    // 6. Subscribe to external sensor state topics BEFORE spawning run_managed
-    //    so the initial retained state is delivered once the loop starts.
-    let sensor_ids = bridge.all_sensor_ids().await;
-    for sid in &sensor_ids {
-        if let Err(e) = client.subscribe_state(sid).await {
-            warn!(sensor = %sid, error = %e, "Failed to subscribe to sensor state");
-        }
-    }
-    info!(
-        sensor_count = sensor_ids.len(),
-        "Subscribed to sensor state topics"
-    );
-
-    // 6a. Subscribe to actuator state topics so we can detect drift — e.g.
-    // when the actuator is flipped by an external rule, UI command, voice
-    // assistant, or a prior command from us that never landed.
-    let actuator_ids = bridge.all_actuator_ids().await;
-    for aid in &actuator_ids {
-        if let Err(e) = client.subscribe_state(aid).await {
-            warn!(actuator = %aid, error = %e, "Failed to subscribe to actuator state");
-        }
-    }
-    info!(
-        actuator_count = actuator_ids.len(),
-        "Subscribed to actuator state topics"
-    );
-
-    // 6b. Subscribe to OUR OWN thermostat state topics so retained state from
-    // the previous run is replayed — restores actuator_last_change across
-    // restarts (for correct short-cycle lockout).
-    let own_ids = bridge.all_own_device_ids().await;
-    for id in &own_ids {
-        if let Err(e) = client.subscribe_state(id).await {
-            warn!(device_id = %id, error = %e, "Failed to subscribe to own state");
-        }
-    }
-
-    // 6c. Prime the initial-sync tracker with every id we just subscribed to.
-    // State callbacks (spawned after run_managed starts) drain the set as
-    // retained messages arrive. The startup recalc then blocks on drain or
-    // timeout so the first control pass sees real sensor readings and real
-    // actuator state, not cold defaults.
-    let mut expected_ids: Vec<String> =
-        Vec::with_capacity(sensor_ids.len() + actuator_ids.len() + own_ids.len());
-    expected_ids.extend(sensor_ids.iter().cloned());
-    expected_ids.extend(actuator_ids.iter().cloned());
-    expected_ids.extend(own_ids.iter().cloned());
-    expected_ids.sort();
-    expected_ids.dedup();
-    let expected_total = expected_ids.len();
-    bridge.begin_initial_sync(expected_ids).await;
-
-    // 7. Spawn run_managed BEFORE registering devices (critical SDK invariant).
-    let bridge_for_cmd = Arc::clone(&bridge);
-    let bridge_for_state = Arc::clone(&bridge);
-
-    // State callback routes to the own-state restore path for our thermostat
-    // device IDs; everything else is an external sensor.
-    let cmd_cb = move |device_id: String, payload: serde_json::Value| {
-        let b = Arc::clone(&bridge_for_cmd);
-        tokio::spawn(async move {
-            b.on_device_command(&device_id, payload).await;
-        });
-    };
-    let state_cb = move |source_id: String, payload: serde_json::Value| {
-        let b = Arc::clone(&bridge_for_state);
-        tokio::spawn(async move {
-            if source_id.starts_with("thermostat_") {
-                b.on_own_state_restored(&source_id, payload).await;
-                return;
+        .with_state_handler({
+            let tx = tx.clone();
+            let seen = Arc::clone(&learned_seen);
+            let any = Arc::clone(&heard_any);
+            move |doc| {
+                seen.store(true, Ordering::SeqCst);
+                any.store(true, Ordering::SeqCst);
+                let _ = tx.send(Event::Learned(doc));
             }
-            // An external id may be a sensor, an actuator, or (rarely) both.
-            // Dispatch to every applicable handler.
-            let (is_actuator, is_sensor) = b.classify_external(&source_id).await;
-            if is_actuator {
-                b.on_actuator_state(&source_id, payload.clone()).await;
+        })
+        .with_availability_handler({
+            let tx = tx.clone();
+            let any = Arc::clone(&heard_any);
+            move |id, online| {
+                any.store(true, Ordering::SeqCst);
+                let _ = tx.send(Event::Availability(id, online));
             }
-            if is_sensor {
-                b.on_sensor_state(&source_id, payload).await;
-            }
-        });
-    };
-
-    // Publish the operator-config JSON Schema so the hc-web editor renders a
-    // typed form (rides on the capability manifest).
+        })
+        .with_config_descriptor(config::config_descriptor());
     let mgmt = match config::config_schema() {
         Some(schema) => mgmt.with_config_schema(schema),
         None => mgmt,
     };
-
-    // …and the plugin-authored descriptor the editor renders instead of
-    // guessing a form from the schema. Rides the same manifest.
-    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
-
-    // Setpoints and modes changed at runtime live in core's learned state
-    // (`BridgeHandle::apply_learned`): retained, so it arrives shortly after
-    // the loop starts.
-    let learned: Arc<std::sync::Mutex<Option<serde_json::Value>>> = Arc::default();
-    let mgmt = {
-        let cell = Arc::clone(&learned);
-        mgmt.with_state_handler(move |doc| *cell.lock().unwrap() = Some(doc))
+    // Its own screens: the built `ui/` it carries.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, VERSION),
+        None => mgmt,
     };
 
+    let publisher = client.device_publisher();
+    let mut bridge = Bridge::new(
+        Controller::new(loaded),
+        publisher,
+        client.mqtt_client(),
+        client.state_writer(),
+        client.notices(),
+        config_path,
+    );
+
+    // The event loop first: until it polls, publishes only queue.
+    let cmd_tx = tx.clone();
+    let state_tx = tx.clone();
+    let any = Arc::clone(&heard_any);
     let run_handle = tokio::spawn(async move {
-        if let Err(e) = client.run_managed_with_state(cmd_cb, state_cb, mgmt).await {
+        if let Err(e) = client
+            .run_managed_with_state(
+                move |id, payload| {
+                    let _ = cmd_tx.send(Event::Command(id, payload));
+                },
+                move |id, payload| {
+                    any.store(true, Ordering::SeqCst);
+                    let _ = state_tx.send(Event::State(id, payload));
+                },
+                mgmt,
+            )
+            .await
+        {
             error!(error = %e, "PluginClient run loop exited");
         }
     });
 
-    // 7a. Apply what learned state kept, before the first control pass. A
-    //     plugin with nothing kept has no retained doc, so this waits briefly.
-    for _ in 0..20 {
-        if learned.lock().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    let kept = learned.lock().unwrap().clone();
-    if let Some(doc) = kept {
-        bridge.apply_learned(&doc).await;
-    }
+    bridge.subscribe_initial().await;
+    let actor = tokio::spawn(bridge.run(rx));
 
-    // 8. Wait for retained state on every subscribed topic, or a bounded
-    //    timeout if some devices don't publish retained state. This ensures
-    //    the startup recalc below sees the actual current temperature +
-    //    actuator state, not cold defaults.
-    let sync_start = std::time::Instant::now();
-    let missed = bridge
-        .wait_for_initial_sync(std::time::Duration::from_secs(5))
-        .await;
+    let t0 = tokio::time::Instant::now();
+    while !heard_any.load(Ordering::SeqCst) && t0.elapsed() < CONNECT_WAIT {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Learned state: retained, so it arrives shortly after connect — or not
+    // at all for a plugin with nothing kept.
+    let tl = tokio::time::Instant::now();
+    while !learned_seen.load(Ordering::SeqCst) && tl.elapsed() < LEARNED_WAIT {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Every subscribed device's retained state, or the timeout.
+    let t1 = tokio::time::Instant::now();
+    let missed = loop {
+        let (rtx, rrx) = oneshot::channel();
+        let _ = tx.send(Event::SyncRemaining(rtx));
+        let left = rrx.await.unwrap_or_default();
+        if left.is_empty() || t1.elapsed() >= SYNC_WAIT {
+            break left;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    if !missed.is_empty() {
+        warn!(missing = ?missed, "Not every device said anything before start");
+    }
     info!(
-        expected = expected_total,
-        missed,
-        elapsed_ms = sync_start.elapsed().as_millis() as u64,
-        "Initial state sync complete"
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        "Initial state heard; starting"
     );
+    let _ = tx.send(Event::Start);
 
-    // 9. Register devices.
-    bridge.register_all().await?;
-
-    // 10. Startup reconciliation — every thermostat recalculates once, now
-    //     with actuator_last_change restored from retained state (if any).
-    bridge.recalculate_all().await;
-
-    // 11. Main supervisor loop: lockout retry tick + bridge-task dispatch.
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                bridge.tick().await;
-            }
-            task = bridge_rx.recv() => {
-                match task {
-                    Some(BridgeTask::RecalculateAll) => {
-                        info!("Management: recalculate_all");
-                        bridge.recalculate_all().await;
-                    }
-                    Some(BridgeTask::RecalculateAllForce) => {
-                        info!("Management: recalculate_all force=true");
-                        bridge.recalculate_all_force().await;
-                    }
-                    Some(BridgeTask::ReloadConfig) => {
-                        info!("Management: reload_config");
-                        match bridge.reload_config().await {
-                            Ok(()) => {
-                                // Register any newly-configured thermostats.
-                                if let Err(e) = bridge.register_all().await {
-                                    warn!(error = %e, "register_all after reload failed");
-                                }
-                                bridge.recalculate_all().await;
-                                refresh_thermostat_notice(&bridge, &notices).await;
-                            }
-                            Err(e) => error!(error = %e, "reload_config failed"),
-                        }
-                    }
-                    Some(BridgeTask::AddThermostat { entry }) => {
-                        info!(id = %entry.id, "Management: add_thermostat");
-                        if let Err(e) = bridge.add_thermostat(*entry).await {
-                            warn!(error = %e, "add_thermostat failed");
-                        }
-                        refresh_thermostat_notice(&bridge, &notices).await;
-                    }
-                    Some(BridgeTask::RemoveThermostat { id }) => {
-                        info!(id, "Management: remove_thermostat");
-                        if let Err(e) = bridge.remove_thermostat(&id).await {
-                            warn!(error = %e, "remove_thermostat failed");
-                        }
-                        refresh_thermostat_notice(&bridge, &notices).await;
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
+    stopping().await;
+    info!("Stopping");
+    let (rtx, rrx) = oneshot::channel();
+    let _ = tx.send(Event::Shutdown(rtx));
+    // Within homeCore's grace (2 s) before it kills a plugin that was asked.
+    let _ = tokio::time::timeout(Duration::from_secs(1), rrx).await;
+    // Give the event loop a moment to put the last commands on the wire.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    actor.abort();
     run_handle.abort();
     Ok(())
 }
 
-/// Path of the cross-restart device-id snapshot, sibling to
-/// config.toml. Owned by the SDK device tracker.
-fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+/// SIGTERM (homeCore stopping or restarting it) or Ctrl-C.
+async fn stopping() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "No SIGTERM handler; Ctrl-C only");
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// A file beside the config.
+fn sibling(config_path: &str, name: &str) -> std::path::PathBuf {
     std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join(".published-device-ids.json")
+        .join(name)
+}
+
+/// The alerts this plugin raises. "Do something…" on any of them makes an
+/// automation that starts on it.
+fn alert_kinds() -> Vec<plugin_sdk_rs::types::PluginAlertKind> {
+    use plugin_sdk_rs::types::{AlertSeverity, PluginAlertKind};
+    let kind = |topic: &str, label: &str, desc: &str, severity, default_on| PluginAlertKind {
+        topic: topic.into(),
+        label: label.into(),
+        description: Some(desc.into()),
+        severity,
+        default_on,
+    };
+    vec![
+        kind(
+            "sensors_stale",
+            "Thermostat has no current reading",
+            "None of its sensors has reported within its quiet time (2 h unless changed), or \
+             they are offline. Its switch is turned off (unless it is set to leave it) until \
+             a reading comes back.",
+            AlertSeverity::Warning,
+            true,
+        ),
+        kind(
+            "actuator_not_responding",
+            "Thermostat's switch isn't answering",
+            "The plug or switch didn't confirm an on or off within 30 s, or is offline. It is \
+             asked again, less often each time; the alert clears when it confirms.",
+            AlertSeverity::Warning,
+            true,
+        ),
+        kind(
+            "max_run_exceeded",
+            "Thermostat ran too long",
+            "It ran its longest run without a break (4 h for a heater unless changed) and was \
+             turned off. It starts again once the room reaches its target, or when someone \
+             starts it again.",
+            AlertSeverity::Warning,
+            true,
+        ),
+        kind(
+            "manual_override",
+            "Thermostat's switch was used by hand",
+            "Someone switched it by hand, so the thermostat leaves it alone for a while (1 h \
+             unless changed) or until the target or mode changes. News, not a problem: off \
+             unless you turn it on.",
+            AlertSeverity::Info,
+            false,
+        ),
+        kind(
+            "config_entry_skipped",
+            "A thermostat in Settings isn't running",
+            "One [[thermostat]] can't be used as written — a missing field, a target that looks \
+             like °F, a heater set to cool. The others run; the plugin page says what to fix.",
+            AlertSeverity::Warning,
+            true,
+        ),
+    ]
+}
+
+/// The plugin's own actions. Per-thermostat control is on the device
+/// (`set_setpoint`, `hold`, `resume`, … — see `schema.rs`).
+fn capabilities() -> plugin_sdk_rs::types::Capabilities {
+    use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
+    let action = |id: &str,
+                  label: &str,
+                  desc: &str,
+                  params: Option<serde_json::Value>,
+                  role: RequiresRole,
+                  danger: bool| Action {
+        id: id.into(),
+        label: label.into(),
+        description: Some(desc.into()),
+        params,
+        result: None,
+        stream: false,
+        cancelable: false,
+        concurrency: Concurrency::default(),
+        item_key: None,
+        item_operations: None,
+        requires_role: role,
+        timeout_ms: Some(10_000),
+        danger,
+    };
+    Capabilities {
+        spec: "1".into(),
+        plugin_id: String::new(),
+        actions: vec![
+            action(
+                "status",
+                "Status",
+                "The thermostats that run and the ones in Settings that can't, with why and \
+                 the one-press fix where there is one.",
+                None,
+                RequiresRole::ReadOnly,
+                false,
+            ),
+            action(
+                "get_thermostats",
+                "List thermostats",
+                "Every running thermostat's settings, as the file has them plus changes made \
+                 since.",
+                None,
+                RequiresRole::ReadOnly,
+                false,
+            ),
+            action(
+                "recalculate_all",
+                "Recalculate all",
+                "Decide every thermostat again now. With `force`, every switch is sent what \
+                 it should be even if it seems so already — for a switch that drifted.",
+                Some(json!({
+                    "type": "object",
+                    "properties": { "force": { "type": "boolean", "default": false } }
+                })),
+                RequiresRole::User,
+                false,
+            ),
+            action(
+                "add_thermostat",
+                "Add a thermostat",
+                "Adds one to Settings and starts it. `config`: name, kind (ac | heater | \
+                 fan), sensor_device_ids, setpoint (°C), actuator_device_id; the short-cycle \
+                 guards and the rest default for its kind.",
+                Some(json!({
+                    "type": "object",
+                    "properties": { "config": { "type": "object" } },
+                    "required": ["config"]
+                })),
+                RequiresRole::Admin,
+                false,
+            ),
+            action(
+                "remove_thermostat",
+                "Remove a thermostat",
+                "Turns its switch off if it was running it, then removes it from Settings \
+                 and its device from homeCore (with its place in automations).",
+                Some(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                })),
+                RequiresRole::Admin,
+                true,
+            ),
+            action(
+                "fix_entry",
+                "Fix a thermostat's target",
+                "Sets the target of a thermostat in Settings that isn't running — `index` \
+                 (its place in the list, from 0), `id` when it has one, `setpoint` in °C. The \
+                 plugin restarts with it.",
+                Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "index": { "type": "integer" },
+                        "id": { "type": "string" },
+                        "setpoint": { "type": "number" }
+                    },
+                    "required": ["index", "setpoint"]
+                })),
+                RequiresRole::Admin,
+                false,
+            ),
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_manifest_is_conformant_and_routed() {
+        let caps = capabilities();
+        plugin_sdk_rs::conformance::check_manifest(&caps).assert_ok();
+        plugin_sdk_rs::conformance::check_actions_routed(&caps, bridge::MGMT_ACTIONS).assert_ok();
+        for a in bridge::MGMT_ACTIONS {
+            assert!(
+                caps.actions.iter().any(|x| x.id == *a),
+                "{a} not advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn every_alert_kind_is_one_the_controller_raises() {
+        let src = include_str!("controller.rs");
+        for k in alert_kinds() {
+            assert!(src.contains(&format!("\"{}\"", k.topic)), "{}", k.topic);
+        }
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn capability_manifest_fits_in_one_mqtt_packet() {
+        let mut manifest = serde_json::to_value(capabilities()).unwrap();
+        manifest["config_schema"] = config::config_schema().unwrap();
+        manifest["config_descriptor"] = config::config_descriptor();
+        assert!(serde_json::to_vec(&manifest).unwrap().len() < 1024 * 1024);
+    }
 }
