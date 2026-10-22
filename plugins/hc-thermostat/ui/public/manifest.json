@@ -1,0 +1,15 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-thermostat-page" },
+		{ "slot": "device.panel", "element": "hc-thermostat-panel", "device_types": ["thermostat"] },
+		{
+			"slot": "device.card",
+			"element": "hc-thermostat-card",
+			"device_types": ["thermostat"],
+			"forms": ["standard", "large", "compact"]
+		},
+		{ "slot": "rule.step", "element": "hc-thermostat-step", "device_types": ["thermostat"] }
+	]
+}

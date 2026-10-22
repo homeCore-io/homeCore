@@ -23,9 +23,11 @@ pub fn aggregate(values: &[f64], mode: &str) -> Option<f64> {
     }
 }
 
-/// Compute the new `call_for` value given current temp, setpoint, hysteresis,
-/// mode, and the prior call. Prior call is used to stay sticky within the
-/// deadband (the hallmark of hysteresis).
+/// Compute the new call given the temperature, the target, the swing
+/// (`hysteresis`, a °C difference split either side of the target), the mode
+/// and the prior call. In `cool` it switches on above `target + swing/2` and
+/// off below `target − swing/2`; `heat` the other way round. The prior call
+/// keeps it where it is in between — the hallmark of hysteresis.
 pub fn compute_call_for(
     current: f64,
     setpoint: f64,
@@ -89,16 +91,18 @@ pub fn lockout_remaining(
 mod tests {
     use super::*;
 
+    // All in °C, as the thermostat works: a target of 21 °C, a 1 °C swing.
+
     #[test]
     fn aggregate_average() {
-        assert_eq!(aggregate(&[68.0, 72.0], "average"), Some(70.0));
-        assert_eq!(aggregate(&[70.0], "average"), Some(70.0));
+        assert_eq!(aggregate(&[20.0, 22.0], "average"), Some(21.0));
+        assert_eq!(aggregate(&[21.0], "average"), Some(21.0));
     }
 
     #[test]
     fn aggregate_min_max() {
-        assert_eq!(aggregate(&[68.0, 72.0, 65.0], "min"), Some(65.0));
-        assert_eq!(aggregate(&[68.0, 72.0, 65.0], "max"), Some(72.0));
+        assert_eq!(aggregate(&[20.0, 22.0, 18.5], "min"), Some(18.5));
+        assert_eq!(aggregate(&[20.0, 22.0, 18.5], "max"), Some(22.0));
     }
 
     #[test]
@@ -110,40 +114,42 @@ mod tests {
 
     #[test]
     fn aggregate_unknown_falls_back_to_average() {
-        assert_eq!(aggregate(&[68.0, 72.0], "mystery"), Some(70.0));
+        assert_eq!(aggregate(&[20.0, 22.0], "mystery"), Some(21.0));
     }
 
+    /// On half a degree below, off half a degree above.
     #[test]
     fn heat_mode_hysteresis() {
-        assert_eq!(compute_call_for(70.0, 70.0, 2.0, "heat", "idle"), "idle");
-        assert_eq!(compute_call_for(68.9, 70.0, 2.0, "heat", "idle"), "heat");
-        assert_eq!(compute_call_for(69.5, 70.0, 2.0, "heat", "idle"), "idle");
-        assert_eq!(compute_call_for(70.0, 70.0, 2.0, "heat", "heat"), "heat");
-        assert_eq!(compute_call_for(70.9, 70.0, 2.0, "heat", "heat"), "heat");
-        assert_eq!(compute_call_for(71.1, 70.0, 2.0, "heat", "heat"), "idle");
+        assert_eq!(compute_call_for(21.0, 21.0, 1.0, "heat", "idle"), "idle");
+        assert_eq!(compute_call_for(20.4, 21.0, 1.0, "heat", "idle"), "heat");
+        assert_eq!(compute_call_for(20.6, 21.0, 1.0, "heat", "idle"), "idle");
+        assert_eq!(compute_call_for(21.0, 21.0, 1.0, "heat", "heat"), "heat");
+        assert_eq!(compute_call_for(21.4, 21.0, 1.0, "heat", "heat"), "heat");
+        assert_eq!(compute_call_for(21.6, 21.0, 1.0, "heat", "heat"), "idle");
     }
 
+    /// On half a degree above, off half a degree below.
     #[test]
     fn cool_mode_hysteresis() {
-        assert_eq!(compute_call_for(70.0, 70.0, 2.0, "cool", "idle"), "idle");
-        assert_eq!(compute_call_for(71.1, 70.0, 2.0, "cool", "idle"), "cool");
-        assert_eq!(compute_call_for(70.9, 70.0, 2.0, "cool", "idle"), "idle");
-        assert_eq!(compute_call_for(70.0, 70.0, 2.0, "cool", "cool"), "cool");
-        assert_eq!(compute_call_for(69.1, 70.0, 2.0, "cool", "cool"), "cool");
-        assert_eq!(compute_call_for(68.9, 70.0, 2.0, "cool", "cool"), "idle");
+        assert_eq!(compute_call_for(21.0, 21.0, 1.0, "cool", "idle"), "idle");
+        assert_eq!(compute_call_for(21.6, 21.0, 1.0, "cool", "idle"), "cool");
+        assert_eq!(compute_call_for(21.4, 21.0, 1.0, "cool", "idle"), "idle");
+        assert_eq!(compute_call_for(21.0, 21.0, 1.0, "cool", "cool"), "cool");
+        assert_eq!(compute_call_for(20.6, 21.0, 1.0, "cool", "cool"), "cool");
+        assert_eq!(compute_call_for(20.4, 21.0, 1.0, "cool", "cool"), "idle");
     }
 
     #[test]
     fn off_mode_never_calls() {
-        assert_eq!(compute_call_for(50.0, 70.0, 2.0, "off", "heat"), "idle");
-        assert_eq!(compute_call_for(95.0, 70.0, 2.0, "off", "cool"), "idle");
+        assert_eq!(compute_call_for(10.0, 21.0, 1.0, "off", "heat"), "idle");
+        assert_eq!(compute_call_for(35.0, 21.0, 1.0, "off", "cool"), "idle");
     }
 
     #[test]
     fn zero_hysteresis_is_bang_bang() {
-        assert_eq!(compute_call_for(70.0, 70.0, 0.0, "heat", "idle"), "idle");
-        assert_eq!(compute_call_for(69.99, 70.0, 0.0, "heat", "idle"), "heat");
-        assert_eq!(compute_call_for(70.0, 70.0, 0.0, "heat", "heat"), "idle");
+        assert_eq!(compute_call_for(21.0, 21.0, 0.0, "heat", "idle"), "idle");
+        assert_eq!(compute_call_for(20.99, 21.0, 0.0, "heat", "idle"), "heat");
+        assert_eq!(compute_call_for(21.0, 21.0, 0.0, "heat", "heat"), "idle");
     }
 
     #[test]

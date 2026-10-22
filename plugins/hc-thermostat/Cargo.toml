@@ -1,6 +1,6 @@
 [package]
 name        = "hc-thermostat"
-version     = "0.1.17"
+version     = "0.1.18"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Software thermostats that read temperature sensors and drive a switch to a setpoint"
@@ -27,9 +27,10 @@ thiserror          = "2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-appender   = { workspace = true }
-notify             = "8"
 chrono             = { version = "0.4", features = ["serde"] }
 flate2             = "1"
+hc-time            = { path = "../../crates/hc-time" }
+toml_edit          = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

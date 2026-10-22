@@ -1904,12 +1904,12 @@ dependencies = [
 
 [[package]]
 name = "hc-thermostat"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "chrono",
  "flate2",
- "notify",
+ "hc-time",
  "plugin-sdk-rs",
  "rumqttc",
  "schemars",
@@ -1919,6 +1919,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
+ "toml_edit",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2074,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.92"
+version = "0.1.93"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -3381,7 +3382,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugin-sdk-rs"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.23.0",

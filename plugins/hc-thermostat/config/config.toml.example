@@ -21,32 +21,59 @@ log_forward_level  = "info"       # minimum level forwarded to HomeCore via MQTT
 
 # ── Thermostats ────────────────────────────────────────────────────────────
 #
-# One [[thermostat]] block per virtual thermostat. Each entry registers a
-# device under `plugin.thermostat` with id = thermostat_<id>.
+# One [[thermostat]] per room. Each becomes a `thermostat` device,
+# thermostat_<id>. The plugin page's "+ Add a thermostat" writes these for you.
 #
-# Fields:
-#   sensor_device_ids  list of HomeCore device IDs whose `sensor_attribute`
-#                      is read (averaged/min/max'd per `aggregation`)
-#   sensor_attribute   which attribute on the sensor device (default "temperature")
-#   aggregation        "average" | "min" | "max" (default "average")
-#   setpoint           target temperature in °C (sensors report °C)
-#   hysteresis         deadband width in °C (actuator flips at setpoint ± hyst/2)
-#   mode               "heat" | "cool" | "off"
-#   actuator_device_id HomeCore device to command on/off
-#   min_on_secs        short-cycle protection — min time between OFF→ON→OFF
-#   min_off_secs       short-cycle protection — min time between ON→OFF→ON
-#   actuator_on_cmd    optional override (default { on = true })
-#   actuator_off_cmd   optional override (default { on = false })
+# An entry that can't run (a missing field, a target that looks like °F, a
+# heater set to cool…) is left out and said on the plugin page; the others run.
+#
+#   id                   letters, digits, _ and - (it becomes the device id;
+#                        never change it)
+#   kind                 "ac" | "heater" | "fan" — an AC or a fan cools (Cool,
+#                        Off), a heater heats (Heat, Off). Absent: a mode of
+#                        "heat" makes it a heater, anything else an AC.
+#   sensor_device_ids    devices reporting `temperature` (°C)
+#   aggregation          "average" | "min" | "max" across several sensors
+#   setpoint             the target, °C (−40…45). 68 °F is 20 °C.
+#   hysteresis           the swing, a °C width split either side of the
+#                        target: 1.0 switches on 0.5 past it, off 0.5 back
+#   mode                 "cool" | "heat" | "off" — Off sends one OFF, then
+#                        leaves the switch alone
+#   actuator_device_id   the plug or switch it turns on and off
+#   min_on_secs          once on, stays on at least this long (AC: 180)
+#   min_off_secs         once off, stays off at least this long (AC: 300)
+#   max_run_secs         turned off after this long without a break, with an
+#                        alert. Absent: 4 h for a heater, no limit otherwise
+#   sensor_timeout_secs  a reading older than this no longer counts (7200)
+#   on_stale             "off" (default) turns the switch off with no current
+#                        reading; "hold" leaves it as it is
+#   override_secs        a hand flip of the switch is left alone this long
+#                        (3600); 0 takes over again at once
+#   actuator_on_cmd      optional custom payloads (default { on = true } /
+#   actuator_off_cmd     { on = false }) — only here, never from a command
 
 [[thermostat]]
-id                 = "living_room"
-name               = "Living Room Thermostat"
-sensor_device_ids  = ["yolink_lr_temp_a", "yolink_lr_temp_b"]
-sensor_attribute   = "temperature"
+id                 = "office_ac"
+name               = "Office AC Thermostat"
+kind               = "ac"
+sensor_device_ids  = ["yolink_office_temp"]
 aggregation        = "average"
-setpoint           = 21.0
+setpoint           = 20.0
+hysteresis         = 1.0
+mode               = "cool"
+actuator_device_id = "zwave_office_ac_outlet"
+min_on_secs        = 180
+min_off_secs       = 300
+
+[[thermostat]]
+id                 = "garage_heater"
+name               = "Garage Heater Thermostat"
+kind               = "heater"
+sensor_device_ids  = ["yolink_garage_temp"]
+setpoint           = 7.0
 hysteresis         = 1.0
 mode               = "heat"
-actuator_device_id = "switch_furnace_relay"
-min_on_secs        = 300
-min_off_secs       = 180
+actuator_device_id = "zwave_garage_heater_plug"
+min_on_secs        = 120
+min_off_secs       = 120
+max_run_secs       = 14400

@@ -382,7 +382,19 @@ async fn supervise(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// Stop a plugin: ask first (SIGTERM), so it can leave what it controls
+/// safe — hc-thermostat turns off the heaters it was running — and only kill
+/// it (SIGKILL) if it hasn't gone within [`SHUTDOWN_GRACE`].
 async fn kill_child(child: &mut tokio::process::Child, plugin_id: &str) {
+    if ask_to_stop(child) {
+        if let Ok(r) = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
+            if let Err(e) = r {
+                warn!(plugin_id, error = %e, "Plugin wait() failed during stop");
+            }
+            return;
+        }
+        warn!(plugin_id, "Plugin did not stop when asked — killing");
+    }
     if let Err(e) = child.start_kill() {
         warn!(plugin_id, error = %e, "Failed to send kill to plugin");
     }
@@ -391,6 +403,23 @@ async fn kill_child(child: &mut tokio::process::Child, plugin_id: &str) {
         Ok(Err(e)) => warn!(plugin_id, error = %e, "Plugin wait() failed during kill"),
         Err(_) => warn!(plugin_id, "Plugin did not exit after kill signal"),
     }
+}
+
+/// SIGTERM to a running child. False when there is no way to ask (not unix,
+/// or it has already gone).
+#[cfg(unix)]
+fn ask_to_stop(child: &tokio::process::Child) -> bool {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    match child.id() {
+        Some(pid) => kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_ok(),
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn ask_to_stop(_child: &tokio::process::Child) -> bool {
+    false
 }
 
 /// Sleep for `secs`, but wake early on command or shutdown.
@@ -517,5 +546,56 @@ mod output_capture_tests {
             Some(format!("line {}", EXIT_CONTEXT_LINES + 4).as_str())
         );
         assert_eq!(tail.front().map(String::as_str), Some("line 5"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stop_tests {
+    use super::*;
+
+    /// A plugin is asked to stop before it is killed, so it can leave what it
+    /// controls safe: one that traps SIGTERM gets to run its handler.
+    #[tokio::test]
+    async fn a_plugin_is_asked_to_stop_before_it_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("stopped");
+        let script = format!(
+            "trap 'echo asked > {}; exit 0' TERM; echo up; while true; do sleep 0.1; done",
+            mark.display()
+        );
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Wait for the trap to be set (the script says "up" after it).
+        let mut out = child.stdout.take().unwrap();
+        let mut buf = [0u8; 3];
+        tokio::io::AsyncReadExt::read_exact(&mut out, &mut buf)
+            .await
+            .unwrap();
+        kill_child(&mut child, "test").await;
+        assert_eq!(std::fs::read_to_string(&mark).unwrap().trim(), "asked");
+    }
+
+    /// …and one that ignores it is killed after the grace period all the same.
+    #[tokio::test]
+    async fn one_that_ignores_it_is_killed() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; echo up; while true; do sleep 0.1; done")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let mut buf = [0u8; 3];
+        tokio::io::AsyncReadExt::read_exact(&mut out, &mut buf)
+            .await
+            .unwrap();
+        let t = std::time::Instant::now();
+        kill_child(&mut child, "test").await;
+        assert!(child.try_wait().unwrap().is_some(), "still running");
+        assert!(t.elapsed() >= SHUTDOWN_GRACE);
     }
 }

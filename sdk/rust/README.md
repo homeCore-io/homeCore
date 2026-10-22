@@ -167,7 +167,9 @@ last level. The whole of it is "Names and units" in
   `streaming` for the ones that report progress as they go.
 - **Cross-device state** — `subscribe_state` plus `run_managed_with_state`,
   for a plugin that consumes *other* plugins' devices the way hc-thermostat
-  reads sensors it does not own.
+  reads sensors it does not own; `subscribe_availability` plus
+  `ManagementHandle::with_availability_handler` to hear whether those devices
+  are online (`(device_id, online)` per retained availability message).
 - **Log forwarding** — `MqttLogLayer` ships tracing logs to core, so they
   appear in the live log stream alongside core's own.
 - **Conformance** — `conformance::check_all` holds the rules every homeCore

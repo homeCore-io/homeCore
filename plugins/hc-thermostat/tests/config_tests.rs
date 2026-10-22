@@ -29,11 +29,12 @@ fn parses_minimal_config() {
 plugin_id = "plugin.thermostat"
 broker_host = "127.0.0.1"
 broker_port = 1883
-username = "plugin.thermostat"
 password = "x"
 "#,
     );
-    let cfg = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    let cfg = config::Config::load(f.path().to_str().unwrap())
+        .unwrap()
+        .config;
     assert_eq!(cfg.homecore.plugin_id, "plugin.thermostat");
     assert_eq!(cfg.thermostats.len(), 0);
     assert_eq!(cfg.logging.level, "info");
@@ -48,7 +49,6 @@ fn parses_full_thermostat_entry() {
 plugin_id = "plugin.thermostat"
 broker_host = "127.0.0.1"
 broker_port = 1883
-username = "u"
 password = "p"
 
 [[thermostat]]
@@ -65,7 +65,9 @@ min_on_secs = 300
 min_off_secs = 180
 "#,
     );
-    let cfg = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    let cfg = config::Config::load(f.path().to_str().unwrap())
+        .unwrap()
+        .config;
     assert_eq!(cfg.thermostats.len(), 1);
     let t = &cfg.thermostats[0];
     assert_eq!(t.id, "lr");
@@ -84,7 +86,6 @@ fn applies_thermostat_defaults() {
 plugin_id = "plugin.thermostat"
 broker_host = "127.0.0.1"
 broker_port = 1883
-username = "u"
 password = "p"
 
 [[thermostat]]
@@ -94,7 +95,9 @@ sensor_device_ids = ["s1"]
 setpoint = 21.0
 "#,
     );
-    let cfg = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    let cfg = config::Config::load(f.path().to_str().unwrap())
+        .unwrap()
+        .config;
     let t = &cfg.thermostats[0];
     assert_eq!(t.sensor_attribute, "temperature");
     assert_eq!(t.aggregation, "average");
@@ -112,7 +115,6 @@ fn rejects_invalid_mode() {
 plugin_id = "p"
 broker_host = "h"
 broker_port = 1883
-username = "u"
 password = "p"
 
 [[thermostat]]
@@ -123,8 +125,14 @@ setpoint = 21.0
 mode = "bogus"
 "#,
     );
-    let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
-    assert!(err.to_string().contains("mode"));
+    // Left out and said — the plugin still runs (H7).
+    let l = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    assert!(l.config.thermostats.is_empty());
+    assert!(
+        l.skipped[0].problem.contains("mode"),
+        "{}",
+        l.skipped[0].problem
+    );
 }
 
 #[test]
@@ -135,7 +143,6 @@ fn rejects_invalid_aggregation() {
 plugin_id = "p"
 broker_host = "h"
 broker_port = 1883
-username = "u"
 password = "p"
 
 [[thermostat]]
@@ -146,8 +153,14 @@ setpoint = 21.0
 aggregation = "median"
 "#,
     );
-    let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
-    assert!(err.to_string().contains("aggregation"));
+    // Left out and said — the plugin still runs (H7).
+    let l = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    assert!(l.config.thermostats.is_empty());
+    assert!(
+        l.skipped[0].problem.contains("aggregation"),
+        "{}",
+        l.skipped[0].problem
+    );
 }
 
 #[test]
@@ -158,7 +171,6 @@ fn rejects_negative_hysteresis() {
 plugin_id = "p"
 broker_host = "h"
 broker_port = 1883
-username = "u"
 password = "p"
 
 [[thermostat]]
@@ -169,8 +181,14 @@ setpoint = 21.0
 hysteresis = -0.5
 "#,
     );
-    let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
-    assert!(err.to_string().contains("hysteresis"));
+    // Left out and said — the plugin still runs (H7).
+    let l = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    assert!(l.config.thermostats.is_empty());
+    assert!(
+        l.skipped[0].problem.contains("hysteresis"),
+        "{}",
+        l.skipped[0].problem
+    );
 }
 
 #[test]
@@ -181,7 +199,6 @@ fn rejects_empty_plugin_id() {
 plugin_id = ""
 broker_host = "h"
 broker_port = 1883
-username = "u"
 password = "p"
 "#,
     );
@@ -203,8 +220,14 @@ sensor_device_ids = ["s"]
 setpoint = 68.0
 "#,
     );
-    let err = config::Config::load(f.path().to_str().unwrap()).unwrap_err();
-    assert!(err.to_string().contains("°C"), "{err}");
+    // Left out and said — the plugin still runs (H7).
+    let l = config::Config::load(f.path().to_str().unwrap()).unwrap();
+    assert!(l.config.thermostats.is_empty());
+    assert!(
+        l.skipped[0].problem.contains("°F"),
+        "{}",
+        l.skipped[0].problem
+    );
 }
 
 #[test]

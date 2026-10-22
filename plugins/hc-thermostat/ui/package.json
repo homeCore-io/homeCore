@@ -1,0 +1,22 @@
+{
+	"name": "hc-thermostat-ui",
+	"private": true,
+	"version": "0.0.0",
+	"description": "hc-thermostat's own screens: its plugin page (thermostats, the Add flow, entries that cannot run), a thermostat's panel and card, and the automation step, as web components the homeCore app loads.",
+	"type": "module",
+	"scripts": {
+		"build": "vite build",
+		"dev": "vite build --watch",
+		"test": "vitest run",
+		"format": "prettier --write .",
+		"format:check": "prettier --check ."
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"prettier": "^3.9.10",
+		"prettier-plugin-svelte": "^4.1.1",
+		"svelte": "^5.57.2",
+		"vite": "^8.3.4",
+		"vitest": "^4.0.0"
+	}
+}
