@@ -53,18 +53,19 @@
 		<div class="top">
 			<button class="name" onclick={open}>
 				<span class="hc-tile-name">{d.name_override ?? d.name}</span>
-				<span class="hc-tile-state">{said}{on && form !== 'compact' ? ` · ${pct}%` : ''}</span>
+				<span class="hc-tile-state">{said}{on && d.available && form !== 'compact' ? ` · ${pct}%` : ''}</span>
 			</button>
-			<button
+			<!-- Offline: its last state is no longer true, so nothing to read or press. -->
+			{#if d.available}<button
 				class="power"
 				role="switch"
 				aria-checked={on}
 				aria-label={`${d.name_override ?? d.name} ${on ? 'off' : 'on'}`}
 				disabled={!may}
 				onclick={toggle}><span></span></button
-			>
+			>{/if}
 		</div>
-		{#if form !== 'compact'}
+		{#if form !== 'compact' && d.available}
 			<div
 				class="strip"
 				class:dim={!on}
@@ -82,7 +83,7 @@
 					commands.send(d.device_id, { brightness_pct: Number(e.currentTarget.value) })}
 			/>
 		{/if}
-		{#if form === 'large' && presets.length}
+		{#if form === 'large' && presets.length && d.available}
 			<div class="presets">
 				{#each presets.slice(0, 12) as p (p.id)}
 					<button

@@ -135,7 +135,7 @@
 					class="n"
 					type="number"
 					step="0.5"
-					placeholder="—"
+					placeholder={unit.includes('F') ? 'e.g. 32' : 'e.g. 0'}
 					bind:value={cold.value}
 					disabled={!canEdit || saving}
 					onchange={() => cold.on && save('below')}
