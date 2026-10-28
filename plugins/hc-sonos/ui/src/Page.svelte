@@ -14,6 +14,7 @@
 		ago,
 		devicesHref,
 		favouritesOf,
+		playlistsOf,
 		groupsOf,
 		groupVolumeOf,
 		hasMusic,
@@ -38,6 +39,7 @@
 	const speakers = $derived(speakersOf(devices, label));
 	const groups = $derived(groupsOf(devices, label));
 	const favs = $derived(favouritesOf(speakers));
+	const lists = $derived(playlistsOf(speakers));
 	const canRun = $derived(!!hc?.me.can('devices:command'));
 	const admin = $derived(!!(hc?.me.isAdmin || hc?.me.can('plugins:write')));
 
@@ -112,9 +114,18 @@
 	const setVolume = (d, v) => run(hc.command(d.device_id, { volume: v }));
 	const setGroupVolume = (g, v) => run(hc.command(g.leader.device_id, { action: 'set_group_volume', volume: v }));
 
-	// Favourites: the one picked, and the speakers it plays on.
+	// Something to play — a favourite or a playlist — and the speakers it plays on.
 	let pickedFav = $state(null);
-	const fav = $derived(favs.find((f) => f.title === pickedFav) ?? favs[0]);
+	let pickedKind = $state('fav');
+	const fav = $derived(
+		pickedKind === 'list'
+			? (lists.find((f) => f.title === pickedFav) ?? lists[0])
+			: (favs.find((f) => f.title === pickedFav) ?? favs[0])
+	);
+	const pick = (kind, title) => {
+		pickedKind = kind;
+		pickedFav = title;
+	};
 	let targets = $state(null);
 	const chosen = $derived(targets ?? speakers.filter((d) => isPlaying(d)).map((d) => d.device_id).slice(0, 1));
 	const toggleTarget = (id) => (targets = chosen.includes(id) ? chosen.filter((x) => x !== id) : [...chosen, id]);
@@ -131,7 +142,12 @@
 			const lead = d?.attributes?.group_coordinator ?? id;
 			if (leaders.has(lead)) continue;
 			leaders.add(lead);
-			sends.push(hc.command(id, { action: 'play_favorite', favorite: fav.title }));
+			sends.push(
+				hc.command(
+					id,
+					pickedKind === 'list' ? { action: 'play_playlist', playlist: fav.title } : { action: 'play_favorite', favorite: fav.title }
+				)
+			);
 		}
 		const out = await Promise.all(sends);
 		const bad = out.find((r) => !r.ok);
@@ -165,7 +181,7 @@
 						? `${speakers.length - quiet.length} of ${speakers.length} answering`
 						: `${speakers.length} speaker${speakers.length === 1 ? '' : 's'}`}</span
 			>
-			<span class="hc-quiet">{[found, favs.length ? `${favs.length} favourite${favs.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')}</span>
+			<span class="hc-quiet">{[found, favs.length ? `${favs.length} favourite${favs.length === 1 ? '' : 's'}` : '', lists.length ? `${lists.length} playlist${lists.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')}</span>
 		</div>
 		<span class="hc-row">
 			{#if canRun}<button class="hc-pill big" onclick={rescan}>Look for speakers</button>{/if}
@@ -245,20 +261,38 @@
 		{/if}
 	</section>
 
-	{#if favs.length}
+	{#if favs.length || lists.length}
 		<section>
+			{#if favs.length}
 			<div class="head">
 				<h2>Favourites</h2>
 				<span class="hc-quiet">Your Sonos favourites · tap to choose where it plays</span>
 			</div>
+			{/if}
 			<div class="favs">
 				{#each favs as f (f.title)}
-					<button class="fav" class:on={fav?.title === f.title} aria-pressed={fav?.title === f.title} onclick={() => (pickedFav = f.title)}>
+					{@const on = pickedKind === 'fav' && fav?.title === f.title}
+					<button class="fav" class:on aria-pressed={on} onclick={() => pick('fav', f.title)}>
 						<Art src={f.image} fill radius={10} label={f.title} />
 						<b>{f.title}</b>
 					</button>
 				{/each}
 			</div>
+			{#if lists.length}
+				<div class="head lists">
+					<h2>Playlists</h2>
+					<span class="hc-quiet">Your Sonos playlists</span>
+				</div>
+				<div class="favs">
+					{#each lists as f (f.title)}
+						{@const on = pickedKind === 'list' && fav?.title === f.title}
+						<button class="fav" class:on aria-pressed={on} onclick={() => pick('list', f.title)}>
+							<Art src={f.image} fill radius={10} label={f.title} />
+							<b>{f.title}</b>
+						</button>
+					{/each}
+				</div>
+			{/if}
 			{#if fav && canRun}
 				<div class="bar">
 					<b class="bar-title">Play {fav.title} on</b>
@@ -609,5 +643,8 @@
 			width: 100%;
 			justify-content: center;
 		}
+	}
+	.head.lists {
+		margin-top: 12px;
 	}
 </style>

@@ -33,7 +33,7 @@
 <script>
 	import Art from './lib/Art.svelte';
 	import { build, stateOf, stored } from './lib/step.js';
-	import { adopt, favouritesOf, num, speakersOf } from './lib/sonos.js';
+	import { adopt, favouritesOf, playlistsOf, num, speakersOf } from './lib/sonos.js';
 
 	let { host: hc, deviceIds = [], value = {} } = $props();
 	const me = $host();
@@ -44,6 +44,7 @@
 	const label = (d) => hc.devices.label(d);
 	const speakers = $derived(speakersOf(devices, label));
 	const favs = $derived(favouritesOf(speakers));
+	const lists = $derived(playlistsOf(speakers));
 
 	// The step being edited, kept here so quick changes build on each other.
 	let draft = $state(null);
@@ -52,6 +53,7 @@
 	const kind = $derived(kindOf(v) ?? 'fav');
 	const opts = $derived({
 		favorite: v.favorite ?? favs[0]?.title,
+		playlist: v.playlist ?? lists[0]?.title,
 		volume: num(v.volume) ?? 20,
 		withVolume: kind === 'fav' ? num(v.volume) !== undefined : true,
 		members: Array.isArray(v.members) ? v.members : typeof v.members === 'string' && v.members ? [v.members] : []
@@ -83,12 +85,14 @@
 	});
 	const others = $derived(speakers.filter((d) => !ids.includes(d.device_id)));
 	let dragVol = $state(null);
-	const MODES = [
+	// Playlists only when the household has some (or this step already plays one).
+	const MODES = $derived([
 		['fav', 'Play a favourite'],
+		...(lists.length || kind === 'list' ? [['list', 'Play a playlist']] : []),
 		['vol', 'Volume'],
 		['pause', 'Pause'],
 		['group', 'Group']
-	];
+	]);
 </script>
 
 <div class="step">
@@ -125,6 +129,24 @@
 				</div>
 			{:else}
 				<p class="hc-quiet">The speakers have no favourites yet.</p>
+			{/if}
+		</div>
+	{/if}
+
+	{#if kind === 'list'}
+		<div class="part">
+			<span class="sub">Playlist</span>
+			{#if lists.length}
+				<div class="favs" role="radiogroup" aria-label="Playlist">
+					{#each lists as f (f.title)}
+						<button class="fav" class:on={opts.playlist === f.title} role="radio" aria-checked={opts.playlist === f.title} onclick={() => change({ playlist: f.title })}>
+							<Art src={f.image} fill radius={8} label={f.title} />
+							<span class="name">{f.title}</span>
+						</button>
+					{/each}
+				</div>
+			{:else}
+				<p class="hc-quiet">The speakers have no playlists now.</p>
 			{/if}
 		</div>
 	{/if}

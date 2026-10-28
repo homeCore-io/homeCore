@@ -8,6 +8,7 @@ import { listWords, num } from './sonos.js';
 export function kindOf(v) {
 	if (!v || typeof v !== 'object' || !Object.keys(v).length) return 'fav';
 	if (v.action === 'play_favorite') return 'fav';
+	if (v.action === 'play_playlist') return 'list';
 	if (v.action === 'pause') return 'pause';
 	if (v.action === 'group') return 'group';
 	if (v.action === undefined && Object.keys(v).length === 1 && num(v.volume) !== undefined) return 'vol';
@@ -25,6 +26,7 @@ export function sentence(v, names = (id) => id) {
 		const what = v?.favorite ? `play ${quoted(v.favorite)}` : 'play a favourite';
 		return `${what} on {devices}${vol !== undefined ? ` at volume ${vol}` : ''}`;
 	}
+	if (k === 'list') return `${v?.playlist ? `play the playlist ${quoted(v.playlist)}` : 'play a playlist'} on {devices}`;
 	if (k === 'vol') return `set {devices}’s volume to ${vol}`;
 	if (k === 'pause') return 'pause {devices}';
 	if (k === 'group') {
@@ -36,7 +38,8 @@ export function sentence(v, names = (id) => id) {
 
 /** The state a step sends. `volume` rides on a favourite (set on the speaker
  * before it plays) or is the whole step. */
-export function stateOf(kind, { favorite, volume, withVolume, members } = {}) {
+export function stateOf(kind, { favorite, playlist, volume, withVolume, members } = {}) {
+	if (kind === 'list') return playlist ? { action: 'play_playlist', playlist } : { action: 'play_playlist' };
 	if (kind === 'vol') return { volume: Math.round(num(volume) ?? 20) };
 	if (kind === 'pause') return { action: 'pause' };
 	if (kind === 'group') return { action: 'group', members: [...(members ?? [])] };

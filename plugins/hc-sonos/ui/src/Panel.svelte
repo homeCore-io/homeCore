@@ -18,6 +18,7 @@
 		art,
 		clock,
 		favouritesOf,
+		playlistsOf,
 		groupIdsOf,
 		groupName,
 		groupVolumeOf,
@@ -50,6 +51,7 @@
 	const a = $derived(dev?.attributes ?? {});
 	const speakers = $derived(speakersOf(devices, label));
 	const favs = $derived(favouritesOf(speakers));
+	const lists = $derived(playlistsOf(speakers));
 	const canRun = $derived(!!hc?.me.can('devices:command') && dev?.available !== false);
 
 	// An offline speaker says so; what it was playing is no longer true.
@@ -145,11 +147,13 @@
 	}
 
 	let tab = $state('fav');
-	const TABS = [
+	// Playlists get their own tab when the household has any.
+	const TABS = $derived([
 		['fav', 'Favourites'],
+		...(lists.length ? [['list', 'Playlists']] : []),
 		['group', 'Group'],
 		['sound', 'Sound']
-	];
+	]);
 
 	// The Group tab: the other speakers, ticked when they play this group's
 	// music. A tick changes the group at once and says what happened.
@@ -258,6 +262,15 @@
 			{:else}
 				<p class="hc-quiet">No favourites yet — add some in the Sonos app.</p>
 			{/if}
+		{:else if tab === 'list'}
+			<div class="favs">
+				{#each lists as f (f.title)}
+					<button class="fav" class:on={music && a.media_title === f.title} disabled={!canRun} onclick={() => send({ action: 'play_playlist', playlist: f.title })}>
+						<Art src={f.image} fill radius={8} label={f.title} />
+						<b>{f.title}</b>
+					</button>
+				{/each}
+			</div>
 		{:else if tab === 'group'}
 			<div class="group">
 				<span class="hc-quiet lead">Play {label(dev)}'s music in these rooms too</span>

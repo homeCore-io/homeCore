@@ -68,6 +68,23 @@ export function favouritesOf(devices) {
 	return [];
 }
 
+/** The household's playlists (Sonos playlists, as the plugin reads them):
+ * `{ title, image }`, with art when the plugin found it. */
+export function playlistsOf(devices) {
+	for (const d of devices) {
+		const items = attrs(d).available_playlist_items;
+		if (Array.isArray(items) && items.length)
+			return items
+				.filter((f) => typeof f?.title === 'string' && f.title)
+				.map((f) => ({ title: f.title, image: f.image_url ?? f.albumArtUri ?? null }));
+	}
+	for (const d of devices) {
+		const names = attrs(d).available_playlists;
+		if (Array.isArray(names) && names.length) return names.map((title) => ({ title, image: null }));
+	}
+	return [];
+}
+
 /**
  * The speakers as groups: the leader first, then its members by name. A
  * speaker alone is a group of one. A speaker whose leader is not among them
