@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "hc-hue"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "hc-sonos"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
