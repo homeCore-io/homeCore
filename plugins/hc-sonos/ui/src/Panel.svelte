@@ -200,6 +200,8 @@
 			<div class="live"><span class="dot"></span>Live — no track to skip</div>
 		{/if}
 
+		<!-- Offline: nothing to press, as on its card. -->
+		{#if !gone}
 		<div class="transport">
 			<button class="round dim" class:active={a.shuffle === true} aria-label="Shuffle" aria-pressed={a.shuffle === true} disabled={!canRun || !track} onclick={() => send({ action: 'set_shuffle', shuffle: !a.shuffle })}
 				><Icon name="shuffle" /></button
@@ -235,6 +237,7 @@
 				{/if}
 			</div>
 		</div>
+		{/if}
 
 		<div class="seg" role="tablist" aria-label="More">
 			{#each TABS as [id, name] (id)}
@@ -339,7 +342,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
-		max-width: 560px;
 	}
 	.panel.off {
 		opacity: 0.6;
@@ -514,7 +516,7 @@
 	}
 	.favs {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
 		gap: 8px;
 	}
 	.fav {
