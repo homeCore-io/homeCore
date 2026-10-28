@@ -15,7 +15,7 @@ use uuid::Uuid;
 /// |--------------------|------------------------------------------------------|
 /// | `Admin`            | Full system access, including user mgmt              |
 /// | `User`             | Normal operator: command devices, edit automations   |
-/// | `ReadOnly`         | Minimal read-only view (dashboards, devices, rules)  |
+/// | `ReadOnly`         | Minimal read-only view (devices, rules, scenes)      |
 /// | `Observer`         | Broader read: adds plugins + audit log               |
 /// | `DeviceOperator`   | Observer + command devices; no automation authoring  |
 /// | `RuleEditor`       | Observer + automation/scene/area authoring           |
@@ -28,11 +28,10 @@ pub enum Role {
     Admin,
     /// Read/write access to devices, automations, scenes.
     User,
-    /// Minimal read-only view over devices, automations, dashboards,
-    /// scenes, areas. Cannot see plugins or the audit log.
+    /// Minimal read-only view over devices, automations, scenes, areas. Cannot see plugins or the audit log.
     ReadOnly,
     /// Broader read view: `ReadOnly` plus `plugins:read` and `audit:read`.
-    /// Good default for dashboards and observability services.
+    /// Good default for wall panels and observability services.
     Observer,
     /// Observer permissions plus `devices:write` — can command devices
     /// but cannot author automations, scenes, or areas. Typical shape for
@@ -95,13 +94,8 @@ impl Role {
         let read_all: &[&str] = &[
             "devices:read",
             "automations:read",
-            "dashboards:read",
             "scenes:read",
             "areas:read",
-            // A skin is house-wide appearance. Anyone who can see the house can
-            // see what it looks like — including read-only roles, or the wall
-            // panel would fall back to a built-in for want of a permission.
-            "skins:read",
             // A client's own authored content: widget templates, icon rules,
             // the images somebody uploaded. Core neither stores nor
             // understands it — a client keeps it and asks here who the caller
@@ -113,16 +107,12 @@ impl Role {
         ];
         let write_authoring: &[&str] = &[
             "automations:write",
-            "dashboards:write",
             "scenes:write",
             "areas:write",
-            // Authoring a skin sits with authoring a dashboard: it is a change
-            // to how the house presents itself, not to what it does.
-            "skins:write",
-            // And authoring a client's content sits with both, for the same
-            // reason: a template or an icon rule changes how the house
-            // presents itself. Whoever may author a dashboard may author
-            // these; whoever may not, may not.
+            // Authoring a client's content sits with authoring the house's
+            // automations, scenes and areas: a page, a template or an icon
+            // rule changes how the house presents itself. Whoever may author
+            // those may author these; whoever may not, may not.
             "content:write",
         ];
         // Using the house without changing it: command a device, run a scene.
@@ -220,6 +210,22 @@ mod role_tests {
     }
 
     #[test]
+    fn no_role_grants_a_retired_scope() {
+        for role in Role::all() {
+            for scope in role.scopes() {
+                assert!(
+                    !is_retired_scope(&scope),
+                    "{} still grants retired `{scope}`",
+                    role.wire()
+                );
+            }
+        }
+        for scope in display_scopes() {
+            assert!(!is_retired_scope(&scope), "displays still get `{scope}`");
+        }
+    }
+
+    #[test]
     fn content_scopes_follow_the_authoring_line() {
         // A client keeps its own authored content — templates, icon rules,
         // uploaded images — and asks core who the caller is. Core defines who
@@ -227,7 +233,7 @@ mod role_tests {
         //
         // Reading follows the other reads: every role that can see the house
         // can see what it looks like. Writing follows authoring: the roles that
-        // may author a dashboard may author these, and the three that may not,
+        // may author automations may author these, and the three that may not,
         // may not.
         for role in Role::all() {
             assert!(
@@ -431,6 +437,29 @@ pub fn display_scopes() -> Vec<String> {
     v.push("devices:command".into());
     v.push("scenes:run".into());
     v
+}
+
+/// Scopes a past release granted that nothing checks any more.
+///
+/// Dashboards, skins and the asset store left core when the client that used
+/// them was retired (the current app keeps pages, themes and images in its own
+/// server). Keys made before then still hold these in their stored scope
+/// lists, and so do sessions minted by an older build. They are harmless —
+/// no route asks for them — so they are still *read* without complaint, and a
+/// key that carries them keeps working on its other scopes. They are never
+/// written again: no role grants them, and a request to put one on a key drops
+/// it rather than refusing the whole request (a client editing an old key
+/// sends back the list it was shown).
+pub const RETIRED_SCOPES: &[&str] = &[
+    "dashboards:read",
+    "dashboards:write",
+    "skins:read",
+    "skins:write",
+];
+
+/// Whether `scope` is one of [`RETIRED_SCOPES`].
+pub fn is_retired_scope(scope: &str) -> bool {
+    RETIRED_SCOPES.contains(&scope)
 }
 
 /// Public-facing user record (no password hash).

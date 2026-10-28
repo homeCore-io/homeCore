@@ -18,7 +18,6 @@ use uuid::Uuid;
 
 pub mod alert_rule_store;
 pub mod api_key_store;
-pub mod asset_store;
 pub mod audit_store;
 pub mod battery_store;
 pub mod device_store;
@@ -32,7 +31,6 @@ pub mod user_store;
 
 use alert_rule_store::AlertRuleStore;
 use api_key_store::ApiKeyStore;
-use asset_store::AssetStore;
 use audit_store::AuditStore;
 use battery_store::BatteryStore;
 use device_store::{DeviceStore, DeviceWrite};
@@ -44,7 +42,6 @@ use schema_store::SchemaStore;
 use user_store::UserStore;
 
 pub use api_key_store::ApiKeyRecord;
-pub use asset_store::AssetRecord;
 pub use audit_store::{AuditActorType, AuditEntry, AuditQuery, AuditResult};
 pub use battery_store::{BatteryEdge, BatteryRecord};
 pub use plugin_runtime_store::{
@@ -67,7 +64,6 @@ pub struct StateStore {
     alert_rules: Arc<AlertRuleStore>,
     plugin_state: Arc<PluginStateStore>,
     plugin_runtimes: Arc<PluginRuntimeStore>,
-    assets: Arc<AssetStore>,
     /// Where changes to the house's catalogue are announced. See [`on_change`].
     ///
     /// [`on_change`]: StateStore::on_change
@@ -137,7 +133,6 @@ impl StateStore {
             alert_rules,
             plugin_state,
             plugin_runtimes,
-            assets,
         ) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
@@ -175,14 +170,6 @@ impl StateStore {
             let alert_rules = AlertRuleStore::new(Arc::clone(&db))?;
             let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
             let plugin_runtimes = PluginRuntimeStore::new(Arc::clone(&db))?;
-            // Blobs live beside the state DB rather than inside it, and the
-            // path is derived rather than configured — the same trick
-            // `jwt_secret_file` and `audit.db` already use.
-            let assets_dir = std::path::Path::new(&state_path)
-                .parent()
-                .map(|d| d.join("assets"))
-                .unwrap_or_else(|| std::path::PathBuf::from("assets"));
-            let assets = AssetStore::new(Arc::clone(&db), assets_dir)?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -196,7 +183,6 @@ impl StateStore {
                 alert_rules,
                 plugin_state,
                 plugin_runtimes,
-                assets,
             ))
         })
         .await??;
@@ -214,7 +200,6 @@ impl StateStore {
             alert_rules: Arc::new(alert_rules),
             plugin_state: Arc::new(plugin_state),
             plugin_runtimes: Arc::new(plugin_runtimes),
-            assets: Arc::new(assets),
             changes: Arc::new(OnceLock::new()),
         })
     }
@@ -229,15 +214,6 @@ impl StateStore {
     /// the operations are single small reads.
     pub fn plugin_runtimes(&self) -> Arc<PluginRuntimeStore> {
         Arc::clone(&self.plugin_runtimes)
-    }
-
-    /// Content-addressed blob storage for the files a dashboard points at.
-    ///
-    /// Handed out rather than wrapped, like the runtime store above: every
-    /// caller is an HTTP handler, and the one operation heavy enough to matter
-    /// — writing bytes — is put on a blocking thread by that handler.
-    pub fn assets(&self) -> Arc<AssetStore> {
-        Arc::clone(&self.assets)
     }
 
     pub async fn plugin_state_get(&self, plugin_id: &str) -> Result<Option<serde_json::Value>> {

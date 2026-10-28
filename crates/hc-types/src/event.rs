@@ -108,22 +108,12 @@ pub enum Event {
         timestamp: DateTime<Utc>,
         plugin_id: String,
         capabilities: crate::plugin_capabilities::Capabilities,
-        /// The dashboard widgets the manifest declares, already validated —
-        /// core drops any it cannot promise every client will draw, so a
-        /// consumer of this event never has to ask again.
-        ///
-        /// Carried alongside rather than inside `Capabilities` for the same
-        /// reason `config_schema` is: `spec = "1"` is frozen, and adding a
-        /// field to it would source-break every plugin that builds a manifest
-        /// literally — including the ones outside this repo. Typed all the
-        /// same, because unlike a config schema a descriptor has a validator,
-        /// and a `Value` here would mean every reader running it again.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        widgets: Vec<crate::widget_descriptor::WidgetDescriptor>,
         /// The manifest's `config_schema` field (JSON Schema for the plugin's
         /// operator config), if present. Carried alongside — rather than inside —
-        /// the frozen `Capabilities` type so the config editor can render a typed
-        /// form. `None` when the plugin published no schema (→ raw-TOML fallback).
+        /// the frozen `Capabilities` type (`spec = "1"`: adding a field to it
+        /// would source-break every plugin that builds a manifest literally,
+        /// including the ones outside this repo) so the config editor can render
+        /// a typed form. `None` when the plugin published no schema (→ raw-TOML fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_schema: Option<serde_json::Value>,
         /// The manifest's `config_descriptor` field — the plugin's own,
@@ -134,11 +124,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config_descriptor: Option<serde_json::Value>,
         /// The kinds of alert the plugin can raise (`alert_kinds` on the
-        /// manifest), carried alongside for the same reason as `widgets`.
+        /// manifest), carried alongside for the same reason as `config_schema`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         alert_kinds: Vec<crate::alert::PluginAlertKind>,
         /// The plugin's own screens (`ui` on the manifest), already
-        /// validated; carried alongside for the same reason as `widgets`.
+        /// validated; carried alongside for the same reason as `config_schema`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ui: Option<crate::plugin_ui::PluginUi>,
     },

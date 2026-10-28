@@ -19,18 +19,6 @@ pub mod alert;
 /// it. Behind a feature because a wasm client never needs the builders.
 #[cfg(feature = "descriptor")]
 pub mod config_descriptor;
-pub mod dashboard;
-
-/// What core will accept in a widget config — the table `hc-api` validates
-/// against, served so a client can stop mirroring it. See
-/// [`dashboard_vocabulary`] for why this one is declared where the rule
-/// vocabulary is reflected.
-pub mod dashboard_vocabulary;
-
-/// What a stored layout MEANS — the reference implementation of packing,
-/// gravity and the overlap rule, so a client does not have to reimplement
-/// hc-web's grid engine from scratch and hope it agrees.
-pub mod dashboard_layout;
 pub mod device;
 /// The names devices report and take: one name, one meaning, one unit.
 pub mod device_vocabulary;
@@ -42,13 +30,11 @@ pub mod plugin_notice;
 pub mod plugin_ui;
 pub mod rule;
 pub mod schema;
-pub mod skin;
 
 /// The rule vocabulary, derived from the rule types rather than written down.
 /// See [`vocabulary`] for why that distinction is the whole point.
 #[cfg(feature = "schema")]
 pub mod vocabulary;
-pub mod widget_descriptor;
 
 pub use log_line::LogLine;
 pub use plugin_capabilities::{Action, Capabilities, Concurrency, ItemOp, RequiresRole};
