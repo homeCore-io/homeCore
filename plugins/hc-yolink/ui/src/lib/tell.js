@@ -46,7 +46,7 @@ export function build({ was, deviceId, deviceName, op, value, forMinutes = 0, no
 		attribute: 'temperature',
 		op,
 		value,
-		state_label: label ?? `${op === 'above' ? 'Warmer' : 'Colder'} than ${value} °C`,
+		state_label: label ?? `${op === 'above' ? 'Warmer' : 'Colder'} than ${value}°C`,
 		severity: was?.severity ?? 'warning'
 	};
 	if (forMinutes > 0) r.for_minutes = forMinutes;
