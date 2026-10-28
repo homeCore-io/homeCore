@@ -145,7 +145,7 @@ export function positionNow(d, now = Date.now()) {
 /** One line for a Roku, as the cards and the page say it. */
 export function stateLine(d, now = Date.now()) {
 	const n = nowOf(d);
-	if (n.kind === 'offline') return 'Not answering';
+	if (n.kind === 'offline') return 'Offline';
 	if (n.kind === 'off') return 'Off';
 	if (n.kind === 'home') return 'On · Home';
 	if (n.kind === 'input') return `On · ${n.name}`;

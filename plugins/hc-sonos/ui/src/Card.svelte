@@ -27,7 +27,11 @@
 	const dev = $derived(devices.find((d) => d.device_id === deviceId));
 	const a = $derived(dev?.attributes ?? {});
 	const name = $derived(dev ? hc.devices.label(dev) : '');
-	const lines = $derived(dev ? nowLines(dev, { empty: '' }) : { title: '', sub: '' });
+	// An offline speaker says so, with nothing to press.
+	const gone = $derived(dev?.available === false);
+	const lines = $derived(
+		!dev ? { title: '', sub: '' } : gone ? { title: 'Offline', sub: '' } : nowLines(dev, { empty: '' })
+	);
 	const canRun = $derived(!!hc?.me.can('devices:command') && dev?.available !== false);
 	const grouped = $derived(dev ? groupIdsOf(dev).length > 1 : false);
 
@@ -63,9 +67,9 @@
 					<span class="hc-tile-name">{name}</span>
 					<span class="hc-tile-state one">{lines.title}</span>
 				</span>
-				<button class="play ghost" aria-label={`${isPlaying(dev) ? 'Pause' : 'Play'} ${name}`} disabled={!canRun || !hasMusic(dev)} onclick={() => run(playPause(hc, dev))}
+				{#if !gone}<button class="play ghost" aria-label={`${isPlaying(dev) ? 'Pause' : 'Play'} ${name}`} disabled={!canRun || !hasMusic(dev)} onclick={() => run(playPause(hc, dev))}
 					><Icon name={isPlaying(dev) ? 'pause' : 'play'} size={14} /></button
-				>
+				>{/if}
 			</span>
 		{:else}
 			<span class="row">
@@ -74,20 +78,20 @@
 					<span class="hc-tile-name">{name}</span>
 					<span class="title">{lines.title}</span>
 					{#if lines.sub}<span class="hc-tile-state one">{lines.sub}</span>{/if}
-					{#if grouped && form === 'large'}<span class="hc-tile-state one">Playing in a group of {groupIdsOf(dev).length}</span>{/if}
+					{#if grouped && form === 'large' && !gone}<span class="hc-tile-state one">Playing in a group of {groupIdsOf(dev).length}</span>{/if}
 				</span>
 			</span>
-			{#if showBar}
+			{#if showBar && !gone}
 				<span class="bar" role="progressbar" aria-valuemin="0" aria-valuemax={where.dur} aria-valuenow={Math.round(where.pos)}
 					><span class="fill" style:width={`${(where.pos / where.dur) * 100}%`}></span></span
 				>
 			{/if}
-			<span class="controls">
+			{#if !gone}<span class="controls">
 				<button class="play" aria-label={`${isPlaying(dev) ? 'Pause' : 'Play'} ${name}`} disabled={!canRun || !hasMusic(dev)} onclick={() => run(playPause(hc, dev))}
 					><Icon name={isPlaying(dev) ? 'pause' : 'play'} size={16} /></button
 				>
 				<span class="slider"><Volume value={volumeOf(dev)} name={`${name} volume`} disabled={!canRun} onset={(v) => run(hc.command(deviceId, { volume: v }))} /></span>
-			</span>
+			</span>{/if}
 			{#if error}<span class="err" role="alert">{error}</span>{/if}
 		{/if}
 	</div>

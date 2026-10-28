@@ -52,14 +52,18 @@
 	const favs = $derived(favouritesOf(speakers));
 	const canRun = $derived(!!hc?.me.can('devices:command') && dev?.available !== false);
 
-	const radio = $derived(isRadio(dev));
-	const music = $derived(hasMusic(dev));
+	// An offline speaker says so; what it was playing is no longer true.
+	const gone = $derived(dev?.available === false);
+	const radio = $derived(!gone && isRadio(dev));
+	const music = $derived(!gone && hasMusic(dev));
 	const track = $derived(music && !radio && !inputOf(dev));
 	const favNamed = $derived(favs.some((f) => f.title === a.media_title));
 	const kind = $derived(music ? playbackWord(dev) : '');
-	const input = $derived(inputOf(dev));
+	const input = $derived(gone ? '' : inputOf(dev));
 	const sub = $derived(
-		input
+		gone
+			? 'It isn’t answering — it may be unplugged or off the network.'
+			: input
 			? 'Input'
 			: !music
 			? favs.length
@@ -152,7 +156,7 @@
 	const others = $derived(speakers.filter((d) => d.device_id !== deviceId));
 	let busyId = $state('');
 	let answers = $state({});
-	const nowOf = (d) => (d.available === false ? 'Not answering' : hasMusic(d) ? `${inputOf(d) || d.attributes.media_title}, ${playbackWord(d)}` : 'Nothing playing');
+	const nowOf = (d) => (d.available === false ? 'Offline' : hasMusic(d) ? `${inputOf(d) || d.attributes.media_title}, ${playbackWord(d)}` : 'Nothing playing');
 	async function tick(o) {
 		busyId = o.device_id;
 		error = '';
@@ -180,7 +184,7 @@
 			<Art src={art(dev)} size={120} radius={12} label={a.media_title ?? ''} />
 			<div class="words">
 				{#if kind}<span class="kind">{kind}</span>{/if}
-				<span class="title">{input || (music ? a.media_title : 'Nothing playing')}</span>
+				<span class="title">{gone ? 'Offline' : input || (music ? a.media_title : 'Nothing playing')}</span>
 				{#if sub}<span class="hc-quiet sub">{sub}</span>{/if}
 				{#if grouped}<span class="hc-quiet sub">Playing together: {groupWords}</span>{/if}
 				{#if sleepMins}<span class="hc-quiet sub">{sleepWords(sleepMins)}</span>{/if}
