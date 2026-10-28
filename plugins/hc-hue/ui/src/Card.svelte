@@ -42,12 +42,12 @@
 
 	const stateLine = $derived.by(() => {
 		if (!dev) return '';
-		if (!dev.available) return 'Not answering';
+		if (!dev.available) return 'Offline';
 		if (kind === 'motion_sensor') return a.motion ? 'Motion now' : 'No motion';
 		if (kind === 'group')
 			return onCount === 0 ? 'All off' : `${onCount} of ${members.length} on${running ? ` · ${hc.devices.label(running)}` : ''}`;
 		if (!a.on) return 'Off';
-		return `${bri} %${form === 'large' && running ? ` · ${hc.devices.label(running)}` : ''}`;
+		return `${bri}%${form === 'large' && running ? ` · ${hc.devices.label(running)}` : ''}`;
 	});
 
 	const open = () => dev && hc.ui.openDevice(dev.device_id);
@@ -60,7 +60,7 @@
 		{#if kind === 'motion_sensor'}
 			<span class="row">
 				<span class="hc-tile-name">{name}</span>
-				{#if num(a.battery_pct) !== undefined && num(a.battery_pct) <= 15}<span class="bat">battery {Math.round(num(a.battery_pct))} %</span>{/if}
+				{#if num(a.battery_pct) !== undefined && num(a.battery_pct) <= 15}<span class="bat">battery {Math.round(num(a.battery_pct))}%</span>{/if}
 			</span>
 			<span class="hc-tile-state">{stateLine}</span>
 			{#if form !== 'compact'}
@@ -194,6 +194,7 @@
 		background: var(--track-on, var(--accent));
 		flex: none;
 		border: none;
+		transition: background 0.15s;
 	}
 	.tog::after {
 		content: '';
@@ -204,6 +205,8 @@
 		height: 22px;
 		border-radius: 50%;
 		background: #fff;
+		/* As the app's own switch, so it reads the same in dark mode (#123). */
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 	}
 	.tog.off {
 		background: var(--track-off, #cfc8ba);

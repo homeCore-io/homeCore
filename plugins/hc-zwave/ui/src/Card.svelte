@@ -70,7 +70,7 @@
 				{@render icon(18)}
 				<span class="words">
 					<span class="hc-tile-name">{name}</span>
-					<span class="hc-tile-state one">{dev.available === false ? 'Not answering' : compactLine(dev)}</span>
+					<span class="hc-tile-state one">{dev.available === false ? 'Offline' : compactLine(dev)}</span>
 				</span>
 				<button class="act ghost" disabled={!canRun || busy} onclick={toggle}>{locked ? 'Unlock' : 'Lock'}</button>
 			</span>
@@ -79,7 +79,7 @@
 				{@render icon(22)}
 				<span class="words">
 					<span class="hc-tile-name">{name}</span>
-					<span class="st" class:open={!locked}>{dev.available === false ? 'Not answering' : `${state}${a.open === true ? ' · door open' : ''}`}</span>
+					<span class="st" class:open={!locked}>{dev.available === false ? 'Offline' : `${state}${a.open === true ? ' · door open' : ''}`}</span>
 				</span>
 			</span>
 			{#if cardLine(dev, names)}<span class="hc-tile-state line">{cardLine(dev, names)}</span>{/if}
