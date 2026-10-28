@@ -33,7 +33,15 @@ fn record_to_summary(r: &ApiKeyRecord) -> ApiKeySummary {
         label: r.label.clone(),
         prefix: r.prefix.clone(),
         owner_uid: r.owner_uid,
-        scopes: r.scopes.clone(),
+        // A key made before dashboards and skins left core still holds their
+        // scopes. Nothing checks them, so they are not shown as if they meant
+        // something; the stored record is left as it was.
+        scopes: r
+            .scopes
+            .iter()
+            .filter(|sc| !hc_auth::user::is_retired_scope(sc))
+            .cloned()
+            .collect(),
         created_at: r.created_at,
         last_used_at: r.last_used_at,
         expires_at: r.expires_at,
@@ -71,12 +79,22 @@ fn grantable(claims: &hc_auth::Claims, owner_role: HashSet<String>) -> HashSet<S
         .collect()
 }
 
+/// Take out scopes that no longer mean anything (see
+/// [`hc_auth::user::RETIRED_SCOPES`]). Dropped rather than refused: a session
+/// minted by an older build still lists them among its own scopes, and a
+/// client editing an old key sends back the list it was given — neither should
+/// fail over a scope nothing checks. Never written to a key again either way.
+fn drop_retired_scopes(scopes: &mut Vec<String>) {
+    scopes.retain(|sc| !hc_auth::user::is_retired_scope(sc));
+}
+
 /// `POST /api/v1/auth/api-keys`
 pub async fn create_api_key(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
-    Json(body): Json<CreateApiKeyRequest>,
+    Json(mut body): Json<CreateApiKeyRequest>,
 ) -> impl IntoResponse {
+    drop_retired_scopes(&mut body.scopes);
     if let Some(no) = key_may_not_manage(&claims) {
         return no;
     }
@@ -328,7 +346,8 @@ pub async fn update_api_key(
         }
         rec.label = trimmed.to_string();
     }
-    if let Some(new_scopes) = body.scopes {
+    if let Some(mut new_scopes) = body.scopes {
+        drop_retired_scopes(&mut new_scopes);
         // Enforce scope subset against key owner's current role scopes — and
         // the caller's own.
         let owner_scopes: HashSet<String> = match s.store.get_user_by_id(rec.owner_uid).await {
@@ -481,4 +500,21 @@ fn tidy_cidrs(cidrs: &[String]) -> Vec<String> {
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod retired_scope_tests {
+    use super::drop_retired_scopes;
+
+    #[test]
+    fn retired_scopes_are_dropped_and_the_rest_kept_in_order() {
+        let mut scopes = vec![
+            "devices:read".to_string(),
+            "dashboards:read".to_string(),
+            "content:read".to_string(),
+            "skins:write".to_string(),
+        ];
+        drop_retired_scopes(&mut scopes);
+        assert_eq!(scopes, vec!["devices:read", "content:read"]);
+    }
 }

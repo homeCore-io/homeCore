@@ -17,9 +17,7 @@
 //! ```
 //!
 //! Available guards: [`DevicesRead`], [`DevicesWrite`], [`AutomationsRead`],
-//! [`AutomationsWrite`], [`DashboardsRead`], [`DashboardsWrite`],
-//! [`SkinsRead`], [`SkinsWrite`],
-//! [`ScenesRead`], [`ScenesWrite`], [`AreasRead`], [`AreasWrite`],
+//! [`AutomationsWrite`], [`ScenesRead`], [`ScenesWrite`], [`AreasRead`], [`AreasWrite`],
 //! [`PluginsRead`], [`PluginsWrite`].
 
 use axum::{
@@ -510,10 +508,6 @@ scope_extractor!(DevicesRead, "devices:read");
 scope_extractor!(DevicesWrite, "devices:write");
 scope_extractor!(AutomationsRead, "automations:read");
 scope_extractor!(AutomationsWrite, "automations:write");
-scope_extractor!(DashboardsRead, "dashboards:read");
-scope_extractor!(DashboardsWrite, "dashboards:write");
-scope_extractor!(SkinsRead, "skins:read");
-scope_extractor!(SkinsWrite, "skins:write");
 scope_extractor!(ScenesRead, "scenes:read");
 scope_extractor!(ScenesWrite, "scenes:write");
 scope_extractor!(AreasRead, "areas:read");

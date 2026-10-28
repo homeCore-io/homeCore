@@ -18,7 +18,7 @@ describe('tell me when', () => {
 	});
 	it('builds a core alert rule in °C, keeping what it doesn’t set', () => {
 		const r = build({ deviceId: 'f', deviceName: 'Garage Freezer', op: 'above', value: -10, forMinutes: 15, notify: '' });
-		expect(r).toEqual({ name: 'Garage Freezer warming up', enabled: true, device_ids: ['f'], attribute: 'temperature', op: 'above', value: -10, for_minutes: 15, state_label: 'Warmer than -10 °C', severity: 'warning' });
+		expect(r).toEqual({ name: 'Garage Freezer warming up', enabled: true, device_ids: ['f'], attribute: 'temperature', op: 'above', value: -10, for_minutes: 15, state_label: 'Warmer than -10°C', severity: 'warning' });
 		const again = build({ was: { ...r, id: 'x', after: '22:00' }, deviceId: 'f', deviceName: 'Garage Freezer', op: 'above', value: -12, forMinutes: 0, notify: 'Phone', enabled: false });
 		expect(again.id).toBe('x');
 		expect(again.after).toBe('22:00');

@@ -73,7 +73,7 @@
 			forMinutes: op === 'above' ? Number(warm.for) : (was?.for_minutes ?? 0),
 			notify,
 			enabled: f.on,
-			label: `${op === 'above' ? 'Warmer' : 'Colder'} than ${f.value} ${unit}`
+			label: `${op === 'above' ? 'Warmer' : 'Colder'} than ${f.value}${unit}`
 		});
 		const r = await saveRule(hc, rule);
 		saving = false;

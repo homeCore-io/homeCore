@@ -57,7 +57,7 @@ struct SetupArgs {
     /// the service user's role scopes (controlled by `--service-role`).
     #[arg(
         long,
-        default_value = "devices:read,automations:read,scenes:read,dashboards:read,areas:read"
+        default_value = "devices:read,automations:read,scenes:read,areas:read"
     )]
     service_scopes: String,
     /// Role for the service user: `read_only` or `user`. Defaults to the

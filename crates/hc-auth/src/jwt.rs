@@ -272,7 +272,7 @@ mod tests {
             sid: None,
         };
         assert!(
-            claims.has_scope("skins:write"),
+            claims.has_scope("content:write"),
             "a scope added by a later release must not need a re-login"
         );
     }

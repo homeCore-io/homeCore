@@ -637,7 +637,15 @@ pub async fn me(State(s): State<AppState>, AuthUser(claims): AuthUser) -> impl I
             // Added to the response rather than to `UserInfo`, which several
             // other endpoints return and where a per-credential field would be
             // meaningless.
-            body["scopes"] = json!(claims.scopes);
+            // A session or key from before dashboards and skins left core may
+            // still list their scopes; nothing checks them, so they are not
+            // reported as if they meant something.
+            let scopes: Vec<&String> = claims
+                .scopes
+                .iter()
+                .filter(|sc| !hc_auth::user::is_retired_scope(sc))
+                .collect();
+            body["scopes"] = json!(scopes);
             body["has_pin"] = json!(user.pin_hash.is_some());
             (StatusCode::OK, Json(body)).into_response()
         }
@@ -1207,7 +1215,12 @@ mod me_tests {
             uid: user.id.to_string(),
             exp: u64::MAX,
             role: Role::Admin,
-            scopes: vec!["dashboards:read".into(), "content:read".into()],
+            // `dashboards:read` is retired: carried by an old key, never reported.
+            scopes: vec![
+                "devices:read".into(),
+                "dashboards:read".into(),
+                "content:read".into(),
+            ],
             actor: None,
             tv: 0,
             sid: None,
@@ -1220,12 +1233,12 @@ mod me_tests {
         // ...and the authority is the key's.
         assert_eq!(
             body["scopes"],
-            serde_json::json!(["dashboards:read", "content:read"])
+            serde_json::json!(["devices:read", "content:read"])
         );
         assert!(!body["scopes"]
             .as_array()
             .unwrap()
-            .contains(&serde_json::json!("dashboards:write")));
+            .contains(&serde_json::json!("devices:write")));
     }
 
     /// A password token carries its role's scopes, so the two agree there —

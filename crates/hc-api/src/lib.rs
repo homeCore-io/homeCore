@@ -29,7 +29,6 @@ use tracing::{info, warn};
 pub mod admin_uds;
 pub mod alert_handlers;
 pub mod api_key_handlers;
-pub mod asset_handlers;
 pub mod audit;
 pub mod audit_handlers;
 pub mod auth_handlers;
@@ -37,7 +36,6 @@ pub mod auth_middleware;
 pub mod backup;
 pub mod change_audit;
 pub mod config_writer;
-pub mod dashboard_store;
 pub mod display_handlers;
 pub mod event_log;
 pub mod group_store;
@@ -57,14 +55,11 @@ pub mod plugin_runtimes;
 pub mod rate_limit;
 pub mod registry;
 pub mod rule_file_store;
-pub mod skin_handlers;
-pub mod skin_store;
 pub mod streaming;
 pub mod ws;
 
 use auth_middleware::require_auth;
 use backup::BackupPaths;
-use dashboard_store::{DashboardStore, DashboardStoreData};
 use event_log::EventLog;
 use group_store::{GroupStore, RuleGroup};
 use logs::LogStreamState;
@@ -74,7 +69,6 @@ pub use plugin_config_store::PluginConfigStore;
 pub use plugin_config_watcher::PluginConfigWatcher;
 pub use plugin_install::{InstallContext, InstalledPlugin};
 use rule_file_store::RuleFileStore;
-use skin_store::{SkinStore, SkinStoreData};
 
 /// Runtime command sent to a plugin supervisor task.
 #[derive(Debug)]
@@ -149,14 +143,6 @@ pub struct PluginRecord {
     /// publishes, or if the published manifest failed to decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<hc_types::Capabilities>,
-    /// Dashboard widgets this plugin contributes, from the same manifest and
-    /// already validated by the bridge — anything core could not promise every
-    /// client would draw never reaches here.
-    ///
-    /// Empty for plugins on SDKs predating widgets, which is indistinguishable
-    /// from "contributes none" and needs no special handling.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub widgets: Vec<hc_types::widget_descriptor::WidgetDescriptor>,
     /// JSON Schema for the plugin's operator config, carried on the capability
     /// manifest. Drives the config editor's typed form; `None` → raw-TOML
     /// fallback. Not shown in the plugin list — served at
@@ -278,7 +264,6 @@ impl PluginRecord {
             supports_management: false,
             notices: Vec::new(),
             capabilities: None,
-            widgets: Vec::new(),
             config_schema: None,
             config_descriptor: None,
             ui: None,
@@ -366,15 +351,6 @@ pub struct AppState {
     pub rule_groups: Option<Arc<RwLock<Vec<RuleGroup>>>>,
     /// Persistent store for rule groups (groups.json in rules dir).
     pub group_store: Option<Arc<GroupStore>>,
-    /// Dashboard definitions and per-user defaults.
-    pub dashboards: Option<Arc<RwLock<DashboardStoreData>>>,
-    /// Persistent store for dashboards (`data/dashboards.json`).
-    pub dashboard_store: Option<Arc<DashboardStore>>,
-    /// User-defined skins. The built-in four are compiled into the client and
-    /// are not here — see `hc_types::skin`.
-    pub skins: Option<Arc<RwLock<SkinStoreData>>>,
-    /// Persistent store for skins (`data/skins.json`).
-    pub skin_store: Option<Arc<SkinStore>>,
     /// Live calendar store — loaded `.ics` files with expanded events.
     /// `None` when no calendar directory is configured.
     pub calendar: Option<CalendarHandle>,
@@ -514,7 +490,6 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
-                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             ui: None,
@@ -562,7 +537,6 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
-                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             ui: None,
@@ -593,7 +567,6 @@ pub fn spawn_plugin_registry_listener(
                     plugin_id,
                     timestamp,
                     capabilities,
-                    widgets,
                     config_schema,
                     config_descriptor,
                     // Kept by the alert engine, which is what reads them.
@@ -620,7 +593,6 @@ pub fn spawn_plugin_registry_listener(
                             version: None,
                             supports_management: false,
                             capabilities: None,
-                            widgets: Vec::new(),
                             config_schema: None,
                             config_descriptor: None,
                             ui: None,
@@ -628,10 +600,6 @@ pub fn spawn_plugin_registry_listener(
                             installed_version: None,
                         });
                     rec.capabilities = Some(capabilities);
-                    // Replaced wholesale, like notices: the manifest is the
-                    // plugin's current belief, so a card it stopped declaring
-                    // has been withdrawn and must stop being offered.
-                    rec.widgets = widgets;
                     if config_schema.is_some() {
                         rec.config_schema = config_schema;
                     }
@@ -882,10 +850,6 @@ impl AppState {
             pauses: None,
             rule_groups: None,
             group_store: None,
-            dashboards: None,
-            dashboard_store: None,
-            skins: None,
-            skin_store: None,
             calendar: None,
             calendar_dir: None,
             calendar_expansion_days: 400,
@@ -1072,21 +1036,6 @@ impl AppState {
         self
     }
 
-    /// Attach the dashboard store and pre-loaded dashboards.
-    pub fn with_dashboard_store(mut self, store: DashboardStore, data: DashboardStoreData) -> Self {
-        self.dashboard_store = Some(Arc::new(store));
-        self.dashboards = Some(Arc::new(RwLock::new(data)));
-        self
-    }
-
-    /// Attach the skin store. Absent, `/skins` answers 501 rather than
-    /// pretending an empty list is the house's answer.
-    pub fn with_skin_store(mut self, store: SkinStore, data: SkinStoreData) -> Self {
-        self.skin_store = Some(Arc::new(store));
-        self.skins = Some(Arc::new(RwLock::new(data)));
-        self
-    }
-
     /// Attach the calendar store handle and directory path.
     pub fn with_calendar(
         mut self,
@@ -1213,12 +1162,6 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugin-runtimes/{id}/artifacts/{plugin_id}",
             get(plugin_runtime_handlers::get_placement_artifact),
         )
-        // Assets are read without a token, because a browser sends no
-        // Authorization header on an <img>, a CSS background or a font — the
-        // reason album art works on :8080 and 401s at :3001. The id is a
-        // content hash the caller cannot choose or guess, and that is what
-        // stands in for the token. Writes and the listing stay protected.
-        .route("/assets/{id}", get(asset_handlers::get_asset))
         // Webhooks are public — the path segment acts as the shared secret.
         // External services (cloud, IFTTT, etc.) POST here to fire rules.
         .route("/webhooks/{path}", post(handlers::receive_webhook));
@@ -1428,81 +1371,6 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             post(handlers::set_group_enabled),
         )
         // Scenes
-        .route(
-            "/dashboards",
-            get(handlers::list_dashboards).post(handlers::create_dashboard),
-        )
-        .route(
-            "/dashboards/templates",
-            get(handlers::list_dashboard_templates),
-        )
-        .route(
-            "/dashboards/templates/{id}",
-            post(handlers::create_dashboard_from_template),
-        )
-        // The other direction: a page you have designed becomes something to
-        // start the next one from. `/template` rather than `/templates/{id}`
-        // because the id in the path is the *page's*.
-        .route(
-            "/dashboards/{id}/template",
-            post(handlers::save_dashboard_as_template),
-        )
-        .route(
-            "/skins",
-            get(skin_handlers::list_skins).post(skin_handlers::create_skin),
-        )
-        .route(
-            "/skins/{id}",
-            get(skin_handlers::get_skin)
-                .put(skin_handlers::update_skin)
-                .delete(skin_handlers::delete_skin),
-        )
-        // Assets — the writes and the listing. The read is public; see
-        // `asset_handlers` for why, and note that the listing is the one call
-        // that would turn an unguessable id into a guessable one.
-        .route(
-            "/assets",
-            get(asset_handlers::list_assets)
-                .post(asset_handlers::upload_asset)
-                // Axum's default body cap is 2MB, so an upload route has to say
-                // its own. The slack is for headers; the handler enforces the
-                // real limit and answers 413 rather than letting the layer cut
-                // the connection.
-                .layer(DefaultBodyLimit::max(
-                    asset_handlers::MAX_ASSET_BYTES + 4096,
-                )),
-        )
-        .route("/assets/{id}", delete(asset_handlers::delete_asset))
-        .route(
-            "/assets/group/{group}",
-            delete(asset_handlers::delete_asset_group),
-        )
-        // Before `/dashboards/{id}`, so the literal wins over the wildcard.
-        .route(
-            "/dashboards/vocabulary",
-            get(handlers::get_dashboard_vocabulary),
-        )
-        .route("/dashboards/import", post(handlers::import_dashboard))
-        .route("/dashboards/reload", post(handlers::reload_dashboards))
-        .route(
-            "/dashboards/{id}",
-            get(handlers::get_dashboard)
-                .put(handlers::update_dashboard)
-                .delete(handlers::delete_dashboard),
-        )
-        .route(
-            "/dashboards/{id}/access",
-            put(handlers::set_dashboard_access),
-        )
-        .route("/dashboards/{id}/export", get(handlers::export_dashboard))
-        .route(
-            "/dashboards/{id}/duplicate",
-            post(handlers::duplicate_dashboard),
-        )
-        .route(
-            "/dashboards/{id}/default",
-            post(handlers::set_default_dashboard),
-        )
         .route(
             "/scenes",
             get(handlers::list_scenes).post(handlers::create_scene),

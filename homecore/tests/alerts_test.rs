@@ -191,7 +191,6 @@ async fn a_plugin_alert_is_raised_and_cleared_from_what_the_plugin_says() -> Res
             plugin_id: "plugin.wled".into(),
             actions: vec![],
         },
-        widgets: vec![],
         config_schema: None,
         config_descriptor: None,
         ui: None,

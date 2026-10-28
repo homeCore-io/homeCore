@@ -1890,12 +1890,10 @@ dependencies = [
  "chrono",
  "hc-auth",
  "hc-types",
- "hex",
  "redb",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "tokio",
  "tracing",
@@ -2075,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.93"
+version = "0.1.94"
 dependencies = [
  "anyhow",
  "base64 0.23.0",

@@ -29,7 +29,6 @@ homeCore is written in async Rust (Tokio), stores device state in an embedded [r
 | **Solar events & modes** | Sunrise/sunset triggers computed locally from lat/lon; solar and named boolean modes, hot-reloaded from `modes.toml` |
 | **Virtual devices** | Software timers, switches, and glue devices — creatable over the API and usable in rules like any other device |
 | **Calendars** | `.ics` calendars — local files or subscribed URLs — become `CalendarEvent` triggers and `CalendarActive` conditions |
-| **Dashboards** | Per-breakpoint dashboard layouts stored server-side, so any client sees the same thing |
 | **History & metrics** | Per-attribute time series in SQLite, Prometheus text at `/metrics`, optional InfluxDB v2 export |
 | **Backup & restore** | `POST /system/backup` streams a zip of state, history, config, and rules; `POST /system/restore` puts one back |
 | **REST + WebSocket API** | Every route is specified in [`docs/openapi.yaml`](docs/openapi.yaml), and a test fails the build if the two drift apart; live event and log streams over WebSocket |
