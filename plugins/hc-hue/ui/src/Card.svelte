@@ -54,46 +54,54 @@
 	const toggle = () => hc.command(deviceId, { on: !a.on });
 </script>
 
+{#snippet icon()}
+	<!-- Drawn as the app draws its own (Lucide): a bulb, a room's lamp, motion. -->
+	<span class="ic" aria-hidden="true"
+		><svg viewBox="0 0 24 24" width={form === 'compact' ? 18 : 20} height={form === 'compact' ? 18 : 20} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+			>{#if kind === 'motion_sensor'}<path d="M22 12h-4l-3 9L9 3l-3 9H2" />{:else if kind === 'group'}<path d="M8 2h8l4 10H4L8 2Z" /><path d="M12 12v6" /><path d="M8 22v-2c0-1.1.9-2 2-2h4a2 2 0 0 1 2 2v2H8Z" />{:else}<path
+					d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"
+				/><path d="M9 18h6" /><path d="M10 22h4" />{/if}</svg
+		></span
+	>
+{/snippet}
+
+{#snippet words()}
+	<span class="words">
+		<span class="hc-tile-name">{name}</span>
+		<span class="hc-tile-state">{stateLine}{#if kind === 'motion_sensor' && num(a.battery_pct) !== undefined && num(a.battery_pct) <= 15}<span class="bat"> · battery {Math.round(num(a.battery_pct))}%</span>{/if}</span>
+	</span>
+{/snippet}
+
 {#if dev}
-	<div class="hc-tile {form}" class:lit class:off={!dev.available}>
+	<!-- The app's own card, laid out the same (#5): its symbol top left, the
+	     switch top right, the name and state under them; the light's colour
+	     in the bar, a room's lights in its stripe. -->
+	<div class="hc-tile {form}" class:lit class:gone={!dev.available}>
 		<button class="cover" aria-label={`Open ${name}`} onclick={open}></button>
-		{#if kind === 'motion_sensor'}
-			<span class="row">
-				<span class="hc-tile-name">{name}</span>
-				{#if num(a.battery_pct) !== undefined && num(a.battery_pct) <= 15}<span class="bat">battery {Math.round(num(a.battery_pct))}%</span>{/if}
-			</span>
-			<span class="hc-tile-state">{stateLine}</span>
-			{#if form !== 'compact'}
+		<span class="top">
+			{@render icon()}
+			{#if form === 'compact'}{@render words()}{/if}
+			{#if dev.available && kind !== 'motion_sensor'}
+				<button class="tog" class:off={!a.on} role="switch" aria-checked={!!a.on} aria-label={`${name} on or off`} onclick={toggle}
+				></button>
+			{/if}
+		</span>
+		{#if form !== 'compact'}
+			{@render words()}
+			{#if kind === 'motion_sensor'}
 				<span class="row facts">
 					{#if num(a.temperature) !== undefined}<span class="hc-num">{temperature(num(a.temperature)).n}°</span>{/if}
 					{#if num(a.illuminance) !== undefined}<span class="hc-num">{Math.round(num(a.illuminance))} lux</span>{/if}
 				</span>
-			{/if}
-		{:else}
-			<span class="row">
-				{#if form === 'compact' || form === 'large'}
-					<span class="sw" class:big={form === 'large'} style:background={kind === 'group' ? 'none' : swatchOf(a)}></span>
-				{/if}
-				<span class="words">
-					<span class="hc-tile-name">{name}</span>
-					<span class="hc-tile-state">{stateLine}</span>
+			{:else if kind === 'group'}
+				<span class="stripe">
+					{#each members as l (l.device_id)}<span style:background={swatchOf(l.attributes)} title={hc.devices.label(l)}></span>{/each}
 				</span>
-				{#if dev.available}
-					<button class="tog" class:off={!a.on} role="switch" aria-checked={!!a.on} aria-label={`${name} on or off`} onclick={toggle}
-					></button>
-				{/if}
-			</span>
-			{#if form !== 'compact'}
-				{#if kind === 'group'}
-					<span class="stripe">
-						{#each members as l (l.device_id)}<span style:background={swatchOf(l.attributes)} title={hc.devices.label(l)}></span>{/each}
-					</span>
-				{:else}
-					<span class="bar"><span style:width={`${a.on ? bri : 0}%`} style:background={swatchOf(a)}></span></span>
-				{/if}
-				{#if form === 'large' && scenes.length}
-					<span class="scenes"><Scenes {hc} {scenes} columns={4} compact /></span>
-				{/if}
+			{:else}
+				<span class="bar"><span style:width={`${a.on ? bri : 0}%`} style:background={swatchOf(a)}></span></span>
+			{/if}
+			{#if form === 'large' && scenes.length && kind !== 'motion_sensor'}
+				<span class="scenes"><Scenes {hc} {scenes} columns={4} compact /></span>
 			{/if}
 		{/if}
 	</div>
@@ -113,6 +121,7 @@
 		z-index: 0;
 	}
 	.row,
+	.words,
 	.stripe,
 	.bar,
 	.scenes,
@@ -139,22 +148,45 @@
 		display: flex;
 		flex-direction: column;
 	}
-	.off {
-		opacity: 0.6;
+	/* Offline: dimmed, as the app's own (not .off — that's a light switched off). */
+	.gone .ic,
+	.gone .words {
+		opacity: 0.55;
 	}
-	.sw {
-		width: 30px;
-		height: 30px;
-		border-radius: 9px;
+	.top {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 10px;
+		min-width: 0;
+		position: relative;
+		z-index: 1;
+		pointer-events: none;
+	}
+	.compact .top {
+		align-items: center;
+	}
+	.compact .words {
+		flex: 1;
+	}
+	.ic {
+		width: 38px;
+		height: 38px;
 		flex: none;
+		border-radius: var(--radius-chip, 10px);
+		background: var(--surface-2);
+		color: var(--ink-muted);
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
-	.sw.big {
-		width: 40px;
-		height: 40px;
-		border-radius: 11px;
+	.compact .ic {
+		width: 34px;
+		height: 34px;
 	}
-	.lit .sw {
-		box-shadow: 0 0 14px rgba(255, 170, 80, 0.45);
+	.lit .ic {
+		background: var(--fill, var(--lit-bg));
+		color: var(--lit-ink);
 	}
 	.bar {
 		height: 9px;
