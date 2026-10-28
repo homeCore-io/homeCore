@@ -76,9 +76,10 @@
 		font-size: 13px;
 		white-space: nowrap;
 	}
+	/* Tiles of a sensible size however wide the panel is (it fills its dialog now). */
 	.favs {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
 		gap: 8px;
 	}
 	.favs.row {

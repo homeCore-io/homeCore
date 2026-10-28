@@ -8,6 +8,10 @@ describe('the step', () => {
 	it('says each mode the way the mockup does', () => {
 		expect(sentence({ action: 'play_favorite', favorite: 'Piano for Sleeping', volume: 20 })).toBe('play Piano for Sleeping on {devices} at volume 20');
 		expect(sentence({ volume: 20 })).toBe('set {devices}’s volume to 20');
+		// A playlist plays through its own action (play_playlist).
+		expect(kindOf({ action: 'play_playlist', playlist: 'Dinner' })).toBe('list');
+		expect(sentence({ action: 'play_playlist', playlist: 'Dinner' })).toBe('play the playlist Dinner on {devices}');
+		expect(stateOf('list', { playlist: 'Dinner' })).toEqual({ action: 'play_playlist', playlist: 'Dinner' });
 		expect(sentence({ action: 'pause' })).toBe('pause {devices}');
 		expect(sentence({ action: 'group', members: ['sonos_office_1', 'sonos_office_2'] }, name)).toBe('play {devices}’s music on Office-1 and Office-2 too');
 		expect(sentence({ action: 'group', members: [] })).toBe('play {devices} on its own');

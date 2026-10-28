@@ -116,9 +116,10 @@
 	const stateLine = $derived.by(() => {
 		if (!light) return '';
 		if (!light.available) return 'Not answering the bridge';
-		if (!a.on) return 'Off';
+		// Off is said by the app's panel above; saying it again here stood alone.
+		if (!a.on) return '';
 		const what = running ? effectName(effect) : tab === 'white' ? `${Math.round(num(a.color_temp) ?? 0)} K` : tab === 'gradient' ? 'gradient' : 'colour';
-		return `On · ${bri} % · ${what}`;
+		return `On · ${bri}% · ${what}`;
 	});
 </script>
 
@@ -195,7 +196,7 @@
 							{/each}
 						</span>
 						{#if running}
-							<div class="hc-head"><span class="hc-label">Speed</span><span class="hc-num">{speed} %</span></div>
+							<div class="hc-head"><span class="hc-label">Speed</span><span class="hc-num">{speed}%</span></div>
 							<input type="range" min="0" max="100" value={speed} aria-label="Effect speed" oninput={(e) => setSpeed(+e.currentTarget.value)} />
 						{/if}
 					</section>
