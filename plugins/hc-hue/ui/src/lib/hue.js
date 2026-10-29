@@ -11,6 +11,16 @@ export function adopt(el, host) {
 
 export const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
+/** Whether a device's battery is low: what homeCore's alerts say
+ *  (`host.alerts`), else — on an app without them — homeCore's own line,
+ *  20 % unless changed. */
+export function batteryLow(d, alerts) {
+	if (!d) return false;
+	if (alerts) return alerts.some((x) => x.device_id === d.device_id && x.kind === 'low_battery');
+	const b = num(d.attributes?.battery_pct);
+	return d.attributes?.battery_low === true || (b !== undefined && b <= 20);
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const hex2 = (v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0');
 const toHex = (r, g, b) => `#${hex2(r)}${hex2(g)}${hex2(b)}`;

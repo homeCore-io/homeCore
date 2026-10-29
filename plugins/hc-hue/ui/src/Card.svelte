@@ -14,7 +14,7 @@
      scenes to tap. A motion sensor says when it last saw someone. -->
 <script>
 	import Scenes from './lib/SceneTiles.svelte';
-	import { adopt, ago, num, runningIn, scenesOf, swatchOf } from './lib/hue.js';
+	import { adopt, ago, batteryLow, num, runningIn, scenesOf, swatchOf } from './lib/hue.js';
 	import { follow, temperature } from './lib/units.svelte.js';
 
 	let { host: hc, deviceId, form = 'standard' } = $props();
@@ -24,6 +24,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const dev = $derived(devices.find((d) => d.device_id === deviceId));
 	const a = $derived(dev?.attributes ?? {});
 	const kind = $derived(dev?.device_type);
@@ -68,7 +70,7 @@
 {#snippet words()}
 	<span class="words">
 		<span class="hc-tile-name">{name}</span>
-		<span class="hc-tile-state">{stateLine}{#if kind === 'motion_sensor' && num(a.battery_pct) !== undefined && num(a.battery_pct) <= 15}<span class="bat"> · battery {Math.round(num(a.battery_pct))}%</span>{/if}</span>
+		<span class="hc-tile-state">{stateLine}{#if batteryLow(dev, alerts)}<span class="bat"> · battery {num(a.battery_pct) === undefined ? 'low' : `${Math.round(num(a.battery_pct))}%`}</span>{/if}</span>
 	</span>
 {/snippet}
 

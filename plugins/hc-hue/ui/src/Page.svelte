@@ -5,7 +5,7 @@
      settings. -->
 <script>
 	import Pair from './lib/Pair.svelte';
-	import { adopt, num } from './lib/hue.js';
+	import { adopt, batteryLow, num } from './lib/hue.js';
 
 	let { host: hc } = $props();
 	const me = $host();
@@ -13,6 +13,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	// Bridges this plugin is running: a refresh has counted their lights, or
 	// they are waiting to be paired.
 	const bridges = $derived(
@@ -112,7 +114,7 @@
 				const out = [];
 				if (!d.available && d.device_type === 'light') out.push({ d, why: 'not answering — switched off at the wall?' });
 				const bat = num(d.attributes.battery_pct);
-				if (bat !== undefined && bat <= 15) out.push({ d, why: `battery ${Math.round(bat)} %` });
+				if (batteryLow(d, alerts)) out.push({ d, why: bat === undefined ? 'battery low' : `battery ${Math.round(bat)} %` });
 				if (d.attributes.update_state === 'ready_to_install') out.push({ d, why: 'an update is ready in the Hue app' });
 				return out;
 			})

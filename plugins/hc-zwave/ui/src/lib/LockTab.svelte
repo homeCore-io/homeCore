@@ -2,7 +2,7 @@
      asks first); the door, the battery, the bolt; and how it locks again by
      itself. -->
 <script>
-	import { failed, lastLine, num, RELOCK_CHOICES, relockBody, relockOf } from './zwave.js';
+	import { failed, lastLine, lowBattery, num, RELOCK_CHOICES, relockBody, relockOf } from './zwave.js';
 
 	let { hc, dev, names = {}, canRun = false, admin = false } = $props();
 
@@ -11,7 +11,9 @@
 	const state = $derived(a.jammed === true ? 'Jammed' : a.locked === true ? 'Locked' : a.locked === false ? 'Unlocked' : 'Not sure');
 	const line = $derived(lastLine(dev, names));
 	const battery = $derived(num(a.battery_pct));
-	const lowBattery = $derived(a.battery_low === true || (battery !== undefined && battery <= 30));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
+	const low = $derived(lowBattery(undefined, dev, alerts));
 	const relock = $derived(relockOf(dev));
 	const canRelock = $derived(a.lock_operation_type !== undefined || a.lock_auto_relock_secs !== undefined);
 	const choices = $derived(RELOCK_CHOICES.some(([s]) => s === relock) ? RELOCK_CHOICES : [...RELOCK_CHOICES, [relock, `${relock} seconds`]]);
@@ -61,9 +63,9 @@
 			<span class="hc-label">Door</span>
 			<span class="v">{a.open === true ? 'Open' : a.open === false ? 'Closed' : '—'}</span>
 		</div>
-		<div class="tile" class:warn={lowBattery}>
+		<div class="tile" class:warn={low}>
 			<span class="hc-label">Battery</span>
-			<span class="v" class:bad={lowBattery}>{battery === undefined ? '—' : `${battery}%`}{lowBattery ? ' · change soon' : ''}</span>
+			<span class="v" class:bad={low}>{battery === undefined ? '—' : `${battery}%`}{low ? ' · change soon' : ''}</span>
 		</div>
 		<div class="tile" class:warn={a.jammed === true}>
 			<span class="hc-label">Bolt</span>

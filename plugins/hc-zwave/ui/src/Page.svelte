@@ -34,6 +34,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const label = (d) => hc.devices.label(d);
 	const admin = $derived(!!(hc?.me.isAdmin || hc?.me.can('plugins:write')));
 
@@ -69,7 +71,7 @@
 	);
 	const answering = $derived(rows.filter((r) => r.node.status !== 'dead').length);
 	const c = $derived(status?.controller ?? {});
-	const lows = $derived(rows.filter((r) => lowBattery(r.node, r.device)));
+	const lows = $derived(rows.filter((r) => lowBattery(r.node, r.device, alerts)));
 	const dead = $derived(rows.filter((r) => r.node.status === 'dead'));
 	const leftover = $derived(gone(status, devices));
 	const nameOf = (r) => (r.device ? label(r.device) : r.node.name || `Node ${r.node.node_id}`);
@@ -212,7 +214,7 @@
 					<span class="dev"><b>{nameOf(r)}</b><small>{modelLine(r.node, r.device)}</small></span>
 					<span class="room">{r.device?.room ?? ''}</span>
 					<span class="now">{r.node.status === 'dead' ? 'Not answering' : nowWords(r.device)}</span>
-					<span class="pow" class:low={lowBattery(r.node, r.device)}>{powerWords(r.node)}</span>
+					<span class="pow" class:low={lowBattery(r.node, r.device, alerts)}>{powerWords(r.node)}</span>
 					<span class="sig"><span class="hc-dot {sigTone(r.node.signal)}"></span>{SIGNAL_WORDS[r.node.signal] ?? '—'}</span>
 					<span class="heard hc-num">{heard(r.node)}</span>
 				</button>

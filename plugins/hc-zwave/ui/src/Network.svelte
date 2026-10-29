@@ -12,6 +12,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const label = (d) => hc.devices.label(d);
 
 	let status = $state(null);
@@ -28,7 +30,7 @@
 
 	const rows = $derived(rowsOf(status, devices));
 	const answering = $derived(rows.filter((r) => r.node.status !== 'dead').length);
-	const needs = $derived(attention(status, devices, label));
+	const needs = $derived(attention(status, devices, label, alerts));
 	const connected = $derived(status?.connection?.state === 'connected');
 </script>
 
