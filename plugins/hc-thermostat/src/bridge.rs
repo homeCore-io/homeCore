@@ -197,7 +197,7 @@ impl Bridge {
             Event::State(id, p) => self.ctl.on_state(&id, &p, now),
             Event::Availability(id, online) => self.ctl.on_availability(&id, online, now),
             Event::Command(id, p) => self.ctl.on_command(&id, &p, now),
-            Event::Learned(doc) => self.ctl.apply_learned(&doc),
+            Event::Learned(doc) => self.ctl.apply_learned(&doc, Utc::now()),
             Event::SyncRemaining(tx) => {
                 let _ = tx.send(self.ctl.sync_remaining());
             }

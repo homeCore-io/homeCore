@@ -5,6 +5,7 @@
      settings for its kind — then the sentence it makes, and "Add it". -->
 <script>
 	import {
+		ago,
 		choices,
 		diffText,
 		KINDS,
@@ -182,6 +183,7 @@
 					<input type="checkbox" value={s.id} bind:group={sensors} />
 					<span class="grow">{s.name}<span class="hc-quiet small"> {s.room}</span></span>
 					<b class="hc-num">{about(s)}</b>
+					{#if s.at}<span class="hc-quiet small when">{ago(s.at)}</span>{/if}
 				</label>
 			{/each}
 		</div>
@@ -390,6 +392,10 @@
 	.pick input {
 		width: 18px;
 		height: 18px;
+	}
+	.pick .when {
+		min-width: 76px;
+		text-align: right;
 	}
 	.grow {
 		flex: 1;

@@ -201,6 +201,29 @@ pub fn learned_entry(file: &ThermostatEntry, kept: &Value) -> Option<ThermostatE
     (entry.id == file.id && entry.problem().is_none()).then_some(entry)
 }
 
+/// The part of a thermostat's state worth keeping over a homeCore restart:
+/// when its switch last changed, a hold or override, and today's figures.
+/// Readings are left out — they change all day, and every sensor says its
+/// reading again when its plugin comes back.
+pub fn runtime_of(state: &Value) -> Value {
+    const KEEP: [&str; 10] = [
+        "actuator_last_change",
+        "on_since",
+        "reason",
+        "hold_setpoint",
+        "hold_until",
+        "override_until",
+        "today_from",
+        "run_secs_today",
+        "cycles_today",
+        "longest_run_secs_today",
+    ];
+    KEEP.iter()
+        .filter_map(|k| Some((k.to_string(), state.get(*k)?.clone())))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// `hvac_action`'s word for running in a mode.
 fn running_word(mode: &str) -> &'static str {
     if mode == "heat" {
@@ -447,6 +470,11 @@ pub struct Controller {
     seen: HashMap<String, Seen>,
     /// Readings as our own retained state had them, for their age at a restart.
     restored: HashMap<String, (f64, DateTime<Utc>)>,
+    /// Thermostats whose own retained state was heard before start — fresher
+    /// than what learned state kept, so that is not applied to them.
+    own_restored: HashSet<String>,
+    /// The running state last kept in learned state (see [`runtime_of`]).
+    runtime_kept: Option<Value>,
     candidates: HashMap<String, Candidate>,
     sync_pending: Option<HashSet<String>>,
     fx: Vec<Effect>,
@@ -475,6 +503,8 @@ impl Controller {
             readings: HashMap::new(),
             seen: HashMap::new(),
             restored: HashMap::new(),
+            own_restored: HashSet::new(),
+            runtime_kept: None,
             candidates: HashMap::new(),
             sync_pending: None,
             fx: Vec::new(),
@@ -485,7 +515,29 @@ impl Controller {
 
     /// What to do now, in order.
     pub fn take_effects(&mut self) -> Vec<Effect> {
+        self.keep_runtime();
         std::mem::take(&mut self.fx)
+    }
+
+    /// Keep every thermostat's running state in core's learned state when it
+    /// has changed: our own retained state is lost when homeCore restarts
+    /// (its broker keeps none), learned state is not.
+    fn keep_runtime(&mut self) {
+        if !self.started {
+            return;
+        }
+        let now: serde_json::Map<String, Value> = self
+            .therms
+            .iter()
+            .filter_map(|(id, t)| Some((id.clone(), runtime_of(t.published.as_ref()?))))
+            .collect();
+        let now = Value::Object(now);
+        if self.runtime_kept.as_ref() != Some(&now) {
+            self.runtime_kept = Some(now.clone());
+            // Learned state merges at the top level, so the whole set is sent.
+            self.fx
+                .push(Effect::PersistLearned(json!({ "runtime": now })));
+        }
     }
 
     pub fn started(&self) -> bool {
@@ -653,9 +705,19 @@ impl Controller {
 
     /// The runtime changes learned state kept, where the config file has not
     /// been edited since. Only before start: afterwards we are its writer.
-    pub fn apply_learned(&mut self, doc: &Value) {
+    pub fn apply_learned(&mut self, doc: &Value, now: DateTime<Utc>) {
         if self.started {
             return;
+        }
+        // The running state kept there, where our own retained state (newer)
+        // is gone — after homeCore restarted.
+        if let Some(runtime) = doc.get("runtime").and_then(Value::as_object) {
+            for (id, p) in runtime {
+                if !self.own_restored.contains(id) && self.therms.contains_key(id) {
+                    info!(thermostat = %id, "Took up its running state from learned state");
+                    self.restore_own(id, p, now);
+                }
+            }
         }
         let Some(kept) = doc.get("thermostats").and_then(Value::as_object) else {
             return;
@@ -700,6 +762,7 @@ impl Controller {
             if !self.started {
                 let id = id.to_string();
                 self.heard(device_id);
+                self.own_restored.insert(id.clone());
                 self.restore_own(&id, payload, now);
             }
             return;
@@ -2580,6 +2643,62 @@ actuator_device_id = "den_ac"
         assert!(c.own_id("thermostat_nobody").is_none());
     }
 
+    /// What a homeCore restart would lose (our own retained state with it) is
+    /// kept in learned state when it changes, and only then.
+    #[test]
+    fn the_running_state_is_kept_in_learned_state() {
+        let mut c = started(19.8);
+        c.take_effects();
+        c.on_command(
+            "thermostat_mbr",
+            &json!({"action": "hold", "setpoint": 19.0, "for_secs": 3600}),
+            at(10),
+        );
+        let fx = c.take_effects();
+        let kept: Vec<_> = fx
+            .iter()
+            .filter_map(|e| match e {
+                Effect::PersistLearned(d) => d.get("runtime").cloned(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "{fx:?}");
+        assert_eq!(kept[0]["mbr"]["hold_setpoint"], json!(19.0));
+        assert_eq!(kept[0]["mbr"]["hold_until"], json!("2026-10-21T15:00:10Z"));
+        assert!(kept[0]["mbr"].get("sensor_readings").is_none());
+        // A new reading alone changes nothing kept.
+        temp(&mut c, "mbr_temp", 19.7, 20);
+        assert!(!c
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::PersistLearned(d) if d.get("runtime").is_some())));
+    }
+
+    /// After homeCore restarted, our own retained state is gone: learned
+    /// state brings back the hold and the guard's clock. Our own retained
+    /// state, when there is any, is newer and wins whichever comes first.
+    #[test]
+    fn learned_state_stands_in_for_lost_retained_state() {
+        let runtime = json!({"runtime": {"office": {
+            "actuator_last_change": "2026-10-21T13:58:00Z",
+            "hold_until": "2026-10-21T16:00:00Z", "hold_setpoint": 19.0}}});
+        let mut c = house();
+        c.apply_learned(&runtime, at(0));
+        temp(&mut c, "office_temp", 25.0, 0);
+        switch(&mut c, "office_ac", false, 0);
+        c.start(at(0));
+        let fx = c.take_effects();
+        assert!(!cmds(&fx).iter().any(|(a, _)| a == "office_ac"), "{fx:?}");
+        let s = last_state(&fx, "thermostat_office").unwrap();
+        assert_eq!(s["reason"], json!("waiting_min_off"));
+        assert_eq!(s["hold_setpoint"], json!(19.0));
+
+        let mut c = house();
+        c.on_state("thermostat_office", &json!({"hold_until": null}), at(0));
+        c.apply_learned(&runtime, at(0));
+        assert!(c.t("office").hold.is_none());
+    }
+
     /// Today's figures survive a restart — told by the instant the day began,
     /// not a date that needs the timezone — and start again at midnight.
     #[test]
@@ -2626,7 +2745,7 @@ actuator_device_id = "den_ac"
         changed.setpoint = 21.5;
         let doc =
             json!({"thermostats": {"mbr": runtime_change(&c.t("mbr").cfg, &changed).unwrap()}});
-        c.apply_learned(&doc);
+        c.apply_learned(&doc, Utc::now());
         assert_eq!(c.t("mbr").cfg.setpoint, 21.5);
     }
 
