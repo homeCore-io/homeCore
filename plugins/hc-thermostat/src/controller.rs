@@ -535,7 +535,8 @@ impl Controller {
         if self.runtime_kept.as_ref() != Some(&now) {
             self.runtime_kept = Some(now.clone());
             // Learned state merges at the top level, so the whole set is sent.
-            self.fx.push(Effect::PersistLearned(json!({ "runtime": now })));
+            self.fx
+                .push(Effect::PersistLearned(json!({ "runtime": now })));
         }
     }
 
