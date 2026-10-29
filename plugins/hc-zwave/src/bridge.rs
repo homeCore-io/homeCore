@@ -25,6 +25,7 @@
 //! and says so. It used to sit in a channel and be sent whenever the
 //! connection came back — an unlock an hour late.
 
+use crate::battery;
 use crate::config::Config;
 use crate::inclusion::{decode_controller_event, ControllerEvent};
 use crate::lock::{self, CodeNames, LockEvent};
@@ -246,7 +247,16 @@ fn build_state(node: &NodeState, translator: &Translator) -> Value {
     for v in &node.values {
         translate_node_value(node.node_id, v, translator, &mut map);
     }
-    Value::Object(map)
+    let mut state = Value::Object(map);
+    if let Some(low) = battery_low(node, &state) {
+        state["battery_low"] = Value::Bool(low);
+    }
+    state
+}
+
+/// Whether the battery is low, from what the node holds and what it is.
+fn battery_low(node: &NodeState, state: &Value) -> Option<bool> {
+    battery::low(node, device_type_for(node, state) == Some("lock"))
 }
 
 /// One value's attributes, or none.
@@ -902,6 +912,18 @@ async fn on_node_event(s: &Arc<Shared>, ev: &RawEvent) -> Result<()> {
                     publish_lock_event(s, node_id, e).await?;
                 }
             }
+            // The device's own "battery low" (zwave-js 15.10+): said until it
+            // reads healthy again.
+            if ev
+                .args
+                .as_ref()
+                .is_some_and(|a| battery::is_warning_event(cc, a))
+            {
+                info!(node_id, "Battery low, says the device");
+                s.publisher
+                    .publish_state_partial(&device_id, &json!({ "battery_low": true }))
+                    .await?;
+            }
         }
         "statistics updated" => {
             if let Some(st) = ev.get("statistics") {
@@ -1026,7 +1048,7 @@ async fn on_value(s: &Arc<Shared>, node_id: u32, args: &Value) -> Result<()> {
     if a.new_value.is_null() {
         return Ok(());
     }
-    let pairs = value_pairs(
+    let mut pairs = value_pairs(
         node_id,
         a.command_class,
         a.endpoint,
@@ -1035,6 +1057,14 @@ async fn on_value(s: &Arc<Shared>, node_id: u32, args: &Value) -> Result<()> {
         &a.new_value,
         &s.translator,
     );
+    if battery::is_input(a.command_class, &a.property, pk.as_deref()) {
+        if let Some(node) = s.node(node_id) {
+            let state = build_state(&node, &s.translator);
+            if let Some(low) = state.get("battery_low") {
+                pairs.push(("battery_low".into(), low.clone()));
+            }
+        }
+    }
     if pairs.is_empty() {
         return Ok(());
     }
@@ -1528,6 +1558,34 @@ mod tests {
         for gone in ["cc112_3", "cc114_manufacturerid", "name"] {
             assert!(state.get(gone).is_none(), "{gone}");
         }
+    }
+
+    /// A lock at 23 % is low (homeCore's alerts see `battery_low`); a sensor
+    /// at 23 % is left to homeCore's own line; new batteries clear it.
+    #[test]
+    fn a_locks_battery_is_low_from_thirty_percent() {
+        let at = |generic: &str, specific: &str, pct: u64| {
+            node(json!({
+                "nodeId": 23,
+                "deviceClass": {
+                    "generic":  { "key": 0, "label": generic },
+                    "specific": { "key": 0, "label": specific },
+                },
+                "values": [ { "commandClass": 128, "endpoint": 0, "property": "level", "value": pct } ]
+            }))
+        };
+        let state = |n: &NodeState| {
+            let t = Translator::new();
+            t.learn_node(n);
+            build_state(n, &t)
+        };
+        let lock = state(&at("Entry Control", "Secure Keypad Door Lock", 23));
+        assert_eq!(lock["battery_pct"], json!(23));
+        assert_eq!(lock["battery_low"], json!(true));
+        let sensor = state(&at("Notification Sensor", "Notification Sensor", 23));
+        assert!(sensor.get("battery_low").is_none());
+        let fresh = state(&at("Entry Control", "Secure Keypad Door Lock", 100));
+        assert_eq!(fresh["battery_low"], json!(false));
     }
 
     /// M10: a node's name and room are not published as state.

@@ -12,6 +12,7 @@
 //! ```
 
 mod actions;
+mod battery;
 mod bridge;
 mod config;
 mod convert;

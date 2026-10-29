@@ -49,7 +49,8 @@ Shared names and units (`hc_types::device_vocabulary`), converted in
 | `lock_operation_type` (1 stays, 2 locks again), `lock_timeout_secs`, `lock_auto_relock_secs` | Door Lock configuration (writable) |
 | `last_lock_action`, `last_lock_method`, `last_lock_slot`, `last_lock_event` | lock events (`src/lock.rs`) |
 | `heat_setpoint`, `cool_setpoint`, `hvac_mode`, `hvac_action`, `fan_mode` | Thermostat |
-| sensors, meters (incl. rate type 0 keys 65536/66048/66560/66816), `battery_pct`, `battery_low` | |
+| sensors, meters (incl. rate type 0 keys 65536/66048/66560/66816), `battery_pct` | |
+| `battery_low` | the device's own warning — zwave-js 15.10+'s "battery low" notification, Battery `rechargeOrReplace`, Power Management "Battery level status" (older zwave-js: `isLow`) — and a lock at 30 % or below; cleared when the battery reads above 30 % (`src/battery.rs`) |
 | `motion`, `tampered`, `intrusion`, `smoke`, `co`, `co2_alarm`, `water_detected`, `heat_alarm`, `overload`, `overcurrent` | Notification CC by zwave-js's own variable names |
 | `child_lock` | Protection local (writable) |
 | `last_command_error` | the plugin |
