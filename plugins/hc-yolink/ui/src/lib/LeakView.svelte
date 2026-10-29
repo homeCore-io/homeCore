@@ -5,6 +5,8 @@
 	import { ago, batteryLow, clock, lasted, lastWet, leakAutomations, listWords, quietAfter, temp, when } from './yolink.js';
 
 	let { hc, dev, status = null } = $props();
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 
 	const a = $derived(dev?.attributes ?? {});
 	const off = $derived(dev?.available === false);
@@ -59,10 +61,10 @@
 			<span class="v">{a.temperature !== undefined ? (void unitsTick, temp(hc, a.temperature)) : '—'}</span>
 			{#if a.freeze_warning === true}<span class="hc-quiet small bad">near freezing</span>{/if}
 		</div>
-		<div class="tile" class:warn={!!fault || batteryLow(dev)}>
+		<div class="tile" class:warn={!!fault || batteryLow(dev, alerts)}>
 			<span class="hc-label">Sensor</span>
 			<span class="v" class:bad={!!fault}>{fault || 'Working'}</span>
-			<span class="hc-quiet small">{fault ? 'it may not notice water' : batteryLow(dev) ? 'battery low — change it soon' : 'no probe or freeze fault'}</span>
+			<span class="hc-quiet small">{fault ? 'it may not notice water' : batteryLow(dev, alerts) ? 'battery low — change it soon' : 'no probe or freeze fault'}</span>
 		</div>
 	</div>
 	<div class="note">

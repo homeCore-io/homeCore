@@ -37,11 +37,19 @@ export function ago(iso, now = Date.now()) {
 /** Stale after three missed uploads at the usual minute. */
 export const stale = (iso, now = Date.now()) => now - Date.parse(iso ?? '') > 3.5 * 60_000;
 
+/** Whether a sensor's battery is low: what homeCore's alerts say
+ *  (`host.alerts`), else — on an app without them — the plugin's flag. */
+export function batteryLow(d, alerts) {
+	if (!d) return false;
+	if (alerts) return alerts.some((x) => x.device_id === d.device_id && x.kind === 'low_battery');
+	return d.attributes?.battery_low === true;
+}
+
 /** A sensor's battery: `battery_pct` where it is a level, `voltage` where it
- *  is a cell voltage, and only `battery_low` where it is a 0/1 flag. */
-export function battery(a) {
+ *  is a cell voltage, and only `battery_low` where it is a 0/1 flag. `low` is
+ *  whether to call it low — `batteryLow`. */
+export function battery(a, low = a.battery_low === true) {
 	if (a.battery_kind === undefined && a.battery_low === undefined) return { text: '—', tone: '' };
-	const low = a.battery_low === true;
 	let text = low ? 'Low' : 'OK';
 	if (num(a.battery_pct) !== undefined) text = `${fmt(a.battery_pct, 0)} %${low ? ' · low' : ''}`;
 	else if (num(a.voltage) !== undefined) text = `${fmt(a.voltage, 2)} V${low ? ' · low' : ''}`;

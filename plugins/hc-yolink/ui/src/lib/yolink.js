@@ -131,7 +131,8 @@ export function quarters(d) {
 	return p === undefined ? undefined : Math.max(0, Math.min(4, Math.round(p / 25)));
 }
 
-export const BATTERY_WORDS = ['Empty', 'Low — change soon', 'Half', 'Three quarters', 'Full'];
+/** A level in words. Whether it wants changing is homeCore's to say — `batteryLow`. */
+export const BATTERY_WORDS = ['Empty', 'A quarter', 'Half', 'Three quarters', 'Full'];
 
 /** "full", "2 of 4", "1 of 4 · low". */
 export function batteryShort(d) {
@@ -141,7 +142,14 @@ export function batteryShort(d) {
 	return `${q} of 4`;
 }
 
-export const batteryLow = (d) => attrs(d).battery_low === true || (quarters(d) ?? 4) <= 1;
+/** Whether a device's battery is low: what homeCore's alerts say
+ *  (`host.alerts`), else — on an app without them — the plugin's flag or
+ *  YoLink's own "1 of 4". */
+export function batteryLow(d, alerts) {
+	if (!d) return false;
+	if (alerts) return alerts.some((x) => x.device_id === d.device_id && x.kind === 'low_battery');
+	return attrs(d).battery_low === true || (quarters(d) ?? 4) <= 1;
+}
 
 /** Devices with less than a full battery, lowest first. */
 export function batteries(devices) {
@@ -263,14 +271,14 @@ export function lastProblem(d, now = Date.now()) {
 }
 
 /** "Locks itself after 10 s", "Door closed · battery low". */
-export function lockSubline(d) {
+export function lockSubline(d, alerts) {
 	const a = attrs(d);
 	const parts = [];
 	if (a.open === true) parts.push('Door open');
 	else if (a.open === false) parts.push('Door closed');
 	const auto = num(a.auto_lock_secs);
 	if (auto) parts.push(`Locks itself after ${secsWords(auto)}`);
-	if (batteryLow(d)) parts.push('battery low');
+	if (batteryLow(d, alerts)) parts.push('battery low');
 	const s = parts.join(' · ');
 	return s.charAt(0).toUpperCase() + s.slice(1);
 }

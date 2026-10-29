@@ -5,13 +5,15 @@
 	import { autoChoices, batteryLow, BATTERY_WORDS, lastLine, lastProblem, lockState, num, quarters, SOUND } from './yolink.js';
 
 	let { hc, dev, canRun = false } = $props();
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 
 	const a = $derived(dev?.attributes ?? {});
 	const label = $derived(dev ? hc.devices.label(dev) : '');
 	const off = $derived(dev?.available === false);
 	const line = $derived(lastLine(dev));
 	const q = $derived(quarters(dev));
-	const low = $derived(batteryLow(dev));
+	const low = $derived(batteryLow(dev, alerts));
 	const problem = $derived(lastProblem(dev));
 	const auto = $derived(num(a.auto_lock_secs));
 	const sound = $derived(num(a.sound_level));

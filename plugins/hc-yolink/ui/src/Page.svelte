@@ -39,6 +39,8 @@
 	import { readRules, rulesFor, tellsWords } from './lib/tell.js';
 
 	let { host: hc } = $props();
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const me = $host();
 	$effect(() => adopt(me, hc));
 
@@ -101,7 +103,7 @@
 
 	const all = $derived(devices);
 	const quietOnes = $derived(all.filter((d) => !reporting(d)).sort(byName));
-	const lows = $derived(all.filter(batteryLow).sort(byName));
+	const lows = $derived(all.filter((d) => batteryLow(d, alerts)).sort(byName));
 	const w = $derived(water(all, tick));
 	const leaks = $derived([...w.leaks].sort(byName));
 	const valveAutos = $derived(leakAutomations(automations, w.leaks.map((d) => d.device_id)));
@@ -224,7 +226,7 @@
 								<td class="hc-num now" class:off={!reporting(d)}>{(void unitsTick, reporting(d) ? temp(hc, d.attributes.temperature) : 'Not reporting')}</td>
 								<td class="dim">{d.attributes.humidity !== undefined ? `${Math.round(d.attributes.humidity)} %` : '—'}</td>
 								<td class="dim">{tells || '—'}</td>
-								<td class="dim" class:low={batteryLow(d)}>{batteryShort(d)}</td>
+								<td class="dim" class:low={batteryLow(d, alerts)}>{batteryShort(d)}</td>
 							</tr>
 						{/each}
 					</tbody>
@@ -258,7 +260,7 @@
 					<div class="list">
 						{#each locks as d (d.device_id)}
 							<button class="row tall" onclick={() => open(d)}>
-								<span class="two-line"><b>{label(d)}</b><small>{lockSubline(d)}</small></span>
+								<span class="two-line"><b>{label(d)}</b><small>{lockSubline(d, alerts)}</small></span>
 								<span class="lk" class:unlocked={d.attributes.locked !== true}>{reporting(d) ? lockState(d) : 'Not reporting'}</span>
 							</button>
 						{/each}
@@ -292,7 +294,7 @@
 					{@const q = quarters(d)}
 					<button class="tile batt" onclick={() => open(d)}>
 						<span class="bars" aria-hidden="true">{#each [0, 1, 2, 3] as i (i)}<span class:on={i < q} class:bad={q <= 1}></span>{/each}</span>
-						<span class="words2"><span class="nm">{label(d)}</span><span class="bn" class:low={q <= 1}>{BATTERY_WORDS[q]}</span></span>
+						<span class="words2"><span class="nm">{label(d)}</span><span class="bn" class:low={batteryLow(d, alerts)}>{batteryLow(d, alerts) ? 'Low — change soon' : BATTERY_WORDS[q]}</span></span>
 					</button>
 				{/each}
 			</div>

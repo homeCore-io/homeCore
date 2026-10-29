@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "hc-yolink"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "chrono",
