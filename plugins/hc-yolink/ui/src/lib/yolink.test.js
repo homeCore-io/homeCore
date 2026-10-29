@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	batteries,
+	batteryLow,
 	batteryShort,
 	becameTrue,
 	cardLine,
@@ -24,6 +25,19 @@ const dev = (device_type, attributes, extra = {}) => ({ device_id: `yolink_${Mat
 const host = (f) => ({ units: { show: (v, u) => (f && u === '°C' ? { value: Math.round((v * 9) / 5 + 32), unit: '°F', text: `${Math.round((v * 9) / 5 + 32)} °F` } : { value: v, unit: u, text: `${v} ${u}` }), toCore: (v, u) => (f && u === '°C' ? ((v - 32) * 5) / 9 : v) } });
 
 describe('batteries in quarters', () => {
+	it('is low when homeCore’s alerts say so', () => {
+		const lock = dev('lock', { open: false, battery_pct: 25, battery_low: true });
+		// Ignored in Alerts: not low on the screen either.
+		expect(batteryLow(lock, [])).toBe(false);
+		expect(lockSubline(lock, [])).toBe('Door closed');
+		expect(batteryLow(lock, [{ device_id: lock.device_id, kind: 'low_battery' }])).toBe(true);
+		expect(batteryLow(lock, [{ device_id: lock.device_id, kind: 'offline' }])).toBe(false);
+		// An app without alerts: the flag, or 1 of 4.
+		expect(batteryLow(lock, undefined)).toBe(true);
+		expect(batteryLow(dev('leak_sensor', { battery_pct: 25 }), undefined)).toBe(true);
+		expect(batteryLow(dev('leak_sensor', { battery_pct: 50 }), undefined)).toBe(false);
+	});
+
 	it('reads YoLink’s levels back from battery_pct', () => {
 		expect(quarters(dev('lock', { battery_pct: 25 }))).toBe(1);
 		expect(batteryShort(dev('lock', { battery_pct: 100 }))).toBe('full');

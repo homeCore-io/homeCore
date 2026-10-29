@@ -5,7 +5,7 @@
      the plugin's settings. -->
 <script>
 	import Now from './lib/Now.svelte';
-	import { adopt, ago, battery, kindOf, reading, stale } from './lib/weather.js';
+	import { adopt, ago, battery, batteryLow, kindOf, reading, stale } from './lib/weather.js';
 	import { follow } from './lib/units.svelte.js';
 
 	/** @type {{ host: import('../../../../sdk/ui/index.js').Host }} */
@@ -16,6 +16,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	let now = $state(Date.now());
 	$effect(() => {
 		const t = setInterval(() => (now = Date.now()), 5000);
@@ -30,7 +32,7 @@
 		sensors.map((d) => d.last_seen).filter(Boolean).sort().at(-1)
 	);
 	const reporting = $derived(newest !== undefined && !stale(newest, now));
-	const low = $derived(sensors.filter((d) => d.attributes.battery_low === true));
+	const low = $derived(sensors.filter((d) => batteryLow(d, alerts)));
 
 	// ---- the plugin's settings (admins) ----
 	let cfg = $state(null);
@@ -162,7 +164,7 @@
 				</thead>
 				<tbody>
 					{#each sensors as d (d.device_id)}
-						{@const b = battery(d.attributes)}
+						{@const b = battery(d.attributes, batteryLow(d, alerts))}
 						<tr>
 							<td>
 								<button class="link" onclick={() => hc.ui.openDevice(d.device_id)}>{hc.devices.label(d)}</button>

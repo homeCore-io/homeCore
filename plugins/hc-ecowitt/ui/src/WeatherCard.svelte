@@ -9,7 +9,7 @@
      with UV, lightning and the sensors that need a battery. "Details" opens
      the station's panel. -->
 <script>
-	import { adopt, compass, fmt, n, num, rainGauge, trend, u, uvWords } from './lib/weather.js';
+	import { adopt, batteryLow, compass, fmt, n, num, rainGauge, trend, u, uvWords } from './lib/weather.js';
 	import { follow } from './lib/units.svelte.js';
 
 	let { host: hc, form = 'standard' } = $props();
@@ -19,9 +19,11 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const station = $derived(devices.find((d) => d.device_type === 'weather_station'));
 	const sensors = $derived(devices.filter((d) => d.device_type !== 'gateway'));
-	const low = $derived(sensors.filter((d) => d.attributes.battery_low === true));
+	const low = $derived(sensors.filter((d) => batteryLow(d, alerts)));
 	const s = $derived(station?.attributes ?? {});
 	const rain = $derived(rainGauge(devices));
 	const r = $derived(rain?.attributes ?? {});

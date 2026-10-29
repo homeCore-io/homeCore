@@ -29,6 +29,8 @@
 	import { cardWords, readRules, rulesFor } from './lib/tell.js';
 
 	let { host: hc, deviceId, form = 'standard' } = $props();
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const me = $host();
 	$effect(() => adopt(me, hc));
 
@@ -66,7 +68,7 @@
 		if (!r.ok) error = r.error;
 	}
 	const open = () => dev && hc.ui.openDevice(dev.device_id);
-	const line = $derived([cardLine(dev), batteryLow(dev) ? 'battery low' : ''].filter(Boolean).join(' · '));
+	const line = $derived([cardLine(dev), batteryLow(dev, alerts) ? 'battery low' : ''].filter(Boolean).join(' · '));
 </script>
 
 {#snippet icon(size)}
@@ -102,7 +104,7 @@
 					<span class="st" class:open={!locked}>{off ? 'Not reporting' : `${lockState(dev)}${a.open === true ? ' · door open' : ''}`}</span>
 				</span>
 			</span>
-			{#if line}<span class="hc-tile-state line" class:low={batteryLow(dev)}>{line}</span>{/if}
+			{#if line}<span class="hc-tile-state line" class:low={batteryLow(dev, alerts)}>{line}</span>{/if}
 			<button class="act" disabled={!canRun || busy} onclick={toggle}>{locked ? 'Unlock…' : 'Lock'}</button>
 			{#if error}<span class="err" role="alert">{error}</span>{/if}
 		{/if}

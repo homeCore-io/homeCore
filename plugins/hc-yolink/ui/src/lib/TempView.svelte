@@ -7,6 +7,8 @@
 	import { build, channels, FOR_CHOICES, readRules, rulesFor, ruleName, saveRule } from './tell.js';
 
 	let { hc, dev, row = null, status = null } = $props();
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 
 	const a = $derived(dev?.attributes ?? {});
 	const label = $derived(dev ? hc.devices.label(dev) : '');
@@ -162,9 +164,9 @@
 			<span class="v">{SIGNAL_WORDS[row?.signal ?? 'unknown']}</span>
 			{#if row?.signal_dbm}<span class="hc-quiet small">{row.signal_dbm} dBm</span>{/if}
 		</div>
-		<div class="tile" class:warn={batteryLow(dev)}>
+		<div class="tile" class:warn={batteryLow(dev, alerts)}>
 			<span class="hc-label">Battery</span>
-			<span class="v" class:bad={batteryLow(dev)}>{q === undefined ? '—' : `${q <= 1 ? 'Low' : BATTERY_WORDS[q]} · ${q} of 4`}</span>
+			<span class="v" class:bad={batteryLow(dev, alerts)}>{q === undefined ? '—' : `${batteryLow(dev, alerts) ? 'Low' : BATTERY_WORDS[q]} · ${q} of 4`}</span>
 		</div>
 	</div>
 </div>
