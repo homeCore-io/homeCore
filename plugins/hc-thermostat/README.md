@@ -71,6 +71,10 @@ shows them in place of its generic ones.
 - **At start** it only listens: learned state, its own retained state, every
   sensor and switch. Then it registers its devices and makes one settling pass
   that sends each switch what it should be.
+- **A homeCore restart** loses its own retained state (homeCore's broker keeps
+  none), so a hold, a hand-flip override, when the switch last changed (for the
+  guards) and today's figures are also kept in learned state whenever they
+  change, and taken from there at start when its own retained state is gone.
 
 ## What a thermostat reports
 

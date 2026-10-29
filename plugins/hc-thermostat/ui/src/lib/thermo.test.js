@@ -118,6 +118,7 @@ describe('time', () => {
 		expect(span(52 * 60)).toBe('52 m');
 		expect(ago(iso(240), NOW)).toBe('4 min ago');
 		expect(ago(iso(20), NOW)).toBe('just now');
+		expect(ago(iso(194 * 3600), NOW)).toBe('8 days ago');
 	});
 
 	it('counts a run going on now into today', () => {

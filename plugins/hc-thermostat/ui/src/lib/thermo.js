@@ -154,13 +154,14 @@ export function minutes(secs) {
 	return `${s} s`;
 }
 
-/** "4 min ago", "just now", "2 h 14 m ago". */
+/** "4 min ago", "just now", "2 h 14 m ago", "8 days ago". */
 export function ago(iso, now = Date.now()) {
 	const t = ms(iso);
 	if (t === undefined) return '';
 	const s = (now - t) / 1000;
 	if (s < 60) return 'just now';
 	if (s < 3600) return `${Math.round(s / 60)} min ago`;
+	if (s >= 2 * 86400) return `${Math.floor(s / 86400)} days ago`;
 	return `${span(s)} ago`;
 }
 
