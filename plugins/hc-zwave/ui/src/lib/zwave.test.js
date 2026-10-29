@@ -64,6 +64,16 @@ describe('words for the network', () => {
 		expect(lowBattery({ battery_pct: 29 }, { device_type: 'motion_sensor', attributes: {} })).toBe(false);
 	});
 
+	it('says a battery is low when homeCore’s alerts do', () => {
+		const alerts = [{ device_id: 'zwave_45', kind: 'low_battery' }, { device_id: 'zwave_46', kind: 'offline' }];
+		// homeCore said nothing about the lock at 29 % (someone ignored it,
+		// say): neither does its screen.
+		expect(lowBattery({ battery_pct: 29 }, lock({}), alerts)).toBe(false);
+		expect(lowBattery({ battery_pct: 80 }, { device_id: 'zwave_45', attributes: {} }, alerts)).toBe(true);
+		expect(lowBattery({ device_id: 'zwave_45' }, undefined, alerts)).toBe(true);
+		expect(lowBattery({ battery_pct: 5 }, { device_id: 'zwave_46', attributes: {} }, [])).toBe(false);
+	});
+
 	it('describes a route', () => {
 		expect(routeWords({ repeaters: [] })).toBe('Straight to the controller');
 		expect(routeWords({ repeaters: [12, 7] })).toBe('Through nodes 12 and 7');

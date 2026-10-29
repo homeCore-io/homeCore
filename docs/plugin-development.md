@@ -244,6 +244,8 @@ for now; never send pictures as data URIs over the management channel.
 Every element gets a `host` (types: `sdk/ui/index.d.ts`), scoped to the plugin:
 
 - `devices` — its devices, live (`subscribe`, `list`, `get`, `label`, `history`);
+- `alerts` — homeCore's alerts on its devices, live (`subscribe`, `list`): what
+  the Alerts page shows (below);
 - `command(deviceId, body)`, `action(id, params)`, `query(id, params)`,
   `upload(action, file, params)`;
 - `config` — its settings file (admins), `restartPlugin()`;
@@ -304,6 +306,16 @@ Gotchas, each learnt the hard way:
   `host.units.toCore`; `host.units.subscribe` hears them change it. It is
   absent before app 0.1.21 — fall back to the schema's unit, as
   `hc-ecowitt/ui/src/lib/units.svelte.js` does.
+- **Say what homeCore says, don't decide again.** Whether a battery is low,
+  a device has been offline too long, a reading is out of line: homeCore's
+  alerts decide that, with the line the house set and what someone chose to
+  ignore. Read `host.alerts` (`kind: 'low_battery'` on the device) rather
+  than comparing `battery_pct` to a number of your own — a screen that says
+  "replace soon" where Alerts says nothing (or the reverse) is a bug. Where a
+  device needs an earlier warning (a lock), have the plugin publish
+  `battery_low: true` so homeCore alerts on it. `host.alerts` is absent
+  before app 0.1.34 — fall back to `battery_low` and 20 %, as
+  `hc-hue/ui/src/lib/hue.js` (`batteryLow`) does.
 - WLED's screens were the app's own and moved into the plugin with a small
   adapter layer (`hc-wled/ui/src/lib/*` gives the old `#lib/...` names over
   `host`, via Vite aliases) — a pattern for porting existing Svelte screens.

@@ -8,7 +8,7 @@
 <!-- A Hue accessory's panel: a motion sensor's readings and today's motion,
      a remote's buttons and how each was last pressed, a door sensor. -->
 <script>
-	import { adopt, ago, num } from './lib/hue.js';
+	import { adopt, ago, batteryLow, num } from './lib/hue.js';
 	import { follow, temperature } from './lib/units.svelte.js';
 
 	let { host: hc, deviceId } = $props();
@@ -18,6 +18,8 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	let alerts = $state();
+	$effect(() => hc?.alerts?.subscribe((list) => (alerts = list)));
 	const dev = $derived(devices.find((d) => d.device_id === deviceId));
 	const a = $derived(dev?.attributes ?? {});
 	const kind = $derived(dev?.device_type ?? '');
@@ -65,7 +67,7 @@
 	}
 
 	const battery = $derived(num(a.battery_pct));
-	const low = $derived(battery !== undefined && battery <= 15);
+	const low = $derived(batteryLow(dev, alerts));
 	// Hue publishes °C, always; shown in the person's units.
 	const temp = $derived(num(a.temperature) === undefined ? undefined : temperature(num(a.temperature)));
 	const sens = ['Low', 'Medium', 'High'];

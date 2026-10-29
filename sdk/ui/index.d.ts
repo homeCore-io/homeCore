@@ -49,6 +49,8 @@
  * the plugin's card for every device of the slot's types.
  * Later (the app after 0.1.27): `fileUrl` — without it, draw no picture the
  * plugin keeps.
+ * Later (the app after 0.1.33): `alerts` — without it, decide for yourself
+ * (a low battery from `battery_low` and the level).
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -57,6 +59,27 @@
  */
 
 export type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/**
+ * One of homeCore's alerts on one of the plugin's devices, as the app's
+ * Alerts page shows it: homeCore decided it (its low-battery line, its
+ * alert rules, what someone ignored), so a screen that shows it agrees.
+ */
+export interface Alert {
+	/** Stable while it lasts: `low_battery:{device}`, `rule:{rule}:{device}`. */
+	id: string;
+	/** `offline`, `wet`, `smoke`, `jammed`, `low_battery`, `rule`, `plugin`, … */
+	kind: string;
+	device_id: string;
+	/** In words, with the device's name: "Hallway Sensor: battery low (14%)". */
+	message: string;
+	/** The same without the name, for the device's own screen: "Battery low (14%)". */
+	reason: string;
+	severity: 'info' | 'warning' | 'error' | 'critical';
+	raised_at: string;
+	/** Someone has seen it; it stays until it clears. */
+	acknowledged: boolean;
+}
 
 /** One of the plugin's devices, as homeCore reports it. */
 export interface Device {
@@ -116,6 +139,18 @@ export interface Host {
 			attribute: string,
 			opts?: { from?: string; limit?: number }
 		): Promise<Result<{ at: string; value: unknown }[]>>;
+	};
+
+	/**
+	 * homeCore's alerts on the plugin's devices, live — what the Alerts page
+	 * lists. Show these instead of deciding again ("is this battery low?").
+	 * Absent on an app before 0.1.34: decide for yourself there.
+	 */
+	readonly alerts?: {
+		/** `undefined` until homeCore has said (or on one too old to have alerts). */
+		list(): Alert[] | undefined;
+		/** Called now, and again on every change; returns the way to stop. */
+		subscribe(f: (alerts: Alert[] | undefined) => void): () => void;
 	};
 
 	/** A command to one of its devices, in the device's own words. */

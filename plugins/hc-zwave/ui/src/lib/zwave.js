@@ -119,8 +119,11 @@ export function powerWords(node) {
 	return node.sleeps ? `${pct} · sleeps` : pct;
 }
 
-/** The battery level that is worth a word: a lock's below 30 %, else 20 %. */
-export function lowBattery(node, device) {
+/** Whether the battery is low: what homeCore's alerts say (`host.alerts`),
+ *  else — on an app without them — a lock's at 30 % or below, else 20 %. */
+export function lowBattery(node, device, alerts) {
+	const id = device?.device_id ?? node?.device_id;
+	if (alerts) return alerts.some((x) => x.device_id === id && x.kind === 'low_battery');
 	const b = num(node?.battery_pct ?? attrs(device).battery_pct);
 	if (attrs(device).battery_low === true) return true;
 	if (b === undefined) return false;
@@ -137,12 +140,12 @@ export function rowsOf(status, devices) {
 }
 
 /** What needs someone, one line per device: not answering, battery, signal. */
-export function attention(status, devices, label = (d) => d?.name) {
+export function attention(status, devices, label = (d) => d?.name, alerts) {
 	const out = [];
 	for (const { node, device } of rowsOf(status, devices)) {
 		const name = device ? label(device) : node.name ?? `Node ${node.node_id}`;
 		if (node.status === 'dead') out.push({ id: node.device_id, name, what: 'not answering', tone: 'bad' });
-		else if (lowBattery(node, device)) out.push({ id: node.device_id, name, what: `battery ${num(node.battery_pct) ?? 'low'}${num(node.battery_pct) !== undefined ? '%' : ''}`, tone: 'bad' });
+		else if (lowBattery(node, device, alerts)) out.push({ id: node.device_id, name, what: `battery ${num(node.battery_pct) ?? 'low'}${num(node.battery_pct) !== undefined ? '%' : ''}`, tone: 'bad' });
 		else if (node.signal === 'poor' || node.signal === 'fair') out.push({ id: node.device_id, name, what: `signal ${node.signal}`, tone: 'warn' });
 	}
 	return out;
