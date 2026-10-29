@@ -354,7 +354,8 @@ static ALIAS_TABLE: &[AliasEntry] = &[
     alias("50/0/value/66050", "power_w_exported", Identity),
     // Battery (CC 128).
     alias("128/0/level", "battery_pct", Identity),
-    alias("128/0/isLow", "battery_low", Identity),
+    // `battery_low` is decided from several values and an event:
+    // `crate::battery`.
     // Door Lock (CC 98). currentMode is what the hardware confirmed;
     // targetMode is where commands go. `boltStatus` said the same as
     // `locked`, so it is not published.
@@ -504,9 +505,9 @@ pub fn is_unpublished(cc: u32, property: &str, property_key: Option<&str>) -> bo
             property,
             "duration" | "restorePrevious" | "Up" | "Down" | "On" | "Off"
         ),
-        // A battery's level and whether it is low are the readings; its
-        // chemistry and charging flags are not.
-        128 => !matches!(property, "level" | "isLow"),
+        // A battery's level is the reading; whether it is low is decided in
+        // `crate::battery`, and its chemistry and charging flags are not.
+        128 => property != "level",
         // A lock: whether it is locked, whether the door is open, and how it
         // locks again by itself. The bolt and latch said the same as
         // `locked`; the handles and twist assist are installation settings;
@@ -1405,13 +1406,14 @@ mod tests {
             (113, "Access Control", Some("Keypad state")),
             (50, "reset", None),
             (117, "rf", None),
+            (128, "isLow", None),
+            (128, "rechargeOrReplace", None),
         ] {
             assert!(is_unpublished(cc, prop, pk), "{cc}/{prop}/{pk:?}");
         }
         for (cc, prop, pk) in [
             (37, "currentValue", None),
             (128, "level", None),
-            (128, "isLow", None),
             (98, "currentMode", None),
             (98, "doorStatus", None),
             (113, "Access Control", Some("Door state")),
