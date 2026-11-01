@@ -147,10 +147,11 @@
 		const a = d?.attributes ?? {};
 		if (typeof a.temperature !== 'number') return '—';
 		const show = (v) => (hc?.units ? hc.units.show(v, '°C').text : `${Math.round(v * 10) / 10}°C`);
+		if (a.hvac_mode === 'off') return `${show(a.temperature)} · off`;
+		if (a.hvac_mode === 'auto' && typeof a.heat_setpoint === 'number' && typeof a.cool_setpoint === 'number')
+			return `${show(a.temperature)} · heat ${show(a.heat_setpoint)}, cool ${show(a.cool_setpoint)}`;
 		const target = a.hvac_mode === 'cool' ? a.cool_setpoint : a.heat_setpoint;
-		return typeof target === 'number' && a.hvac_mode !== 'off'
-			? `${show(a.temperature)} · target ${show(target)}`
-			: show(a.temperature);
+		return typeof target === 'number' ? `${show(a.temperature)} · target ${show(target)}` : show(a.temperature);
 	};
 	const noteOf = (t) =>
 		alerts.find((a) => a.device_id === t.device_id)?.reason ??
