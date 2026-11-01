@@ -20,6 +20,7 @@ members = [
     "plugins/hc-hue",
     "plugins/hc-isy",
     "plugins/hc-lutron",
+    "plugins/hc-nuheat",
     "plugins/hc-plugin-template",
     "plugins/hc-roku",
     "plugins/hc-sonos",
