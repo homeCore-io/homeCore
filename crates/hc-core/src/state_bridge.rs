@@ -515,6 +515,10 @@ impl StateBridge {
             device.attributes.remove(key);
         }
         device.last_seen = Utc::now();
+        // A report means the device is there. Say so when that is news: the
+        // "online" its plugin sends next then changes nothing, and without this
+        // a client that saw it registered unavailable would never hear it came up.
+        let came_online = !device.available;
         device.available = true;
         device.last_change = Some(change.clone());
 
@@ -560,6 +564,15 @@ impl StateBridge {
         }
 
         self.store.upsert_device(&device).await?;
+
+        if came_online {
+            let _ = self.pub_bus.publish(Event::DeviceAvailabilityChanged {
+                timestamp: Utc::now(),
+                device_id: device_id.to_string(),
+                device_name: Some(device.effective_name().to_string()),
+                available: true,
+            });
+        }
 
         // Fire DeviceNameChanged if the name attribute caused a rename.
         if device.name != previous_name {
@@ -1580,5 +1593,54 @@ mod alert_tests {
             rx.try_recv().unwrap(),
             Event::PluginAlerts { alerts, .. } if alerts.is_empty()
         ));
+    }
+
+    /// A device registered unavailable that then reports is announced as
+    /// available, once: its plugin's "online" after that changes nothing.
+    #[tokio::test]
+    async fn a_first_report_announces_the_device_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let mut floor = DeviceState::new("nuheat_1", "Living Room", "plugin.nuheat");
+        floor.available = false;
+        store.upsert_device(&floor).await.unwrap();
+        let bus = EventBus::new(16);
+        let pub_bus = EventBus::new(16);
+        let mut rx = pub_bus.subscribe();
+        let bridge = StateBridge::new(bus, pub_bus, store);
+        bridge
+            .handle_mqtt(
+                "homecore/devices/nuheat_1/state",
+                br#"{"temperature":21.9}"#,
+            )
+            .await
+            .unwrap();
+        let mut came_up = 0;
+        while let Ok(e) = rx.try_recv() {
+            if let Event::DeviceAvailabilityChanged { available, .. } = e {
+                assert!(available);
+                came_up += 1;
+            }
+        }
+        assert_eq!(came_up, 1);
+        bridge
+            .handle_mqtt("homecore/devices/nuheat_1/availability", b"online")
+            .await
+            .unwrap();
+        bridge
+            .handle_mqtt(
+                "homecore/devices/nuheat_1/state",
+                br#"{"temperature":22.0}"#,
+            )
+            .await
+            .unwrap();
+        while let Ok(e) = rx.try_recv() {
+            assert!(!matches!(e, Event::DeviceAvailabilityChanged { .. }));
+        }
     }
 }
