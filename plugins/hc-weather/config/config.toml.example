@@ -1,0 +1,64 @@
+# hc-weather — example configuration.
+#
+# homeCore seeds the real file at `config/plugins/plugin.weather.toml` when the
+# plugin is installed, and restarts the plugin when it changes. This copy is
+# for running the binary by hand:
+#
+#   cargo run -p hc-weather -- plugins/hc-weather/config/config.toml
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.weather"
+password    = ""
+
+[logging]
+forward_level = "info"      # trace | debug | info | warn | error
+
+[weather]
+# The US National Weather Service asks every program that reads its warnings
+# to say who to contact about it. Sent only to api.weather.gov. Optional.
+contact = ""
+
+# How often each is read, in seconds. Open-Meteo updates the weather now every
+# 15 minutes, so reading it more often fetches the same numbers again.
+current_interval_secs     = 900
+forecast_interval_secs    = 1800
+air_quality_interval_secs = 900
+alerts_interval_secs      = 120
+
+# Where it asks. Change these only for a server of your own (Open-Meteo can be
+# self-hosted) or a stand-in while testing.
+# forecast_url    = "https://api.open-meteo.com/v1/forecast"
+# air_quality_url = "https://air-quality-api.open-meteo.com/v1/air-quality"
+# geocoding_url   = "https://geocoding-api.open-meteo.com/v1/search"
+# nws_url         = "https://api.weather.gov"
+# meteoalarm_url  = "https://feeds.meteoalarm.org/api/v1/warnings"
+
+# ── Places ──────────────────────────────────────────────────────────────────
+# With none, the plugin reports the house (device `weather_home`), at the
+# coordinates in homeCore's own [location]. Add one for anywhere else. Its id
+# names its device, `weather_<id>`, for good.
+#
+# [[weather.locations]]
+# id        = "cabin"
+# name      = "Cabin"
+# latitude  = 35.611
+# longitude = -83.489
+#
+# Or by postal code, looked up once:
+# [[weather.locations]]
+# id          = "office"
+# name        = "Office"
+# postal_code = "10001"
+# country     = "US"
+#
+# Warnings: "auto" takes the US's from the National Weather Service. In
+# Europe, MeteoAlarm needs the region named, by its code or part of its name:
+# [[weather.locations]]
+# id              = "flat"
+# name            = "Flat"
+# query           = "Husum"
+# country         = "DE"
+# alerts          = "auto"            # auto | nws | meteoalarm | off
+# meteoalarm_area = "Nordfriesland"

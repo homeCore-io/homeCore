@@ -305,6 +305,15 @@ usual with a `file_path` param — a local file, removed once the action has
 replied (copy it first if the action keeps working after replying). A page of
 yours sends one with `host.upload(action, file, params)`.
 
+## Where the house is
+
+homeCore publishes its `[location]` coordinates on the retained
+`homecore/system/location` topic, beside the time zone. The SDK keeps the
+latest: `plugin_sdk_rs::house_location()` returns it once it has arrived, and
+`wait_house_location(timeout)` waits for it (call it after `run_managed` has
+started). A homeCore older than this SDK never sends it, so keep a fallback,
+such as coordinates in your settings.
+
 ## Secrets in log fields
 
 `MqttLogLayer` publishes log events to a topic anything can subscribe to,

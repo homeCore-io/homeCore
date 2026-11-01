@@ -23,6 +23,8 @@ pub mod device;
 /// The names devices report and take: one name, one meaning, one unit.
 pub mod device_vocabulary;
 pub mod event;
+/// Where the house is, as core publishes it to plugins.
+pub mod location;
 pub mod log_line;
 pub mod mqtt;
 pub mod plugin_capabilities;

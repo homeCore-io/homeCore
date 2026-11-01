@@ -863,6 +863,20 @@ async fn main() -> Result<()> {
             tracing::debug!(tz = %tz_name, "Published retained homecore/system/tz");
         }
 
+        // The house's coordinates, beside the zone, for plugins that need to
+        // know where the house is (weather for "home"). The same `[location]`
+        // sunrise and sunset come from.
+        let here = hc_types::location::HouseLocation {
+            latitude: config.location.latitude,
+            longitude: config.location.longitude,
+        };
+        if let Err(e) = publish_handle
+            .publish_retained(hc_types::location::TOPIC, here.to_payload())
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to publish retained {}", hc_types::location::TOPIC);
+        }
+
         // Restore each plugin's durable learned-state as a retained MQTT message
         // so a (re)connecting plugin loads it on subscribe. The broker's retained
         // store is in-memory (lost on restart); redb is the durable source.
