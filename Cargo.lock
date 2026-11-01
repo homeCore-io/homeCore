@@ -1959,6 +1959,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-weather"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "plugin-sdk-rs",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hc-web-admin"
 version = "0.1.4"
 dependencies = [

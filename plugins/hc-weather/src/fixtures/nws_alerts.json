@@ -1,0 +1,106 @@
+{
+ "type": "FeatureCollection",
+ "title": "Current watches, warnings, and advisories",
+ "features": [
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.c47213b8846f19b1cb8b737423603b76e5d64476.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "id": "urn:oid:2.49.0.1.840.0.c47213b8846f19b1cb8b737423603b76e5d64476.001.1",
+    "areaDesc": "Archuleta, CO",
+    "sent": "2026-11-01T09:44:00-07:00",
+    "effective": "2026-11-01T09:44:00-07:00",
+    "onset": "2026-11-01T09:44:00-07:00",
+    "expires": "2026-11-02T19:00:00-07:00",
+    "ends": "2026-11-02T19:00:00-07:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Flood Warning",
+    "senderName": "NWS Grand Junction CO",
+    "headline": "Flood Warning issued November 1 at 9:44AM MST until November 2 at 7:00PM MST by NWS Grand Junction CO",
+    "description": "* WHAT...Flooding caused by excessive rainfall is expected.\n\n* WHERE...South Central Archuleta County in southwestern Colorado...\n\n* WHEN...Until 700 PM MST Monday.\n\n* IMPACTS...Flooding of rivers, creeks, streams, and other low-lying\nand flood-prone locations is imminent or occurring.\n\n* ADDITIONAL",
+    "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.\n\nBe especially cautious at night when it is harder to recognize the\ndangers of flooding.\n\nBe aware of you"
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.2dd215e378eb08e478cfc3dafdca53426c0e3e44.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "id": "urn:oid:2.49.0.1.840.0.2dd215e378eb08e478cfc3dafdca53426c0e3e44.001.1",
+    "areaDesc": "Alamosa  Vicinity/Central San Luis Valley Below 8500 Ft",
+    "sent": "2026-11-01T08:12:00-07:00",
+    "effective": "2026-11-01T08:12:00-07:00",
+    "onset": "2026-11-04T07:18:00-07:00",
+    "expires": "2026-11-01T16:15:00-07:00",
+    "ends": "2026-11-06T07:00:00-07:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Possible",
+    "urgency": "Future",
+    "event": "Flood Watch",
+    "senderName": "NWS Pueblo CO",
+    "headline": "Flood Watch issued November 1 at 8:12AM MST until November 6 at 7:00AM MST by NWS Pueblo CO",
+    "description": "...The National Weather Service in Pueblo has issued a Flood Watch\nfor the following rivers in Colorado...\n\nRio Grande At Alamosa affecting Alamosa Vicinity/Central San Luis\nValley Below 8500 Feet zone.\n\nFor the Upper Rio Grande River...including Alamosa...flooding is\npossible.\n\n* WHAT...Flooding is",
+    "instruction": "If you are in the watch area, remain alert to possible flooding.\n\nResidents and those with interests near the river should monitor\nrising water levels and be prepared for possible Flood Warnings.\n\nAdd"
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.db344a22a64f5a1e397a735c897be6600ae98a73.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "id": "urn:oid:2.49.0.1.840.0.db344a22a64f5a1e397a735c897be6600ae98a73.002.1",
+    "areaDesc": "Johnson and Bartlett Mesas Including Raton Pass",
+    "sent": "2026-11-01T09:46:00-07:00",
+    "effective": "2026-11-01T09:46:00-07:00",
+    "onset": "2026-11-01T11:00:00-07:00",
+    "expires": "2026-11-02T02:15:00-07:00",
+    "ends": "2026-11-02T05:00:00-07:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Wind Advisory",
+    "senderName": "NWS Albuquerque NM",
+    "headline": "Wind Advisory issued November 1 at 9:46AM MST until November 2 at 5:00AM MST by NWS Albuquerque NM",
+    "description": "* WHAT...Southwest winds 25 to 35 mph with gusts up to 55 mph\nexpected.\n\n* WHERE...Johnson and Bartlett Mesas Including Raton Pass.\n\n* WHEN...Until 5 AM MST Monday.\n\n* IMPACTS...Gusty winds will blow around unsecured objects. Tree\nlimbs may be blown down. Expect strong crosswinds on area roadways.",
+    "instruction": "Winds this strong can make driving difficult, especially for high\nprofile vehicles. Use extra caution."
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.d7ff3dffeda68ee6e8388abc656bf5a27a4767c6.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "id": "urn:oid:2.49.0.1.840.0.d7ff3dffeda68ee6e8388abc656bf5a27a4767c6.001.1",
+    "areaDesc": "Inland Palm Beach County",
+    "sent": "2026-11-01T11:58:00-05:00",
+    "effective": "2026-11-01T11:58:00-05:00",
+    "onset": "2026-11-01T11:58:00-05:00",
+    "expires": "2026-11-01T12:30:00-05:00",
+    "ends": null,
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Observed",
+    "urgency": "Expected",
+    "event": "Special Weather Statement",
+    "senderName": "NWS Miami FL",
+    "headline": "Special Weather Statement issued November 1 at 11:58AM EST by NWS Miami FL",
+    "description": "At 1157 AM EST, National Weather Service meteorologists were tracking\na strong thunderstorm 10 miles west of Loxahatchee NWR, or 13 miles\nsoutheast of Belle Glade, moving northwest at 40 mph.\n\nHAZARD...Wind gusts of 45 to 50 mph.\n\nSOURCE...Radar indicated.\n\nIMPACT...Gusty winds could knock down tree",
+    "instruction": "These winds can down small tree limbs and branches, and blow around\nunsecured small objects. Seek shelter in a safe building until the\nstorm passes."
+   }
+  }
+ ]
+}

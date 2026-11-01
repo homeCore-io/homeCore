@@ -1,0 +1,651 @@
+{
+ "warnings": [
+  {
+   "uuid": "97b80ef6-2955-4463-99e6-e482a632bfe2",
+   "alert": {
+    "identifier": "2.49.0.0.276.0.DWD.PVW.1793097480000.3c53dbd1-d8fd-4af1-88da-92ba6fc81e05.MUL",
+    "msgType": "Update",
+    "sent": "2026-10-27T11:38:00+01:00",
+    "status": "Actual",
+    "info": [
+     {
+      "area": [
+       {
+        "altitude": 0,
+        "areaDesc": "Elbe von Hamburg bis Cuxhaven",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE804",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "501000004",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       }
+      ],
+      "category": [
+       "Met"
+      ],
+      "certainty": "Likely",
+      "contact": "Deutscher Wetterdienst",
+      "description": "This event no longer poses a threat.",
+      "event": "near gale",
+      "eventCode": [
+       {
+        "value": "2.1.14",
+        "valueName": "PROFILE_VERSION"
+       },
+       {
+        "value": "© GeoBasis-DE / BKG 2021 (Daten modifiziert)",
+        "valueName": "LICENSE"
+       },
+       {
+        "value": "11",
+        "valueName": "II"
+       },
+       {
+        "value": "WIND",
+        "valueName": "GROUP"
+       },
+       {
+        "value": "255 235 59",
+        "valueName": "AREA_COLOR"
+       }
+      ],
+      "expires": "2026-10-27T11:38:00+01:00",
+      "headline": "Cancellation of Official NEAR GALE WARNING",
+      "language": "en",
+      "onset": "2026-10-27T03:27:00+01:00",
+      "parameter": [
+       {
+        "value": "2; yellow; Moderate",
+        "valueName": "awareness_level"
+       },
+       {
+        "value": "7; coastalevent",
+        "valueName": "awareness_type"
+       }
+      ],
+      "responseType": [
+       "AllClear"
+      ],
+      "senderName": "DWD / Seewetterdienst Hamburg",
+      "severity": "Minor",
+      "urgency": "Immediate",
+      "web": "https://dwd.de/warnungen"
+     }
+    ]
+   }
+  },
+  {
+   "uuid": "50c2642c-7f14-4c22-9cd9-972ba957dcee",
+   "alert": {
+    "identifier": "2.49.0.0.276.0.DWD.PVW.1793118360000.b00ff23e-dc8f-4e6e-9300-28a515a078dc.MUL",
+    "msgType": "Alert",
+    "sent": "2026-10-27T17:26:00+01:00",
+    "status": "Actual",
+    "info": [
+     {
+      "area": [
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Nordfriesland - Binnenland",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE106",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "901054001",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Nordfriesland - Küste",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE095",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "901054002",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       }
+      ],
+      "category": [
+       "Met"
+      ],
+      "certainty": "Likely",
+      "contact": "Deutscher Wetterdienst",
+      "description": "There is a risk of wind gusts (level 1 of 4).\nMax. gusts: < 60 km/h; Wind direction: south",
+      "event": "wind gusts",
+      "eventCode": [
+       {
+        "value": "2.1.14",
+        "valueName": "PROFILE_VERSION"
+       },
+       {
+        "value": "© GeoBasis-DE / BKG 2021 (Daten modifiziert)",
+        "valueName": "LICENSE"
+       },
+       {
+        "value": "51",
+        "valueName": "II"
+       },
+       {
+        "value": "WIND",
+        "valueName": "GROUP"
+       },
+       {
+        "value": "255 235 59",
+        "valueName": "AREA_COLOR"
+       }
+      ],
+      "expires": "2026-10-27T20:30:00+01:00",
+      "headline": "Official WARNING of WIND GUSTS",
+      "instruction": "Hazard(s) to expect: light objects flying through the air. \nRecommendations for what to do: \nSecure loose objects. For example, fasten tents and coverings.",
+      "language": "en",
+      "onset": "2026-10-27T18:00:00+01:00",
+      "parameter": [
+       {
+        "value": "south",
+        "valueName": "wind direction"
+       },
+       {
+        "value": "<60 [km/h]",
+        "valueName": "gusts"
+       },
+       {
+        "value": "light objects flying through the air",
+        "valueName": "impacts"
+       },
+       {
+        "value": "2; yellow; Moderate",
+        "valueName": "awareness_level"
+       },
+       {
+        "value": "1; Wind",
+        "valueName": "awareness_type"
+       }
+      ],
+      "responseType": [
+       "Prepare"
+      ],
+      "senderName": "Deutscher Wetterdienst",
+      "severity": "Minor",
+      "urgency": "Immediate",
+      "web": "https://dwd.de/warnungen"
+     }
+    ]
+   }
+  },
+  {
+   "uuid": "70fec1f2-c9bf-45b9-9194-5d8132fb290c",
+   "alert": {
+    "identifier": "2.49.0.0.276.0.DWD.PVW.1793124180000.8f5fb15c-44f1-40b7-926b-fc2ce5d69030.MUL",
+    "msgType": "Update",
+    "sent": "2026-10-27T19:03:00+01:00",
+    "status": "Actual",
+    "info": [
+     {
+      "area": [
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Kreis Harz - Bergland (Oberharz)",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE093",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "915085002",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       }
+      ],
+      "category": [
+       "Met"
+      ],
+      "certainty": "Likely",
+      "contact": "Deutscher Wetterdienst",
+      "description": "This event no longer poses a threat.",
+      "event": "gale-force gusts",
+      "eventCode": [
+       {
+        "value": "2.1.14",
+        "valueName": "PROFILE_VERSION"
+       },
+       {
+        "value": "© GeoBasis-DE / BKG 2021 (Daten modifiziert)",
+        "valueName": "LICENSE"
+       },
+       {
+        "value": "52",
+        "valueName": "II"
+       },
+       {
+        "value": "WIND",
+        "valueName": "GROUP"
+       },
+       {
+        "value": "251 140 0",
+        "valueName": "AREA_COLOR"
+       }
+      ],
+      "expires": "2026-10-27T19:03:00+01:00",
+      "headline": "Cancellation of Official WARNING of GALE-FORCE GUSTS",
+      "language": "en",
+      "onset": "2026-10-27T09:11:00+01:00",
+      "parameter": [
+       {
+        "value": "<75 [km/h]",
+        "valueName": "gusts"
+       },
+       {
+        "value": "south-west",
+        "valueName": "wind direction"
+       },
+       {
+        "value": "west",
+        "valueName": "subsequent wind direction"
+       },
+       {
+        "value": "south-west",
+        "valueName": "wind direction"
+       },
+       {
+        "value": "west",
+        "valueName": "wind direction"
+       },
+       {
+        "value": "single branches falling",
+        "valueName": "impacts"
+       },
+       {
+        "value": "objects flying through the air",
+        "valueName": "impacts"
+       },
+       {
+        "value": "3; orange; Severe",
+        "valueName": "awareness_level"
+       },
+       {
+        "value": "1; Wind",
+        "valueName": "awareness_type"
+       }
+      ],
+      "responseType": [
+       "AllClear"
+      ],
+      "senderName": "Deutscher Wetterdienst",
+      "severity": "Moderate",
+      "urgency": "Immediate",
+      "web": "https://dwd.de/warnungen"
+     }
+    ]
+   }
+  },
+  {
+   "uuid": "df9b459c-cbff-425a-9158-1cdddbdf33f4",
+   "alert": {
+    "identifier": "2.49.0.0.276.0.DWD.PVW.1793260080000.ecec0543-c340-4ead-822e-85dc307499e1.MUL",
+    "msgType": "Update",
+    "sent": "2026-10-29T08:48:00+01:00",
+    "status": "Actual",
+    "info": [
+     {
+      "area": [
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Birkenfeld",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE182",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "107134000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Kusel",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE160",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "107336000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis und Stadt Kassel",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE026",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "906633999",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Bad Kreuznach",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE143",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "107133000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Schwalm-Eder-Kreis",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE177",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "106634000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Hersfeld-Rotenburg",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE217",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "106632000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Werra-Meißner-Kreis",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE279",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "106636000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 0,
+        "areaDesc": "Kreis Mainz-Bingen und Stadt Mainz",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE097",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "907339999",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       }
+      ],
+      "category": [
+       "Met"
+      ],
+      "certainty": "Likely",
+      "contact": "Deutscher Wetterdienst",
+      "description": "There is a risk of fog (level 1 of 1).\nVisibility: < 150 m",
+      "event": "fog",
+      "eventCode": [
+       {
+        "value": "2.1.14",
+        "valueName": "PROFILE_VERSION"
+       },
+       {
+        "value": "© GeoBasis-DE / BKG 2021 (Daten modifiziert)",
+        "valueName": "LICENSE"
+       },
+       {
+        "value": "59",
+        "valueName": "II"
+       },
+       {
+        "value": "FOG",
+        "valueName": "GROUP"
+       },
+       {
+        "value": "255 235 59",
+        "valueName": "AREA_COLOR"
+       }
+      ],
+      "expires": "2026-10-29T09:00:00+01:00",
+      "headline": "Official WARNING of FOG",
+      "instruction": "Hazard(s) to expect: severely reduced visibility possible. \nRecommendations for what to do: \nAdapt your driving behaviour to sudden reduced visibility (fog banks).",
+      "language": "en",
+      "onset": "2026-10-28T23:56:00+01:00",
+      "parameter": [
+       {
+        "value": "<150 [m]",
+        "valueName": "visibility"
+       },
+       {
+        "value": "severely reduced visibility possible",
+        "valueName": "impacts"
+       },
+       {
+        "value": "2; yellow; Moderate",
+        "valueName": "awareness_level"
+       },
+       {
+        "value": "4; Fog",
+        "valueName": "awareness_type"
+       }
+      ],
+      "responseType": [
+       "Prepare"
+      ],
+      "senderName": "Deutscher Wetterdienst",
+      "severity": "Minor",
+      "urgency": "Immediate",
+      "web": "https://dwd.de/warnungen"
+     }
+    ]
+   }
+  },
+  {
+   "uuid": "8fc9279e-dbb7-4371-835f-9c04aee50749",
+   "alert": {
+    "identifier": "2.49.0.0.276.0.DWD.PVW.1793348580000.35ac32c7-a22b-4012-ac90-135e36ef5e6d.MUL",
+    "msgType": "Alert",
+    "sent": "2026-10-30T09:23:00+01:00",
+    "status": "Actual",
+    "info": [
+     {
+      "area": [
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Schwarzwald-Baar-Kreis",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE408",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "108326000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Kreis Emmendingen",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE227",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "108316000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Kreis Lörrach",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE312",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "108336000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Kreis Breisgau-Hochschwarzwald und Stadt Freiburg",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE035",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "908315999",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       },
+       {
+        "altitude": 3280.8399,
+        "areaDesc": "Kreis Waldshut",
+        "ceiling": 9842.5197,
+        "geocode": [
+         {
+          "value": "DE281",
+          "valueName": "EMMA_ID"
+         },
+         {
+          "value": "108337000",
+          "valueName": "WARNCELLID"
+         }
+        ]
+       }
+      ],
+      "category": [
+       "Met"
+      ],
+      "certainty": "Likely",
+      "contact": "Deutscher Wetterdienst",
+      "description": "There is a risk of gale-force gusts (level 2 of 4).\nHeight range: > 1000 m; Max. gusts: 70-80 km/h; Wind direction: east",
+      "event": "gale-force gusts",
+      "eventCode": [
+       {
+        "value": "2.1.14",
+        "valueName": "PROFILE_VERSION"
+       },
+       {
+        "value": "© GeoBasis-DE / BKG 2021 (Daten modifiziert)",
+        "valueName": "LICENSE"
+       },
+       {
+        "value": "52",
+        "valueName": "II"
+       },
+       {
+        "value": "WIND",
+        "valueName": "GROUP"
+       },
+       {
+        "value": "251 140 0",
+        "valueName": "AREA_COLOR"
+       }
+      ],
+      "expires": "2026-10-31T10:00:00+01:00",
+      "headline": "Official WARNING of GALE-FORCE GUSTS",
+      "instruction": "Hazard(s) caused by: single branches falling; objects flying through the air. \nRecommendations for what to do: \nSecure free-standing objects (e.g. screens and furniture). For example, fasten tents and coverings. Watch out for falling objects outdoors (e.g. branches).",
+      "language": "en",
+      "onset": "2026-10-30T20:00:00+01:00",
+      "parameter": [
+       {
+        "value": "70-80 [km/h]",
+        "valueName": "gusts"
+       },
+       {
+        "value": "east",
+        "valueName": "wind direction"
+       },
+       {
+        "value": "single branches falling",
+        "valueName": "impacts"
+       },
+       {
+        "value": "objects flying through the air",
+        "valueName": "impacts"
+       },
+       {
+        "value": "3; orange; Severe",
+        "valueName": "awareness_level"
+       },
+       {
+        "value": "1; Wind",
+        "valueName": "awareness_type"
+       }
+      ],
+      "responseType": [
+       "Prepare"
+      ],
+      "senderName": "Deutscher Wetterdienst",
+      "severity": "Moderate",
+      "urgency": "Immediate",
+      "web": "https://dwd.de/warnungen"
+     }
+    ]
+   }
+  }
+ ]
+}

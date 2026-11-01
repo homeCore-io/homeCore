@@ -1,0 +1,34 @@
+[package]
+name        = "hc-weather"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Weather for a place: Open-Meteo's conditions, forecast and air quality, and the national weather service's warnings as homeCore alerts"
+repository  = "https://github.com/homeCore-io/homeCore"
+
+[package.metadata.homecore]
+# The name people see in Plugins › Add (the registry index).
+name = "Weather"
+
+[[bin]]
+name = "hc-weather"
+path = "src/main.rs"
+
+[dependencies]
+schemars           = { version = "1", optional = true }
+plugin-sdk-rs      = { path = "../../sdk/rust" }
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+toml               = "1"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+chrono             = { version = "0.4", features = ["serde"] }
+reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[features]
+default = ["schema"]
+# The operator-config JSON Schema on the capability manifest, so the app draws
+# a typed form. Off = a leaner build with a TOML textarea instead.
+schema = ["dep:schemars", "plugin-sdk-rs/schema"]

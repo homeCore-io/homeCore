@@ -24,6 +24,7 @@ members = [
     "plugins/hc-roku",
     "plugins/hc-sonos",
     "plugins/hc-thermostat",
+    "plugins/hc-weather",
     "plugins/hc-wled",
     "plugins/hc-yolink",
     "plugins/hc-zwave",
