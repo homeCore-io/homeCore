@@ -1,4 +1,4 @@
-# hc-mysa — example configuration.
+# hc-mysa: example configuration.
 #
 # In a normal install you never copy this file. homeCore seeds the real one at
 # `config/plugins/plugin.mysa.toml` when the plugin is installed, hands that
