@@ -6,6 +6,7 @@
 //! this device and a weather station the same way.
 
 use crate::conditions::CONDITIONS;
+use crate::openmeteo::AQI_CATEGORIES;
 use plugin_sdk_rs::types::schema::{
     AttributeKind, AttributeOption, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
 };
@@ -38,15 +39,69 @@ pub fn device_schema() -> DeviceSchema {
         "precipitation_mm",
         reading(Float, "Rain, last 15 min", Some("mm")),
     );
+    put("dewpoint", reading(Float, "Dew point", Some("°C")));
+    put(
+        "rain_next_hour_mm",
+        reading(Float, "Rain, next hour", Some("mm")),
+    );
+    put(
+        "rain_starts_in_min",
+        reading(Integer, "Rain starts in", Some("min")),
+    );
+    put(
+        "rain_soon",
+        AttributeSchema {
+            kind: Bool,
+            display_name: Some("Rain within 30 min".into()),
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("rain soon", "expects rain soon"),
+                when_false: StateLabel::verbed("dry", "expects no rain soon"),
+            }),
+            ..Default::default()
+        },
+    );
     put("cloud_cover_pct", reading(Float, "Cloud cover", Some("%")));
     put("uvi", reading(Float, "UV index", None));
     put("today_high", reading(Float, "Today's high", Some("°C")));
     put("today_low", reading(Float, "Today's low", Some("°C")));
+    put("tonight_low", reading(Float, "Tonight's low", Some("°C")));
+    put(
+        "freeze_tonight",
+        AttributeSchema {
+            kind: Bool,
+            display_name: Some("Freezing tonight".into()),
+            states: Some(BoolStates {
+                when_true: StateLabel::verbed("freezing", "expects a freeze"),
+                when_false: StateLabel::verbed("above freezing", "expects no freeze"),
+            }),
+            ..Default::default()
+        },
+    );
+    put(
+        "tomorrow_high",
+        reading(Float, "Tomorrow's high", Some("°C")),
+    );
+    put("tomorrow_low", reading(Float, "Tomorrow's low", Some("°C")));
     put(
         "rain_chance_pct",
         reading(Float, "Chance of rain today", Some("%")),
     );
+    put("snow_today_mm", reading(Float, "Snow today", Some("mm")));
     put("aqi", reading(Integer, "Air quality (US AQI)", None));
+    put(
+        "aqi_category",
+        AttributeSchema {
+            kind: Enum,
+            display_name: Some("Air quality".into()),
+            options: Some(
+                AQI_CATEGORIES
+                    .iter()
+                    .map(|(v, l)| AttributeOption::new(*v).labelled(*l))
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+    );
     put("pm25_ugm3", reading(Float, "PM2.5", Some("µg/m³")));
     put("ozone_ugm3", reading(Float, "Ozone", Some("µg/m³")));
     put(

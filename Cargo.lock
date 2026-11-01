@@ -1987,6 +1987,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "plugin-sdk-rs",
  "reqwest",
  "schemars",
