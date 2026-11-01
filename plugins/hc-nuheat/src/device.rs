@@ -110,6 +110,10 @@ pub struct CommandContext {
     /// The thermostat's current setpoint in °C, for a hold that names no
     /// temperature of its own.
     pub current_setpoint_c: Option<f64>,
+    /// Whether the thermostat is on a permanent hold now. A new target for
+    /// one stays permanent, as in NuHeat's own app, rather than quietly
+    /// handing it back to a schedule its owner turned off.
+    pub permanently_held: bool,
 }
 
 /// Read a command payload as an [`Intent`].
@@ -117,7 +121,7 @@ pub struct CommandContext {
 /// Accepts both shapes homeCore commands arrive in: attribute writes
 /// (`{"setpoint": 21.5}`, `{"schedule_mode": "auto"}`) because the schema declares
 /// those attributes writable, and action calls (`{"action": "hold_temperature",
-/// "temperature": 21.5, "hours": 3}`) because the schema declares those
+/// "setpoint": 21.5, "hours": 3}`) because the schema declares those
 /// actions. A plugin that declares both and honours only one produces controls
 /// that look live and do nothing.
 pub fn interpret(
@@ -130,7 +134,7 @@ pub fn interpret(
         return match action {
             "resume_schedule" => Ok(Intent::Auto),
             "hold_temperature" => {
-                let celsius = read_temperature(payload, &["temperature", "setpoint"])
+                let celsius = read_temperature(payload, &["setpoint", "temperature"])
                     .or(ctx.current_setpoint_c)
                     .ok_or(Rejection::HoldWithoutTemperature)?;
                 let hours = payload
@@ -144,7 +148,7 @@ pub fn interpret(
                 })
             }
             "set_permanent_hold" => {
-                let celsius = read_temperature(payload, &["temperature", "setpoint"])
+                let celsius = read_temperature(payload, &["setpoint", "temperature"])
                     .or(ctx.current_setpoint_c)
                     .ok_or(Rejection::HoldWithoutTemperature)?;
                 Ok(Intent::PermanentHold { celsius })
@@ -205,7 +209,7 @@ pub fn interpret(
         // A bare setpoint. Which hold it becomes is the operator's setting —
         // see `bare_setpoint_is_permanent`.
         (None, Some(celsius)) => {
-            if ctx.bare_setpoint_is_permanent {
+            if ctx.bare_setpoint_is_permanent || ctx.permanently_held {
                 Ok(Intent::PermanentHold { celsius })
             } else {
                 Ok(Intent::Hold {
@@ -420,9 +424,9 @@ pub fn device_schema(limits: units::SetpointLimits) -> DeviceSchema {
                 icon: Some("thermostat".into()),
                 params: vec![
                     ParamSpec {
-                        name: "temperature".into(),
+                        name: "setpoint".into(),
                         kind: ParamKind::Float,
-                        label: Some("Temperature".into()),
+                        label: Some("Target".into()),
                         required: true,
                         default: None,
                         unit: Some("°C".into()),
@@ -449,7 +453,7 @@ pub fn device_schema(limits: units::SetpointLimits) -> DeviceSchema {
                     },
                 ],
                 writes: Some("setpoint".into()),
-                sentence: Some("hold {device} at {temperature} for {hours} hours".into()),
+                sentence: Some("hold {device} at {setpoint} for {hours} hours".into()),
                 confirm: None,
                 requires_role: Default::default(),
             },
@@ -463,9 +467,9 @@ pub fn device_schema(limits: units::SetpointLimits) -> DeviceSchema {
                 category: Some("Schedule".into()),
                 icon: Some("lock".into()),
                 params: vec![ParamSpec {
-                    name: "temperature".into(),
+                    name: "setpoint".into(),
                     kind: ParamKind::Float,
-                    label: Some("Temperature".into()),
+                    label: Some("Target".into()),
                     required: true,
                     default: None,
                     unit: Some("°C".into()),
@@ -476,7 +480,7 @@ pub fn device_schema(limits: units::SetpointLimits) -> DeviceSchema {
                     options_from: None,
                 }],
                 writes: Some("setpoint".into()),
-                sentence: Some("hold {device} at {temperature} indefinitely".into()),
+                sentence: Some("hold {device} at {setpoint} indefinitely".into()),
                 confirm: None,
                 requires_role: Default::default(),
             },
@@ -493,6 +497,7 @@ mod tests {
             bare_setpoint_is_permanent: false,
             default_hold_hours: None,
             current_setpoint_c: Some(21.0),
+            permanently_held: false,
         }
     }
 
@@ -526,6 +531,19 @@ mod tests {
         c.bare_setpoint_is_permanent = true;
         let intent = interpret(&json!({"setpoint": 22.5}), c, at()).expect("understood");
         assert_eq!(intent, Intent::PermanentHold { celsius: 22.5 });
+    }
+
+    #[test]
+    fn a_new_target_on_a_permanent_hold_stays_permanent() {
+        let mut c = ctx();
+        c.permanently_held = true;
+        let intent = interpret(&json!({"setpoint": 22.5}), c, at()).expect("understood");
+        assert_eq!(intent, Intent::PermanentHold { celsius: 22.5 });
+        // Asking for a hold by name still gets one.
+        assert!(matches!(
+            interpret(&json!({"schedule_mode": "hold", "setpoint": 22.5}), c, at()),
+            Ok(Intent::Hold { .. })
+        ));
     }
 
     #[test]

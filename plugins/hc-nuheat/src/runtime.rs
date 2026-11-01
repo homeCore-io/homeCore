@@ -87,6 +87,7 @@ pub struct Runtime {
 #[derive(Debug, Clone, Default)]
 struct Known {
     setpoint_c: Option<f64>,
+    permanently_held: bool,
     name: String,
     /// The fault last raised as an alert, so it is only said when it changes.
     fault: Option<String>,
@@ -320,6 +321,7 @@ impl Runtime {
             let mut guard = self.known.lock().expect("known mutex");
             let entry = guard.entry(t.serial_number.clone()).or_default();
             entry.setpoint_c = state["setpoint"].as_f64();
+            entry.permanently_held = state["schedule_mode"] == "permanent_hold";
             entry.name = name.to_string();
             let changed = first_time || entry.fault != fault;
             entry.fault = fault.clone();
@@ -329,7 +331,8 @@ impl Runtime {
             // Current state, not events: the whole list each time, empty when clear.
             let alerts: Vec<PluginAlert> = fault
                 .iter()
-                .map(|f| PluginAlert::new(ALERT_FAULT, format!("Fault: {f}")))
+                // The thermostat's own words, after its name: "Master Bath Floor: floor sensor open".
+                .map(|f| PluginAlert::new(ALERT_FAULT, f.clone()))
                 .collect();
             self.publisher.set_alerts(&device_id, &alerts).await?;
         }
@@ -359,15 +362,18 @@ impl Runtime {
             return;
         };
 
+        let known = self
+            .known
+            .lock()
+            .expect("known mutex")
+            .get(&serial)
+            .cloned()
+            .unwrap_or_default();
         let ctx = CommandContext {
             bare_setpoint_is_permanent: self.bare_setpoint_is_permanent,
             default_hold_hours: self.default_hold_hours,
-            current_setpoint_c: self
-                .known
-                .lock()
-                .expect("known mutex")
-                .get(&serial)
-                .and_then(|k| k.setpoint_c),
+            current_setpoint_c: known.setpoint_c,
+            permanently_held: known.permanently_held,
         };
 
         let intent = match device::interpret(payload, ctx, chrono::Utc::now()) {
