@@ -115,12 +115,24 @@ services' addresses, for a self-hosted Open-Meteo or a stand-in. A postal code
 or name is looked up once and kept in `.weather-places.json` beside the
 settings file.
 
-## Its screen
+## Its screens
 
-A page in Settings › Plugins: each place with the weather there now and any
-warnings, when each reading was last fetched, Refresh now, and the data's
-credit. Its devices have no card of their own: the app's Weather card draws
-them, and their panel is the app's generic one.
+A page in Settings › Plugins: each place with the weather there now and
+what's coming, any warnings in full, the next 24 hours, when each reading
+was last fetched, Refresh now, and the data's credit.
+
+**Weather, animated**, a card for any page (`dashboard.card`, compact,
+standard or large): the weather now as a moving scene. The sky picks the
+backdrop and day or night the sun or moon; cloud cover sets how many clouds,
+the last 15 minutes' rain how heavy the rain or snow, and the wind slants it
+and speeds the clouds. Over it: the temperature, a ribbon for a watch or
+warning, "Rain in 20 min", the next hours and, when large, five days. Its
+settings choose the place (with more than one) and a name. It is CSS and SVG
+only, stops moving when off screen or when the tab is hidden, and stands still
+for anyone whose device asks for reduced motion.
+
+The devices have no card of their own: the app's Weather card draws them,
+and their panel is the app's generic one.
 
 ## Data
 
