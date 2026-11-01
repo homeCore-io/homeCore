@@ -199,7 +199,7 @@ async fn try_start(
         auth: Arc::clone(&auth),
         api,
         notices,
-        wake: wake_tx.clone(),
+        runtime: Arc::clone(&rt),
     };
 
     let mgmt = {

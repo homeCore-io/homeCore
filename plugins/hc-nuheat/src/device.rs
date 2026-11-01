@@ -166,7 +166,7 @@ pub fn interpret(
         .map(|m| Mode::parse(m).ok_or_else(|| Rejection::UnknownMode(m.to_string())))
         .transpose()?;
 
-    // Not `temperature`: that is the floor's reading, never written.
+    // Not `temperature`: that is the thermostat's reading, never written.
     let celsius = read_temperature(
         payload,
         &["setpoint", "heat_setpoint", "target_temperature"],
@@ -308,7 +308,9 @@ pub fn device_schema(limits: units::SetpointLimits) -> DeviceSchema {
     attributes.insert(
         "temperature".into(),
         AttributeSchema {
-            display_name: Some("Floor temperature".into()),
+            // The thermostat's own reading: the floor's or the room air's, as it
+            // was set up. NuHeat doesn't say which, so neither is claimed.
+            display_name: Some("Temperature".into()),
             unit: Some("°C".into()),
             ..AttributeSchema::read_only(AttributeKind::Float)
         },

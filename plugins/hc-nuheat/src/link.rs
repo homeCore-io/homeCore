@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use crate::api::NuHeatApi;
 use crate::auth::{Auth, Returned, Via};
-use crate::runtime::{NOTICE_AUTH_REJECTED, NOTICE_NOT_LINKED, NOTICE_RELINK_DUE};
+use crate::runtime::{Runtime, NOTICE_AUTH_REJECTED, NOTICE_NOT_LINKED, NOTICE_RELINK_DUE};
 
 /// What the link and sign-out actions need to do their work.
 #[derive(Clone)]
@@ -33,9 +33,9 @@ pub struct LinkHandle {
     pub auth: Arc<Auth>,
     pub api: NuHeatApi,
     pub notices: PluginNotices,
-    /// Cuts the poll interval short, so a freshly linked account shows its
-    /// thermostats at once.
-    pub wake: tokio::sync::mpsc::Sender<()>,
+    /// Reads the account's thermostats as soon as it is linked, before the
+    /// link reports back, so the page that asked lists them straight away.
+    pub runtime: Arc<Runtime>,
 }
 
 impl LinkHandle {
@@ -86,7 +86,7 @@ impl LinkHandle {
         for n in [NOTICE_NOT_LINKED, NOTICE_AUTH_REJECTED, NOTICE_RELINK_DUE] {
             self.notices.clear(n);
         }
-        let _ = self.wake.try_send(());
+        self.runtime.poll().await;
         info!(
             account = account.user_name.as_deref().unwrap_or("unknown"),
             "Linked to a NuHeat account"

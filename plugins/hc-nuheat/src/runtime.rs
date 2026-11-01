@@ -50,7 +50,7 @@ pub fn alert_kinds() -> Vec<PluginAlertKind> {
         topic: ALERT_FAULT.into(),
         label: "Thermostat fault".into(),
         description: Some(
-            "The thermostat reports a fault, most often its floor sensor. It may not heat \
+            "The thermostat reports a fault, most often a sensor. It may not heat \
              until it is fixed."
                 .into(),
         ),
@@ -91,6 +91,34 @@ struct Known {
     name: String,
     /// The fault last raised as an alert, so it is only said when it changes.
     fault: Option<String>,
+    /// The end of a hold this plugin asked for, for "Hold ends" when NuHeat
+    /// doesn't say. A hold set anywhere else isn't known, so it shows nothing.
+    requested_hold: Option<RequestedHold>,
+}
+
+/// A timed hold this plugin set: until when, and at what wire setpoint.
+#[derive(Debug, Clone, PartialEq)]
+struct RequestedHold {
+    until: chrono::DateTime<chrono::Utc>,
+    setpoint_wire: i64,
+}
+
+/// "Hold ends", when NuHeat's own answer doesn't carry it: the end this plugin
+/// asked for, while the thermostat is still holding that same target and the
+/// end is still ahead. Anything else means the hold is over or was changed
+/// elsewhere, and the memory is dropped.
+fn remembered_hold_end(
+    requested: &mut Option<RequestedHold>,
+    reported: &Thermostat,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let holding = reported.mode.and_then(Mode::from_wire) == Some(Mode::Hold);
+    let r = requested.as_ref()?;
+    if holding && reported.set_point_temperature == Some(r.setpoint_wire) && r.until > now {
+        return Some(r.until.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+    *requested = None;
+    None
 }
 
 impl Runtime {
@@ -314,7 +342,7 @@ impl Runtime {
             info!(device_id = %device_id, name = %name, "Registered a NuHeat thermostat");
         }
 
-        let (state, scale_check) = device::state_payload(t);
+        let (mut state, scale_check) = device::state_payload(t);
 
         let fault = state["error_state"].as_str().map(str::to_owned);
         let fault_changed = {
@@ -323,6 +351,15 @@ impl Runtime {
             entry.setpoint_c = state["setpoint"].as_f64();
             entry.permanently_held = state["schedule_mode"] == "permanent_hold";
             entry.name = name.to_string();
+            if state["hold_until"].is_null() {
+                if let Some(end) =
+                    remembered_hold_end(&mut entry.requested_hold, t, chrono::Utc::now())
+                {
+                    state["hold_until"] = Value::String(end);
+                }
+            } else {
+                entry.requested_hold = None;
+            }
             let changed = first_time || entry.fault != fault;
             entry.fault = fault.clone();
             changed
@@ -440,6 +477,24 @@ impl Runtime {
             return;
         }
         self.clear_transport_notices();
+
+        // Remember the end of a timed hold, for "Hold ends" if NuHeat's answer
+        // leaves it out. Any other command ends what was remembered.
+        let requested = match &intent {
+            Intent::Hold {
+                celsius,
+                hold_until: Some(until),
+            } => chrono::DateTime::parse_from_rfc3339(until)
+                .ok()
+                .map(|u| RequestedHold {
+                    until: u.with_timezone(&chrono::Utc),
+                    setpoint_wire: units::encode_celsius_within(*celsius, self.limits),
+                }),
+            _ => None,
+        };
+        if let Some(entry) = self.known.lock().expect("known mutex").get_mut(&serial) {
+            entry.requested_hold = requested;
+        }
 
         // Read back what the thermostat now reports, rather than echoing the
         // command. This is the whole state contract in one call.
@@ -617,5 +672,58 @@ mod tests {
         assert_eq!(kinds[0].topic, ALERT_FAULT);
         assert!(kinds[0].default_on);
         assert!(matches!(kinds[0].severity, AlertSeverity::Error));
+    }
+
+    /// "Hold ends" from the end this plugin asked for, only while that same
+    /// hold is what the thermostat reports, and never for a hold set elsewhere.
+    #[test]
+    fn a_hold_s_end_is_the_one_asked_for_while_that_hold_lasts() {
+        let now = chrono::Utc::now();
+        let until = now + chrono::Duration::hours(1);
+        let asked = || {
+            Some(RequestedHold {
+                until,
+                setpoint_wire: 2111,
+            })
+        };
+        let reported = |mode: i64, setpoint: i64| Thermostat {
+            mode: Some(mode),
+            set_point_temperature: Some(setpoint),
+            ..Thermostat::default()
+        };
+
+        let mut memory = asked();
+        let shown = remembered_hold_end(&mut memory, &reported(2, 2111), now);
+        assert_eq!(shown, Some(until.format("%Y-%m-%dT%H:%M:%SZ").to_string()));
+        assert!(memory.is_some());
+
+        // Changed in NuHeat's app to another target: not ours any more.
+        let mut memory = asked();
+        assert_eq!(
+            remembered_hold_end(&mut memory, &reported(2, 2200), now),
+            None
+        );
+        assert!(memory.is_none());
+
+        // Back on its schedule, or past the end: over.
+        let mut memory = asked();
+        assert_eq!(
+            remembered_hold_end(&mut memory, &reported(1, 2111), now),
+            None
+        );
+        assert!(memory.is_none());
+        let mut memory = asked();
+        let later = until + chrono::Duration::minutes(1);
+        assert_eq!(
+            remembered_hold_end(&mut memory, &reported(2, 2111), later),
+            None
+        );
+
+        // A hold set elsewhere: nothing remembered, nothing shown.
+        let mut memory = None;
+        assert_eq!(
+            remembered_hold_end(&mut memory, &reported(2, 2111), now),
+            None
+        );
     }
 }

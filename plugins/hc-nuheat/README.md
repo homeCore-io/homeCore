@@ -3,7 +3,7 @@
 NuHeat Signature floor-heating thermostats in [homeCore](https://github.com/homeCore-io/homeCore),
 through NuHeat's cloud OpenAPI.
 
-One `thermostat` device per thermostat on the account: floor temperature,
+One `thermostat` device per thermostat on the account: its temperature (the floor's or the room's, as the thermostat is set up),
 target, whether it is heating, and whether it follows its schedule. A
 Signature talks to NuHeat and nothing else, so the cloud is the device here,
 and everything is polled.
@@ -85,7 +85,7 @@ On `homecore/devices/nuheat_<serial>/state`, in the shared names and units
 
 | key | |
 |---|---|
-| `temperature` | floor temperature, °C |
+| `temperature` | the thermostat's reading (floor or air, as it is set up), °C |
 | `setpoint` | target, °C |
 | `hvac_mode` | always `heat`: a floor only heats |
 | `hvac_action` | `heating` or `idle`, whether the relay is on now |
@@ -130,7 +130,7 @@ refuses leaves the app showing what the floor is really doing.
 
 | | kind | |
 |---|---|---|
-| `thermostat_fault` | alert, error, on by default | the thermostat reports a fault (a floor sensor, most often), in its own words |
+| `thermostat_fault` | alert, error, on by default | the thermostat reports a fault (a sensor, most often), in its own words |
 | `not_linked` | notice | not signed in, or NuHeat ended the sign-in |
 | `relink_due` | notice | the 30 days end within five |
 | `auth_rejected` | notice | NuHeat refused the sign-in |
