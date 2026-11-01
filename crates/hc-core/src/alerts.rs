@@ -697,7 +697,20 @@ fn first_true<'a>(d: &DeviceState, attrs: &[&'a str]) -> Option<&'a str> {
         .find(|a| d.attributes.get(*a) == Some(&Value::Bool(true)))
 }
 
+/// "Battery low" → "battery low", to follow a name. A title ("Severe
+/// Thunderstorm Warning") or an abbreviation ("NWS outage") keeps its case.
 fn lower_first(s: &str) -> String {
+    let mut words = s.split_whitespace();
+    let first = words.next().unwrap_or("");
+    let upper = |w: &str| w.chars().next().is_some_and(char::is_uppercase);
+    let abbreviation = first.chars().filter(|c| c.is_alphabetic()).count() > 1
+        && first
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(char::is_uppercase);
+    if abbreviation || words.next().is_some_and(upper) {
+        return s.to_string();
+    }
     let mut c = s.chars();
     match c.next() {
         Some(f) => f.to_lowercase().chain(c).collect(),
@@ -1224,5 +1237,21 @@ mod tests {
         assert!(same(&json!(1), &json!(1.0)));
         assert!(same(&json!("on"), &json!("on")));
         assert!(!same(&json!(true), &json!(1)));
+    }
+
+    #[test]
+    fn a_reason_follows_a_name_in_its_own_case_when_it_is_a_title() {
+        assert_eq!(lower_first("Battery low"), "battery low");
+        assert_eq!(
+            lower_first("Lost connection to the bridge"),
+            "lost connection to the bridge"
+        );
+        assert_eq!(
+            lower_first("Severe Thunderstorm Warning until 7:45 PM"),
+            "Severe Thunderstorm Warning until 7:45 PM"
+        );
+        assert_eq!(lower_first("NWS can't be reached"), "NWS can't be reached");
+        assert_eq!(lower_first("A"), "a");
+        assert_eq!(lower_first(""), "");
     }
 }
