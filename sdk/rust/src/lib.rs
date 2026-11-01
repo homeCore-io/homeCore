@@ -63,6 +63,40 @@ pub mod types {
     pub use hc_types::plugin_ui::{PluginUi, UiSlot, HOST_API};
 }
 
+pub use hc_types::location::HouseLocation;
+
+// The house's coordinates, from core's retained `homecore/system/location`.
+// Set by the event loop when the message arrives, a few ms after connect.
+static HOUSE_LOCATION: Mutex<Option<HouseLocation>> = Mutex::new(None);
+
+fn set_house_location(here: HouseLocation) {
+    if let Ok(mut g) = HOUSE_LOCATION.lock() {
+        *g = Some(here);
+    }
+}
+
+/// Where the house is, as homeCore said (its `[location]`), once the
+/// retained message has arrived. `None` before then, or from a homeCore
+/// too old to say.
+pub fn house_location() -> Option<HouseLocation> {
+    HOUSE_LOCATION.lock().ok().and_then(|g| *g)
+}
+
+/// [`house_location`], waiting up to `timeout` for it to arrive. Call it
+/// after `run_managed` has started: the event loop reads the message.
+pub async fn wait_house_location(timeout: Duration) -> Option<HouseLocation> {
+    let until = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(here) = house_location() {
+            return Some(here);
+        }
+        if tokio::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Log rotation, compression, retention, and the plugin's tracing setup.
 /// Also re-exports the `hc-logging` items plugins use directly.
 pub mod logging;
@@ -1876,6 +1910,13 @@ impl PluginClient {
                         {
                             warn!(error = %e, "Failed to subscribe homecore/system/tz");
                         }
+                        // Where the house is (retained), for `house_location`.
+                        if let Err(e) = client
+                            .subscribe(hc_types::location::TOPIC, QoS::AtMostOnce)
+                            .await
+                        {
+                            warn!(error = %e, "Failed to subscribe {}", hc_types::location::TOPIC);
+                        }
                         // Re-subscribe to all tracked topics on every (re)connect.
                         // With clean_session=true, subscriptions are lost on reconnect.
                         let topics: Vec<String> = subs.lock().unwrap().iter().cloned().collect();
@@ -1990,6 +2031,15 @@ impl PluginClient {
                                 }
                             }
                             Err(e) => warn!(error = %e, "Non-UTF8 homecore/system/tz payload"),
+                        }
+                        continue;
+                    }
+
+                    // homecore/system/location: the house's coordinates.
+                    if p.topic == hc_types::location::TOPIC {
+                        match HouseLocation::from_payload(&p.payload) {
+                            Some(here) => set_house_location(here),
+                            None => warn!("Bad position in {}", hc_types::location::TOPIC),
                         }
                         continue;
                     }
@@ -2820,5 +2870,24 @@ mod async_and_files_tests {
         .await;
         assert_eq!(out["status"], "error");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod house_location_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_house_is_known_once_core_has_said() {
+        let here = HouseLocation {
+            latitude: 35.96,
+            longitude: -83.92,
+        };
+        set_house_location(here);
+        assert_eq!(house_location(), Some(here));
+        assert_eq!(
+            wait_house_location(Duration::from_millis(10)).await,
+            Some(here)
+        );
     }
 }
