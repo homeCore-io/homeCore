@@ -143,6 +143,15 @@ fn broker() -> Section {
                 .visible_when(Cond::truthy("broker.tls_port")),
         )
         .field(
+            Field::text("broker.external_url")
+                .label("External broker")
+                .help(
+                    "mqtt://host:port of a Mosquitto or EMQX to use instead of the \
+                     embedded broker, which then isn't started. Plugins must point at \
+                     it too. Leave empty for the embedded broker.",
+                ),
+        )
+        .field(
             Field::table("broker.clients")
                 .label("Client credentials")
                 .help(

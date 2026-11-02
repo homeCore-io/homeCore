@@ -406,6 +406,14 @@ pub struct BrokerSection {
     /// requires authentication on all connections.
     #[serde(default)]
     pub clients: Vec<ClientAclConfig>,
+    /// An external broker (Mosquitto, EMQX) to use instead of the embedded
+    /// one, as `mqtt://host:port` (the port defaults to 1883). When it is set
+    /// the embedded broker isn't started, so `host`, `port`, `v5_port` and the
+    /// TLS listener are unused. `clients` still gives core its own
+    /// `internal.core` login, and is what `hc-cli broker
+    /// generate-mosquitto-config` writes the broker's ACL from.
+    #[serde(default)]
+    pub external_url: Option<String>,
 }
 
 impl Default for BrokerSection {
@@ -418,6 +426,7 @@ impl Default for BrokerSection {
             cert_path: None,
             key_path: None,
             clients: vec![],
+            external_url: None,
         }
     }
 }
@@ -426,6 +435,64 @@ impl BrokerSection {
     pub fn resolve(&mut self, base: &Path) {
         resolve_opt_path(&mut self.cert_path, base);
         resolve_opt_path(&mut self.key_path, base);
+    }
+
+    /// `external_url` as a host and port, or `None` for the embedded broker.
+    /// A blank value counts as unset. TLS (`mqtts://`) is refused: core's own
+    /// MQTT client doesn't speak it.
+    pub fn external(&self) -> Result<Option<(String, u16)>, String> {
+        let Some(url) = self
+            .external_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        else {
+            return Ok(None);
+        };
+        let rest = if let Some(r) = url
+            .strip_prefix("mqtt://")
+            .or_else(|| url.strip_prefix("tcp://"))
+        {
+            r
+        } else if url.starts_with("mqtts://") || url.starts_with("ssl://") {
+            return Err(format!(
+                "[broker] external_url = \"{url}\": TLS to an external broker isn't supported; \
+                 use mqtt:// on a trusted network or a local TLS-terminating proxy"
+            ));
+        } else if url.contains("://") {
+            return Err(format!(
+                "[broker] external_url = \"{url}\": expected mqtt://host:port"
+            ));
+        } else {
+            url
+        };
+        let rest = rest.trim_end_matches('/');
+        let (host, port) = match rest.strip_prefix('[') {
+            // [v6]:port or [v6]
+            Some(v6) => {
+                let (h, tail) = v6
+                    .split_once(']')
+                    .ok_or_else(|| format!("[broker] external_url = \"{url}\": unclosed ["))?;
+                (h.to_string(), tail.strip_prefix(':'))
+            }
+            None => match rest.rsplit_once(':') {
+                Some((h, p)) => (h.to_string(), Some(p)),
+                None => (rest.to_string(), None),
+            },
+        };
+        if host.is_empty() || host.contains('/') {
+            return Err(format!(
+                "[broker] external_url = \"{url}\": expected mqtt://host:port"
+            ));
+        }
+        let port =
+            match port {
+                None => 1883,
+                Some(p) => p.parse::<u16>().ok().filter(|p| *p != 0).ok_or_else(|| {
+                    format!("[broker] external_url = \"{url}\": bad port \"{p}\"")
+                })?,
+            };
+        Ok(Some((host, port)))
     }
 }
 
@@ -749,6 +816,56 @@ impl Default for AuthSection {
             whitelist: vec![],
             admin_uds: AdminUdsSection::default(),
             initial_admin_password_file: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod external_broker_tests {
+    use super::BrokerSection;
+
+    fn ext(url: &str) -> Result<Option<(String, u16)>, String> {
+        BrokerSection {
+            external_url: Some(url.into()),
+            ..BrokerSection::default()
+        }
+        .external()
+    }
+
+    #[test]
+    fn an_external_broker_is_read_as_host_and_port() {
+        assert_eq!(BrokerSection::default().external(), Ok(None));
+        assert_eq!(ext("  "), Ok(None));
+        assert_eq!(
+            ext("mqtt://mosquitto:1883"),
+            Ok(Some(("mosquitto".into(), 1883)))
+        );
+        assert_eq!(
+            ext("mqtt://192.168.1.20"),
+            Ok(Some(("192.168.1.20".into(), 1883)))
+        );
+        assert_eq!(
+            ext("tcp://broker.local:1884/"),
+            Ok(Some(("broker.local".into(), 1884)))
+        );
+        assert_eq!(ext("broker:1885"), Ok(Some(("broker".into(), 1885))));
+        assert_eq!(
+            ext("mqtt://[fd00::5]:1883"),
+            Ok(Some(("fd00::5".into(), 1883)))
+        );
+    }
+
+    #[test]
+    fn a_broker_address_core_cant_use_is_refused() {
+        for bad in [
+            "mqtts://broker:8883",
+            "http://broker:1883",
+            "mqtt://broker:0",
+            "mqtt://broker:port",
+            "mqtt://:1883",
+            "mqtt://[fd00::5",
+        ] {
+            assert!(ext(bad).is_err(), "{bad}");
         }
     }
 }
