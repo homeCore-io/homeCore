@@ -399,6 +399,7 @@ async fn main() -> Result<()> {
                     },
                 })
                 .collect(),
+            plugins_store: Some(central.clone()),
             calendars_dir: Some(PathBuf::from(&config.calendars.dir)),
             kept: None,
         };
@@ -1171,6 +1172,7 @@ async fn main() -> Result<()> {
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
         plugin_configs,
+        plugins_store: Some(backup_config_store.clone()),
         calendars_dir: Some(calendar_dir.clone()),
         kept: Some(hc_api::backup::KeptBackups {
             dir: {
