@@ -21,17 +21,26 @@ shows this device like a weather station, with no screen of the plugin's own.
 |---|---|---|
 | `temperature`, `feels_like` | °C | now |
 | `humidity` | % | now |
+| `dewpoint` | °C | now |
 | `pressure` | hPa | at sea level |
 | `wind_speed`, `wind_gust` | m/s | now |
 | `wind_direction` | ° | where the wind comes from |
 | `precipitation_mm` | mm | the last 15 minutes |
+| `rain_next_hour_mm` | mm | expected in the next hour |
+| `rain_starts_in_min` | min | until rain starts, within the next two hours; null if none is expected |
+| `rain_soon` | | rain expected within 30 minutes |
 | `cloud_cover_pct` | % | now |
 | `is_day` | | day or night |
 | `condition` | | `clear`, `partly_cloudy`, `cloudy`, `fog`, `drizzle`, `rain`, `freezing_rain`, `snow`, `showers`, `thunderstorm` (each with a label and an icon in the schema) |
 | `today_high`, `today_low` | °C | today |
 | `rain_chance_pct` | % | today |
+| `snow_today_mm` | mm | snow expected today |
+| `tonight_low` | °C | the coldest hour from now to 9 tomorrow morning |
+| `freeze_tonight` | | `tonight_low` at or below 0 °C |
+| `tomorrow_high`, `tomorrow_low` | °C | tomorrow |
 | `uvi` | | today's highest UV index |
 | `aqi` | | US AQI now |
+| `aqi_category` | | `good`, `moderate`, `unhealthy_sensitive`, `unhealthy`, `very_unhealthy`, `hazardous` (the EPA's bands) |
 | `pm25_ugm3`, `ozone_ugm3` | µg/m³ | now |
 | `forecast` | | seven days, today first (below) |
 | `forecast_hourly` | | the next 24 hours, for automations |
@@ -42,12 +51,15 @@ shows this device like a weather station, with no screen of the plugin's own.
 `forecast` is a list of days:
 
 ```json
-{ "time": "2026-11-01T00:00:00-05:00", "high": 17.1, "low": 8.2,
-  "condition": "cloudy", "precipitation_probability": 1, "precipitation_mm": 0.0 }
+{ "time": "2026-11-02T00:00:00-05:00", "high": 17.1, "low": 8.2,
+  "condition": "cloudy", "precipitation_probability": 1, "precipitation_mm": 0.0,
+  "snowfall_mm": 0.0, "wind_gust": 5.1 }
 ```
 
-Each `time` is the place's midnight with its offset, so a day is never shown
-under the day before. `forecast_hourly` entries have `time`, `temperature`,
+Each `time` is the place's midnight with that day's offset (from its time
+zone, so the days after a clock change are right too), and a day is never
+shown under the day before. `snowfall_mm` is snow, not its water; `wind_gust`
+is the day's strongest. `forecast_hourly` entries have `time`, `temperature`,
 `condition`, `precipitation_probability`, `precipitation_mm` and `wind_gust`.
 
 Only what changed is published. Readings it can't get are null.
@@ -66,7 +78,9 @@ by itself when the service withdraws it or it expires.
 
 A warning's kind comes from what the service calls it: the NWS rates a Flood
 Watch "Severe", and it is still a watch. Automations can start on, check and
-act on these alerts, or use `alert_level`.
+act on these alerts, or use `alert_level`. The plugin's page shows each one in
+full, with when it ends and what the service says to do; an NWS update replaces
+the message it updates rather than showing both.
 
 `alerts = "auto"` takes a US place's warnings from the NWS (by its country, or
 by where it is when no country is given). MeteoAlarm lists warnings by
@@ -101,12 +115,24 @@ services' addresses, for a self-hosted Open-Meteo or a stand-in. A postal code
 or name is looked up once and kept in `.weather-places.json` beside the
 settings file.
 
-## Its screen
+## Its screens
 
-A page in Settings › Plugins: each place with the weather there now and any
-warnings, when each reading was last fetched, Refresh now, and the data's
-credit. Its devices have no card of their own: the app's Weather card draws
-them, and their panel is the app's generic one.
+A page in Settings › Plugins: each place with the weather there now and
+what's coming, any warnings in full, the next 24 hours, when each reading
+was last fetched, Refresh now, and the data's credit.
+
+**Weather, animated**, a card for any page (`dashboard.card`, compact,
+standard or large): the weather now as a moving scene. The sky picks the
+backdrop and day or night the sun or moon; cloud cover sets how many clouds,
+the last 15 minutes' rain how heavy the rain or snow, and the wind slants it
+and speeds the clouds. Over it: the temperature, a ribbon for a watch or
+warning, "Rain in 20 min", the next hours and, when large, five days. Its
+settings choose the place (with more than one) and a name. It is CSS and SVG
+only, stops moving when off screen or when the tab is hidden, and stands still
+for anyone whose device asks for reduced motion.
+
+The devices have no card of their own: the app's Weather card draws them,
+and their panel is the app's generic one.
 
 ## Data
 

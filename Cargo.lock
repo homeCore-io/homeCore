@@ -1983,10 +1983,11 @@ dependencies = [
 
 [[package]]
 name = "hc-weather"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "plugin-sdk-rs",
  "reqwest",
  "schemars",

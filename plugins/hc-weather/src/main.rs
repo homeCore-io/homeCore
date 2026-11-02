@@ -278,15 +278,28 @@ async fn read(shared: &Shared, place: &Place, source: Source) -> Result<Map<Stri
     }
 }
 
+/// How long to wait after `failed` reads in a row: a minute, doubling each
+/// time, never longer than the usual turn. A blip then costs a minute of old
+/// weather rather than a whole turn.
+fn retry_after(failed: u32, every: Duration) -> Duration {
+    if failed == 0 {
+        return every;
+    }
+    let secs = 60u64.saturating_mul(1 << (failed - 1).min(10));
+    Duration::from_secs(secs).min(every)
+}
+
 /// Read one source for one place, now and then every `every`, or sooner
-/// when someone asks for a refresh.
+/// when someone asks for a refresh or the last read failed.
 async fn poll(shared: Arc<Shared>, place: Place, source: Source, every: Duration) {
     let id = place.device_id();
     let mut misses = 0u32;
+    let mut failed = 0u32;
     let mut online = false;
     loop {
         match read(&shared, &place, source).await {
             Ok(patch) => {
+                failed = 0;
                 shared.merge(&id, patch).await;
                 shared.note(&place.id, source, Ok(()));
                 if source == Source::Now {
@@ -298,6 +311,7 @@ async fn poll(shared: Arc<Shared>, place: Place, source: Source, every: Duration
                 }
             }
             Err(e) => {
+                failed += 1;
                 warn!(device_id = %id, source = source.name(), error = %e, "read failed");
                 shared.note(&place.id, source, Err(e.to_string()));
                 // The weather now unread twice running: say the device is
@@ -313,7 +327,7 @@ async fn poll(shared: Arc<Shared>, place: Place, source: Source, every: Duration
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(every) => {}
+            _ = tokio::time::sleep(retry_after(failed, every)) => {}
             _ = shared.refresh.notified() => {}
         }
     }
@@ -561,6 +575,7 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
 /// The `status` action: each place, where it is, whose warnings it gets, and
 /// when each reading was last fetched (or why it wasn't).
 fn status_of(shared: &Shared) -> Value {
+    let said = shared.said.lock().expect("said").clone();
     let all = shared.status.lock().expect("status");
     let places: Vec<Value> = all
         .iter()
@@ -575,10 +590,31 @@ fn status_of(shared: &Shared) -> Value {
                 "warnings_from": s.warnings_from,
                 "updated": s.updated.iter().map(|(k, t)| (k.to_string(), json!(t.to_rfc3339()))).collect::<Map<_, _>>(),
                 "failing": s.failing,
+                "warnings": said.get(&format!("weather_{id}")).map(|w| warnings_json(w)).unwrap_or_default(),
             })
         })
         .collect();
     json!({ "status": "ok", "places": places })
+}
+
+/// The warnings in full, for the plugin's page: the alert list carries only
+/// the headline.
+fn warnings_json(found: &[alerts::WxAlert]) -> Vec<Value> {
+    found
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "event": a.event,
+                "headline": a.headline,
+                "level": a.level,
+                "since": a.since.map(|t| t.to_rfc3339()),
+                "until": a.until.map(|t| t.to_rfc3339()),
+                "description": a.description,
+                "instruction": a.instruction,
+            })
+        })
+        .collect()
 }
 
 fn capabilities() -> plugin_sdk_rs::types::Capabilities {
@@ -615,6 +651,26 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
                 RequiresRole::User,
             ),
         ],
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::retry_after;
+    use std::time::Duration;
+
+    #[test]
+    fn a_failed_read_is_tried_again_sooner_but_never_later_than_usual() {
+        let turn = Duration::from_secs(900);
+        assert_eq!(retry_after(0, turn), turn);
+        assert_eq!(retry_after(1, turn), Duration::from_secs(60));
+        assert_eq!(retry_after(2, turn), Duration::from_secs(120));
+        assert_eq!(retry_after(4, turn), Duration::from_secs(480));
+        assert_eq!(retry_after(5, turn), turn);
+        assert_eq!(retry_after(40, turn), turn);
+        // Warnings every two minutes: never stretched past that.
+        let warnings = Duration::from_secs(120);
+        assert_eq!(retry_after(3, warnings), warnings);
     }
 }
 

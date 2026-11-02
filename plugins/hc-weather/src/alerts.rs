@@ -24,6 +24,31 @@ pub struct WxAlert {
     pub headline: String,
     /// 3 warning, 2 watch, 1 advisory.
     pub level: u8,
+    /// When the hazard begins (or, failing that, when the message took
+    /// effect).
+    pub since: Option<DateTime<Utc>>,
+    /// When it ends (or, failing that, when the message expires).
+    pub until: Option<DateTime<Utc>>,
+    /// The service's full text, and what it says to do.
+    pub description: Option<String>,
+    pub instruction: Option<String>,
+}
+
+fn time_of(p: &Value, keys: &[&str]) -> Option<DateTime<Utc>> {
+    keys.iter().find_map(|k| {
+        p[*k]
+            .as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc))
+    })
+}
+
+fn text_of(p: &Value, key: &str) -> Option<String> {
+    p[key]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 pub const WARNING: &str = "weather_warning";
@@ -98,24 +123,42 @@ fn nws_level(event: &str, severity: &str) -> u8 {
 }
 
 /// `GET /alerts/active?point=lat,lon` from api.weather.gov, as warnings.
+///
+/// An update can arrive while the message it replaces is still listed; the
+/// update names it in `references`, and only the update is kept.
 pub fn parse_nws(v: &Value, now: DateTime<Utc>) -> Vec<WxAlert> {
-    let mut out: Vec<WxAlert> = v["features"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let features = v["features"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let replaced: std::collections::HashSet<&str> = features
+        .iter()
+        .flat_map(|f| {
+            f["properties"]["references"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|r| r["identifier"].as_str())
+        .collect();
+    let mut out: Vec<WxAlert> = features
+        .iter()
         .filter_map(|f| {
             let p = &f["properties"];
+            let id = p["id"].as_str().or(f["id"].as_str())?;
             if p["status"].as_str() != Some("Actual")
                 || p["messageType"].as_str() == Some("Cancel")
+                || replaced.contains(id)
                 || ended(p, now)
             {
                 return None;
             }
             let event = p["event"].as_str()?.to_string();
             Some(WxAlert {
-                id: p["id"].as_str().or(f["id"].as_str())?.to_string(),
+                id: id.to_string(),
                 headline: p["headline"].as_str().unwrap_or(&event).to_string(),
                 level: nws_level(&event, p["severity"].as_str().unwrap_or("")),
+                since: time_of(p, &["onset", "effective"]),
+                until: time_of(p, &["ends", "expires"]),
+                description: text_of(p, "description"),
+                instruction: text_of(p, "instruction"),
                 event,
             })
         })
@@ -186,6 +229,10 @@ pub fn parse_meteoalarm(v: &Value, area: &str, now: DateTime<Utc>) -> Vec<WxAler
                 id: a["identifier"].as_str().or(w["uuid"].as_str())?.to_string(),
                 headline: info["headline"].as_str().unwrap_or(event).to_string(),
                 level: meteoalarm_level(info),
+                since: time_of(info, &["onset", "effective"]),
+                until: time_of(info, &["expires"]),
+                description: text_of(info, "description"),
+                instruction: text_of(info, "instruction"),
                 event: event.to_string(),
             })
         })
@@ -205,7 +252,9 @@ pub fn to_plugin_alerts(alerts: &[WxAlert]) -> Vec<PluginAlert> {
                 2 => WATCH,
                 _ => ADVISORY,
             };
-            PluginAlert::new(kind, a.headline.clone()).key(a.id.clone())
+            let mut p = PluginAlert::new(kind, a.headline.clone()).key(a.id.clone());
+            p.since = a.since;
+            p
         })
         .collect()
 }
@@ -271,6 +320,38 @@ mod tests {
             f["properties"]["messageType"] = json!("Cancel");
         }
         assert!(parse_nws(&v, at("2026-11-01T17:00:00Z")).is_empty());
+    }
+
+    #[test]
+    fn an_update_replaces_the_message_it_names() {
+        let mut v = nws();
+        let features = v["features"].as_array_mut().unwrap();
+        let old = features[0]["properties"]["id"].clone();
+        features[1]["properties"]["references"] = json!([{ "identifier": old }]);
+        let a = parse_nws(&v, at("2026-11-01T17:00:00Z"));
+        assert!(a.iter().all(|w| json!(w.id) != old), "the old one is gone");
+        assert_eq!(
+            a.len(),
+            parse_nws(&nws(), at("2026-11-01T17:00:00Z")).len() - 1
+        );
+    }
+
+    #[test]
+    fn a_warning_knows_when_it_starts_and_ends_and_what_to_do() {
+        let a = parse_nws(&nws(), at("2026-11-01T17:00:00Z"));
+        let flood = a.iter().find(|w| w.event == "Flood Warning").unwrap();
+        assert_eq!(flood.since, Some(at("2026-11-01T16:44:00Z")));
+        assert!(flood.until.is_some());
+        assert!(flood.description.as_deref().unwrap().starts_with("* WHAT"));
+        assert!(flood
+            .instruction
+            .as_deref()
+            .unwrap()
+            .contains("Turn around"));
+        let p = to_plugin_alerts(&a);
+        assert_eq!(p[0].since, a[0].since, "homeCore hears when it began");
+        let m = parse_meteoalarm(&meteoalarm(), "DE106", at("2026-10-27T12:00:00Z"));
+        assert!(m[0].since.is_some() && m[0].instruction.is_some());
     }
 
     #[test]

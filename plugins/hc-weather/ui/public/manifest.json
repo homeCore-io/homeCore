@@ -1,5 +1,15 @@
 {
 	"host_api": 1,
 	"entry": "index.js",
-	"slots": [{ "slot": "plugin.page", "element": "hc-weather-page" }]
+	"slots": [
+		{ "slot": "plugin.page", "element": "hc-weather-page" },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-weather-sky",
+			"label": "Weather, animated",
+			"description": "the sky now as a moving scene, with the hours and days ahead",
+			"forms": ["standard", "large", "compact"],
+			"settings": "hc-weather-sky-settings"
+		}
+	]
 }

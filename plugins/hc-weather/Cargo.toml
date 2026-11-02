@@ -1,6 +1,6 @@
 [package]
 name        = "hc-weather"
-version     = "0.1.0"
+version     = "0.1.1"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Weather for a place: Open-Meteo's conditions, forecast and air quality, and the national weather service's warnings as homeCore alerts"
@@ -25,6 +25,7 @@ anyhow             = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 chrono             = { version = "0.4", features = ["serde"] }
+chrono-tz          = { workspace = true }
 reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [features]
