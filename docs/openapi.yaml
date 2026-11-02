@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.96"
+  version: "0.1.97"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -8153,10 +8153,11 @@ paths:
       summary: Request a graceful restart
       description: |
         **Admin role required.**  Triggers the same graceful-shutdown broadcast
-        the signal handler uses; the runtime supervisor (systemd / docker) is
-        expected to respawn the process.  The response is returned first — the
-        shutdown broadcast is delayed ~250 ms so the body can flush.  Takes no
-        request body.
+        the signal handler uses, then exits with status 75 (EX_TEMPFAIL) so
+        the supervisor starts it again: systemd's `Restart=on-failure`,
+        launchd's KeepAlive and docker's restart policies all do. A stop by
+        signal exits 0. The response is returned first; the shutdown is
+        delayed about 250 ms so the body can flush. Takes no request body.
       tags: [system]
       security:
         - bearerAuth: []
