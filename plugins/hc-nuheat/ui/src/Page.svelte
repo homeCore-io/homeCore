@@ -136,8 +136,6 @@
 	});
 	const day = (iso) =>
 		new Date(iso).toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
-	const daysLeft = (iso) => Math.ceil((Date.parse(iso) - now) / 86_400_000);
-	const soon = $derived(status?.relink_due ? daysLeft(status.relink_due) <= 5 : false);
 
 	const deviceOf = (id) => devices.find((d) => d.device_id === id);
 	const reading = (d) => {
@@ -163,22 +161,17 @@
 		<section class="hc-card">
 			<div class="hc-head">
 				<h3>
-					<span class="hc-dot" class:good={status.linked && !soon} class:warn={soon} class:bad={!status.linked}></span>
+					<span class="hc-dot" class:good={status.linked} class:bad={!status.linked}></span>
 					{status.linked ? 'Signed in to NuHeat' : 'Not signed in to NuHeat'}
 				</h3>
 			</div>
 			{#if status.linked}
 				<div class="facts">
 					{#if status.account}<span><span class="hc-label">Account</span> {status.account}</span>{/if}
-					{#if status.relink_due}
-						<span class:warn={soon}
-							><span class="hc-label">Sign in again by</span>
-							{day(status.relink_due)}{#if soon}{' '}({daysLeft(status.relink_due) <= 0 ? 'now' : `${daysLeft(status.relink_due)} days`}){/if}</span
-						>
-					{/if}
+					{#if status.linked_at}<span><span class="hc-label">Since</span> {day(status.linked_at)}</span>{/if}
 				</div>
 				<p class="hc-quiet">
-					NuHeat ends a sign-in 30 days after it's made. Signing in again takes a minute and starts another 30.
+					It stays signed in while homeCore runs. If homeCore is off for 15 days, sign in again.
 				</p>
 			{:else}
 				<p class="hc-quiet">

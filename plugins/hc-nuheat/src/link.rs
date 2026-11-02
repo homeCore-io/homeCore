@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use crate::api::NuHeatApi;
 use crate::auth::{Auth, Returned, Via};
-use crate::runtime::{Runtime, NOTICE_AUTH_REJECTED, NOTICE_NOT_LINKED, NOTICE_RELINK_DUE};
+use crate::runtime::{Runtime, NOTICE_AUTH_REJECTED, NOTICE_NOT_LINKED};
 
 /// What the link and sign-out actions need to do their work.
 #[derive(Clone)]
@@ -83,7 +83,7 @@ impl LinkHandle {
             .await
             .map_err(|e| anyhow::anyhow!("NuHeat didn't accept the sign-in: {e}"))?;
         self.auth.set_account(account.user_name.clone()).await;
-        for n in [NOTICE_NOT_LINKED, NOTICE_AUTH_REJECTED, NOTICE_RELINK_DUE] {
+        for n in [NOTICE_NOT_LINKED, NOTICE_AUTH_REJECTED] {
             self.notices.clear(n);
         }
         self.runtime.poll().await;
@@ -95,7 +95,6 @@ impl LinkHandle {
             "status": "ok",
             "linked": true,
             "account": account.user_name,
-            "relink_due": self.auth.relink_due().map(|t| t.to_rfc3339()),
         }))
     }
 
@@ -104,7 +103,6 @@ impl LinkHandle {
     /// every rule and card with it.
     pub async fn sign_out(&self) -> Value {
         self.auth.sign_out().await;
-        self.notices.clear(NOTICE_RELINK_DUE);
         info!("Signed out of NuHeat and cleared the stored tokens");
         json!({ "status": "ok", "signed_out": true })
     }

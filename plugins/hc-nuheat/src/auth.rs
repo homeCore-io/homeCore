@@ -45,10 +45,10 @@
 //! NuHeat's refresh tokens are one-time use: each refresh returns a new one
 //! and retires the old. So a refresh is serialised (two at once would spend
 //! the same token, and the loser would un-link the plugin), and the new token
-//! is persisted before the new access token is used. They also have an
-//! absolute lifetime of 30 days from sign-in ([`REFRESH_LIFETIME`]), whatever
-//! the use, so [`Auth::relink_due`] says when the person has to sign in again,
-//! and the plugin warns ahead of it.
+//! is persisted before the new access token is used. Each lasts 15 days from
+//! its last use and NuHeat sets no absolute limit (since 2026-11-02), so a
+//! homeCore that keeps running stays signed in; one that is off for 15 days
+//! has to sign in again.
 //!
 //! ## Where the tokens live
 //!
@@ -84,13 +84,6 @@ const SCOPES: &str = "openid openapi offline_access";
 /// just inside the deadline doesn't 401 on its way to the API.
 const RENEW_MARGIN: Duration = Duration::minutes(5);
 
-/// NuHeat's absolute refresh-token lifetime: 30 days from signing in, however
-/// often the token is used.
-pub const REFRESH_LIFETIME: Duration = Duration::days(30);
-
-/// Say a new sign-in is due this long before it is.
-pub const RELINK_WARNING: Duration = Duration::days(5);
-
 /// How long a sign-in that was started may take to come back.
 const PENDING_TTL: Duration = Duration::minutes(10);
 
@@ -119,7 +112,7 @@ pub struct Tokens {
     pub access_token: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub refresh_token: Option<String>,
-    /// When the person signed in: the refresh token's 30 days count from here.
+    /// When the person signed in. Renewals keep it.
     pub linked_at: Option<DateTime<Utc>>,
     /// Their NuHeat account's name, as the API said when they linked.
     pub account: Option<String>,
@@ -450,7 +443,7 @@ impl Auth {
         let mut tokens = match self.post_token(&form).await {
             Ok(t) => t,
             Err(e) if e.to_string().contains("invalid_grant") => {
-                // Spent, revoked or past its 30 days: it will never work again.
+                // Spent, revoked or unused for 15 days: it will never work again.
                 self.store(Tokens::default()).await;
                 bail!("NuHeat ended this sign-in ({e}); link the account again");
             }
@@ -552,19 +545,6 @@ impl Auth {
 
     pub fn linked_at(&self) -> Option<DateTime<Utc>> {
         self.tokens.lock().expect("token mutex").linked_at
-    }
-
-    /// When the person has to sign in again: 30 days after they last did.
-    pub fn relink_due(&self) -> Option<DateTime<Utc>> {
-        let guard = self.tokens.lock().expect("token mutex");
-        guard.refresh_token.as_ref()?;
-        guard.linked_at.map(|t| t + REFRESH_LIFETIME)
-    }
-
-    /// Whether that is close enough to say so.
-    pub fn relink_soon(&self, now: DateTime<Utc>) -> bool {
-        self.relink_due()
-            .is_some_and(|due| due - now < RELINK_WARNING)
     }
 
     #[cfg(test)]
@@ -838,8 +818,6 @@ mod tests {
         let t = a.tokens();
         assert_eq!(t.refresh_token.as_deref(), Some("R1"));
         assert!(t.linked_at.is_some());
-        let due = a.relink_due().unwrap();
-        assert!((due - Utc::now() - REFRESH_LIFETIME).num_seconds().abs() < 5);
         assert_eq!(a.bearer().await.unwrap(), "A1");
     }
 
@@ -911,7 +889,7 @@ mod tests {
         assert!(seen.lock().unwrap()[0].contains("refresh_token=R1"));
         let t = a.tokens();
         assert_eq!(t.refresh_token.as_deref(), Some("R2"));
-        // Refreshing doesn't move the 30 days.
+        // Renewing doesn't change when the person signed in.
         assert_eq!(t.linked_at, Some(linked));
         assert_eq!(t.account.as_deref(), Some("me@example.com"));
     }
@@ -931,27 +909,6 @@ mod tests {
         let e = a.bearer().await.unwrap_err();
         assert!(e.to_string().contains("link the account again"), "{e}");
         assert!(!a.is_linked());
-    }
-
-    #[test]
-    fn a_sign_in_is_due_again_thirty_days_after_it_was_made() {
-        let a = auth();
-        let now = Utc::now();
-        a.set_tokens(Tokens {
-            refresh_token: Some("R".into()),
-            linked_at: Some(now - Duration::days(24)),
-            ..Tokens::default()
-        });
-        assert!(!a.relink_soon(now));
-        a.set_tokens(Tokens {
-            refresh_token: Some("R".into()),
-            linked_at: Some(now - Duration::days(26)),
-            ..Tokens::default()
-        });
-        assert!(a.relink_soon(now));
-        // Nothing is due when nothing is linked.
-        a.set_tokens(Tokens::default());
-        assert_eq!(a.relink_due(), None);
     }
 
     #[test]
