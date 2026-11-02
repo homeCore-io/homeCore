@@ -1770,6 +1770,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-mysa"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.0",
+ "chrono",
+ "plugin-sdk-rs",
+ "rand 0.10.1",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
 name = "hc-notify"
 version = "0.1.4"
 dependencies = [

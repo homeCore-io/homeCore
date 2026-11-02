@@ -1,0 +1,16 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Deck door open alert",
+    enabled: true,
+    priority: 10,
+    tags: ["deck", "door-alerts", "security"],
+    trigger: DeviceStateChanged(
+        device: "deck.door",
+        attribute: Some("open"),
+        to: Some(true),
+    ),
+    actions: [
+        RuleAction(action: Notify(channel: "telegram", message: "Deck door opened")),
+    ],
+)
+

@@ -1,0 +1,29 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Security, nighttime motion alert",
+    enabled: true,
+    priority: 50,
+    tags: ["security"],
+    cooldown_secs: Some(120),
+
+    trigger: DeviceStateChanged(
+        device: "outside.motion",
+        attribute: Some("motion"),
+        to: Some(true),
+    ),
+
+    conditions: [
+        ModeIs(mode_id: "mode_night", on: true),
+        // Scripts take raw device IDs
+        ScriptExpression(script: "!device_state(\"switch_expected_motion\")[\"on\"] && !device_state(\"mode_away\")[\"on\"]"),
+    ],
+
+    actions: [
+        RuleAction(action: Parallel(actions: [
+            Notify(channel: "telegram", message: "Motion detected outside at night!", title: Some("Security Alert")),
+            Notify(channel: "pushover", message: "Exterior motion detected"),
+            SetDeviceState(device: "outside.floodlight", state: { "on": true, "brightness_pct": 100 }),
+        ])),
+    ],
+)
+

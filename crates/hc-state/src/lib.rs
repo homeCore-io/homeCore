@@ -555,6 +555,11 @@ impl StateStore {
         let id = device_id.to_string();
         let removed = tokio::task::spawn_blocking(move || store.delete(&id)).await??;
         if removed {
+            // A device re-added under the same id starts with no battery
+            // latch, so a low battery is reported again.
+            if let Err(e) = self.forget_battery(device_id).await {
+                tracing::warn!(device_id, error = %e, "could not clear the battery latch");
+            }
             self.announce(|| Event::DeviceRemoved {
                 timestamp: chrono::Utc::now(),
                 device_id: device_id.to_string(),
@@ -881,6 +886,22 @@ mod change_tests {
                 _ => "other",
             })
             .collect()
+    }
+
+    /// A device deleted while its battery was low, then added again under the
+    /// same id, reports low again. Its latch used to outlive it.
+    #[tokio::test]
+    async fn deleting_a_device_forgets_its_low_battery() {
+        let (_dir, store, _) = store_with_sink().await;
+        let sensor = DeviceState::new("sensor", "Sensor", "plugin.test");
+        store.upsert_device(&sensor).await.unwrap();
+        let low = || store.evaluate_battery("sensor", 5.0, 20.0, 5.0);
+        assert_eq!(low().await.unwrap(), Some(BatteryEdge::WentLow));
+        assert_eq!(low().await.unwrap(), None, "latched");
+
+        store.delete_device("sensor").await.unwrap();
+        store.upsert_device(&sensor).await.unwrap();
+        assert_eq!(low().await.unwrap(), Some(BatteryEdge::WentLow));
     }
 
     /// Every write is seen, whoever made it; a state report — by far the

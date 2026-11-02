@@ -1,0 +1,18 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Humidifier off",
+    enabled: true,
+    priority: 10,
+
+    trigger: DeviceStateChanged(device: "office.humidity_sensor", attribute: Some("humidity")),
+
+    conditions: [
+        DeviceState(device: "office.humidity_sensor", attribute: "humidity", op: Gt, value: 50),
+        DeviceState(device: "office.humidifier_plug", attribute: "on", op: Eq, value: true),
+    ],
+
+    actions: [
+        RuleAction(action: SetDeviceState(device: "office.humidifier_plug", state: { "on": false })),
+    ],
+)
+

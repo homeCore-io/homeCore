@@ -4,9 +4,9 @@ set shell := ["bash", "-uc"]
 # so the same template ships unchanged to every hc-* plugin.
 BIN_NAME := file_name(justfile_directory())
 
-# hc-scripts location (override with `HC_SCRIPTS=... just package` if your
-# checkout doesn't follow the meta-layout).
-HC_SCRIPTS := env_var_or_default("HC_SCRIPTS", "../../hc-scripts")
+# hc-scripts location: the workspace root holds core/ and hc-scripts/ side by
+# side (override with `HC_SCRIPTS=... just package` if yours doesn't).
+HC_SCRIPTS := env_var_or_default("HC_SCRIPTS", "../../../hc-scripts")
 
 # List recipes
 default:
@@ -24,9 +24,7 @@ fmt-fix:
 clippy:
     cargo clippy --all-targets --all-features -- \
         -D warnings \
-        -A clippy::too_many_arguments \
-        -A clippy::type_complexity \
-        -A clippy::result_large_err
+        -A clippy::type_complexity
 
 test:
     cargo test --all-features

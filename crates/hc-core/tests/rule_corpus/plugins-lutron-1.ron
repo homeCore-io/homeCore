@@ -1,0 +1,14 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Living room, Lutron evening scene",
+    enabled: true,
+    priority: 0,
+    trigger: SunEvent(event: Sunset, offset_minutes: -15),
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device_id: "lutron_scene_movie_mode",
+            state: { "action": "activate" },
+        )),
+    ],
+)
+

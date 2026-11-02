@@ -1,0 +1,18 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Dinner music",
+    enabled: true,
+    priority: 10,
+    trigger: DeviceStateChanged(
+        device_id: "dining_room.music_switch",
+        attribute: Some("on"),
+        to: Some(true),
+    ),
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device_id: "living_room.sonos",
+            state: { "action": "play_favorite", "favorite": "Dinner Jazz" },
+        )),
+    ],
+)
+

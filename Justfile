@@ -7,14 +7,12 @@ check: fmt clippy test
 fmt:
     cargo fmt --all -- --check
 
-# Run clippy lints (deny only compile-affecting and correctness lints for now)
+# Run clippy exactly as CI does (hc-scripts rust-ci.yml), so a green `just
+# check` means a green CI lint step.
 clippy:
-    cargo clippy --workspace --all-targets -- \
-        -D clippy::correctness \
-        -D clippy::suspicious \
-        -A clippy::type_complexity \
-        -A clippy::too_many_arguments \
-        -A clippy::should_implement_trait
+    cargo clippy --workspace --all-targets --all-features -- \
+        -D warnings \
+        -A clippy::type_complexity
 
 # Run tests
 test:

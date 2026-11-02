@@ -1,0 +1,22 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Office, mode-based lighting",
+    enabled: true,
+    priority: 0,
+    trigger: DeviceStateChanged(
+        device_id: "mode_night",
+        attribute: Some("on"),
+        to: Some(true),
+    ),
+    actions: [
+        RuleAction(action: SetDeviceStatePerMode(
+            device_id: "lutron_21",
+            modes: [
+                (mode: "mode_night", state: { "on": true, "brightness_pct": 20 }),
+                (mode: "mode_away", state: { "on": false }),
+            ],
+            default_state: Some({ "on": true, "brightness_pct": 80 }),
+        )),
+    ],
+)
+

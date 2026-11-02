@@ -1,0 +1,37 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",  // all zeros: HomeCore assigns a real ID on first load
+    name: "Front door alert",
+    enabled: true,
+    priority: 10,          // higher runs first
+    tags: ["security", "door-alerts"],
+
+    trigger: DeviceStateChanged(
+        device: "entryway.front_door",
+        attribute: Some("open"),
+        to: Some(true),    // optional: only fire when the attribute changes to this value
+    ),
+
+    conditions: [
+        TimeWindow(
+            start: "08:00:00",
+            end: "22:00:00",
+        ),
+    ],
+
+    actions: [
+        RuleAction(
+            enabled: true,
+            action: Notify(
+                channel: "telegram",
+                message: "Front door opened",
+            ),
+        ),
+    ],
+
+    // Optional fields:
+    // cooldown_secs: Some(300),
+    // run_mode: Single,           // Parallel | Single | Restart | Queued(max_queue: 10)
+    // trigger_condition: Some("device_state(\"mode_night\")[\"on\"] == true"),
+    // required_expression: Some("current_hour() >= 6 && current_hour() < 22"),
+)
+

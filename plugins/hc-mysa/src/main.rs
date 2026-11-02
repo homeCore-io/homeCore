@@ -1,0 +1,518 @@
+//! hc-mysa: Mysa thermostats, over the Mysa Consumer API.
+//!
+//! One homeCore `thermostat` device per thermostat the customer shared,
+//! polled. Mysa's API is a cloud API; there is nothing local to talk to.
+//!
+//! The order below is the one the SDK requires: `run_managed` is spawned
+//! *before* anything is registered. See the comment at that call.
+//!
+//! ```text
+//! src/
+//! ├── main.rs      connect → logs → manage → describe → run → poll → consume
+//! ├── config.rs    the config core hands you as argv[1], and how it renders
+//! ├── auth.rs      homeCore's Mysa client, PKCE, and where tokens live
+//! ├── api.rs       the Mysa Consumer API, from its OpenAPI document
+//! ├── device.rs    thermostat ⇄ homeCore device: state, schema, commands
+//! ├── link.rs      signing in: the page's actions and a streaming fallback
+//! ├── runtime.rs   the poll loop, the command path, and the notices
+//! └── units.rs     landing on the values a thermostat accepts
+//! ```
+
+mod api;
+mod auth;
+mod config;
+mod device;
+mod link;
+mod runtime;
+mod units;
+
+use anyhow::Result;
+use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
+use plugin_sdk_rs::{AsyncActionFuture, PluginClient, PluginConfig};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
+
+use config::Config;
+use runtime::Runtime;
+
+/// Bounded startup retries, then exit and let core's supervisor apply its own
+/// exponential backoff. The convention every shipped plugin follows.
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_DELAY_SECS: u64 = 60;
+
+#[tokio::main]
+async fn main() {
+    // Core passes the config path as the first argument; the fallback is only
+    // for running the binary by hand.
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config/config.toml".to_string());
+
+    let (_log_guard, log_level_handle, mqtt_log_handle) = init_logging(&config_path);
+
+    let cfg = match Config::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, path = %config_path, "Failed to load config");
+            std::process::exit(1);
+        }
+    };
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        info!(attempt, max = MAX_ATTEMPTS, "Starting hc-mysa plugin");
+        match try_start(
+            &cfg,
+            &config_path,
+            log_level_handle.clone(),
+            mqtt_log_handle.clone(),
+        )
+        .await
+        {
+            Ok(()) => return,
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                error!(error = %e, attempt, "Startup failed; retrying in {RETRY_DELAY_SECS} s");
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+            }
+            Err(e) => {
+                error!(error = %e, "Startup failed after {MAX_ATTEMPTS} attempts; exiting");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn init_logging(
+    config_path: &str,
+) -> (
+    tracing_appender::non_blocking::WorkerGuard,
+    plugin_sdk_rs::logging::LogLevelHandle,
+    plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) {
+    #[derive(serde::Deserialize, Default)]
+    struct Bootstrap {
+        #[serde(default)]
+        logging: plugin_sdk_rs::logging::LoggingConfig,
+    }
+    let bootstrap: Bootstrap = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+    // `plugin_sdk_rs` is in the filter on purpose: reconnects and subscription
+    // restores are logged by the SDK, and filtering to this crate alone hides
+    // exactly the lines that explain a misbehaving plugin.
+    plugin_sdk_rs::logging::init_logging(
+        config_path,
+        "hc-mysa",
+        "hc_mysa=info,plugin_sdk_rs=info",
+        &bootstrap.logging,
+    )
+}
+
+/// Where the device snapshot lives: beside the config file core handed us.
+fn snapshot_path(config_path: &str) -> PathBuf {
+    Path::new(config_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".published-device-ids.json")
+}
+
+async fn try_start(
+    cfg: &Config,
+    config_path: &str,
+    log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
+    mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) -> Result<()> {
+    let client = PluginClient::connect(PluginConfig {
+        broker_host: cfg.homecore.broker_host.clone(),
+        broker_port: cfg.homecore.broker_port,
+        plugin_id: cfg.homecore.plugin_id.clone(),
+        password: cfg.homecore.password.clone(),
+    })
+    .await?
+    // Remember what was registered, across restarts. Without it, reconcile can
+    // only see devices registered in *this* process, so a thermostat removed
+    // from the account while the plugin was down would linger in homeCore
+    // forever — visible, and accepting commands nothing executes.
+    .with_device_persistence(snapshot_path(config_path));
+
+    mqtt_log_handle.connect(
+        client.mqtt_client(),
+        &cfg.homecore.plugin_id,
+        &cfg.logging.log_forward_level,
+    );
+
+    let publisher = client.device_publisher();
+    let notices = client.notices();
+    let state_writer = client.state_writer();
+
+    let (api, http) = api::MysaApi::new(cfg.mysa.endpoints.api_url.as_deref())?;
+    let auth = Arc::new(auth::Auth::new(
+        &cfg.mysa.auth_settings(),
+        http,
+        state_writer,
+    ));
+
+    let rt = Arc::new(Runtime::new(
+        api.clone(),
+        Arc::clone(&auth),
+        publisher,
+        notices.clone(),
+        &cfg.mysa,
+    ));
+
+    // Lets the link action and the `refresh` button cut a poll interval short.
+    let (wake_tx, mut wake_rx) = mpsc::channel::<()>(4);
+
+    let mgmt = client
+        .enable_management(
+            60,
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            Some(config_path.to_string()),
+            Some(log_level_handle),
+        )
+        .await?
+        .with_capabilities(capabilities());
+
+    // The plugin's page: link, status, sign out. Its settings stay the app's form.
+    let mgmt = match plugin_sdk_rs::ui::find_dir(env!("CARGO_MANIFEST_DIR")) {
+        Some(dir) => mgmt.with_ui_dir(dir, env!("CARGO_PKG_VERSION")),
+        None => mgmt,
+    };
+
+    // Tokens live in core's durable learned state, so a restart resumes without
+    // asking the operator to sign in again. This handler fires on connect with
+    // the retained document and on every later change.
+    let mgmt = {
+        let auth = Arc::clone(&auth);
+        mgmt.with_state_handler(move |doc| auth.adopt_persisted_state(&doc))
+    };
+
+    let link = link::LinkHandle {
+        auth: Arc::clone(&auth),
+        api,
+        notices,
+        runtime: Arc::clone(&rt),
+    };
+
+    let mgmt = {
+        let rt = Arc::clone(&rt);
+        let wake = wake_tx.clone();
+        let link = link.clone();
+        mgmt.with_custom_handler(move |cmd| match cmd["action"].as_str()? {
+            "refresh" => {
+                let _ = wake.try_send(());
+                Some(json!({ "status": "ok", "message": "refreshing" }))
+            }
+            "status" => Some(json!({ "status": "ok", "result": rt.status() })),
+            "begin_link" => Some(link.begin(cmd)),
+            _ => None,
+        })
+    };
+
+    // These wait on Mysa, so they mustn't hold up the MQTT loop.
+    let mgmt = {
+        let link = link.clone();
+        mgmt.with_async_handler(move |cmd| {
+            let link = link.clone();
+            let cmd = cmd.clone();
+            match cmd["action"].as_str()? {
+                "complete_link" => {
+                    Some(Box::pin(async move { link.complete(&cmd).await }) as AsyncActionFuture)
+                }
+                "sign_out" => {
+                    Some(Box::pin(async move { link.sign_out().await }) as AsyncActionFuture)
+                }
+                _ => None,
+            }
+        })
+    };
+
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
+    let mgmt = mgmt.with_streaming_action(link::streaming_link(link));
+
+    // Commands arrive on a synchronous SDK callback; hand them to this channel
+    // so cloud I/O never stalls the MQTT event loop.
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(64);
+
+    // ── Start the event loop BEFORE registering anything ──────────────────
+    //
+    // `run_managed` is what drives the MQTT connection: until it is polling,
+    // nothing published leaves the process, it only queues, and the queue holds
+    // 64 messages. Registering one device costs four of them, so registering
+    // first works with three thermostats and hangs at startup with seventeen —
+    // no error, no log line, just a stop.
+    tokio::spawn(async move {
+        if let Err(e) = client
+            .run_managed(
+                move |device_id, payload| {
+                    // try_send, not send: dropping a command under load beats
+                    // blocking the event loop behind it.
+                    if cmd_tx.try_send((device_id.clone(), payload)).is_err() {
+                        warn!(device_id = %device_id, "Command queue full, dropped");
+                    }
+                },
+                mgmt,
+            )
+            .await
+        {
+            error!(error = %e, "SDK event loop exited");
+        }
+        // Dropping `cmd_tx` closes the command loop below, so the process exits
+        // and core restarts it — rather than sitting there looking healthy with
+        // no connection behind it.
+    });
+
+    // Let the connection establish, and give the retained learned-state
+    // document a moment to arrive, so the first poll has the token a previous
+    // run persisted instead of raising a spurious "not signed in".
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // ── The poll loop ─────────────────────────────────────────────────────
+    let poll_interval = Duration::from_secs(cfg.mysa.poll_interval_secs.max(30));
+    {
+        let rt = Arc::clone(&rt);
+        tokio::spawn(async move {
+            loop {
+                rt.poll().await;
+                // Wake early when someone links an account or presses Refresh,
+                // rather than making them wait out the interval.
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = wake_rx.recv() => {}
+                }
+            }
+        });
+    }
+
+    // ── Commands ──────────────────────────────────────────────────────────
+    //
+    // Sequential on purpose, and coalesced: attribute writes queued for one
+    // thermostat while an earlier command was out become one command, the
+    // latest value of each winning. Mysa limits writes tightly and asks
+    // clients not to automate rapid changes; a held-down + is one write.
+    while let Some(first) = cmd_rx.recv().await {
+        let mut queued = vec![first];
+        while let Ok(next) = cmd_rx.try_recv() {
+            queued.push(next);
+        }
+        for (device_id, payload) in coalesce(queued) {
+            rt.apply(&device_id, &payload).await;
+        }
+    }
+    Ok(())
+}
+
+/// Attribute writes for one thermostat merged, later values winning, in the
+/// order each thermostat was first asked; actions kept as they came.
+fn coalesce(queued: Vec<(String, serde_json::Value)>) -> Vec<(String, serde_json::Value)> {
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    for (id, payload) in queued {
+        let is_action = payload.get("action").is_some();
+        let merge_into = (!is_action)
+            .then(|| {
+                // Only into this thermostat's latest entry, so nothing moves
+                // past an action queued between.
+                out.iter_mut()
+                    .rev()
+                    .find(|(other, _)| *other == id)
+                    .filter(|(_, p)| p.get("action").is_none() && p.is_object())
+            })
+            .flatten();
+        match (merge_into, payload.as_object()) {
+            (Some((_, existing)), Some(fields)) => {
+                let target = existing.as_object_mut().expect("checked above");
+                for (k, v) in fields {
+                    target.insert(k.clone(), v.clone());
+                }
+            }
+            _ => out.push((id, payload)),
+        }
+    }
+    out
+}
+
+/// The action manifest: each entry becomes a button on the plugin's page and a
+/// call hc-mcp can make, with no UI code at either end.
+fn capabilities() -> Capabilities {
+    let action = |id: &str, label: &str, description: &str, role: RequiresRole| Action {
+        id: id.into(),
+        label: label.into(),
+        description: Some(description.into()),
+        params: None,
+        result: None,
+        stream: false,
+        cancelable: false,
+        concurrency: Concurrency::default(),
+        item_key: None,
+        item_operations: None,
+        requires_role: role,
+        timeout_ms: None,
+        danger: false,
+    };
+    Capabilities {
+        spec: "1".into(),
+        // Left empty: the SDK fills in the id it connected with.
+        plugin_id: String::new(),
+        actions: vec![
+            Action {
+                result: Some(json!({
+                    "linked": { "type": "boolean" },
+                    "thermostats": { "type": "integer" },
+                })),
+                stream: true,
+                cancelable: true,
+                // One sign-in at a time: two would race to keep their tokens.
+                concurrency: Concurrency::Single,
+                // Generous: the middle of it is a person signing in elsewhere.
+                timeout_ms: Some(600_000),
+                ..action(
+                    "link_account",
+                    "Link Mysa account",
+                    "Sign in to Mysa and paste back the address you land on.",
+                    RequiresRole::Admin,
+                )
+            },
+            Action {
+                params: Some(json!({
+                    "via": { "type": "string", "enum": ["relay", "loopback"] },
+                    "return_to": { "type": "string" },
+                })),
+                result: Some(json!({ "url": { "type": "string" } })),
+                ..action(
+                    "begin_link",
+                    "Start signing in",
+                    "The plugin page's first step: where to sign in at Mysa.",
+                    RequiresRole::Admin,
+                )
+            },
+            Action {
+                params: Some(json!({
+                    "code": { "type": "string" },
+                    "state": { "type": "string" },
+                    "pasted": { "type": "string" },
+                })),
+                result: Some(json!({ "linked": { "type": "boolean" }, "thermostats": { "type": "integer" } })),
+                timeout_ms: Some(60_000),
+                concurrency: Concurrency::Single,
+                ..action(
+                    "complete_link",
+                    "Finish signing in",
+                    "The plugin page's last step: what Mysa sent back.",
+                    RequiresRole::Admin,
+                )
+            },
+            Action {
+                danger: true,
+                timeout_ms: Some(30_000),
+                ..action(
+                    "sign_out",
+                    "Sign out",
+                    "Forget the Mysa sign-in. Thermostats stay, without readings, until you link again.",
+                    RequiresRole::Admin,
+                )
+            },
+            action(
+                "refresh",
+                "Refresh now",
+                "Ask Mysa for every thermostat now, instead of waiting.",
+                RequiresRole::User,
+            ),
+            action(
+                "status",
+                "Show status",
+                "Whether it's signed in, until when, and which thermostats it found.",
+                RequiresRole::ReadOnly,
+            ),
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A declared action nothing handles is a button that does nothing. The
+    /// streaming pair are registered in `link.rs`; the two synchronous ones are
+    /// handled by the custom handler in `try_start`, and this pins the list the
+    /// two halves have to agree on.
+    #[test]
+    fn every_declared_action_is_handled_somewhere() {
+        let declared: Vec<String> = capabilities()
+            .actions
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                "link_account",
+                "begin_link",
+                "complete_link",
+                "sign_out",
+                "refresh",
+                "status"
+            ]
+        );
+        for action in capabilities().actions {
+            let handled_by_stream = action.id == "link_account";
+            assert_eq!(
+                action.stream, handled_by_stream,
+                "{} is declared stream={} but handled the other way",
+                action.id, action.stream
+            );
+        }
+    }
+
+    /// Signing in and out changes stored credentials, so neither belongs to an
+    /// ordinary user; polling sooner is harmless.
+    #[test]
+    fn credential_actions_require_an_admin() {
+        for action in capabilities().actions {
+            let expected = match action.id.as_str() {
+                "link_account" | "begin_link" | "complete_link" | "sign_out" => RequiresRole::Admin,
+                // Read by the page with `query`, which needs only devices:read.
+                "status" => RequiresRole::ReadOnly,
+                _ => RequiresRole::User,
+            };
+            assert_eq!(action.requires_role, expected, "{}", action.id);
+        }
+    }
+
+    #[test]
+    fn queued_writes_for_one_thermostat_become_one_and_actions_stay_apart() {
+        let q = vec![
+            ("a".to_string(), json!({ "heat_setpoint": 20.0 })),
+            ("b".to_string(), json!({ "hvac_mode": "cool" })),
+            ("a".to_string(), json!({ "heat_setpoint": 21.0 })),
+            ("a".to_string(), json!({ "action": "hold" })),
+            ("a".to_string(), json!({ "fan_mode": "auto" })),
+        ];
+        let out = coalesce(q);
+        assert_eq!(
+            out,
+            vec![
+                ("a".to_string(), json!({ "heat_setpoint": 21.0 })),
+                ("b".to_string(), json!({ "hvac_mode": "cool" })),
+                ("a".to_string(), json!({ "action": "hold" })),
+                ("a".to_string(), json!({ "fan_mode": "auto" })),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_snapshot_sits_beside_the_config_core_handed_us() {
+        assert_eq!(
+            snapshot_path("/var/lib/homecore/config/plugins/plugin.mysa.toml"),
+            PathBuf::from("/var/lib/homecore/config/plugins/.published-device-ids.json")
+        );
+    }
+}

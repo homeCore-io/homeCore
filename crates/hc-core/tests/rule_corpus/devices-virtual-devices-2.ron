@@ -1,0 +1,19 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Garage close: lights off",
+    enabled: true,
+    priority: 0,
+    trigger: DeviceStateChanged(
+        device_id: "timer_garage_close",
+        attribute: Some("state"),
+        to: Some("finished"),
+    ),
+    conditions: [],
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device_id: "garage.main_light",
+            state: {"on": false},
+        )),
+    ],
+)
+

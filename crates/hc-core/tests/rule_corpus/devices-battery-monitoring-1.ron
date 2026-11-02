@@ -1,0 +1,17 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Notify on any battery low",
+    enabled: true,
+    priority: 0,
+    trigger: DeviceBatteryLow(device_id: None),
+    conditions: [],
+    actions: [
+        RuleAction(action: RunScript(script: r#"
+            let id = trigger_device();
+            let pct = trigger_value();
+            notify_titled("all", "Battery low",
+                "Battery low: " + id + " at " + pct + "%");
+        "#)),
+    ],
+)
+

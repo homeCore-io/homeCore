@@ -1,0 +1,14 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Porch light, on at sunset",
+    enabled: true,
+    priority: 0,
+    trigger: SunEvent(event: Sunset, offset_minutes: 0),
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device_id: "isy_13_a6_99_1",
+            state: { "on": true, "brightness_pct": 100 },
+        )),
+    ],
+)
+

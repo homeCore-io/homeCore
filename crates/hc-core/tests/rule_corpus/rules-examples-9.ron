@@ -1,0 +1,30 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Arrival home",
+    enabled: true,
+    priority: 10,
+    tags: ["presence", "arrival"],
+
+    trigger: DeviceStateChanged(
+        device: "entryway.front_door",
+        attribute: Some("open"),
+        to: Some(true),
+    ),
+
+    conditions: [
+        ModeIs(mode_id: "mode_away", on: true),
+    ],
+
+    actions: [
+        RuleAction(action: Parallel(actions: [
+            SetDeviceState(device: "entryway.light", state: { "on": true, "brightness_pct": 80 }),
+            SetDeviceState(device: "hallway.thermostat", state: { "hvac_mode": "heat", "setpoint": 21 }),   // °C
+        ])),
+        RuleAction(action: SetMode(mode_id: "mode_away", command: Off)),
+        RuleAction(action: CallService(
+            url: "http://sonos.local:5005/Entryway/say/Welcome+home",
+            method: "GET",
+        )),
+    ],
+)
+

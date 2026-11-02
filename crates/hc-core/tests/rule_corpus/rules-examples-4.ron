@@ -1,0 +1,24 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Hallway motion light",
+    enabled: true,
+    priority: 10,
+    run_mode: Single,   // one run at a time; new motion is handled by the wait below
+
+    trigger: DeviceStateChanged(
+        device: "hallway.motion",
+        attribute: Some("motion"),
+        to: Some(true),
+    ),
+
+    actions: [
+        RuleAction(action: SetDeviceState(device: "hallway.light", state: { "on": true })),
+        RuleAction(action: Comment(text: "Wait for 5 minutes without motion, then turn off")),
+        RuleAction(action: WaitForExpression(
+            expression: "device_state(\"motion_hallway\")[\"motion\"] == false",
+            hold_duration_ms: Some(300000),
+        )),
+        RuleAction(action: SetDeviceState(device: "hallway.light", state: { "on": false })),
+    ],
+)
+
