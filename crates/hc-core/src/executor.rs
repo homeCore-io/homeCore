@@ -380,8 +380,9 @@ fn to_json_number(f: f64) -> JsonValue {
 ///
 /// `snapshot` is a frozen-at-fire-time view of device state used by Rhai
 /// scripts.  It stays consistent across all script evaluations within one
-/// rule firing.  `ctx.device_cache` (the live DashMap) is used only by
-/// `WaitForExpression` and `RunRuleActions`.
+/// rule firing. `ctx.device_cache` (the live DashMap) is used by
+/// `WaitForExpression`, `RunRuleActions` and the repeat loops, which need
+/// device states as they are now.
 ///
 /// Actions with `enabled = false` are skipped and recorded as `Skipped` in the
 /// action trace.
@@ -389,6 +390,17 @@ pub async fn execute_actions(
     actions: Vec<RuleAction>,
     ctx: Arc<ExecutorContext>,
     snapshot: Arc<HashMap<String, JsonValue>>,
+) -> Result<()> {
+    execute_actions_at(actions, ctx, snapshot, 0).await
+}
+
+/// [`execute_actions`] at a `RunRuleActions` depth, so rules that run each
+/// other stop at [`MAX_CALL_DEPTH`] instead of recursing without end.
+async fn execute_actions_at(
+    actions: Vec<RuleAction>,
+    ctx: Arc<ExecutorContext>,
+    snapshot: Arc<HashMap<String, JsonValue>>,
+    call_depth: u32,
 ) -> Result<()> {
     let total = actions.len();
     for (idx, ra) in actions.into_iter().enumerate() {
@@ -417,7 +429,15 @@ pub async fn execute_actions(
             }
             continue;
         }
-        execute_one(ra.action, idx, total, Arc::clone(&ctx), snapshot.clone(), 0).await?;
+        execute_one(
+            ra.action,
+            idx,
+            total,
+            Arc::clone(&ctx),
+            snapshot.clone(),
+            call_depth,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -730,12 +750,22 @@ fn run_single_action(
                     &condition
                 };
                 debug!(condition = %snippet, limit, delay_ms = delay, "action: RepeatUntil — starting");
+                // The body runs first, then the check, against device states
+                // as they are now: the loop is usually waiting for its own
+                // actions (or the world) to change something.
                 for i in 0..limit {
                     if ctx.exit_flag.load(Ordering::SeqCst) {
                         break;
                     }
+                    execute_actions_inner(
+                        actions.clone(),
+                        Arc::clone(&ctx),
+                        snapshot_from_cache(&ctx.device_cache),
+                        call_depth,
+                    )
+                    .await?;
                     let cond_script = condition.clone();
-                    let snap = snapshot.clone();
+                    let snap = snapshot_from_cache(&ctx.device_cache);
                     let done = tokio::task::spawn_blocking(move || {
                         ScriptRuntime::new_with_devices(snap).eval_condition(&cond_script)
                     })
@@ -755,13 +785,6 @@ fn run_single_action(
                         warn!(max = limit, "action: RepeatUntil — hit max_iterations without condition becoming true");
                         break;
                     }
-                    execute_actions_inner(
-                        actions.clone(),
-                        Arc::clone(&ctx),
-                        snapshot.clone(),
-                        call_depth,
-                    )
-                    .await?;
                     if delay > 0 {
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
@@ -792,10 +815,12 @@ fn run_single_action(
                         warn!(max = limit, "action: RepeatWhile — hit max_iterations");
                         break;
                     }
-                    let snap = snapshot.clone();
+                    // Device states as they are now, not when the rule fired.
+                    let snap = snapshot_from_cache(&ctx.device_cache);
                     let cond = condition.clone();
-                    let passes = tokio::task::spawn_blocking(move || {
-                        ScriptRuntime::new_with_devices(snap).eval_condition(&cond)
+                    let passes = tokio::task::spawn_blocking({
+                        let snap = Arc::clone(&snap);
+                        move || ScriptRuntime::new_with_devices(snap).eval_condition(&cond)
                     })
                     .await??;
                     if !passes {
@@ -805,13 +830,8 @@ fn run_single_action(
                         );
                         break;
                     }
-                    execute_actions_inner(
-                        actions.clone(),
-                        Arc::clone(&ctx),
-                        snapshot.clone(),
-                        call_depth,
-                    )
-                    .await?;
+                    execute_actions_inner(actions.clone(), Arc::clone(&ctx), snap, call_depth)
+                        .await?;
                     if delay > 0 {
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
@@ -1303,7 +1323,8 @@ fn run_single_action(
                         });
                         let sub_snapshot = snapshot_from_cache(&ctx.device_cache);
                         // Use execute_actions so per-action enabled flags are respected.
-                        execute_actions(target_actions, sub_ctx, sub_snapshot).await?;
+                        execute_actions_at(target_actions, sub_ctx, sub_snapshot, call_depth + 1)
+                            .await?;
                     }
                 }
             }
@@ -2713,6 +2734,109 @@ mod tests {
         execute_actions(vec![action], ExecutorContext::for_test(), empty_snapshot())
             .await
             .unwrap();
+    }
+
+    /// A counter the loop body bumps, so a test can see how many passes ran.
+    fn count_pass() -> Action {
+        Action::SetHubVariable {
+            name: "passes".into(),
+            value: serde_json::json!(1),
+            op: Some(hc_types::rule::VariableOp::Add),
+        }
+    }
+
+    fn passes(ctx: &ExecutorContext) -> i64 {
+        ctx.hub_vars
+            .get("passes")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    }
+
+    /// "Until" runs the body before it asks, so even a condition that is true
+    /// from the start gets one pass, and a never-true one gets exactly
+    /// `max_iterations`.
+    #[tokio::test]
+    async fn repeat_until_runs_first_and_then_checks() {
+        for (condition, max, expected) in [("true", 10, 1), ("false", 3, 3)] {
+            let ctx = ExecutorContext::for_test();
+            let action = ra(Action::RepeatUntil {
+                condition: condition.into(),
+                actions: vec![count_pass()],
+                max_iterations: Some(max),
+                interval_ms: None,
+            });
+            execute_actions(vec![action], Arc::clone(&ctx), empty_snapshot())
+                .await
+                .unwrap();
+            assert_eq!(passes(&ctx), expected, "until {condition}");
+        }
+    }
+
+    /// The loops look at device states as they are now. Before, they read the
+    /// snapshot from when the rule fired, so a loop waiting for a door to
+    /// close ran to its limit however soon the door closed.
+    #[tokio::test]
+    async fn repeat_loops_see_device_changes_while_they_run() {
+        let open = |v: bool| HashMap::from([("open".to_string(), serde_json::json!(v))]);
+        for until in [true, false] {
+            let ctx = ExecutorContext::for_test();
+            ctx.device_cache.insert("door".into(), open(true));
+            let cache = Arc::clone(&ctx.device_cache);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                cache.insert("door".into(), open(false));
+            });
+            let action = if until {
+                Action::RepeatUntil {
+                    condition: r#"device_state("door")["open"] == false"#.into(),
+                    actions: vec![count_pass()],
+                    max_iterations: Some(100),
+                    interval_ms: Some(20),
+                }
+            } else {
+                Action::RepeatWhile {
+                    condition: r#"device_state("door")["open"] == true"#.into(),
+                    actions: vec![count_pass()],
+                    max_iterations: Some(100),
+                    interval_ms: Some(20),
+                }
+            };
+            execute_actions(vec![ra(action)], Arc::clone(&ctx), empty_snapshot())
+                .await
+                .unwrap();
+            let n = passes(&ctx);
+            assert!((1..20).contains(&n), "until={until}: {n} passes");
+        }
+    }
+
+    /// A rule that runs itself stops at the depth limit. The depth used to
+    /// start again at 0 inside every RunRuleActions, so this never ended.
+    #[tokio::test]
+    async fn rules_that_run_each_other_stop_at_the_depth_limit() {
+        let id = Uuid::new_v4();
+        let rule: hc_types::rule::Rule = ron::from_str(&format!(
+            r#"Rule(id: "{id}", name: "loop", enabled: true, priority: 0,
+                trigger: ManualTrigger,
+                actions: [
+                    RuleAction(action: SetHubVariable(name: "passes", value: 1, op: Some(Add))),
+                    RuleAction(action: RunRuleActions(rule_id: "{id}")),
+                ])"#
+        ))
+        .unwrap();
+        let actions = rule.actions.clone();
+        let ctx = Arc::new(ExecutorContext {
+            rules_handle: Arc::new(RwLock::new(vec![rule])),
+            ..Arc::try_unwrap(ExecutorContext::for_test()).ok().unwrap()
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_actions(actions, Arc::clone(&ctx), empty_snapshot()),
+        )
+        .await
+        .expect("a rule running itself must stop")
+        .unwrap();
+        // Depth 0 plus MAX_CALL_DEPTH nested runs.
+        assert_eq!(passes(&ctx), i64::from(MAX_CALL_DEPTH) + 1);
     }
 
     #[tokio::test]

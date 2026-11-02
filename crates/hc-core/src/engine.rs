@@ -156,8 +156,8 @@ pub struct RuleEngine {
     capture_store: crate::executor::CaptureStore,
     /// Cross-rule hub variable store.  Key: variable name.
     hub_vars: Arc<DashMap<String, JsonValue>>,
-    /// Per-rule in-flight action task counter, used by run_mode: single/queued.
-    rule_in_flight: Arc<DashMap<Uuid, Arc<AtomicUsize>>>,
+    /// Per rule: its runs in flight, for the run modes.
+    rule_in_flight: Arc<DashMap<Uuid, Arc<RuleRuns>>>,
     /// Seconds to wait for in-flight tasks during graceful shutdown.
     drain_timeout_secs: u64,
     /// Shared calendar store for `Condition::CalendarActive`.
@@ -576,7 +576,10 @@ impl RuleEngine {
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0) as usize;
                             let trigger = rule.all_triggers().nth(index).unwrap_or(&rule.trigger);
-                            if still_matches_for_duration(trigger, &self.device_cache) {
+                            let held = payload.get("available").and_then(|v| v.as_bool());
+                            if still_matches_for_duration(trigger, &self.device_cache)
+                                && availability_held(&self.state, trigger, held).await
+                            {
                                 let tctx = TriggerContext {
                                     trigger_index: (!rule.triggers.is_empty()).then_some(index),
                                     ..TriggerContext::default()
@@ -649,13 +652,25 @@ impl RuleEngine {
                 let trigger = trigger.clone();
                 let bus = self.pub_bus.clone();
                 let cache = Arc::clone(&self.device_cache);
+                let state = self.state.clone();
+                // The availability the device changed to, which must still hold.
+                let held = match event {
+                    Event::DeviceAvailabilityChanged { available, .. } => Some(*available),
+                    _ => None,
+                };
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(dur_secs)).await;
-                    if still_matches_for_duration(&trigger, &cache) {
+                    if still_matches_for_duration(&trigger, &cache)
+                        && availability_held(&state, &trigger, held).await
+                    {
                         let _ = bus.publish(Event::Custom {
                             timestamp: Utc::now(),
                             event_type: "deferred_rule_fire".into(),
-                            payload: serde_json::json!({ "rule_id": rule_id, "trigger_index": index }),
+                            payload: serde_json::json!({
+                                "rule_id": rule_id,
+                                "trigger_index": index,
+                                "available": held,
+                            }),
                         });
                     } else {
                         debug!(rule_name = %rule_name, "for_duration_secs: state changed, not firing");
@@ -861,11 +876,12 @@ impl RuleEngine {
         }
 
         // ── Run mode concurrency check ────────────────────────────────────────
-        let rule_counter = self
+        let runs = self
             .rule_in_flight
             .entry(rule.id)
-            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .or_insert_with(|| Arc::new(RuleRuns::default()))
             .clone();
+        let rule_counter = &runs.count;
 
         match &rule.run_mode {
             RunMode::Parallel => {} // always proceed
@@ -904,8 +920,13 @@ impl RuleEngine {
                 }
             }
             RunMode::Restart => {
-                // Cancel all pending cancellable delays for this rule so the
-                // in-flight execution winds down quickly, then proceed.
+                // Stop the run in flight at its next step, then cut its
+                // cancellable delays short so it gets there now. Without the
+                // stop, the old run carried on after its delay was cut: "off
+                // in 5 minutes" turned the light off at once.
+                if let Some(old) = runs.latest.lock().unwrap().as_ref() {
+                    old.store(true, Ordering::SeqCst);
+                }
                 let prefix = format!("{}/", rule.id);
                 let keys: Vec<String> = self
                     .delay_registry
@@ -995,10 +1016,7 @@ impl RuleEngine {
             );
         }
 
-        let stop_chain = rule
-            .actions
-            .iter()
-            .any(|ra| matches!(ra.action, hc_types::rule::Action::StopRuleChain));
+        let stop_chain = stops_the_chain(rule);
 
         // Update cooldown map immediately after confirming the rule fires.
         if rule.cooldown_secs.is_some() {
@@ -1014,7 +1032,11 @@ impl RuleEngine {
         // Per-firing correlation ID threaded through actions → device commands → events.
         let firing_correlation_id = Uuid::new_v4().to_string();
         let in_flight = Arc::clone(&self.in_flight);
-        let rule_counter_spawn = Arc::clone(&rule_counter);
+        let runs_spawn = Arc::clone(&runs);
+        let queued = matches!(rule.run_mode, RunMode::Queued { .. });
+        let device_cache = Arc::clone(&self.device_cache);
+        let exit_flag = Arc::new(AtomicBool::new(false));
+        *runs.latest.lock().unwrap() = Some(Arc::clone(&exit_flag));
         let fire_history = Arc::clone(&self.fire_history);
         let state_for_persist = self.state.clone();
 
@@ -1040,7 +1062,7 @@ impl RuleEngine {
             rule_id: rule.id,
             rule_name: rule.name.clone(),
             log_actions: rule.log_actions,
-            exit_flag: Arc::new(AtomicBool::new(false)),
+            exit_flag,
             trace: Some(Arc::clone(&action_trace_buf)),
             correlation_id: Some(firing_correlation_id.clone()),
             judge: Some(self.judge_for(rule, trigger_alert_id(&trigger_ctx))),
@@ -1049,8 +1071,16 @@ impl RuleEngine {
         });
 
         in_flight.fetch_add(1, Ordering::SeqCst);
-        rule_counter_spawn.fetch_add(1, Ordering::SeqCst);
+        runs_spawn.count.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
+            // Queued: one run at a time, in the order they fired, each seeing
+            // device states as they are when its turn comes.
+            let (_turn, snapshot) = if queued {
+                let turn = Arc::clone(&runs_spawn.queue).acquire_owned().await.ok();
+                (turn, snapshot_of(&device_cache))
+            } else {
+                (None, snapshot)
+            };
             let action_start = Instant::now();
             debug!(rule_name = %rule_name, rule_id = %rule_id, count = action_count, "rule.actions: starting");
             match execute_actions(actions, ctx, snapshot).await {
@@ -1093,7 +1123,7 @@ impl RuleEngine {
                 elapsed_ms: Some(total_ms),
                 correlation_id: Some(firing_correlation_id),
             });
-            rule_counter_spawn.fetch_sub(1, Ordering::SeqCst);
+            runs_spawn.count.fetch_sub(1, Ordering::SeqCst);
             in_flight.fetch_sub(1, Ordering::SeqCst);
         });
         Ok(stop_chain)
@@ -1743,22 +1773,55 @@ impl RuleEngine {
     /// Wrapped in `Arc` so multiple script evaluations within a single rule
     /// firing share the same allocation instead of each cloning the full map.
     fn snapshot_from_cache(&self) -> Arc<HashMap<String, JsonValue>> {
-        Arc::new(
-            self.device_cache
-                .iter()
-                .map(|entry| {
-                    let attrs = JsonValue::Object(
-                        entry
-                            .value()
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                    );
-                    (entry.key().clone(), attrs)
-                })
-                .collect(),
-        )
+        snapshot_of(&self.device_cache)
     }
+}
+
+/// Device states as scripts see them.
+fn snapshot_of(
+    cache: &DashMap<String, HashMap<String, JsonValue>>,
+) -> Arc<HashMap<String, JsonValue>> {
+    Arc::new(
+        cache
+            .iter()
+            .map(|entry| {
+                let attrs = JsonValue::Object(
+                    entry
+                        .value()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                );
+                (entry.key().clone(), attrs)
+            })
+            .collect(),
+    )
+}
+
+/// A rule's runs in flight: how many, the newest one's stop flag (for
+/// `Restart`), and the turn that `Queued` runs take one at a time.
+struct RuleRuns {
+    count: AtomicUsize,
+    latest: std::sync::Mutex<Option<Arc<AtomicBool>>>,
+    queue: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for RuleRuns {
+    fn default() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            latest: std::sync::Mutex::new(None),
+            queue: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+}
+
+/// Whether firing this rule stops the lower-priority rules on the same event.
+/// A StopRuleChain step that is switched off doesn't.
+fn stops_the_chain(rule: &Rule) -> bool {
+    rule.actions
+        .iter()
+        .any(|ra| ra.enabled && matches!(ra.action, hc_types::rule::Action::StopRuleChain))
 }
 
 // ---------------------------------------------------------------------------
@@ -2177,9 +2240,24 @@ fn still_matches_for_duration(
                 ThresholdOp::Below | ThresholdOp::CrossesBelow => curr_f < threshold,
             }
         }
-        // For DeviceAvailabilityChanged and others, optimistically assume still matches.
+        // DeviceAvailabilityChanged is checked by `availability_held`, which
+        // needs the state store; others have nothing to re-check.
         _ => true,
     }
+}
+
+/// For a DeviceAvailabilityChanged trigger with `for_duration_secs`: whether
+/// the device still has the availability it changed to (`held`). A device
+/// that went offline for a moment and came back doesn't fire "offline for 5
+/// minutes". Other triggers pass.
+async fn availability_held(state: &StateStore, trigger: &Trigger, held: Option<bool>) -> bool {
+    let Trigger::DeviceAvailabilityChanged { device_id, .. } = trigger else {
+        return true;
+    };
+    let Some(held) = held else {
+        return false;
+    };
+    matches!(state.get_device(device_id).await, Ok(Some(d)) if d.available == held)
 }
 
 /// Short human-readable label for the trigger variant (for log fields).
@@ -2752,6 +2830,49 @@ mod tests {
     use chrono::Utc;
     use hc_types::device::{DeviceChange, DeviceChangeKind};
     use serde_json::json;
+
+    /// "Offline for 5 minutes" fires only if the device is still offline when
+    /// the 5 minutes are up. It used to fire whatever happened in between.
+    #[tokio::test]
+    async fn an_availability_trigger_rechecks_after_its_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut dev = hc_types::device::DeviceState::new("lamp", "Lamp", "test");
+        dev.available = false;
+        state.upsert_device(&dev).await.unwrap();
+        let trigger: Trigger = ron::from_str(
+            r#"DeviceAvailabilityChanged(device_id: "lamp", to: Some(false), for_duration_secs: Some(300))"#,
+        )
+        .unwrap();
+
+        assert!(availability_held(&state, &trigger, Some(false)).await);
+        dev.available = true;
+        state.upsert_device(&dev).await.unwrap();
+        assert!(!availability_held(&state, &trigger, Some(false)).await);
+        // Other triggers have nothing to re-check here.
+        let other: Trigger = ron::from_str("ManualTrigger").unwrap();
+        assert!(availability_held(&state, &other, None).await);
+    }
+
+    #[test]
+    fn a_switched_off_stop_rule_chain_stops_nothing() {
+        let rule = |enabled: bool| -> Rule {
+            ron::from_str(&format!(
+                r#"Rule(id: "{}", name: "r", enabled: true, priority: 0,
+                    trigger: ManualTrigger,
+                    actions: [RuleAction(enabled: {enabled}, action: StopRuleChain)])"#,
+                uuid::Uuid::new_v4()
+            ))
+            .unwrap()
+        };
+        assert!(stops_the_chain(&rule(true)));
+        assert!(!stops_the_chain(&rule(false)));
+    }
 
     fn an_alert(
         id: &str,
