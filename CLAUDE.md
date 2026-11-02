@@ -312,12 +312,12 @@ Each sub-directory is its own independent git repository. `workspace.toml` at th
 the authoritative repo list (used by `hc-scripts/workspace-clone.sh`).
 
 **`core/` is a monorepo.** It holds the server, its 17 crates, the Rust plugin
-SDK (`sdk/rust`, crate `plugin-sdk-rs`) and all thirteen Rust plugins
+SDK (`sdk/rust`, crate `plugin-sdk-rs`) and every Rust plugin
 (`plugins/hc-*`) as members of one cargo workspace with one `Cargo.lock`. The
 per-plugin repos and `hc-plugin-sdk-rs` are archived read-only; the meta-layout
 workspaces (`plugins/Cargo.toml` and friends) that used to stitch them together
 are gone. Only non-Rust components stay separate repos: `plugins/hc-matter`
-(TypeScript), `clients/hc-web` (Flutter), `clients/hc-mcp` (Python), and the
+(TypeScript), `clients/hc-web-svelte` (the web app), `clients/hc-mcp` (Python), and the
 Python/Node.js/.NET SDKs in `sdks/`.
 
 ```
@@ -359,7 +359,7 @@ homeCore/                          # container dir (no git)
 │   ├── homecore/                  # the server binary — a workspace member like
 │   │   ├── src/                   #   any other; the root is a pure [workspace]
 │   │   │   ├── main.rs
-│   │   │   └── plugin_launcher.rs # plugin supervision + restart backoff
+│   │   │   └── plugin_manager.rs  # plugin supervision + restart backoff
 │   │   └── tests/
 │   │       └── integration_test.rs  # end-to-end: virtual device → rule → command
 │   ├── sdk/rust/                  # the Rust plugin SDK — crate `plugin-sdk-rs`
@@ -391,9 +391,9 @@ homeCore/                          # container dir (no git)
 │   └── hc-matter/                 # Matter bridge (TypeScript, matter.js)
 │
 └── clients/                       # UI and API consumers (each is its own git repo)
-    ├── hc-web/                    # Flutter web dashboard (all phases complete)
+    ├── hc-web-svelte/             # the web app (SvelteKit)
     ├── hc-tui/                    # Terminal UI (ratatui)
-    └── hc-mcp/                    # MCP server for Claude integration (not yet started)
+    └── hc-mcp/                    # MCP server for Claude integration (Python)
 ```
 
 ---
