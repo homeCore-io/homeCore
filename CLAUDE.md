@@ -377,8 +377,7 @@ homeCore/                          # container dir (no git)
 │   │   ├── hc-roku/               # Roku TVs and players (ECP)
 │   │   ├── hc-captest/            # capability-spec conformance test plugin
 │   │   └── hc-plugin-template/    # starter template — read this first
-│   ├── rules/                     # live automation rules (RON, hot-reloaded)
-│   │   └── examples/              # documented rule patterns (OR/AND, multi-trigger…)
+│   ├── rules/                     # this machine's rules: gitignored, never committed
 │   └── docs/
 │       ├── devNotes.md            # developer reference (API, rule patterns, device types)
 │       └── monorepo-plan.md       # why the SDK and plugins live here now

@@ -1,0 +1,13 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Morning, start coffee",
+    enabled: true,
+    priority: 10,
+
+    trigger: CustomEvent(event_type: "morning_routine_started"),
+
+    actions: [
+        RuleAction(action: SetDeviceState(device: "kitchen.coffee_plug", state: { "on": true })),
+    ],
+)
+

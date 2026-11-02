@@ -1,0 +1,23 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Garage, left open alert",
+    enabled: true,
+    priority: 10,
+    tags: ["garage", "door-alerts"],
+    cooldown_secs: Some(600),   // alert at most every 10 minutes
+
+    trigger: Cron(expression: "0 * * * * *"),   // every minute (seconds field first)
+
+    conditions: [
+        DeviceState(device: "garage.main_door", attribute: "open", op: Eq, value: true),
+        TimeElapsed(device: "garage.main_door", attribute: "open", duration_secs: 600),
+    ],
+
+    actions: [
+        RuleAction(action: Notify(
+            channel: "telegram",
+            message: "Garage door has been open for 10+ minutes!",
+        )),
+    ],
+)
+

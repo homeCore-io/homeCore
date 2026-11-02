@@ -1,0 +1,29 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Temperature: high alert",
+    enabled: true,
+    priority: 0,
+    cooldown_secs: Some(3600),   // once per hour at most
+    trigger: DeviceStateChanged(
+        device_id: "sensor_basement_temp",
+        attribute: Some("temperature"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "sensor_basement_temp",
+            attribute: "temperature",
+            op: Gt,
+            value: 29,   // °C: every plugin publishes temperatures in °C
+        ),
+    ],
+    actions: [
+        RuleAction(action: RunScript(script: r#"
+            let t = trigger_value();
+            notify_titled("telegram", "Temperature Alert",
+                "Basement temperature is " + t + " °C. Check the HVAC!");
+            notify_titled("email-alerts", "HomeCore Temperature Alert",
+                "Basement temperature alert: " + t + " °C");
+        "#)),
+    ],
+)
+

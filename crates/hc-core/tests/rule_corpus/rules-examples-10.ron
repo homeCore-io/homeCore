@@ -1,0 +1,21 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Kitchen music, play favorite",
+    enabled: true,
+    priority: 10,
+    tags: ["music", "sonos", "kitchen"],
+
+    trigger: DeviceStateChanged(
+        device: "kitchen.music_switch",
+        attribute: Some("on"),
+        to: Some(true),
+    ),
+
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device: "kitchen.sonos",
+            state: { "action": "play_favorite", "favorite": "Morning Jazz" },
+        )),
+    ],
+)
+

@@ -1,0 +1,19 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Garage door: start close timer",
+    enabled: true,
+    priority: 0,
+    trigger: DeviceStateChanged(
+        device_id: "garage.main_door",
+        attribute: Some("open"),
+        to: Some(true),
+    ),
+    conditions: [],
+    actions: [
+        RuleAction(action: SetDeviceState(
+            device_id: "timer_garage_close",
+            state: {"action": "start", "duration_secs": 600},
+        )),
+    ],
+)
+

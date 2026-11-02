@@ -1,0 +1,23 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Doorbell, flash light",
+    enabled: true,
+    priority: 10,
+    tags: ["security", "doorbell"],
+
+    trigger: WebhookReceived(path: "doorbell-secret-path-a3f9c2"),
+
+    actions: [
+        RuleAction(action: RepeatCount(
+            count: 3,
+            interval_ms: Some(1000),   // pause between flashes
+            actions: [
+                SetDeviceState(device: "living_room.lamp", state: { "on": true, "color_rgb": { "r": 255, "g": 200, "b": 0 } }),
+                Delay(duration_secs: 1),
+                SetDeviceState(device: "living_room.lamp", state: { "on": false }),
+            ],
+        )),
+        RuleAction(action: Notify(channel: "telegram", message: "Doorbell rang")),
+    ],
+)
+

@@ -1,0 +1,17 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Outdoor lights on at sunset",
+    enabled: true,
+    priority: 10,
+    tags: ["outdoor", "lighting", "solar"],
+
+    trigger: SunEvent(event: Sunset, offset_minutes: -15),
+
+    actions: [
+        RuleAction(action: Parallel(actions: [
+            SetDeviceState(device: "porch.light", state: { "on": true, "brightness_pct": 80 }),
+            SetDeviceState(device: "deck.light", state: { "on": true, "brightness_pct": 60 }),
+        ])),
+    ],
+)
+

@@ -1,0 +1,21 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Morning, motion detected",
+    enabled: true,
+    priority: 10,
+
+    trigger: DeviceStateChanged(
+        device: "bedroom.motion",
+        attribute: Some("motion"),
+        to: Some(true),
+    ),
+
+    conditions: [
+        TimeWindow(start: "06:00:00", end: "09:00:00"),
+    ],
+
+    actions: [
+        RuleAction(action: FireEvent(event_type: "morning_routine_started", payload: {})),
+    ],
+)
+

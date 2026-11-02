@@ -1,0 +1,26 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Garage door: close reminder",
+    enabled: true,
+    priority: 0,
+    trigger: DeviceStateChanged(
+        device_id: "timer_garage_close",
+        attribute: Some("state"),
+        to: Some("finished"),
+    ),
+    conditions: [
+        DeviceState(
+            device_id: "garage.main_door",
+            attribute: "open",
+            op: Eq,
+            value: true,
+        ),
+    ],
+    actions: [
+        RuleAction(action: Notify(
+            channel: "telegram",
+            message: "Garage door has been open for 10 minutes!",
+        )),
+    ],
+)
+

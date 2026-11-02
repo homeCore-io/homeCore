@@ -1,0 +1,22 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Front door, daytime alert",
+    enabled: true,
+    priority: 10,
+    tags: ["door-alerts", "security"],
+
+    trigger: DeviceStateChanged(
+        device: "entryway.front_door",
+        attribute: Some("open"),
+        to: Some(true),
+    ),
+
+    conditions: [
+        TimeWindow(start: "08:00:00", end: "22:00:00"),
+    ],
+
+    actions: [
+        RuleAction(action: Notify(channel: "telegram", message: "Front door opened")),
+    ],
+)
+

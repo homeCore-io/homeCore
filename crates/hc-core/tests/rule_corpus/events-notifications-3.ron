@@ -1,0 +1,35 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Garage: left open alert",
+    enabled: true,
+    priority: 10,
+    cooldown_secs: Some(600),   // alert at most once per 10 minutes
+    trigger: Cron(expression: "0 * * * * *"),   // every minute (sec min hour dom month dow)
+    conditions: [
+        DeviceState(
+            device_id: "yolink_garage_door",
+            attribute: "open",
+            op: Eq,
+            value: true,
+        ),
+        TimeElapsed(
+            device_id: "yolink_garage_door",
+            attribute: "open",
+            duration_secs: 600,
+        ),
+    ],
+    actions: [
+        RuleAction(action: Parallel(actions: [
+            Notify(
+                channel: "telegram",
+                message: "Garage door has been open for 10+ minutes!",
+                title: Some("Garage Alert"),
+            ),
+            Notify(
+                channel: "pushover-urgent",
+                message: "Garage door has been open for 10+ minutes!",
+            ),
+        ])),
+    ],
+)
+
