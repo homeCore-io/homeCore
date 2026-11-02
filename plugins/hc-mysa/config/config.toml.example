@@ -1,0 +1,56 @@
+# hc-mysa: example configuration.
+#
+# In a normal install you never copy this file. homeCore seeds the real one at
+# `config/plugins/plugin.mysa.toml` when the plugin is installed, hands that
+# path to the process, and restarts the plugin when it changes. This copy is
+# for running the binary by hand during development:
+#
+#   cargo run -p hc-mysa -- config/config.toml
+
+# ── Broker connection ────────────────────────────────────────────────────────
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.mysa"
+password    = ""            # set when the broker has [[broker.clients]] auth
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logging]
+level             = "info"  # this plugin's own log file; accepts filters too
+log_forward_level = "info"  # what reaches homeCore's live log stream
+rotation          = "daily" # hourly | daily | weekly | never
+max_size_mb       = 100     # rotate at this size too; 0 disables
+compress          = true    # gzip rotated files
+prune_after_days  = 0       # delete rotated files older than this; 0 = never
+
+# ── Mysa ─────────────────────────────────────────────────────────────────────
+[mysa]
+# How often to read every thermostat. One call reads them all.
+poll_interval_secs = 60
+
+# Publish only these Mysa device ids. Empty (or absent) means all of them.
+# only_devices = ["abc123"]
+
+# Where these devices land in homeCore. Optional.
+# area = "Bedrooms"
+
+# ── Signing in ───────────────────────────────────────────────────────────────
+# Nothing to set. Use "Link Mysa account" on the plugin page: you sign in on
+# Mysa's own site, and Mysa sends you back to your homeCore through
+# homecore.io/oauth/mysa/callback. The plugin signs in as homeCore's Mysa
+# client (PKCE, no secret) once Mysa has issued it. Tokens are kept in
+# homeCore's own plugin state, never in this file.
+#
+# Mysa ends a sign-in 30 days after it was made, so the plugin asks you to
+# link again shortly before then.
+#
+# Only if Mysa issued you a client of your own:
+[mysa.auth]
+# client_id             = ""
+# redirect_uri          = ""   # one registered against your client, port included
+# loopback_redirect_uri = ""   # for pasting the address back
+
+# For testing against a local stand-in only. Leave out.
+# [mysa.endpoints]
+# identity_url = "http://127.0.0.1:18996"
+# api_url      = "http://127.0.0.1:18996"
