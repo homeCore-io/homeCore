@@ -36,15 +36,21 @@ attribute = "on"
   [ecosystem.state_topics.coerce]
   on = "onoff_to_bool"             # "ON" → true, "OFF" → false
 
-# Tasmota also publishes POWER state in the full STATUS response — optional:
+# Tasmota also answers commands on stat/{device}/RESULT: power for any device,
+# and the light fields for a dimmer or PWM light. One entry covers both,
+# because the first pattern that matches a topic is the only one used.
 [[ecosystem.state_topics]]
 pattern   = "stat/{device}/RESULT"
 
   [ecosystem.state_topics.field_map]
-  POWER = "on"
+  POWER      = "on"
+  Dimmer     = "brightness_pct" # 0 to 100 in Tasmota
+  CT         = "color_temp"     # mired in Tasmota; kelvin in homeCore
+  "Color"    = "color_hex"      # Tasmota's hex string, e.g. "FF8000"
 
   [ecosystem.state_topics.coerce]
-  on = "onoff_to_bool"
+  on         = "onoff_to_bool"
+  color_temp = "mired_to_kelvin"
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +90,11 @@ payload   = "raw_string"
 
 
 # ---------------------------------------------------------------------------
-# Power monitoring (Tasmota Energy)
-# Covers: Sonoff Pow, Sonoff S31, Gosund SP111, BlitzWolf BW-SHP6, etc.
-# Published on a timer (default 5 min) or on change.
+# Telemetry: power monitoring and temperature / humidity sensors
+# Power: Sonoff Pow, Sonoff S31, Gosund SP111, BlitzWolf BW-SHP6, etc.
+# Sensors: AM2301, DHT22, SHT3x, DS18B20, etc.
+# Published on a timer (default 5 min) or on change. One entry for both,
+# because the first pattern that matches a topic is the only one used.
 # ---------------------------------------------------------------------------
 
 [[ecosystem.state_topics]]
@@ -100,16 +108,6 @@ pattern = "tele/{device}/SENSOR"
   "ENERGY.Factor"      = "power_factor"
   "ENERGY.ApparentPower" = "apparent_power_va"
   "ENERGY.ReactivePower" = "reactive_power_var"
-
-
-# ---------------------------------------------------------------------------
-# Temperature / humidity sensor (AM2301, DHT22, SHT3x, etc.)
-# ---------------------------------------------------------------------------
-
-[[ecosystem.state_topics]]
-pattern = "tele/{device}/SENSOR"
-
-  [ecosystem.state_topics.field_map]
   # Tasmota uses sensor driver name as the JSON key (AM2301, DHT22, DS18B20…)
   # List the ones you have. All map to the same canonical attributes.
   "AM2301.Temperature" = "temperature"
@@ -119,24 +117,6 @@ pattern = "tele/{device}/SENSOR"
   "SHT3X.Temperature"  = "temperature"
   "SHT3X.Humidity"     = "humidity"
   "DS18B20.Temperature" = "temperature"
-
-
-# ---------------------------------------------------------------------------
-# Dimmer / PWM light (Tasmota light control)
-# ---------------------------------------------------------------------------
-
-[[ecosystem.state_topics]]
-pattern = "stat/{device}/RESULT"
-
-  [ecosystem.state_topics.field_map]
-  POWER      = "on"
-  Dimmer     = "brightness_pct" # 0–100 in Tasmota
-  CT         = "color_temp"     # mired in Tasmota; kelvin in homeCore
-  "Color"    = "color_hex"      # Tasmota's hex string, e.g. "FF8000"
-
-  [ecosystem.state_topics.coerce]
-  on         = "onoff_to_bool"
-  color_temp = "mired_to_kelvin"
 
 
 # ---------------------------------------------------------------------------
