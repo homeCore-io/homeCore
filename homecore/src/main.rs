@@ -1391,6 +1391,7 @@ async fn main() -> Result<()> {
         });
     }
 
+    let restart_flag = app_state.restart_requested.clone();
     let mut api_task = tokio::spawn(async move {
         hc_api::serve(
             &api_host,
@@ -1403,6 +1404,7 @@ async fn main() -> Result<()> {
         )
         .await
     });
+    let restart_requested = restart_flag;
     let shutdown_wait = wait_for_shutdown_watch(shutdown_rx.clone());
     tokio::pin!(shutdown_wait);
 
@@ -1435,6 +1437,15 @@ async fn main() -> Result<()> {
     }
 
     if shutdown_requested {
+        if restart_requested.load(std::sync::atomic::Ordering::SeqCst) {
+            // A clean 0 here leaves homeCore stopped under systemd's
+            // Restart=on-failure; ask the supervisor to start it again.
+            info!(
+                code = hc_api::RESTART_EXIT_CODE,
+                "HomeCore shutdown sequence complete, exiting to be restarted"
+            );
+            std::process::exit(hc_api::RESTART_EXIT_CODE);
+        }
         info!("HomeCore shutdown sequence complete");
         std::process::exit(0);
     }

@@ -11,10 +11,12 @@ Group=@@GROUP@@
 WorkingDirectory=@@INSTALL_DIR@@
 Environment="HOMECORE_HOME=@@INSTALL_DIR@@"
 ExecStart=@@INSTALL_DIR@@/bin/homecore --home @@INSTALL_DIR@@ --config config/homecore.toml
-ExecReload=/bin/kill -HUP $MAINPID
+# No ExecReload: homeCore has no SIGHUP handler, so a reload would stop it.
+# Use `systemctl restart homecore` (or POST /system/restart) instead.
 
-# Restart policy — homecore supervises plugins internally, so a crash here
-# means homecore itself died; restart promptly.
+# Restart policy: homecore supervises plugins internally, so a crash here
+# means homecore itself died; restart promptly. POST /system/restart exits
+# with 75 so that it counts as a failure and is restarted too.
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60

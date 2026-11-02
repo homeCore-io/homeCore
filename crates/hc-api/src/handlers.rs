@@ -8557,6 +8557,9 @@ pub async fn system_restart(
         .with_target("system", "homecore");
     audit::emit(&s, audit_e).await;
 
+    s.restart_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
     // Spawn the broadcast on a delay so the HTTP response can flush
     // before the server starts tearing down.
     let tx = tx.clone();
@@ -8569,7 +8572,7 @@ pub async fn system_restart(
         StatusCode::ACCEPTED,
         Json(json!({
             "ok": true,
-            "message": "shutdown requested; supervisor should respawn within seconds",
+            "message": "restarting; homeCore exits with status 75 for its supervisor to start it again",
         })),
     )
         .into_response()
