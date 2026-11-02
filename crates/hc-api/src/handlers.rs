@@ -7634,7 +7634,11 @@ pub async fn set_group_enabled(
     let rule_ids = group.rule_ids.clone();
     drop(groups);
 
-    let Some(rh) = &s.rules_handle else {
+    // The authored rules are what gets written and shown; the compiled ones
+    // (device names resolved to ids) only run. Writing the compiled form put
+    // raw ids in the files, and leaving the authored form alone meant the
+    // app still showed the old state and its next edit undid this.
+    let Some(source_rh) = &s.source_rules_handle else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "rule engine not available" })),
@@ -7644,7 +7648,7 @@ pub async fn set_group_enabled(
 
     let mut updated = Vec::new();
     {
-        let mut rules = rh.write().await;
+        let mut rules = source_rh.write().await;
         for rule in rules.iter_mut() {
             if rule_ids.contains(&rule.id) {
                 rule.enabled = enabled;
@@ -7657,6 +7661,15 @@ pub async fn set_group_enabled(
         for rule in &updated {
             if let Err(e) = fs.write_rule(rule) {
                 tracing::warn!(rule_id = %rule.id, error = %e, "set_group_enabled: failed to write rule file");
+            }
+        }
+    }
+
+    // Only `enabled` changed, so the compiled rules need no recompiling.
+    if let Some(rh) = &s.rules_handle {
+        for rule in rh.write().await.iter_mut() {
+            if rule_ids.contains(&rule.id) {
+                rule.enabled = enabled;
             }
         }
     }
