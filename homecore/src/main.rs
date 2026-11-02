@@ -399,6 +399,7 @@ async fn main() -> Result<()> {
                     },
                 })
                 .collect(),
+            plugins_store: Some(central.clone()),
             calendars_dir: Some(PathBuf::from(&config.calendars.dir)),
             kept: None,
         };
@@ -478,7 +479,8 @@ async fn main() -> Result<()> {
         "Core SDK protocol version (heartbeat compat baseline)"
     );
 
-    // ── 6. Embedded MQTT broker ────────────────────────────────────────────
+    // ── 6. MQTT broker: the embedded one, or `[broker] external_url` ───────
+    let external_broker = config.broker.external().map_err(anyhow::Error::msg)?;
     let broker_cfg = BrokerConfig {
         host: config.broker.host.clone(),
         port: config.broker.port,
@@ -500,7 +502,18 @@ async fn main() -> Result<()> {
             })
             .collect(),
     };
-    Broker::new(broker_cfg).spawn()?;
+    match &external_broker {
+        Some((host, port)) => info!(
+            host = %host,
+            port,
+            "Using an external MQTT broker; the embedded broker is not started"
+        ),
+        None => Broker::new(broker_cfg).spawn()?,
+    }
+    // Where core's own client, and a newly installed plugin, connect.
+    let (mqtt_host, mqtt_port) = external_broker
+        .clone()
+        .unwrap_or_else(|| ("127.0.0.1".to_string(), config.broker.port));
 
     // ── 9. Internal MQTT client ────────────────────────────────────────────
     let internal_cred = config
@@ -510,8 +523,8 @@ async fn main() -> Result<()> {
         .find(|c| c.id == "internal.core")
         .cloned();
     let mqtt_cfg = MqttClientConfig {
-        broker_host: "127.0.0.1".into(),
-        broker_port: config.broker.port,
+        broker_host: mqtt_host.clone(),
+        broker_port: mqtt_port,
         client_id: "internal.core".into(),
         username: internal_cred.as_ref().map(|c| c.id.clone()),
         password: internal_cred.as_ref().map(|c| c.password.clone()),
@@ -1171,6 +1184,7 @@ async fn main() -> Result<()> {
         config_path: config_path.clone(),
         rules_dir: rules_dir.clone(),
         plugin_configs,
+        plugins_store: Some(backup_config_store.clone()),
         calendars_dir: Some(calendar_dir.clone()),
         kept: Some(hc_api::backup::KeptBackups {
             dir: {
@@ -1243,8 +1257,12 @@ async fn main() -> Result<()> {
     .with_plugin_install(std::sync::Arc::new(hc_api::InstallContext {
         plugins_dir: install_base.join("plugins"),
         config_plugins_dir: install_base.join("config").join("plugins"),
-        broker_host: config.broker.host.clone(),
-        broker_port: config.broker.port,
+        broker_host: if external_broker.is_some() {
+            mqtt_host.clone()
+        } else {
+            config.broker.host.clone()
+        },
+        broker_port: mqtt_port,
     }))
     .with_plugin_runtimes(config.plugin_runtimes.clone())
     .with_plugin_spawn(plugin_spawn_tx)
@@ -1391,6 +1409,7 @@ async fn main() -> Result<()> {
         });
     }
 
+    let restart_flag = app_state.restart_requested.clone();
     let mut api_task = tokio::spawn(async move {
         hc_api::serve(
             &api_host,
@@ -1403,6 +1422,7 @@ async fn main() -> Result<()> {
         )
         .await
     });
+    let restart_requested = restart_flag;
     let shutdown_wait = wait_for_shutdown_watch(shutdown_rx.clone());
     tokio::pin!(shutdown_wait);
 
@@ -1435,6 +1455,15 @@ async fn main() -> Result<()> {
     }
 
     if shutdown_requested {
+        if restart_requested.load(std::sync::atomic::Ordering::SeqCst) {
+            // A clean 0 here leaves homeCore stopped under systemd's
+            // Restart=on-failure; ask the supervisor to start it again.
+            info!(
+                code = hc_api::RESTART_EXIT_CODE,
+                "HomeCore shutdown sequence complete, exiting to be restarted"
+            );
+            std::process::exit(hc_api::RESTART_EXIT_CODE);
+        }
         info!("HomeCore shutdown sequence complete");
         std::process::exit(0);
     }

@@ -19,10 +19,11 @@
 //!
 //! `ClientAcl::allow_pub` and `allow_sub` are stored in config and surfaced as
 //! structured data (e.g. for generating external broker config), but **rumqttd
-//! 0.19 does not enforce per-topic publish/subscribe ACL at the broker level**.
+//! does not enforce per-topic publish/subscribe ACL at the broker level**.
 //! Topic isolation is achieved instead through the plugin SDK, which only
 //! publishes to its own device topics by convention.  For strict topic ACL use
-//! an external broker (Mosquitto, EMQX) pointed at via `external_url`.
+//! an external broker (Mosquitto, EMQX) set as `[broker] external_url`, which
+//! then runs instead of this one.
 
 use anyhow::{Context, Result};
 use rumqttd::{
@@ -243,7 +244,7 @@ impl Broker {
              Choose one:\n  \
                1. Set [broker].host = \"127.0.0.1\" to keep MQTT loopback-only.\n  \
                2. Add at least one [[broker.clients]] entry with credentials \
-                  (run `hc-cli broker generate-credentials` to scaffold).\n  \
+                  (see https://homecore.io/docs/administration/broker).\n  \
                3. If you understand the risk and have isolated this network \
                   another way, set HC_ALLOW_ANONYMOUS_REMOTE_BROKER=1."
         );

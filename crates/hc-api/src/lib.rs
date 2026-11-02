@@ -418,7 +418,17 @@ pub struct AppState {
     /// the runtime supervisor (systemd / docker / hand-rolled) is
     /// expected to spawn the process again.
     pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+    /// Set by `POST /system/restart` before it signals shutdown, so the
+    /// process can exit with [`RESTART_EXIT_CODE`] instead of 0. A stop by
+    /// signal leaves it false.
+    pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// The exit status after `POST /system/restart`: EX_TEMPFAIL. A supervisor
+/// restarts on it under `Restart=on-failure` (systemd), `KeepAlive` (launchd)
+/// or any docker restart policy, where a clean exit of 0 would leave homeCore
+/// stopped. A stop by signal still exits 0.
+pub const RESTART_EXIT_CODE: i32 = 75;
 
 /// A plugin is back: `plugin_status_changed` to `active`, so a screen showing
 /// it offline or starting needn't poll to see it return.
@@ -869,6 +879,7 @@ impl AppState {
             alerts: None,
             homecore_config_path: None,
             shutdown_tx: None,
+            restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Spawn background task to increment metrics counters from bus events.

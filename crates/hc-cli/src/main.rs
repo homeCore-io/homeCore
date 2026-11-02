@@ -683,7 +683,8 @@ fn cmd_broker_gen_mosquitto(
     println!("  2. Run passwd.setup.sh inside an eclipse-mosquitto container");
     println!("     to produce the hashed `passwd` file Mosquitto wants.");
     println!("  3. Deploy Mosquitto with all three files mounted, then set");
-    println!("     `[broker].external_url` in homecore.toml to point at it.");
+    println!("     `[broker] external_url = \"mqtt://<host>:<port>\"` in homecore.toml,");
+    println!("     and point every plugin's broker_host/broker_port at it too.");
     println!("     See https://homecore.io/docs/administration/broker for the full recipe.");
     Ok(())
 }

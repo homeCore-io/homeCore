@@ -15,22 +15,23 @@ use uuid::Uuid;
 /// Controls how a rule behaves when it is triggered while previous actions
 /// from the same rule are still executing.
 ///
-/// ```toml
-/// run_mode = "single"   # skip if already running
-/// run_mode = "restart"  # cancel in-flight and restart
-/// run_mode = { type = "queued", max_queue = 3 }
-/// run_mode = "parallel" # default — concurrent firings
-/// ```
+/// In a rule file (RON): `run_mode: Single`, `run_mode: Restart`,
+/// `run_mode: Queued(max_queue: 3)`; `Parallel` is the default. In JSON:
+/// `"Single"` or `{"Queued": {"max_queue": 3}}`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum RunMode {
-    /// No limit — concurrent firings run in parallel (default).
+    /// No limit: firings run side by side (default).
     #[default]
     Parallel,
-    /// If the rule is already executing, skip this firing.
+    /// If the rule is already running, skip this firing.
     Single,
-    /// Cancel the in-flight execution (cancels pending delays) and restart.
+    /// Stop the run in flight at its next step (cutting its cancelable
+    /// delays short) and start again. A delay that isn't cancelable is
+    /// waited out first.
     Restart,
-    /// Queue up to `max_queue` concurrent firings; drop if the queue is full.
+    /// Run firings one at a time, in the order they came, each seeing device
+    /// states as they are when its turn comes. Up to `max_queue` may be
+    /// waiting or running; more are skipped.
     Queued {
         #[serde(default = "default_max_queue")]
         max_queue: usize,

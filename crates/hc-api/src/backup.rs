@@ -73,6 +73,11 @@ pub struct BackupPaths {
     /// destination path is looked up by `id` against this same table —
     /// so cross-host restores work even when the absolute paths differ.
     pub plugin_configs: Vec<PluginConfigEntry>,
+    /// The central plugin config folder (`config/plugins`). A plugin in the
+    /// backup that isn't in `plugin_configs`, one installed from the registry
+    /// or any plugin on a fresh host, is restored here: it is where an
+    /// installed plugin reads its settings from first.
+    pub plugins_store: Option<crate::PluginConfigStore>,
     /// Where the calendars live, if anywhere.
     pub calendars_dir: Option<PathBuf>,
     /// Backups homeCore makes by itself (`[backup]`), and where it keeps them.
@@ -682,8 +687,9 @@ fn destination(paths: &BackupPaths, name: &Path) -> Option<PathBuf> {
             name.file_name().map(|n| dir.join(n))
         }
         // Archive shape: "plugins/<plugin_id>/config.toml". The destination
-        // comes from the running host's [[plugins]] block — ids match across
-        // hosts, paths don't. An id this host doesn't run is skipped.
+        // comes from the running host's plugin table (ids match across hosts,
+        // paths don't), else the central folder. Only `plugin.*` ids go to the
+        // central folder, so an entry can't land on its managed.toml.
         _ if name_str.starts_with("plugins/") => {
             let id = name_str
                 .strip_prefix("plugins/")
@@ -694,6 +700,10 @@ fn destination(paths: &BackupPaths, name: &Path) -> Option<PathBuf> {
                 .iter()
                 .find(|p| p.id == id)
                 .map(|p| p.path.clone())
+                .or_else(|| {
+                    let store = paths.plugins_store.as_ref()?;
+                    (id.starts_with("plugin.") && !id.contains('/')).then(|| store.path_for(id))
+                })
         }
         _ => None,
     }
@@ -845,6 +855,7 @@ mod tests {
             config_path,
             rules_dir,
             plugin_configs,
+            plugins_store: None,
             calendars_dir: Some(dir.join("config/calendars")),
             kept: None,
         }
@@ -1010,6 +1021,39 @@ mod tests {
             .unwrap()
             .iter()
             .any(|v| v.as_str() == Some("plugins/plugin.hue/config.toml")));
+    }
+
+    /// A plugin the destination host doesn't list (installed from the
+    /// registry, or any plugin on a fresh host) goes to the central folder,
+    /// where an installed plugin reads its settings first. The check says
+    /// the same as the restore does.
+    #[test]
+    fn restore_puts_an_unlisted_plugin_in_the_central_folder() {
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+        let src_hue =
+            write_plugin_config(src_dir.path(), "plugin.hue", "bridge_ip = \"10.0.0.5\"\n");
+        let src_odd = write_plugin_config(src_dir.path(), "managed", "[[managed]]\n");
+        let bytes = build_zip(&make_paths(src_dir.path(), vec![src_hue, src_odd])).unwrap();
+
+        let store = crate::PluginConfigStore::new(dst_dir.path().join("config/plugins"));
+        let mut dst_paths = make_paths(dst_dir.path(), vec![]);
+        dst_paths.plugins_store = Some(store.clone());
+
+        let plan = plan_restore(&dst_paths, &bytes).unwrap();
+        assert!(plan
+            .restored
+            .iter()
+            .any(|n| n == "plugins/plugin.hue/config.toml"));
+        // Not a plugin id: it would land on managed.toml.
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|n| n == "plugins/managed/config.toml"));
+
+        extract_restore(&dst_paths, &bytes).unwrap();
+        assert!(store.read("plugin.hue").unwrap().contains("10.0.0.5"));
+        assert!(!dst_dir.path().join("config/plugins/managed.toml").exists());
     }
 
     #[test]
