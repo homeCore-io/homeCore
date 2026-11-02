@@ -5,8 +5,9 @@ through the [Mysa Consumer API](https://consumer-api.mysa.cloud/v1/reference).
 
 **Not released yet.** It signs in as homeCore's Mysa client (issued
 2026-11-01; Mysa's consent page names it "homeCore", published by Simplex
-Technology). Until Mysa registers homecore.io's return page, you sign in by
-pasting an address back (below).
+Technology). From a home-network address the browser comes back to homeCore by
+itself after you sign in; from anywhere else you paste an address back
+(below).
 
 One `thermostat` device per thermostat the customer shared: its temperature,
 humidity, mode and targets, and whichever of fan, swing, keypad lock and
@@ -43,15 +44,8 @@ secret, as Mysa requires, and asks for:
 | `consumer-api/schedules.write` | hold and follow-the-schedule (it never edits a schedule program) |
 | `consumer-api/energy.read` | energy history (not shown yet) |
 
-**For now, by pasting.** Mysa has registered only
-`http://127.0.0.1:8127/mysa/callback` so far. Link Mysa account opens Mysa in
-a new tab; after you choose Allow, Mysa sends that tab to that address, where
-nothing answers. Copy the whole address from the address bar and paste it into
-the page within a minute.
-
-**Once Mysa registers the return page** (`auth::RELAY_REGISTERED`), and when
-the plugin's page is open at a home-network address, the browser comes back
-by itself:
+When the plugin's page is open at a home-network address, the browser comes
+back by itself:
 
 1. The page asks the plugin to start (`begin_link`) and goes to Mysa.
 2. After you sign in, Mysa sends the browser to
@@ -71,7 +65,14 @@ The code is useless without the verifier, which never leaves the plugin.
 `state` is random, single use, good for ten minutes, and checked.
 
 A homeCore reached any other way (a public name, a VPN address) signs in by
-pasting.
+pasting. Link Mysa account opens Mysa in a new tab; after you choose Allow,
+Mysa sends that tab to `http://127.0.0.1:8127/mysa/callback`, where nothing
+answers. Copy the whole address from the address bar and paste it into the
+page within a minute.
+
+Mysa registered both return pages after reviewing them (2026-11-02), and
+asked to be told before either page changes how it handles the code or where
+it sends the browser.
 
 **Mysa ends a sign-in 30 days after it is made**, however often it is used.
 The page shows the date, and the plugin raises a notice five days before.

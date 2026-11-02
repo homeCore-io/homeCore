@@ -19,12 +19,13 @@
 //! - [`RELAY_REDIRECT`], a static page on homecore.io. It reads `state`, finds
 //!   the address of the person's own homeCore in it, and sends the browser
 //!   back there with the `code`, **only if that address is on a home network**
-//!   ([`at_home`]; the page applies the same rule). Mysa registers it after
-//!   reviewing the live page; until then [`RELAY_REGISTERED`] is false and
-//!   only the loopback works.
+//!   ([`at_home`]; the page applies the same rule). Mysa registered it on
+//!   2026-11-02 after reviewing the live page, and asked to be told before
+//!   any change to how the page handles the code or where it sends the
+//!   browser.
 //! - [`LOOPBACK_REDIRECT`], which nothing listens on. The person copies the
-//!   address the browser shows and pastes it into the plugin's page.
-//!   Registered with the client.
+//!   address the browser shows and pastes it into the plugin's page: for a
+//!   homeCore reached at an address that isn't on a home network.
 //!
 //! The code is useless on its own: exchanging it needs the PKCE verifier,
 //! which never leaves this process. Mysa wants it exchanged within 60
@@ -66,10 +67,10 @@ use tracing::{info, warn};
 pub const CLIENT_ID: &str = "5jbbk15i5u3n7mh0pq3pv6div5";
 /// The relay page on homecore.io.
 pub const RELAY_REDIRECT: &str = "https://homecore.io/oauth/mysa/callback";
-/// Whether Mysa has registered [`RELAY_REDIRECT`] against [`CLIENT_ID`]. Not
-/// yet: Mysa adds it after reviewing the live page. Until then signing in is
-/// by pasting the loopback address.
-pub const RELAY_REGISTERED: bool = false;
+/// Whether Mysa has registered [`RELAY_REDIRECT`] against [`CLIENT_ID`]: yes,
+/// since 2026-11-02. Mysa approved the page as it was then; tell Mysa before
+/// changing how it handles the code or where it sends the browser.
+pub const RELAY_REGISTERED: bool = true;
 /// The loopback address, also registered. Nothing listens on it.
 pub const LOOPBACK_REDIRECT: &str = "http://127.0.0.1:8127/mysa/callback";
 
@@ -753,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn homecores_client_signs_in_by_pasting_unless_mysa_registered_the_relay() {
+    fn homecores_client_signs_in_through_the_registered_relay_or_by_pasting() {
         let a = Auth::new(
             &AuthSettings::default(),
             reqwest::Client::new(),
@@ -761,13 +762,15 @@ mod tests {
         );
         assert_eq!(CLIENT_ID, "5jbbk15i5u3n7mh0pq3pv6div5");
         assert!(a.is_configured());
-        // The relay works exactly when Mysa has registered it.
-        assert_eq!(a.relay_ready(), RELAY_REGISTERED);
-        let relay = a.begin(Via::Relay, Some("http://192.168.1.20/x"));
-        assert_eq!(relay.is_ok(), RELAY_REGISTERED);
-        if let Err(e) = relay {
-            assert!(e.to_string().contains("pasting"), "{e}");
-        }
+        // Mysa registered the relay (2026-11-02): a home address signs in through it.
+        assert!(a.relay_ready());
+        let relay = a.begin(Via::Relay, Some("http://192.168.1.20/x")).unwrap();
+        assert_eq!(relay.redirect_uri, RELAY_REDIRECT);
+        assert_eq!(
+            param(&relay.url, "redirect_uri").as_deref(),
+            Some(RELAY_REDIRECT)
+        );
+        // Pasting still works, for a homeCore reached from outside.
         let b = a.begin(Via::Loopback, None).unwrap();
         assert_eq!(param(&b.url, "client_id").as_deref(), Some(CLIENT_ID));
         assert_eq!(b.redirect_uri, LOOPBACK_REDIRECT);
