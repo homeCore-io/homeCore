@@ -3,9 +3,10 @@
 Mysa thermostats in [homeCore](https://github.com/homeCore-io/homeCore),
 through the [Mysa Consumer API](https://consumer-api.mysa.cloud/v1/reference).
 
-**Not released, and not usable yet.** It signs in as homeCore's Mysa client,
-which Mysa hasn't issued yet (requested 2026-11-01). Until then the plugin
-says so and does nothing, unless you enter a client id Mysa issued you.
+**Not released yet.** It signs in as homeCore's Mysa client (issued
+2026-11-01; Mysa's consent page names it "homeCore", published by Simplex
+Technology). Until Mysa registers homecore.io's return page, you sign in by
+pasting an address back (below).
 
 One `thermostat` device per thermostat the customer shared: its temperature,
 humidity, mode and targets, and whichever of fan, swing, keypad lock and
@@ -42,14 +43,26 @@ secret, as Mysa requires, and asks for:
 | `consumer-api/schedules.write` | hold and follow-the-schedule (it never edits a schedule program) |
 | `consumer-api/energy.read` | energy history (not shown yet) |
 
-How the browser gets back:
+**For now, by pasting.** Mysa has registered only
+`http://127.0.0.1:8127/mysa/callback` so far. Link Mysa account opens Mysa in
+a new tab; after you choose Allow, Mysa sends that tab to that address, where
+nothing answers. Copy the whole address from the address bar and paste it into
+the page within a minute.
+
+**Once Mysa registers the return page** (`auth::RELAY_REGISTERED`), and when
+the plugin's page is open at a home-network address, the browser comes back
+by itself:
 
 1. The page asks the plugin to start (`begin_link`) and goes to Mysa.
 2. After you sign in, Mysa sends the browser to
    `https://homecore.io/oauth/mysa/callback`, a static page that sends it
    straight back to your own homeCore's plugin page with the `code`. The
-   address of your homeCore travels in `state`. It goes back by itself only
-   to a home-network address; anywhere else it asks first.
+   address of your homeCore travels in `state`. It forwards only to a
+   home-network address (localhost, a private IPv4, an IPv6 unique local
+   address, or a `.local`, `.home.arpa` or `.internal` name), and refuses
+   anything else; the plugin won't put any other address in `state` either.
+   Otherwise someone could start a sign-in with their own verifier and have
+   a customer's code sent to them.
 3. The page hands the code to the plugin (`complete_link`), which exchanges
    it with its PKCE verifier and lists your thermostats before saying it is
    linked. Mysa allows 60 seconds for this.
@@ -57,15 +70,14 @@ How the browser gets back:
 The code is useless without the verifier, which never leaves the plugin.
 `state` is random, single use, good for ten minutes, and checked.
 
-**If the browser can't get back:** under "Can't come back to this page from
-Mysa?" the page opens Mysa in a new tab using
-`http://127.0.0.1:8127/mysa/callback`. Nothing answers there; copy the whole
-address and paste it into the page within a minute.
+A homeCore reached any other way (a public name, a VPN address) signs in by
+pasting.
 
 **Mysa ends a sign-in 30 days after it is made**, however often it is used.
 The page shows the date, and the plugin raises a notice five days before.
-Signing in again anywhere retires the previous sign-in, so two homeCores on
-one Mysa account sign each other out.
+Refreshing doesn't give a new refresh token or extend it (Mysa confirmed
+this, 2026-11-01). Signing in again anywhere retires the previous sign-in, so
+two homeCores on one Mysa account sign each other out.
 
 Tokens live in homeCore's own plugin state, never in the config file, and are
 never logged.
@@ -93,11 +105,19 @@ thermostats with a schedule.
 
 ## Limits
 
-Mysa limits requests per app and per customer, and writes more tightly than
-reads. One poll lists the thermostats and reads every state in one batch.
-Writes to one thermostat are at least 1.5 s apart, and commands queued while
-one is out are merged. A `429` or `503` stops everything for its
-`Retry-After`.
+Mysa's limits, per 60 seconds (as Mysa gave them, 2026-11-01): per customer,
+300 reads and 30 writes, at most 15 of the writes through any one app; per
+app across all customers, 6,000 reads and 180 writes. One `POST
+/v1/state/batch` a minute per home is what Mysa expects; a batch takes up to
+100 thermostats and counts as one request.
+
+So one poll a minute lists the thermostats and reads every state in one
+batch, and capabilities are read again every six hours. Writes are at most 12
+a minute across the account (a scene that changes every thermostat is spread
+over the minute rather than refused), at least 1.5 s apart to one thermostat,
+and commands queued while one is out are merged. A `429` or `503` stops
+everything for its `Retry-After`. Mysa has no push or webhook, so polling is
+the supported way.
 
 ## Testing
 

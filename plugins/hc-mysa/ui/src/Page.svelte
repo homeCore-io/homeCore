@@ -94,6 +94,21 @@
 		location.assign(r.data.url);
 	}
 
+	// homecore.io sends Mysa's answer back only to a home network (the same
+	// rule as the plugin's at_home), and only once Mysa has registered it.
+	function atHome(loc) {
+		const host = loc.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+		if (host === 'localhost' || host === '::1') return true;
+		if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true;
+		const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+		if (m) {
+			const a = +m[1], b = +m[2];
+			return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+		}
+		return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.(local|home\.arpa|internal)$/.test(host);
+	}
+	const viaRelay = $derived(!!status?.relay_ready && atHome(location));
+
 	// The fallback: sign in in another tab, paste the address back.
 	let pasting = $state(false);
 	let pasted = $state('');
@@ -176,8 +191,8 @@
 			</div>
 			{#if !status.configured}
 				<p class="hc-quiet">
-					This plugin signs in as homeCore's Mysa client, which Mysa hasn't issued yet. A later version of the plugin
-					will carry it. If Mysa issued you a client of your own, enter its id in the settings below.
+					This build of the plugin has no Mysa client id. If Mysa issued you a client of your own, enter its id in the
+					settings below.
 				</p>
 			{:else if status.linked}
 				<div class="facts">
@@ -200,7 +215,7 @@
 
 			{#if admin && status.configured}
 				<div class="hc-row">
-					<button class="hc-pill go" disabled={!!busy} onclick={link}>
+					<button class="hc-pill go" disabled={!!busy} onclick={viaRelay ? link : linkByPasting}>
 						{status.linked ? 'Sign in again' : 'Link Mysa account'}
 					</button>
 					{#if status.linked}
@@ -208,6 +223,7 @@
 						<button class="hc-pill danger" onclick={signOut}>Sign out</button>
 					{/if}
 				</div>
+				{#if viaRelay}
 				<details bind:open={pasting}>
 					<summary class="hc-quiet">Can't come back to this page from Mysa?</summary>
 					<p class="hc-quiet">
@@ -223,6 +239,19 @@
 						<button class="hc-pill go" disabled={!pasted.trim() || !!busy} onclick={() => finish({ pasted: pasted.trim() })}>Link</button>
 					</div>
 				</details>
+				{:else}
+					<p class="hc-quiet">
+						Mysa opens in a new tab. After you sign in and choose Allow, it sends that tab to an address that won't
+						load; that's expected. Copy the whole address from its address bar and paste it here within a minute:
+						Mysa's code doesn't last longer.
+					</p>
+					{#if pasting}
+						<div class="hc-row">
+							<input class="hc-field paste" placeholder="http://127.0.0.1:8127/mysa/callback?code=…" bind:value={pasted} aria-label="The address you landed on" />
+							<button class="hc-pill go" disabled={!pasted.trim() || !!busy} onclick={() => finish({ pasted: pasted.trim() })}>Link</button>
+						</div>
+					{/if}
+				{/if}
 			{:else if status.configured}
 				<p class="hc-quiet">An admin links the account.</p>
 			{/if}

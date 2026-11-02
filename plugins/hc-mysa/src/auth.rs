@@ -6,10 +6,11 @@
 //!
 //! ## Whose client id
 //!
-//! **homeCore's**, once Mysa issues it. Until then [`CLIENT_ID`] is empty and
-//! the plugin says it isn't configured; it never invents one. An operator who
-//! has a Mysa client of their own sets `[mysa.auth] client_id` instead.
-//! Mysa clients have no secret, so there is no secret setting.
+//! **homeCore's**, [`CLIENT_ID`], issued by Mysa on 2026-11-01: a public
+//! client, PKCE S256, no secret, shown on Mysa's consent page as "homeCore"
+//! published by Simplex Technology. An operator who has a Mysa client of
+//! their own sets `[mysa.auth] client_id` instead. Mysa clients have no
+//! secret, so there is no secret setting.
 //!
 //! ## Where the browser comes back
 //!
@@ -17,9 +18,13 @@
 //!
 //! - [`RELAY_REDIRECT`], a static page on homecore.io. It reads `state`, finds
 //!   the address of the person's own homeCore in it, and sends the browser
-//!   back there with the `code`.
+//!   back there with the `code`, **only if that address is on a home network**
+//!   ([`at_home`]; the page applies the same rule). Mysa registers it after
+//!   reviewing the live page; until then [`RELAY_REGISTERED`] is false and
+//!   only the loopback works.
 //! - [`LOOPBACK_REDIRECT`], which nothing listens on. The person copies the
 //!   address the browser shows and pastes it into the plugin's page.
+//!   Registered with the client.
 //!
 //! The code is useless on its own: exchanging it needs the PKCE verifier,
 //! which never leaves this process. Mysa wants it exchanged within 60
@@ -56,13 +61,15 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-/// The client Mysa issues homeCore: authorization code + PKCE, no secret.
-///
-/// **Empty until Mysa approves it.** Requested 2026-11-01; set it here when
-/// the id arrives. Until then the plugin raises `not_configured`.
-pub const CLIENT_ID: &str = "";
-/// The relay page on homecore.io, registered against [`CLIENT_ID`].
+/// The client Mysa issued homeCore: authorization code + PKCE, no secret.
+/// A public client id, so it can live in the source.
+pub const CLIENT_ID: &str = "5jbbk15i5u3n7mh0pq3pv6div5";
+/// The relay page on homecore.io.
 pub const RELAY_REDIRECT: &str = "https://homecore.io/oauth/mysa/callback";
+/// Whether Mysa has registered [`RELAY_REDIRECT`] against [`CLIENT_ID`]. Not
+/// yet: Mysa adds it after reviewing the live page. Until then signing in is
+/// by pasting the loopback address.
+pub const RELAY_REGISTERED: bool = false;
 /// The loopback address, also registered. Nothing listens on it.
 pub const LOOPBACK_REDIRECT: &str = "http://127.0.0.1:8127/mysa/callback";
 
@@ -233,6 +240,7 @@ impl Returned {
 pub struct Auth {
     client_id: String,
     own_client: bool,
+    own_relay: bool,
     relay_redirect: String,
     loopback_redirect: String,
     identity_base: String,
@@ -255,6 +263,7 @@ impl Auth {
         let own = trimmed(&settings.client_id);
         Self {
             own_client: own.is_some(),
+            own_relay: trimmed(&settings.redirect_uri).is_some(),
             client_id: own.unwrap_or_else(|| CLIENT_ID.to_string()),
             relay_redirect: trimmed(&settings.redirect_uri)
                 .unwrap_or_else(|| RELAY_REDIRECT.to_string()),
@@ -272,8 +281,8 @@ impl Auth {
         }
     }
 
-    /// Whether there is a client id to sign in with: homeCore's, once Mysa
-    /// issues it, or the operator's own.
+    /// Whether there is a client id to sign in with: homeCore's or the
+    /// operator's own.
     pub fn is_configured(&self) -> bool {
         !self.client_id.is_empty()
     }
@@ -281,6 +290,12 @@ impl Auth {
     /// Whether the operator set a client of their own.
     pub fn uses_own_client(&self) -> bool {
         self.own_client
+    }
+
+    /// Whether signing in can come back through a relay page: homeCore's,
+    /// once Mysa registers it, or the operator's own `redirect_uri`.
+    pub fn relay_ready(&self) -> bool {
+        self.own_relay || RELAY_REGISTERED
     }
 
     /// Adopt tokens from core's retained learned-state document.
@@ -307,10 +322,21 @@ impl Auth {
     /// [`Via::Relay`], and only if it is an http(s) address.
     pub fn begin(&self, via: Via, return_to: Option<&str>) -> Result<Begun> {
         if !self.is_configured() {
-            bail!(
-                "this plugin has no Mysa client id yet; Mysa hasn't issued homeCore's, \
-                 and none is set in its settings"
-            );
+            bail!("this plugin has no Mysa client id, and none is set in its settings");
+        }
+        if via == Via::Relay {
+            if !self.relay_ready() {
+                bail!(
+                    "Mysa hasn't registered homecore.io's return page yet; \
+                     sign in by pasting the address instead"
+                );
+            }
+            if return_to.is_some_and(|r| return_address(r).is_none()) {
+                bail!(
+                    "this page isn't on a home network, so homecore.io won't send \
+                     Mysa's answer back to it; sign in by pasting the address instead"
+                );
+            }
         }
         let redirect_uri = match via {
             Via::Relay => self.relay_redirect.clone(),
@@ -575,10 +601,36 @@ fn return_address(raw: &str) -> Option<String> {
         return None;
     }
     let url = reqwest::Url::parse(raw).ok()?;
-    matches!(url.scheme(), "http" | "https")
-        .then(|| url.host_str().is_some())
-        .filter(|&has_host| has_host)
-        .map(|_| url.to_string())
+    (matches!(url.scheme(), "http" | "https") && at_home(&url)).then(|| url.to_string())
+}
+
+/// Whether an address is on the person's own network, where the relay page
+/// will send a code: localhost, a loopback or private IPv4, an IPv6 loopback
+/// or unique local address, or a name only local DNS answers (`.local`,
+/// `.home.arpa`, `.internal`). The same rule as the page's `atHome`; Mysa
+/// checks that the page never forwards anywhere else.
+pub fn at_home(url: &reqwest::Url) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return ip.is_loopback() || ip.is_private();
+    }
+    if let Ok(ip) = host.parse::<Ipv6Addr>() {
+        return ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00;
+    }
+    host == "localhost"
+        || [".local", ".home.arpa", ".internal"]
+            .iter()
+            .any(|end| host.len() > end.len() && host.ends_with(end))
 }
 
 /// The return address inside a `state`, as the relay page reads it.
@@ -631,6 +683,8 @@ mod tests {
     fn auth_with(settings: AuthSettings) -> Auth {
         let settings = AuthSettings {
             client_id: settings.client_id.or(Some("test-client".into())),
+            // As if Mysa had registered the relay page for this client.
+            redirect_uri: settings.redirect_uri.or(Some(RELAY_REDIRECT.into())),
             ..settings
         };
         Auth::new(
@@ -699,16 +753,83 @@ mod tests {
     }
 
     #[test]
+    fn homecores_client_signs_in_by_pasting_unless_mysa_registered_the_relay() {
+        let a = Auth::new(
+            &AuthSettings::default(),
+            reqwest::Client::new(),
+            PluginStateWriter::test_instance("plugin.mysa"),
+        );
+        assert_eq!(CLIENT_ID, "5jbbk15i5u3n7mh0pq3pv6div5");
+        assert!(a.is_configured());
+        // The relay works exactly when Mysa has registered it.
+        assert_eq!(a.relay_ready(), RELAY_REGISTERED);
+        let relay = a.begin(Via::Relay, Some("http://192.168.1.20/x"));
+        assert_eq!(relay.is_ok(), RELAY_REGISTERED);
+        if let Err(e) = relay {
+            assert!(e.to_string().contains("pasting"), "{e}");
+        }
+        let b = a.begin(Via::Loopback, None).unwrap();
+        assert_eq!(param(&b.url, "client_id").as_deref(), Some(CLIENT_ID));
+        assert_eq!(b.redirect_uri, LOOPBACK_REDIRECT);
+    }
+
+    #[test]
     fn with_no_client_id_it_says_so_and_starts_nothing() {
         let a = Auth::new(
             &AuthSettings::default(),
             reqwest::Client::new(),
             PluginStateWriter::test_instance("plugin.mysa"),
         );
-        assert_eq!(CLIENT_ID, "", "set only when Mysa issues it");
-        assert!(!a.is_configured());
-        let e = a.begin(Via::Relay, None).unwrap_err();
+        // An empty id can only come from a build without one; say so.
+        let blank = Auth {
+            client_id: String::new(),
+            ..a
+        };
+        assert!(!blank.is_configured());
+        let e = blank.begin(Via::Loopback, None).unwrap_err();
         assert!(e.to_string().contains("no Mysa client id"), "{e}");
+    }
+
+    #[test]
+    fn a_code_is_sent_home_only_to_a_home_network() {
+        let home = [
+            "http://10.0.0.5:8080/settings/plugins/plugin.mysa",
+            "https://192.168.1.20/x",
+            "http://172.20.1.1",
+            "http://127.0.0.1:5180",
+            "http://localhost:5180",
+            "http://homecore.local",
+            "http://hc.home.arpa",
+            "http://hub.internal",
+            "http://[fd12:3456::1]/x",
+            "http://[::1]",
+        ];
+        let away = [
+            "http://evil.com",
+            "http://192.168.1.2.evil.com",
+            "http://homecore",
+            "http://a.local.evil.com",
+            "http://user:pw@10.0.0.1",
+            "http://172.32.0.1",
+            "http://169.254.1.1",
+            "http://8.8.8.8",
+            "http://100.64.1.1",
+            "http://[2001:db8::1]",
+            "http://[fe80::1]",
+            "http://evil.lan",
+            "http://.local",
+        ];
+        for u in home {
+            assert!(at_home(&reqwest::Url::parse(u).unwrap()), "{u} is home");
+        }
+        for u in away {
+            let ok = reqwest::Url::parse(u).map(|u| at_home(&u)).unwrap_or(false);
+            assert!(!ok, "{u} is not home");
+            assert!(
+                auth().begin(Via::Relay, Some(u)).is_err(),
+                "{u} was accepted"
+            );
+        }
     }
 
     #[test]
@@ -792,9 +913,14 @@ mod tests {
             "not a url",
             "//evil",
         ] {
-            let b = auth().begin(Via::Relay, Some(bad)).unwrap();
-            assert!(!b.state.contains('.'), "{bad} was carried");
+            assert!(
+                auth().begin(Via::Relay, Some(bad)).is_err(),
+                "{bad} was accepted"
+            );
         }
+        // With no address at all, the relay page shows the address to paste.
+        let b = auth().begin(Via::Relay, None).unwrap();
+        assert!(!b.state.contains('.'));
     }
 
     #[test]

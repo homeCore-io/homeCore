@@ -58,6 +58,52 @@ const CAPABILITIES_TTL: chrono::Duration = chrono::Duration::hours(6);
 /// to automate rapid changes, and limits writes more tightly than reads.
 const WRITE_SPACING: Duration = Duration::from_millis(1500);
 
+/// Writes allowed in any 60 seconds, across every thermostat. Mysa allows a
+/// customer 15 writes a minute through one app (30 in all, 2026-11-01); this
+/// stays under it, so a scene changing every thermostat at once is spread
+/// over a minute rather than refused.
+const WRITES_PER_MINUTE: usize = 12;
+
+/// The account's writes in the last `window` (a minute).
+struct WriteBudget {
+    window: Duration,
+    sent: Mutex<std::collections::VecDeque<tokio::time::Instant>>,
+}
+
+impl Default for WriteBudget {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(60),
+            sent: Mutex::default(),
+        }
+    }
+}
+
+impl WriteBudget {
+    /// Wait until a write fits, then count it.
+    async fn take(&self) {
+        let minute = self.window;
+        loop {
+            let wait = {
+                let mut sent = self.sent.lock().expect("budget mutex");
+                let now = tokio::time::Instant::now();
+                while sent
+                    .front()
+                    .is_some_and(|t| now.duration_since(*t) >= minute)
+                {
+                    sent.pop_front();
+                }
+                if sent.len() < WRITES_PER_MINUTE {
+                    sent.push_back(now);
+                    return;
+                }
+                minute - now.duration_since(*sent.front().expect("full"))
+            };
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 /// When Mysa sends no `Retry-After`.
 const DEFAULT_WAIT: Duration = Duration::from_secs(60);
 
@@ -83,6 +129,7 @@ pub struct Runtime {
     known: Mutex<HashMap<String, Known>>,
     /// Nothing goes to Mysa before this.
     wait_until: Mutex<Option<std::time::Instant>>,
+    writes: WriteBudget,
 }
 
 impl Runtime {
@@ -107,6 +154,7 @@ impl Runtime {
                 .collect(),
             known: Mutex::new(HashMap::new()),
             wait_until: Mutex::new(None),
+            writes: WriteBudget::default(),
         }
     }
 
@@ -160,12 +208,11 @@ impl Runtime {
             self.notices.raise(
                 PluginNotice::warning(
                     NOTICE_NOT_CONFIGURED,
-                    "This plugin has no Mysa client id yet, so it can't sign in.",
+                    "This plugin has no Mysa client id, so it can't sign in.",
                 )
                 .with_remedy(
-                    "homeCore has asked Mysa for one; a later version of this plugin will \
-                     carry it. If Mysa issued you a client of your own, enter its id in the \
-                     settings below.",
+                    "Update the plugin. If Mysa issued you a client of your own, enter its \
+                     id in the settings below.",
                 ),
             );
             return;
@@ -441,6 +488,7 @@ impl Runtime {
         }
 
         for w in &writes {
+            self.writes.take().await;
             let id2 = id.clone();
             let result = self
                 .call(|b| {
@@ -605,6 +653,7 @@ impl Runtime {
         thermostats.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         serde_json::json!({
             "configured": self.auth.is_configured(),
+            "relay_ready": self.auth.relay_ready(),
             "linked": self.auth.is_linked(),
             "own_client": self.auth.uses_own_client(),
             "linked_at": self.auth.linked_at().map(|t| t.to_rfc3339()),
@@ -651,6 +700,7 @@ mod tests {
             only_devices: vec![],
             known: Mutex::new(HashMap::new()),
             wait_until: Mutex::new(None),
+            writes: WriteBudget::default(),
         };
         assert!(rt.waiting().is_none());
         rt.raise_for(&CallError::Api(ApiError::RateLimited {
@@ -677,10 +727,35 @@ mod tests {
             only_devices: vec![],
             known: Mutex::new(HashMap::new()),
             wait_until: Mutex::new(None),
+            writes: WriteBudget::default(),
         };
         assert!(rt.wanted("anything"));
         rt.only_devices = vec!["bb-1".into()];
         assert!(rt.wanted("bb-1"));
         assert!(!rt.wanted("ac-1"));
+    }
+
+    #[tokio::test]
+    async fn writes_across_thermostats_stay_under_mysas_limit() {
+        // A short window stands in for the minute.
+        let window = Duration::from_millis(300);
+        let b = WriteBudget {
+            window,
+            sent: Mutex::default(),
+        };
+        let start = tokio::time::Instant::now();
+        for _ in 0..WRITES_PER_MINUTE {
+            b.take().await;
+        }
+        assert!(start.elapsed() < window / 3, "the first ones go at once");
+        b.take().await;
+        assert!(start.elapsed() >= window, "the next waits for the window");
+        assert_eq!(WriteBudget::default().window, Duration::from_secs(60));
+        const {
+            assert!(
+                WRITES_PER_MINUTE < 15,
+                "Mysa allows 15 per app per customer"
+            )
+        };
     }
 }
