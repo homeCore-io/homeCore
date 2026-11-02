@@ -3,7 +3,7 @@
 Mysa thermostats in [homeCore](https://github.com/homeCore-io/homeCore),
 through the [Mysa Consumer API](https://consumer-api.mysa.cloud/v1/reference).
 
-**Not released yet.** It signs in as homeCore's Mysa client (issued
+It signs in as homeCore's Mysa client (issued
 2026-11-01; Mysa's consent page names it "homeCore", published by Simplex
 Technology). From a home-network address the browser comes back to homeCore by
 itself after you sign in; from anywhere else you paste an address back
