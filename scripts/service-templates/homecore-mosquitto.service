@@ -11,7 +11,8 @@ User=homecore
 Group=homecore
 Environment="HOMECORE_HOME=/var/lib/homecore"
 ExecStart=/usr/local/bin/homecore --config /etc/homecore/homecore.toml
-ExecReload=/bin/kill -HUP $MAINPID
+# No ExecReload: homeCore has no SIGHUP handler, so a reload would stop it.
+# Use `systemctl restart homecore` (or POST /system/restart) instead.
 
 Restart=on-failure
 RestartSec=5

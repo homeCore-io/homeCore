@@ -86,8 +86,10 @@ services:
     #   [broker]
     #   external_url = "mqtt://mosquitto:1883"
     #
-    # and must NOT have `[[broker.clients]]` entries (those are now owned
-    # by Mosquitto's password_file + aclfile).
+    # and keep its `[[broker.clients]]` entries: core logs in to Mosquitto as
+    # `internal.core` with the password listed there, and `hc-cli broker
+    # generate-mosquitto-config` builds Mosquitto's ACL and passwords from
+    # the same list.
     command: ["--config", "/etc/homecore/homecore.toml"]
 
 volumes:
