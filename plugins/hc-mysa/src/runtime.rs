@@ -291,6 +291,23 @@ impl Runtime {
                     .await
                 {
                     Ok(caps) => {
+                        // What Mysa allows, for checking against its app.
+                        for (mode, m) in
+                            [("heat", &caps.climate.heat), ("cool", &caps.climate.cool)]
+                        {
+                            if let Some(sp) = m
+                                .as_ref()
+                                .and_then(|m| m.setpoint.as_ref().or(m.heat_setpoint.as_ref()))
+                            {
+                                debug!(
+                                    device = %d.id,
+                                    mode,
+                                    controllable = sp.user_controllable,
+                                    values = ?sp.values,
+                                    "Mysa's setpoints"
+                                );
+                            }
+                        }
                         let mut guard = self.known.lock().expect("known mutex");
                         let k = guard.entry(d.id.clone()).or_default();
                         k.caps = Some(caps);

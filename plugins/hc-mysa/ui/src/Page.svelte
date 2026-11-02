@@ -161,7 +161,13 @@
 	const reading = (d) => {
 		const a = d?.attributes ?? {};
 		if (typeof a.temperature !== 'number') return '—';
-		const show = (v) => (hc?.units ? hc.units.show(v, '°C').text : `${Math.round(v * 10) / 10}°C`);
+		// Whole degrees in °F, as the Mysa app and the thermostat card show
+		// them; half degrees in °C, Mysa's own steps.
+		const show = (v) => {
+			const r = hc?.units ? hc.units.show(v, '°C') : { value: v, unit: '°C' };
+			const n = r.unit === '°F' ? Math.round(r.value) : Math.round(r.value * 2) / 2;
+			return `${n}${r.unit}`;
+		};
 		if (a.hvac_mode === 'off') return `${show(a.temperature)} · off`;
 		if (a.hvac_mode === 'auto' && typeof a.heat_setpoint === 'number' && typeof a.cool_setpoint === 'number')
 			return `${show(a.temperature)} · heat ${show(a.heat_setpoint)}, cool ${show(a.cool_setpoint)}`;
@@ -239,7 +245,7 @@
 						<button class="hc-pill go" disabled={!pasted.trim() || !!busy} onclick={() => finish({ pasted: pasted.trim() })}>Link</button>
 					</div>
 				</details>
-				{:else}
+				{:else if !status.linked || pasting}
 					<p class="hc-quiet">
 						Mysa opens in a new tab. After you sign in and choose Allow, it sends that tab to an address that won't
 						load; that's expected. Copy the whole address from its address bar and paste it here within a minute:
