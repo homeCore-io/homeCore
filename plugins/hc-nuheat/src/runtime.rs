@@ -35,7 +35,6 @@ use crate::device::{self, CommandContext, Intent, ScaleCheck};
 use crate::units;
 
 pub const NOTICE_NOT_LINKED: &str = "not_linked";
-pub const NOTICE_RELINK_DUE: &str = "relink_due";
 pub const NOTICE_AUTH_REJECTED: &str = "auth_rejected";
 pub const NOTICE_UNREACHABLE: &str = "api_unreachable";
 pub const NOTICE_RATE_LIMITED: &str = "rate_limited";
@@ -188,24 +187,6 @@ impl Runtime {
             }
         };
         self.notices.clear(NOTICE_NOT_LINKED);
-
-        // NuHeat ends a sign-in 30 days after it was made, used or not.
-        match self.auth.relink_due() {
-            Some(due) if self.auth.relink_soon(chrono::Utc::now()) => self.notices.raise(
-                PluginNotice::warning(
-                    NOTICE_RELINK_DUE,
-                    format!(
-                        "NuHeat ends this sign-in on {}, after which no thermostats are published.",
-                        due.format("%B %-d")
-                    ),
-                )
-                .with_remedy(
-                    "Use \"Link NuHeat account\" on this page before then. It takes a minute \
-                     and starts another 30 days.",
-                ),
-            ),
-            _ => self.notices.clear(NOTICE_RELINK_DUE),
-        }
 
         let thermostats = match self.api.thermostats(&bearer).await {
             Ok(list) => {
@@ -561,7 +542,6 @@ impl Runtime {
     }
 
     fn not_linked(&self, message: &str) {
-        self.notices.clear(NOTICE_RELINK_DUE);
         self.notices.raise(
             PluginNotice::warning(NOTICE_NOT_LINKED, message)
                 .with_remedy("Use \"Link NuHeat account\" on this page."),
@@ -588,7 +568,6 @@ impl Runtime {
             "account": self.auth.account(),
             "own_client": self.auth.uses_own_client(),
             "linked_at": self.auth.linked_at().map(|t| t.to_rfc3339()),
-            "relink_due": self.auth.relink_due().map(|t| t.to_rfc3339()),
             "token_expires_in_secs": self.auth.expires_in().map(|d| d.num_seconds()),
             "thermostats": thermostats,
             "setpoint_min_c": self.limits.min_c,
@@ -661,7 +640,7 @@ mod tests {
         let status = rt.status();
         assert_eq!(status["linked"], serde_json::json!(false));
         assert_eq!(status["own_client"], serde_json::json!(false));
-        assert_eq!(status["relink_due"], Value::Null);
+        assert_eq!(status["linked_at"], Value::Null);
         assert_eq!(status["thermostats"], serde_json::json!([]));
     }
 

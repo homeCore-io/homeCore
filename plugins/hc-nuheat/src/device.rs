@@ -282,11 +282,24 @@ pub fn state_payload(t: &Thermostat) -> (Value, ScaleCheck) {
         "hvac_mode": "heat",
         "hvac_action": if t.is_heating { "heating" } else { "idle" },
         "schedule_mode": mode.map(Mode::as_str),
-        "hold_until": t.hold_until,
+        "hold_until": t.hold_until.as_deref().and_then(hold_end),
         "error_state": t.error_state.as_deref().filter(|e| !e.trim().is_empty()),
         "serial_number": t.serial_number,
     });
     (payload, check)
+}
+
+/// A hold's end as homeCore writes times, `2026-11-02T19:32:33Z`. NuHeat
+/// sends UTC with an offset; one without an offset is taken as UTC too, which
+/// NuHeat says it always is. Anything unreadable isn't published.
+fn hold_end(raw: &str) -> Option<String> {
+    let utc = match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+            .ok()?
+            .and_utc(),
+    };
+    Some(utc.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 /// Whether a reading survived the unit-scale range check.
@@ -692,6 +705,32 @@ mod tests {
         ] {
             assert!(state.get(gone).is_none(), "{gone}");
         }
+    }
+
+    /// NuHeat's own example (2026-11-02): a hold's end in UTC with an offset.
+    #[test]
+    fn a_holds_end_is_published_in_utc() {
+        let held = |until: &str| Thermostat {
+            serial_number: "23607".into(),
+            mode: Some(2),
+            hold_until: Some(until.into()),
+            ..Default::default()
+        };
+        let end = |until: &str| state_payload(&held(until)).0["hold_until"].clone();
+        assert_eq!(
+            end("2026-11-02T19:32:33+00:00"),
+            json!("2026-11-02T19:32:33Z")
+        );
+        assert_eq!(
+            end("2026-11-02T14:32:33-05:00"),
+            json!("2026-11-02T19:32:33Z")
+        );
+        // No offset: UTC, as NuHeat says it always is.
+        assert_eq!(
+            end("2026-11-02T19:32:33.120"),
+            json!("2026-11-02T19:32:33Z")
+        );
+        assert_eq!(end("soon"), Value::Null);
     }
 
     /// The scale tripwire, end to end: an implausible reading is withheld

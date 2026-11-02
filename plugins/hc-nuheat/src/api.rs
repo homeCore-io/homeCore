@@ -27,9 +27,6 @@ use std::time::Duration;
 
 use crate::auth::API_BASE;
 
-/// Whether the thermostat response's field names have been logged yet.
-static FIELDS_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Long enough for a cloud round trip, short enough that a stalled request does
 /// not hold the poll loop past its next tick.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -69,7 +66,8 @@ pub struct Thermostat {
     pub online: bool,
     #[serde(default)]
     pub is_heating: bool,
-    /// When a temporary hold ends. Absent in Auto and in permanent hold.
+    /// When a temporary hold ends, in UTC (NuHeat, 2026-11-02), as
+    /// `2026-11-02T19:32:33+00:00`. Null in Auto and in permanent hold.
     #[serde(default)]
     pub hold_until: Option<String>,
     /// `eScheduleMode`: 1 Auto, 2 Hold, 3 Permanent hold.
@@ -163,15 +161,6 @@ impl NuHeatApi {
 
     pub async fn thermostats(&self, bearer: &str) -> Result<Vec<Thermostat>, ApiError> {
         let raw: Vec<serde_json::Value> = self.get("/api/v2/Thermostat", bearer).await?;
-        // What NuHeat calls each field, said once: a hold's end has never been
-        // seen under `holdUntil` on a live account, and the names are what
-        // would show where it is. Names only, never values.
-        if !FIELDS_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            if let Some(serde_json::Value::Object(first)) = raw.first() {
-                let names: Vec<&str> = first.keys().map(String::as_str).collect();
-                tracing::debug!(fields = ?names, "NuHeat's thermostat fields");
-            }
-        }
         raw.into_iter()
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| ApiError::Api {

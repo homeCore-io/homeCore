@@ -57,10 +57,10 @@ shows an error; copy its whole address and paste it into the page. The
 generic action list's **Link NuHeat account** does the same as a streaming
 action.
 
-**NuHeat ends a sign-in 30 days after it is made**, however often it is used
-(an absolute refresh-token lifetime). The page says when ("Sign in again by
-December 1"), and five days ahead the plugin raises a `relink_due` notice.
-Signing in again takes a minute and starts another 30 days.
+**A sign-in lasts while homeCore keeps running.** Each renewal brings a new
+refresh token good for 15 days, and NuHeat sets no overall limit for
+homeCore's client (NuHeat, 2026-11-02). If homeCore is off for 15 days the
+sign-in ends, and the plugin raises `not_linked`.
 
 **Your own client.** If NuHeat issued you a client of your own, set
 `[nuheat.auth] client_id` (and `client_secret` for a confidential one, and a
@@ -90,7 +90,7 @@ On `homecore/devices/nuheat_<serial>/state`, in the shared names and units
 | `hvac_mode` | always `heat`: a floor only heats |
 | `hvac_action` | `heating` or `idle`, whether the relay is on now |
 | `schedule_mode` | `auto` (following its schedule), `hold` (for now), or `permanent_hold` |
-| `hold_until` | when a temporary hold ends |
+| `hold_until` | when a temporary hold ends, in UTC (`2026-11-02T19:32:33Z`) |
 | `error_state` | the thermostat's own fault text, or null |
 | `serial_number` | |
 
@@ -132,7 +132,6 @@ refuses leaves the app showing what the floor is really doing.
 |---|---|---|
 | `thermostat_fault` | alert, error, on by default | the thermostat reports a fault (a sensor, most often), in its own words |
 | `not_linked` | notice | not signed in, or NuHeat ended the sign-in |
-| `relink_due` | notice | the 30 days end within five |
 | `auth_rejected` | notice | NuHeat refused the sign-in |
 | `api_unreachable`, `rate_limited` | notice | NuHeat's cloud can't be reached, or is slowing the plugin down |
 | `no_thermostats` | notice | the account has none, or none match `only_serials` |
@@ -168,12 +167,12 @@ instead of publishing it.
 | `begin_link`, `complete_link` | the plugin page's two steps of signing in (admin) |
 | **Sign out** | forget the sign-in; thermostats stay registered (admin) |
 | **Refresh now** | poll now instead of waiting out the interval |
-| **Show status** | signed in, as whom, until when, and the thermostats (read-only; the page reads it) |
+| **Show status** | signed in, as whom, since when, and the thermostats (read-only; the page reads it) |
 
 ## Its page
 
 `ui/` builds the plugin page (`plugin.page`): whether it is signed in, the
-account, the date to sign in again by, the thermostats with their reading,
+account and when it signed in, the thermostats with their reading,
 target and any fault, and Link, Refresh, Sign out and the paste fallback. Its
 settings stay the app's generic form below it. Its thermostats have no card of
 their own: the app draws them from their schema (`temperature` and `setpoint`
