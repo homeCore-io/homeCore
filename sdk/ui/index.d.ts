@@ -258,6 +258,65 @@ export interface Host {
 		readonly sheet: CSSStyleSheet;
 		dark(): boolean;
 	};
+
+	/**
+	 * Rive's runtime, lent by the app (13 §12.4): plays a `.riv` file on a
+	 * canvas, fills its view model by property name and runs it as the look's
+	 * motion allows (still settles at once, gentle plays a change and stops,
+	 * lively keeps its loops running; nothing is drawn off screen). Loaded only
+	 * when first used. A file in your UI's folder:
+	 * `new URL('./dial.riv', import.meta.url).href`. A file with scripts must be
+	 * signed (Rive's `--publish`); one made of markup alone needs nothing.
+	 * Absent on an app before 0.1.47.
+	 */
+	readonly rive?: {
+		play(canvas: HTMLCanvasElement, options: RivePlayOptions): Promise<RivePlayer>;
+		/** The look's motion now; `still` too when the device asks for less motion. */
+		motion(): Motion;
+	};
+}
+
+/**
+ * The `host` a UI extension's code is given (13 §12.6): who is looking, the
+ * person's units, the app's look, Rive's runtime, and where its own files
+ * are. Nothing in it reaches a device: a drawing asks for what a tap does with
+ * an `act` event (`detail: { do: 'switch' | 'run' | 'open' }`), as a
+ * plugin's `look.drawing` does, and the app does it.
+ */
+export type ExtensionHost = Pick<Host, 'api' | 'appVersion' | 'me' | 'units' | 'theme' | 'rive'> & {
+	readonly extensionId: string;
+	/** One of the extension's files (`art/face.svg`), for an `<img src>` or `host.rive.play`. */
+	fileUrl(path: string): string;
+};
+
+/** How a look moves: `still`, `gentle` or `lively`. */
+export type Motion = 'still' | 'gentle' | 'lively';
+
+/** What `host.rive.play` plays. */
+export interface RivePlayOptions {
+	/** The `.riv` file's address. */
+	src: string;
+	artboard?: string;
+	/** The state machine to run; the artboard's first when left out. */
+	stateMachine?: string;
+	/** Its view model's values by property name; others are ignored. */
+	values?: Record<string, number | boolean | string>;
+	/** The look's own when left out (`host.rive.motion()`). */
+	motion?: Motion;
+	/** The size to draw at, in CSS pixels; the canvas's own when left out. */
+	width?: number;
+	height?: number;
+}
+
+/** A Rive file playing (`host.rive.play`). */
+export interface RivePlayer {
+	/** New values for its view model; the change plays as the motion allows. */
+	set(values: Record<string, number | boolean | string>): void;
+	motion(m: Motion): void;
+	/** The names and types of its view model's properties. */
+	readonly properties: { name: string; type: string }[];
+	/** Stops it and frees what it holds; call it when your element is removed. */
+	destroy(): void;
 }
 
 /** The person's units (`host.units`). */
