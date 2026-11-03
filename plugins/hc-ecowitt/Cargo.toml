@@ -7,8 +7,10 @@ description = "Ecowitt weather stations, with sensors discovered from the gatewa
 repository  = "https://github.com/homeCore-io/hc-ecowitt"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "Ecowitt"
+# Where the web app's Catalog groups it.
+category = "Weather"
 
 [[bin]]
 name = "hc-ecowitt"

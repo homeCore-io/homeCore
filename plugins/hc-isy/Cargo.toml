@@ -7,8 +7,10 @@ description = "Insteon, Z-Wave and Zigbee devices behind a Universal Devices ISY
 repository  = "https://github.com/homeCore-io/hc-isy"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "ISY"
+# Where the web app's Catalog groups it.
+category = "Hubs"
 
 [[bin]]
 name = "hc-isy"

@@ -445,7 +445,11 @@ point — not the SDKs, which pass slots through.
   static binary, builds `ui/` if it has `package.json`, packs
   `plugin.toml` + binary + `ui/` (`ui = "ui"`) into a signed `.tar.zst`,
   attaches it to the GitHub Release and notifies the registry. homeCore installs
-  the package — the UI with it — from **Plugins → Add / Update**.
+  the package — the UI with it — from **Plugins → Catalog / Update**.
+- **How it shows in the Catalog**: `package.description` is the line under
+  its name, and `[package.metadata.homecore]` holds `name` (as people see it)
+  and `category` (Lighting, Climate, Media, Hubs, Sensors, Weather, or a new
+  one), which the Catalog groups by.
 - A core release that changes plugins tags them on the same commit, and gets
   its entry in `homeCore-io.github.io/docs/release-notes.md` — written for the
   people running a house. See the workspace `AGENTS.md`.

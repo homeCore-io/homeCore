@@ -7,8 +7,10 @@ description = "Lutron Caséta dimmers, switches and Pico remotes, via a Smart Br
 repository  = "https://github.com/homeCore-io/hc-caseta"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "Caséta"
+# Where the web app's Catalog groups it.
+category = "Lighting"
 
 [[bin]]
 name = "hc-caseta"

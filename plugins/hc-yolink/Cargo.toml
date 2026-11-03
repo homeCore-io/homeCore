@@ -7,8 +7,10 @@ description = "YoLink sensors, locks and plugs, through a YS1606 local hub or th
 repository  = "https://github.com/homeCore-io/hc-yolink"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "YoLink"
+# Where the web app's Catalog groups it.
+category = "Sensors"
 
 [[bin]]
 name = "hc-yolink"

@@ -6,6 +6,12 @@ license     = "MIT OR Apache-2.0"
 description = "Mysa thermostats, via the Mysa Consumer API"
 repository  = "https://github.com/homeCore-io/homeCore"
 
+[package.metadata.homecore]
+# The name people see in the Catalog (the registry index).
+name = "Mysa"
+# Where the web app's Catalog groups it.
+category = "Climate"
+
 [[bin]]
 name = "hc-mysa"
 path = "src/main.rs"

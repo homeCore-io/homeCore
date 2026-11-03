@@ -7,8 +7,10 @@ description = "Roku streaming players and Roku TVs, over the External Control Pr
 repository  = "https://github.com/homeCore-io/hc-roku"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "Roku"
+# Where the web app's Catalog groups it.
+category = "Media"
 
 [[bin]]
 name = "hc-roku"

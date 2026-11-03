@@ -7,8 +7,10 @@ description = "Weather for a place: Open-Meteo's conditions, forecast and air qu
 repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "Weather"
+# Where the web app's Catalog groups it.
+category = "Weather"
 
 [[bin]]
 name = "hc-weather"
