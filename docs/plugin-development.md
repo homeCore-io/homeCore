@@ -344,6 +344,11 @@ knows an older one leaves the drawing out. Optional `"artboard"` and
 `"stateMachine"` pick them by name. The same drawings can also come without a
 plugin, as UI extensions (the `hc-extensions` repo).
 
+**Rive from code.** A screen's own code can play a Rive file with the
+app's runtime: `host.rive.play(canvas, { src, stateMachine, values })`
+returns a player (`set(values)`, `motion(m)`, `destroy()`), run as the
+look's motion allows (app 0.1.47; `sdk/ui/index.d.ts`).
+
 If one doesn't load (the plugin is stopped, or its module fails), the app
 draws the thing, the header or the rest view as it would without it, and a
 symbol as a plain box. Draw only from what you're given: `thing` is the
