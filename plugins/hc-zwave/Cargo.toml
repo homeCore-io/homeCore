@@ -7,8 +7,10 @@ description = "Z-Wave locks, dimmers, switches and sensors, through a zwave-js s
 repository  = "https://github.com/homeCore-io/hc-zwave"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "Z-Wave"
+# Where the web app's Catalog groups it.
+category = "Hubs"
 
 [[bin]]
 name = "hc-zwave"

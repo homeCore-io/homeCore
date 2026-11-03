@@ -7,8 +7,10 @@ description = "WLED LED controllers, discovered on the network over mDNS"
 repository  = "https://github.com/homeCore-io/hc-wled"
 
 [package.metadata.homecore]
-# The name people see in Plugins › Add (the registry index).
+# The name people see in the Catalog (the registry index).
 name = "WLED"
+# Where the web app's Catalog groups it.
+category = "Lighting"
 
 [[bin]]
 name = "hc-wled"

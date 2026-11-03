@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.97"
+  version: "0.1.98"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -9772,11 +9772,19 @@ components:
           type: array
           items:
             type: object
+            description: |
+              Passed on as the plugin wrote it. homeCore checks only the slot's name and
+              its custom elements; what a slot and its fields mean is the app's, and
+              the app ignores what it doesn't know.
             required: [slot, element]
+            additionalProperties: true
             properties:
               slot:
                 type: string
-                enum: [plugin.page, device.panel, rule.step, device.card, dashboard.card]
+                description: |
+                  Lowercase words joined by dots. The web app knows plugin.page,
+                  device.panel, rule.step, device.card, dashboard.card, look.drawing,
+                  look.piece and look.symbol.
               element:
                 type: string
                 description: The custom element the module defines.
@@ -9788,18 +9796,32 @@ components:
                 description: For the device slots, only these device types (all when absent).
               label:
                 type: string
-                description: For `dashboard.card`, its name in "Add a card" (required there).
+                description: |
+                  For `dashboard.card`, its name in "Add a card"; for the looks' slots, its
+                  name in the look editor. Required for those.
               description:
                 type: string
               forms:
                 type: array
                 items:
                   type: string
-                  enum: [compact, standard, large]
-                description: For the cards, the sizes it can be (all when absent).
+                description: For the cards, the sizes it can be (compact, standard, large; all when absent).
               settings:
                 type: string
                 description: For `dashboard.card`, the element that edits a card's settings.
+              draws:
+                type: array
+                items:
+                  type: string
+                description: |
+                  For `look.drawing`, the families of things it draws (lights, switches,
+                  scenes, doors, readings, watching, media, climate); for `look.piece`,
+                  the pieces it is (header, rest). Required for those.
+              symbols:
+                type: array
+                items:
+                  type: string
+                description: For `look.symbol`, the names of the symbols its element draws (required).
     PluginStatus:
       type: object
       description: |

@@ -13,7 +13,8 @@ device-talking with your protocol and the shape stays the same.
 src/
 ├── main.rs      connect → logs → manage → describe → run → register → consume
 └── config.rs    the config file core hands you as argv[1], and how it renders
-ui/              its own screens: a page and its lights' card (plain JS)
+ui/              its own screens: a page, its lights' card, and a drawing,
+                 a header and symbols for the looks (plain JS)
 ├── src/index.js the custom elements
 └── public/manifest.json   where each goes
 ```
@@ -234,9 +235,11 @@ anonymous update.
 
 ## Its own screens
 
-`ui/` is the plugin's own page (in place of the generic action list) and its
-lights' card (on Home and the rooms) — plain custom elements, no framework, no
-dependencies. `npm run build` in `ui/` copies them to `ui/dist`, which the
+`ui/` is the plugin's own page (in place of the generic action list), its
+lights' card (on Home and the rooms), and for the looks (Settings › Look) a
+"Bulb" drawing for lights, a one-line room header and two symbols, which draw
+any device in the house once a look chooses them — plain custom elements, no
+framework, no dependencies. `npm run build` in `ui/` copies them to `ui/dist`, which the
 plugin serves (`with_ui_dir` in `main.rs`) and the release packs beside the
 program. Rebuild and restart the plugin to see a change.
 
