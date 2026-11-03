@@ -29,6 +29,27 @@
  * module): it is given `host` and `config`, and answers with a `change`
  * event whose `detail` is `{ config }` — saved with the page, by the app.
  *
+ * The looks' slots draw any device in the house, once a look chooses them
+ * (Settings › Look); they need a `label`, the name the look editor shows:
+ *
+ * - `look.drawing` — how a family of things is drawn (its slot's `draws`:
+ *   lights, switches, scenes, doors, readings, watching). Given `thing`, the
+ *   thing's values (below), `deviceId` and `form`. It draws from `thing`,
+ *   which is set afresh as the thing changes, and asks for what a tap does
+ *   with an `act` event, `detail: { do: 'switch' | 'run' | 'open' }`: the
+ *   app does it, asking first where the house says to. It never commands a
+ *   device itself — `host` is still scoped to the plugin's own.
+ * - `look.piece` — a piece of a page's frame (its slot's `draws`): a
+ *   room's `header`, given `room` (`{ id, name, things }`); or a display's
+ *   `rest` view, given `things` (the house's), which asks to `wake` with a
+ *   `wake` event.
+ * - `look.symbol` — symbols a person can give a device (its slot's
+ *   `symbols`, by name). Its element draws the one named by its `name`
+ *   property, at the size of its text (`1em`), in `currentColor`.
+ *
+ * If one of these fails to load, or throws, the app draws the thing as
+ * Classic does.
+ *
  * A `device.card` element's class may have a static `accepts(device)` —
  * whether it draws this one of the slot's devices; when it says no, the app's
  * own card is shown instead (a plugin's card for its temperature probes, say,
@@ -51,6 +72,8 @@
  * plugin keeps.
  * Later (the app after 0.1.33): `alerts` — without it, decide for yourself
  * (a low battery from `battery_low` and the level).
+ * Later (the app after 0.1.45): the looks' slots and `Thing` — an older app
+ * offers none of them.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -259,6 +282,35 @@ export interface Units {
 }
 
 /** The properties the app sets on a plugin's element. */
+/**
+ * A thing as a look's drawing reads it (`look.drawing`, and a piece's
+ * `things`): its values in plain names, the same as a drawing made in the
+ * look editor reads.
+ */
+export interface Thing {
+	name: string;
+	/** Whether it's on; for a scene, whether it's the one on now. */
+	on: boolean;
+	/** How bright, 0 to 100; null if it doesn't dim. */
+	level: number | null;
+	/** The color it gives off, `#rrggbb`. */
+	color: string;
+	/** A scene's colors, `#rrggbb` with commas between; '' otherwise. */
+	colors: string;
+	room: string;
+	/** Its state in words, in the person's units: "On · 80%", "Closed · 4 d ago". */
+	state: string;
+	/** Readings, in °C and percent; null when it has none. */
+	temperature: number | null;
+	humidity: number | null;
+	/** Whether it's responding. */
+	available: boolean;
+	/** What's wrong, if anything: "Wet", "Battery low". */
+	alarm: string | null;
+	/** What kind of thing it is: light, switch, door, scene, … */
+	kind: string;
+}
+
 export interface PluginElement extends HTMLElement {
 	host: Host;
 	/** On a `device.panel` element. */
@@ -270,6 +322,14 @@ export interface PluginElement extends HTMLElement {
 	form?: 'compact' | 'standard' | 'large';
 	/** On a `dashboard.card` element, and its settings element. */
 	config?: Record<string, unknown>;
+	/** On a `look.drawing` element. */
+	thing?: Thing;
+	/** On a `look.piece` header. */
+	room?: { id: string; name: string; things: Thing[] };
+	/** On a `look.piece` rest view. */
+	things?: Thing[];
+	/** On a `look.symbol` element: the symbol to draw. */
+	name?: string;
 }
 
 /** What a `device.card` element's class may say about a device. */

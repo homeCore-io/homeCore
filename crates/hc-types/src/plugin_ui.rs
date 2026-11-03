@@ -46,8 +46,13 @@ pub struct UiSlot {
     /// `device.panel` (its devices' panel, in place of the generic controls),
     /// `rule.step` (the automation editor's form for a step that sets one of
     /// its devices, in place of the generic one), `device.card` (its devices'
-    /// card on Home and the rooms, in place of the generic one), or
-    /// `dashboard.card` (a card of its own a person adds to a page).
+    /// card on Home and the rooms, in place of the generic one),
+    /// `dashboard.card` (a card of its own a person adds to a page), or one
+    /// of the looks' slots, which any device in the house can be drawn with
+    /// once a look chooses them: `look.drawing` (how a family of things is
+    /// drawn), `look.piece` (a piece of a page's frame: a room's header, a
+    /// display's rest view) or `look.symbol` (symbols a person can give a
+    /// device).
     pub slot: String,
     /// The custom element the module defines for it (`hc-ecowitt-page`).
     pub element: String,
@@ -70,6 +75,13 @@ pub struct UiSlot {
     /// from the page's edit tools; a card with none has no settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<String>,
+    /// For `look.drawing`: the families of things it draws (`DRAWS`); for
+    /// `look.piece`: the pieces it is (`PIECES`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draws: Vec<String>,
+    /// For `look.symbol`: the names of the symbols its element draws.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<String>,
 }
 
 /// The slots the app knows.
@@ -79,7 +91,18 @@ pub const SLOTS: &[&str] = &[
     "rule.step",
     "device.card",
     "dashboard.card",
+    "look.drawing",
+    "look.piece",
+    "look.symbol",
 ];
+
+/// The families of things a `look.drawing` can draw: the look editor's.
+pub const DRAWS: &[&str] = &[
+    "lights", "switches", "scenes", "doors", "readings", "watching",
+];
+
+/// The frame pieces a `look.piece` can be.
+pub const PIECES: &[&str] = &["header", "rest"];
 
 /// The sizes a card can be.
 pub const FORMS: &[&str] = &["compact", "standard", "large"];
@@ -101,11 +124,35 @@ impl PluginUi {
                 && custom_element(&s.element)
                 && s.forms.iter().all(|f| FORMS.contains(&f.as_str()))
                 && s.settings.as_deref().is_none_or(custom_element)
-                && (s.slot != "dashboard.card"
-                    || s.label.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                && (!matches!(
+                    s.slot.as_str(),
+                    "dashboard.card" | "look.drawing" | "look.piece" | "look.symbol"
+                ) || s.label.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                && match s.slot.as_str() {
+                    "look.drawing" => named_from(&s.draws, DRAWS),
+                    "look.piece" => named_from(&s.draws, PIECES),
+                    "look.symbol" => {
+                        !s.symbols.is_empty() && s.symbols.iter().all(|n| symbol_name(n))
+                    }
+                    _ => true,
+                }
         });
         (!self.slots.is_empty()).then_some(self)
     }
+}
+
+/// Some of these names and nothing else.
+fn named_from(names: &[String], from: &[&str]) -> bool {
+    !names.is_empty() && names.iter().all(|n| from.contains(&n.as_str()))
+}
+
+/// A symbol's name: lowercase letters, digits and hyphens.
+fn symbol_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// A custom element name: lowercase, starting with a letter, with a hyphen.
@@ -168,6 +215,30 @@ mod tests {
         let kept: Vec<_> = ui.slots.iter().map(|s| s.element.as_str()).collect();
         assert_eq!(kept, vec!["hc-x-card", "hc-x-presets"]);
         assert_eq!(ui.slots[1].label.as_deref(), Some("Quick presets"));
+    }
+
+    #[test]
+    fn looks_slots_say_what_they_draw_and_have_a_name() {
+        let ui: PluginUi = serde_json::from_value(json!({
+            "host_api": 1,
+            "version": "1.0.0",
+            "slots": [
+                {"slot": "look.drawing", "element": "hc-x-orb", "label": "Orb", "draws": ["lights", "switches"]},
+                {"slot": "look.drawing", "element": "hc-x-nameless", "draws": ["lights"]},
+                {"slot": "look.drawing", "element": "hc-x-nothing", "label": "Nothing"},
+                {"slot": "look.drawing", "element": "hc-x-toasters", "label": "Toast", "draws": ["toasters"]},
+                {"slot": "look.piece", "element": "hc-x-header", "label": "Banner", "draws": ["header"]},
+                {"slot": "look.piece", "element": "hc-x-footer", "label": "Footer", "draws": ["footer"]},
+                {"slot": "look.symbol", "element": "hc-x-symbols", "label": "Brands", "symbols": ["roku", "tv-2"]},
+                {"slot": "look.symbol", "element": "hc-x-bad-symbols", "label": "Bad", "symbols": ["Roku!"]}
+            ]
+        }))
+        .unwrap();
+        let ui = ui.validated().unwrap();
+        let kept: Vec<_> = ui.slots.iter().map(|s| s.element.as_str()).collect();
+        assert_eq!(kept, vec!["hc-x-orb", "hc-x-header", "hc-x-symbols"]);
+        assert_eq!(ui.slots[0].draws, vec!["lights", "switches"]);
+        assert_eq!(ui.slots[2].symbols, vec!["roku", "tv-2"]);
     }
 
     #[test]

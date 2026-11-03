@@ -193,6 +193,9 @@ A plugin can carry web components that the web app puts in its place:
 | `rule.step` | the automation editor's form for a step on its devices | `host`, `deviceIds`, `value` |
 | `device.card` | its devices' card on Home and the rooms | `host`, `deviceId`, `form` |
 | `dashboard.card` | a card of its own a household adds to a page | `host`, `form`, `config` |
+| `look.drawing` | how a family of things is drawn, in a look that chooses it | `host`, `thing`, `deviceId` |
+| `look.piece` | a piece of a page's frame: a room's header, a display's rest view | `host`, `room` or `things` |
+| `look.symbol` | symbols a person can give any device | `host`, `name` |
 
 **The plugin carries them and serves them.** Build them into a folder with one
 ES module and a `manifest.json`:
@@ -285,6 +288,43 @@ plugin, and is the stable way in — the app's internals are not.
   gets `host` and `config` and answers `change` with `detail: {config}` — keep
   a working copy: the `config` it is given lags behind its own saves.
 
+### For the looks
+
+A look (Settings › Look in the app) is how the household's pages are drawn:
+how each family of things is drawn, the frame around a page, how a room is
+grouped. A plugin can add to the choices with three slots. Unlike the others,
+they draw **any device in the house**, not only the plugin's, once a look
+chooses them. Each needs a `label`, the name the look editor shows next to the
+plugin's. `hc-plugin-template/ui/src/index.js` has one of each.
+
+```json
+{ "slot": "look.drawing", "element": "hc-yours-bulb", "label": "Bulb", "draws": ["lights"] },
+{ "slot": "look.piece", "element": "hc-yours-header", "label": "One line", "draws": ["header"] },
+{ "slot": "look.symbol", "element": "hc-yours-symbols", "label": "Brands", "symbols": ["roku", "sonos"] }
+```
+
+- **`look.drawing`**: `draws` names the families it can draw: `lights`,
+  `switches`, `scenes`, `doors`, `readings`, `watching`. It is given
+  `thing`, the thing's values in plain names (`Thing` in
+  `sdk/ui/index.d.ts`: `name`, `on`, `level`, `color`, `state`, `room`, …),
+  set afresh as the thing changes, and `deviceId`. **It never commands a
+  device**: `host` is still scoped to the plugin's own. It asks for what a
+  tap does with an `act` event, `detail: {do: 'switch' | 'run' | 'open'}`, and
+  the app does it, asking first where the house says to.
+- **`look.piece`**: `draws` is `header` (a room's header, given `room`:
+  `{id, name, things}`) or `rest` (a display's rest view, over the whole
+  screen, given `things`; it may ask to `wake` with a `wake` event; a touch
+  wakes it anyway).
+- **`look.symbol`**: `symbols` names them (lowercase, digits, hyphens). The
+  element is created once per symbol shown and given `name`; draw it at
+  `1em`, in `currentColor` (an inline SVG). They are offered in every card's
+  Symbol choice, after the app's own.
+
+If one doesn't load (the plugin is stopped, or its module fails), the app
+draws the thing, the header or the rest view as it would without it, and a
+symbol as a plain box. Draw only from what you're given: `thing` is the
+same data a drawing made in the look editor reads, so the two stay alike.
+
 ### Building them
 
 Use anything that makes custom elements — Svelte with `customElement`, Lit,
@@ -338,7 +378,12 @@ is `src/lib/pluginUi/`: `uis.svelte.ts` (which plugins carry what, from
 (rule.step), `DeviceCard.svelte` (device.card, in front of
 `GenericDeviceCard`), and for dashboard cards `AddCard.svelte`,
 `PluginCard.svelte`, `AddedCards.svelte`, Home's pins and `Tools.svelte` /
-`CardSettings.svelte`. A dashboard card is a page ref
+`CardSettings.svelte`. The looks' slots: `lit/LitDevice.svelte` and
+`kinds/SceneKind.svelte` (look.drawing), `lit/RoomHeadKind.svelte` and
+`looks/PluginRest.svelte` (look.piece), `PluginSymbol.svelte` through
+`Icon.svelte` (look.symbol), offered in `looks/LookEditor.svelte` and
+`CardOptions.svelte`; a look names them `plugin:{plugin}/{element}`, and a
+symbol `plugin:{plugin}/{element}#{name}`. A dashboard card is a page ref
 `card:{plugin}/{element}/{n}`; its settings are the layer change `config`.
 Adding a slot means: `SLOTS` in `hc-types/src/plugin_ui.rs` (+ `openapi.yaml`),
 the `host` types in `sdk/ui/index.d.ts` (+ the app's copy), and the app's mount

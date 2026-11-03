@@ -7,7 +7,10 @@ A plugin can carry web components — a page for itself (`plugin.page`), a panel
 for its devices (`device.panel`), the automation editor's form for a step on its
 devices (`rule.step`), its devices' cards on Home and the rooms (`device.card`),
 and cards of its own a household adds to a page (`dashboard.card`) — and serve
-them itself. The plugin and its UI
+them itself. It can also add to the looks (Settings › Look), drawing any
+device in the house once a look chooses them: a drawing (`look.drawing`), a
+frame piece (`look.piece`) and symbols (`look.symbol`); see "For the looks"
+below. The plugin and its UI
 are one thing: the built UI folder travels in whatever package installs the
 plugin, beside its program, and the plugin hands out its files when asked.
 homeCore passes them through to the web app and keeps none, so a screen is
@@ -88,11 +91,33 @@ with the `hc-tile` class (`compact`, `lit`), so it sits among the app's cards.
 - The app keeps a card's settings with the page, in its own server; homeCore
   never holds them.
 
+## For the looks
+
+The looks' slots draw any device in the house, not only the plugin's, once a
+look chooses them; each needs a `label`, its name in the look editor.
+
+```json
+{ "slot": "look.drawing", "element": "hc-yours-bulb", "label": "Bulb", "draws": ["lights"] },
+{ "slot": "look.piece", "element": "hc-yours-header", "label": "One line", "draws": ["header"] },
+{ "slot": "look.symbol", "element": "hc-yours-symbols", "label": "Brands", "symbols": ["roku"] }
+```
+
+- A `look.drawing` draws the families in `draws` (lights, switches, scenes,
+  doors, readings, watching) from `thing`, the thing's values (`Thing`), and
+  asks for a tap with an `act` event (`detail: { do: 'switch' | 'run' |
+  'open' }`). The app does it; the drawing never commands a device.
+- A `look.piece` is a room's `header` (given `room`) or a display's `rest`
+  view (given `things`; a `wake` event wakes it).
+- A `look.symbol` element draws the symbol named by its `name`, at `1em`, in
+  `currentColor`; its `symbols` are offered in every card's Symbol choice.
+
 ## Examples
 
 `plugins/hc-ecowitt/ui` (a page, a panel, a station card and "Weather now") and
 `plugins/hc-wled/ui` (a page, a panel, a step form with files sent to an
 action, a controller card and "Quick presets" with its settings).
+`plugins/hc-plugin-template/ui` has one of each of the looks' slots, in plain
+JS.
 
 ## Developing
 
