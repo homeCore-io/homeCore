@@ -3,12 +3,12 @@ name        = "hc-nuheat"
 version     = "0.1.1"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
-description = "NuHeat Signature floor-heating thermostats, via the NuHeat OpenAPI"
+description = "Nuheat Signature floor-heating thermostats, via the Nuheat OpenAPI"
 repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
 # The name people see in the Catalog (the registry index).
-name = "NuHeat"
+name = "Nuheat Signature"
 # Where the web app's Catalog groups it.
 category = "Climate"
 

@@ -448,7 +448,7 @@ point — not the SDKs, which pass slots through.
   the package — the UI with it — from **Plugins → Catalog / Update**.
 - **How it shows in the Catalog**: `package.description` is the line under
   its name, and `[package.metadata.homecore]` holds `name` (as people see it)
-  and `category` (Lighting, Climate, Media, Hubs, Sensors, Weather, or a new
+  and `category` (Lighting, Climate, Media, Hubs, Weather, or a new
   one), which the Catalog groups by.
 - A core release that changes plugins tags them on the same commit, and gets
   its entry in `homeCore-io.github.io/docs/release-notes.md` — written for the

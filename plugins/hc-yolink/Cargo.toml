@@ -10,7 +10,7 @@ repository  = "https://github.com/homeCore-io/hc-yolink"
 # The name people see in the Catalog (the registry index).
 name = "YoLink"
 # Where the web app's Catalog groups it.
-category = "Sensors"
+category = "Hubs"
 
 [[bin]]
 name = "hc-yolink"
