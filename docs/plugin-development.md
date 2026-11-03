@@ -197,6 +197,12 @@ A plugin can carry web components that the web app puts in its place:
 | `look.piece` | a piece of a page's frame: a room's header, a display's rest view | `host`, `room` or `things` |
 | `look.symbol` | symbols a person can give any device | `host`, `name` |
 
+homeCore passes each slot to the app as you wrote it, unknown fields included,
+and checks only that its `slot` is a dotted lowercase name and its elements
+are valid custom element names. The app decides what a slot means, and
+ignores a slot or a field it doesn't know, so a slot an older app can't use
+does no harm.
+
 **The plugin carries them and serves them.** Build them into a folder with one
 ES module and a `manifest.json`:
 
@@ -304,7 +310,8 @@ plugin's. `hc-plugin-template/ui/src/index.js` has one of each.
 ```
 
 - **`look.drawing`**: `draws` names the families it can draw: `lights`,
-  `switches`, `scenes`, `doors`, `readings`, `watching`. It is given
+  `switches`, `scenes`, `doors`, `readings`, `watching`, `media`,
+  `climate` (thermostats). It is given
   `thing`, the thing's values in plain names (`Thing` in
   `sdk/ui/index.d.ts`: `name`, `on`, `level`, `color`, `state`, `room`, …),
   set afresh as the thing changes, and `deviceId`. **It never commands a
@@ -319,6 +326,23 @@ plugin's. `hc-plugin-template/ui/src/index.js` has one of each.
   element is created once per symbol shown and given `name`; draw it at
   `1em`, in `currentColor` (an inline SVG). They are offered in every card's
   Symbol choice, after the app's own.
+
+**A drawing made in Rive.** A `look.drawing` can be a Rive file instead of
+code: add `"rive"`, a `.riv` file in the UI's folder, and `"values": 1`.
+The element name is then only its id; the module doesn't need to define it.
+
+```json
+{ "slot": "look.drawing", "element": "hc-yours-dial", "label": "Dial", "draws": ["climate"],
+  "rive": "dial.riv", "values": 1 }
+```
+
+The app fills the file's view model by property name (for thermostats:
+`heating`, `cooling`, `on`, `temperature`, `target`, `low`, `high`,
+`moving`, `unit`), runs it as fast as the look's motion allows, and sends a
+tap to the card. `values` is the version of those names; an app that only
+knows an older one leaves the drawing out. Optional `"artboard"` and
+`"stateMachine"` pick them by name. The same drawings can also come without a
+plugin, as UI extensions (the `hc-extensions` repo).
 
 If one doesn't load (the plugin is stopped, or its module fails), the app
 draws the thing, the header or the rest view as it would without it, and a

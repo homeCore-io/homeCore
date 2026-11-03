@@ -9772,21 +9772,19 @@ components:
           type: array
           items:
             type: object
+            description: |
+              Passed on as the plugin wrote it. homeCore checks only the slot's name and
+              its custom elements; what a slot and its fields mean is the app's, and
+              the app ignores what it doesn't know.
             required: [slot, element]
+            additionalProperties: true
             properties:
               slot:
                 type: string
-                enum:
-                  [
-                    plugin.page,
-                    device.panel,
-                    rule.step,
-                    device.card,
-                    dashboard.card,
-                    look.drawing,
-                    look.piece,
-                    look.symbol
-                  ]
+                description: |
+                  Lowercase words joined by dots. The web app knows plugin.page,
+                  device.panel, rule.step, device.card, dashboard.card, look.drawing,
+                  look.piece and look.symbol.
               element:
                 type: string
                 description: The custom element the module defines.
@@ -9807,8 +9805,7 @@ components:
                 type: array
                 items:
                   type: string
-                  enum: [compact, standard, large]
-                description: For the cards, the sizes it can be (all when absent).
+                description: For the cards, the sizes it can be (compact, standard, large; all when absent).
               settings:
                 type: string
                 description: For `dashboard.card`, the element that edits a card's settings.
@@ -9818,8 +9815,8 @@ components:
                   type: string
                 description: |
                   For `look.drawing`, the families of things it draws (lights, switches,
-                  scenes, doors, readings, watching); for `look.piece`, the pieces it is
-                  (header, rest). Required for those.
+                  scenes, doors, readings, watching, media, climate); for `look.piece`,
+                  the pieces it is (header, rest). Required for those.
               symbols:
                 type: array
                 items:

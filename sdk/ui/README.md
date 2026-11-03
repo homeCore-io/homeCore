@@ -103,13 +103,18 @@ look chooses them; each needs a `label`, its name in the look editor.
 ```
 
 - A `look.drawing` draws the families in `draws` (lights, switches, scenes,
-  doors, readings, watching) from `thing`, the thing's values (`Thing`), and
+  doors, readings, watching, media, climate) from `thing`, the thing's values (`Thing`), and
   asks for a tap with an `act` event (`detail: { do: 'switch' | 'run' |
   'open' }`). The app does it; the drawing never commands a device.
 - A `look.piece` is a room's `header` (given `room`) or a display's `rest`
   view (given `things`; a `wake` event wakes it).
 - A `look.symbol` element draws the symbol named by its `name`, at `1em`, in
   `currentColor`; its `symbols` are offered in every card's Symbol choice.
+- A `look.drawing` can be a Rive file instead: `"rive": "dial.riv"` and
+  `"values": 1` (docs/plugin-development.md, "A drawing made in Rive").
+
+homeCore passes slots and their fields through as written; the app ignores
+what it doesn't know.
 
 ## Examples
 

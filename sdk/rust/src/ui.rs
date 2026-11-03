@@ -178,7 +178,7 @@ mod tests {
         assert!(load(&d.0, "1").is_err());
         std::fs::write(d.0.join("manifest.json"), r#"{"host_api":1,"slots":[]}"#).unwrap();
         assert!(load(&d.0, "1").is_err());
-        // A slot this SDK doesn't know is passed on: homeCore decides.
+        // A slot this SDK doesn't know is passed on: the app decides.
         std::fs::write(
             d.0.join("manifest.json"),
             r#"{"host_api":1,"slots":[{"slot":"future.slot","element":"hc-x-later"}]}"#,
