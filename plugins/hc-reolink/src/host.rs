@@ -132,6 +132,21 @@ pub struct Cam {
     pub parts_name: String,
 }
 
+impl Cam {
+    /// Its devices in homeCore: itself, and a spotlight and siren only if it
+    /// has them. Marking one it hasn't would make an empty device of it.
+    pub fn device_ids(&self) -> Vec<String> {
+        let mut ids = vec![self.id.clone()];
+        if self.features.spotlight {
+            ids.push(camera::spotlight_id(&self.id));
+        }
+        if self.features.siren {
+            ids.push(camera::siren_id(&self.id));
+        }
+        ids
+    }
+}
+
 pub struct Host {
     pub entry: HostEntry,
     pub api: Reolink,
@@ -223,11 +238,7 @@ async fn went_offline(ctx: &Ctx, host: &Host, e: &anyhow::Error) {
     ctx.alert(topic, &host.entry.id, Some(reason.clone())).await;
     ctx.set_status(&host.entry.id, json!({ "ok": false, "why": reason }));
     for c in host.cams.lock().await.iter() {
-        for id in [
-            c.id.clone(),
-            camera::spotlight_id(&c.id),
-            camera::siren_id(&c.id),
-        ] {
+        for id in c.device_ids() {
             let _ = ctx.publisher.set_available(&id, false).await;
         }
     }
@@ -383,19 +394,7 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         }),
     )
     .await;
-    let live: std::collections::HashSet<String> = cams
-        .iter()
-        .flat_map(|c| {
-            let mut ids = vec![c.id.clone()];
-            if c.features.spotlight {
-                ids.push(camera::spotlight_id(&c.id));
-            }
-            if c.features.siren {
-                ids.push(camera::siren_id(&c.id));
-            }
-            ids
-        })
-        .collect();
+    let live: std::collections::HashSet<String> = cams.iter().flat_map(Cam::device_ids).collect();
     *host.cams.lock().await = cams;
     ctx.answered(&e.id, live).await;
     Ok(())
@@ -585,11 +584,7 @@ async fn watch(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
                 if let Some(ch) = chans.iter().find(|x| x.channel == c.channel) {
                     if ch.online != c.online {
                         c.online = ch.online;
-                        for id in [
-                            c.id.clone(),
-                            camera::spotlight_id(&c.id),
-                            camera::siren_id(&c.id),
-                        ] {
+                        for id in c.device_ids() {
                             let _ = ctx.publisher.set_available(&id, ch.online).await;
                         }
                     }

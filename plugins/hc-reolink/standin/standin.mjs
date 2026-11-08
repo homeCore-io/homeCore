@@ -30,16 +30,16 @@ let refused = 0;
 let lockedUntil = 0;
 const log = [];
 const chans = [
-	{ name: 'Front door', type: 'Reolink Video Doorbell', online: 1, ev: { md: 0, people: 0, vehicle: 0, dog_cat: 0, package: 0, visitor: 0 },
+	{ name: 'Stand-in doorbell', type: 'Reolink Video Doorbell', online: 1, ev: { md: 0, people: 0, vehicle: 0, dog_cat: 0, package: 0, visitor: 0 },
 		support: { people: 1, vehicle: 0, dog_cat: 0, package: 1, visitor: 1 }, led: null, ir: 'Auto', ptz: false },
-	{ name: 'Driveway', type: 'RLC-823A', online: 1, ev: { md: 0, people: 0, vehicle: 0, dog_cat: 0, package: 0, visitor: 0 },
+	{ name: 'Stand-in driveway', type: 'RLC-823A', online: 1, ev: { md: 0, people: 0, vehicle: 0, dog_cat: 0, package: 0, visitor: 0 },
 		support: { people: 1, vehicle: 1, dog_cat: 1, package: 0, visitor: 0 }, led: { state: 0, bright: 80 }, ir: 'Auto', ptz: true }
 ];
 // A camera on its own is the PTZ camera, once per lens.
 if (CAMERA) {
 	const cam = chans[1];
 	chans.length = 0;
-	for (let i = 0; i < LENSES; i++) chans.push({ ...structuredClone(cam), name: 'Porch' });
+	for (let i = 0; i < LENSES; i++) chans.push({ ...structuredClone(cam), name: 'Stand-in porch' });
 }
 const presets = [{ enable: 1, id: 1, name: 'Gate' }, { enable: 1, id: 2, name: 'Garage' }, { enable: 0, id: 3, name: '' }];
 
@@ -53,7 +53,7 @@ function answer(c, token) {
 	switch (c.cmd) {
 		case 'GetDevInfo':
 			return CAMERA
-				? ok(c.cmd, { DevInfo: { model: LENSES > 1 ? 'Reolink Duo 2 PoE' : 'RLC-823A', name: 'Porch', type: 'IPC', exactType: 'IPC', channelNum: chans.length, firmVer: 'v3.1.0.stand-in', hardVer: 'IPC_523', serial: '0001' } })
+				? ok(c.cmd, { DevInfo: { model: LENSES > 1 ? 'Reolink Duo 2 PoE' : 'RLC-823A', name: 'Stand-in porch', type: 'IPC', exactType: 'IPC', channelNum: chans.length, firmVer: 'v3.1.0.stand-in', hardVer: 'IPC_523', serial: '0001' } })
 				: ok(c.cmd, { DevInfo: { model: 'RLN8-410', name: 'Stand-in NVR', type: 'NVR', exactType: 'NVR', channelNum: chans.length, firmVer: 'v3.3.0.stand-in', hardVer: 'H3MB18', serial: '0000' } });
 		case 'GetChannelstatus':
 			if (CAMERA) return err(c.cmd, -9, 'not support');
