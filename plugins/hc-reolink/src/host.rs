@@ -23,6 +23,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+/// How long a camera behind an NVR takes to show a spotlight change: read
+/// sooner, and the NVR answers with the state from before it.
+const LED_SETTLES: Duration = Duration::from_secs(2);
+
 /// A snapshot at most this often per camera.
 const SNAP_EVERY: Duration = Duration::from_secs(10);
 
@@ -705,19 +709,30 @@ pub async fn command(ctx: &Ctx, device_id: &str, payload: &Value) -> Result<()> 
             h.api
                 .one(api::set_spotlight(t.channel, want_on, level))
                 .await?;
-            let (on, bright) = h
+            // What was asked, now: an NVR answers a read straight after with
+            // the camera's state from before the command.
+            let asked = match (want_on, level) {
+                (false, _) => json!({ "on": false, "brightness_pct": 0 }),
+                (true, Some(l)) => json!({ "on": true, "brightness_pct": l }),
+                // On at its own brightness: that stays as last read.
+                (true, None) => json!({ "on": true }),
+            };
+            p.publish_state_partial_for_command(device_id, &asked, payload, "reolink")
+                .await?;
+            // Then what it is, once the camera has caught up.
+            tokio::time::sleep(LED_SETTLES).await;
+            if let Ok(v) = h
                 .api
                 .one(api::cmd("GetWhiteLed", json!({ "channel": t.channel })))
                 .await
-                .map(|v| api::parse_white_led(&v))
-                .unwrap_or((want_on, level.unwrap_or(100)));
-            p.publish_state_for_command(
-                device_id,
-                &json!({ "on": on, "brightness_pct": if on { bright } else { 0 } }),
-                payload,
-                "reolink",
-            )
-            .await?;
+            {
+                let (on, bright) = api::parse_white_led(&v);
+                p.publish_state_partial(
+                    device_id,
+                    &json!({ "on": on, "brightness_pct": if on { bright } else { 0 } }),
+                )
+                .await?;
+            }
         }
         Kind::Siren => {
             let times = match (action, payload.get("on").and_then(Value::as_bool)) {
