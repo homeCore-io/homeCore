@@ -334,6 +334,13 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
     if c.features.doorbell {
         state["pushed"] = Value::Null;
     }
+    // Its newest still from before a restart, so its card isn't blank until it sees something.
+    if let Some((rel, ms)) = newest_snapshot(&ctx.files_dir.join("snap"), &c.id).await {
+        state["snapshot"] = json!(rel);
+        if let Some(at) = chrono::DateTime::from_timestamp_millis(ms) {
+            state["snapshot_at"] = json!(at.to_rfc3339());
+        }
+    }
     if c.features.ir {
         if let Ok(v) = host
             .api
@@ -533,10 +540,10 @@ pub async fn snapshot(ctx: &Ctx, host: &Host, cam: &Cam) -> Result<String> {
     Ok(rel)
 }
 
-/// The camera's snapshots past the newest `keep`, removed.
-async fn prune(dir: &std::path::Path, camera: &str, keep: usize) {
+/// A camera's snapshot files, by when they were taken.
+async fn snapshots_of(dir: &std::path::Path, camera: &str) -> Vec<(i64, std::path::PathBuf)> {
     let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
-        return;
+        return Vec::new();
     };
     let prefix = format!("{camera}-");
     let mut mine = Vec::new();
@@ -551,6 +558,18 @@ async fn prune(dir: &std::path::Path, camera: &str, keep: usize) {
         }
     }
     mine.sort();
+    mine
+}
+
+/// The newest one, as the files folder names it.
+async fn newest_snapshot(dir: &std::path::Path, camera: &str) -> Option<(String, i64)> {
+    let (ms, _) = snapshots_of(dir, camera).await.pop()?;
+    Some((format!("snap/{camera}-{ms}.jpg"), ms))
+}
+
+/// The camera's snapshots past the newest `keep`, removed.
+async fn prune(dir: &std::path::Path, camera: &str, keep: usize) {
+    let mine = snapshots_of(dir, camera).await;
     let extra = mine.len().saturating_sub(keep);
     for (_, path) in mine.into_iter().take(extra) {
         let _ = tokio::fs::remove_file(path).await;
@@ -673,6 +692,24 @@ async fn cam_of(h: &Host, id: &str) -> Result<Cam> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn finds_the_newest_still_of_a_camera_and_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in [
+            "reolink_a-5.jpg",
+            "reolink_a-12.jpg",
+            "reolink_a_1-99.jpg",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.path().join(n), b"x").unwrap();
+        }
+        assert_eq!(
+            newest_snapshot(dir.path(), "reolink_a").await,
+            Some(("snap/reolink_a-12.jpg".to_string(), 12))
+        );
+        assert_eq!(newest_snapshot(dir.path(), "reolink_b").await, None);
+    }
 
     #[tokio::test]
     async fn keeps_only_the_newest_snapshots_of_each_camera() {

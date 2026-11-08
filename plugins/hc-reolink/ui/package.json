@@ -1,0 +1,10 @@
+{
+	"name": "hc-reolink-ui",
+	"private": true,
+	"version": "0.0.0",
+	"description": "hc-reolink's own screens: a camera's card and its panel, live through the app's /video, as plain custom elements.",
+	"type": "module",
+	"scripts": {
+		"build": "node build.mjs"
+	}
+}
