@@ -1,0 +1,8 @@
+# Sandbox only: stands in for the house's go2rtc, which the plugin adds its streams to.
+api:
+  listen: "127.0.0.1:11984"
+rtsp:
+  listen: ""
+webrtc:
+  listen: ""
+streams: {}

@@ -42,6 +42,7 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::text("username").label("User name"),
                             Field::secret("password").label("Password"),
                             Field::toggle("https").label("HTTPS"),
+                            Field::port("rtsp_port").label("RTSP port"),
                         ])
                         .help(
                             "The id names its cameras in homeCore for good (reolink_<id>, \
@@ -207,6 +208,13 @@ pub struct HostEntry {
     /// HTTPS (self-signed, as Reolink's are) rather than plain HTTP.
     #[serde(default = "yes")]
     pub https: bool,
+    /// Its RTSP port, for go2rtc; 554 unless it was changed.
+    #[serde(default = "default_rtsp_port")]
+    pub rtsp_port: u16,
+}
+
+fn default_rtsp_port() -> u16 {
+    554
 }
 
 fn default_username() -> String {

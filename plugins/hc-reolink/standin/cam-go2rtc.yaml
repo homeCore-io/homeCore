@@ -1,0 +1,12 @@
+# Sandbox only: plays a Reolink camera's RTSP, test patterns under Reolink's stream names.
+api:
+  listen: "127.0.0.1:19985"
+rtsp:
+  listen: "127.0.0.1:18554"
+webrtc:
+  listen: ""
+streams:
+  h264Preview_01_sub: "ffmpeg:virtual?video=testsrc2&size=640x360#video=h264"
+  h264Preview_01_main: "ffmpeg:virtual?video=testsrc2&size=1280x720#video=h264"
+  h264Preview_02_sub: "ffmpeg:virtual?video=smptebars&size=640x360#video=h264"
+  h264Preview_02_main: "ffmpeg:virtual?video=smptebars&size=1280x720#video=h264"

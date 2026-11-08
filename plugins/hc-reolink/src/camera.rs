@@ -55,13 +55,19 @@ pub fn stream_names(camera: &str) -> (String, String) {
 /// Where go2rtc reads a channel from: RTSP, the sub stream as H.264 and the
 /// main one as the camera sends it. The credentials are in it, so it's only
 /// ever given to go2rtc, never published.
-pub fn rtsp_sources(address: &str, user: &str, pass: &str, channel: u32) -> (String, String) {
+pub fn rtsp_sources(
+    address: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    channel: u32,
+) -> (String, String) {
     let host = address.split(':').next().unwrap_or(address);
     let nn = format!("{:02}", channel + 1);
     let auth = format!("{}:{}", encode(user), encode(pass));
     (
-        format!("rtsp://{auth}@{host}:554/h264Preview_{nn}_sub"),
-        format!("rtsp://{auth}@{host}:554/h264Preview_{nn}_main"),
+        format!("rtsp://{auth}@{host}:{port}/h264Preview_{nn}_sub"),
+        format!("rtsp://{auth}@{host}:{port}/h264Preview_{nn}_main"),
     )
 }
 
@@ -340,7 +346,7 @@ mod tests {
 
     #[test]
     fn rtsp_carries_the_channel_and_escapes_the_password() {
-        let (sub, main) = rtsp_sources("10.0.0.5:443", "admin", "p@ss:w/rd", 1);
+        let (sub, main) = rtsp_sources("10.0.0.5:443", 554, "admin", "p@ss:w/rd", 1);
         assert_eq!(
             sub,
             "rtsp://admin:p%40ss%3Aw%2Frd@10.0.0.5:554/h264Preview_02_sub"

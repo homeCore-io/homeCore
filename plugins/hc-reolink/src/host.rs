@@ -319,7 +319,7 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
         if ctx.cfg.go2rtc.add_streams {
             let e = &host.entry;
             let (s_sub, s_main) =
-                camera::rtsp_sources(&e.address, &e.username, &e.password, c.channel);
+                camera::rtsp_sources(&e.address, e.rtsp_port, &e.username, &e.password, c.channel);
             let ok = g.put(&sub, &s_sub).await.and(g.put(&hd, &s_main).await);
             ctx.alert(
                 "go2rtc_unreachable",
