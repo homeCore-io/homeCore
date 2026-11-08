@@ -1,0 +1,40 @@
+[package]
+name        = "hc-reolink"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Reolink cameras, NVRs and Home Hubs: detections, snapshots, spotlight, siren, PTZ, and live video through go2rtc"
+repository  = "https://github.com/homeCore-io/homeCore"
+
+[package.metadata.homecore]
+# The name people see in the Catalog (the registry index).
+name = "Reolink"
+# Where the web app's Catalog groups it.
+category = "Security"
+
+[[bin]]
+name = "hc-reolink"
+path = "src/main.rs"
+
+[features]
+default = ["schema"]
+# Publishes the operator-config JSON Schema on the capability manifest so the
+# web app renders a typed form. Off = leaner build, no schemars.
+schema = ["dep:schemars", "plugin-sdk-rs/schema"]
+
+[dependencies]
+schemars           = { version = "1", optional = true }
+plugin-sdk-rs      = { path = "../../sdk/rust" }
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+toml               = "1"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender   = { workspace = true }
+reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+chrono             = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

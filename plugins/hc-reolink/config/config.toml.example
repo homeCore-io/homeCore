@@ -1,0 +1,36 @@
+# hc-reolink — Reolink cameras, NVRs and Home Hubs for homeCore.
+# Copy to config.toml and fill in your cameras.
+
+[homecore]
+broker_host = "127.0.0.1"
+broker_port = 1883
+plugin_id   = "plugin.reolink"
+# password  = ""
+
+[logging]
+log_forward_level = "info"
+
+[reolink]
+# How often each camera or NVR is asked what it sees, in seconds.
+poll_secs = 2
+# Snapshots kept per camera, taken when a detection starts.
+snapshots_kept = 20
+# How many times the siren sounds.
+siren_times = 3
+
+# Live video: go2rtc's API as the plugin reaches it. The plugin adds
+# reolink_<camera> (sub stream) and reolink_<camera>_hd (main stream) to it.
+[reolink.go2rtc]
+url = "http://127.0.0.1:1984"
+add_streams = true
+
+# One block per address: a camera on its own, or an NVR or Home Hub, whose
+# cameras arrive as channels. `id` names its cameras in homeCore for good:
+# reolink_<id> for a camera, reolink_<id>_<channel> for an NVR's.
+#[[reolink.hosts]]
+#id       = "driveway"
+#name     = "Driveway"
+#address  = "192.0.2.10"
+#username = "admin"
+#password = ""
+#https    = true

@@ -1845,6 +1845,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hc-reolink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "plugin-sdk-rs",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hc-roku"
 version = "0.1.14"
 dependencies = [
