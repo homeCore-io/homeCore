@@ -167,29 +167,73 @@ pub struct Features {
     pub siren: bool,
     pub ptz: bool,
     pub ir: bool,
+    /// What the camera has but the account signed in may not use ("the
+    /// spotlight"), so it can be said instead of offered.
+    pub denied: Vec<&'static str>,
 }
 
-/// Whether an ability is there: `{"permit": …, "ver": n}` with `ver` above 0.
-fn able(entry: &Value, keys: &[&str]) -> bool {
-    keys.iter()
-        .any(|k| entry[*k]["ver"].as_i64().unwrap_or(0) > 0)
+/// Whether an ability is there (`{"permit": …, "ver": n}` with `ver` above
+/// 0), and whether the account signed in may use it: `permit` is a bitmask,
+/// 4 to read, 2 to change a setting, 1 to operate. A user who may only
+/// watch has 4 on the floodlight and 0 on the siren. No `permit` at all
+/// (older firmware) is taken as allowed.
+fn able(entry: &Value, keys: &[&str], bits: i64) -> Ability {
+    let mut out = Ability::Absent;
+    for k in keys {
+        let e = &entry[*k];
+        if e["ver"].as_i64().unwrap_or(0) <= 0 {
+            continue;
+        }
+        match e["permit"].as_i64() {
+            Some(p) if p & bits == 0 => out = Ability::Denied,
+            _ => return Ability::Allowed,
+        }
+    }
+    out
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ability {
+    Absent,
+    Denied,
+    Allowed,
+}
+
+const WRITE: i64 = 2;
+const OPERATE: i64 = 1 | 2;
 
 /// A channel's abilities (one entry of `Ability.abilityChn`), with the
 /// spellings models use for each.
 pub fn parse_abilities(chn: &Value) -> Features {
+    let spotlight = able(
+        chn,
+        &["floodLight", "supportFLswitch", "supportFLBrightness"],
+        WRITE,
+    );
+    let siren = able(
+        chn,
+        &["alarmAudio", "supportAudioAlarm", "supportAudioAlarmEnable"],
+        OPERATE,
+    );
+    let ptz = able(chn, &["ptzCtrl", "ptzType", "ptzPreset"], 1);
+    let ir = able(chn, &["alarmIrLights", "ledControl"], WRITE);
+    let denied = [
+        (spotlight, "the spotlight"),
+        (siren, "the siren"),
+        (ptz, "PTZ"),
+        (ir, "infrared"),
+    ]
+    .into_iter()
+    .filter(|(a, _)| *a == Ability::Denied)
+    .map(|(_, what)| what)
+    .collect();
     Features {
         motion: true,
-        spotlight: able(
-            chn,
-            &["floodLight", "supportFLswitch", "supportFLBrightness"],
-        ),
-        siren: able(
-            chn,
-            &["alarmAudio", "supportAudioAlarm", "supportAudioAlarmEnable"],
-        ),
-        ptz: able(chn, &["ptzCtrl", "ptzType", "ptzPreset"]),
-        ir: able(chn, &["alarmIrLights", "ledControl"]),
+        spotlight: spotlight == Ability::Allowed,
+        siren: siren == Ability::Allowed,
+        ptz: ptz == Ability::Allowed,
+        ir: ir == Ability::Allowed,
+        denied,
         ..Features::default()
     }
 }
@@ -627,6 +671,25 @@ mod tests {
             json!({ "Ability": { "abilityChn": [chn.clone(), { "ptzType": { "ver": 2 } }] } });
         assert!(parse_abilities(&ability_for(&all, 1)).ptz);
         assert_eq!(ability_for(&all, 5), Value::Null);
+    }
+
+    #[test]
+    fn offers_only_what_the_account_may_use() {
+        // As a real NVR answers for a user who may only watch: the floodlight
+        // readable, the siren not at all, PTZ fully.
+        let chn = json!({
+            "floodLight": { "permit": 4, "ver": 2 },
+            "alarmAudio": { "permit": 0, "ver": 1 },
+            "ptzCtrl": { "permit": 7, "ver": 174 },
+            "ledControl": { "permit": 4, "ver": 1 }
+        });
+        let f = parse_abilities(&chn);
+        assert!(f.ptz && !f.spotlight && !f.siren && !f.ir);
+        assert_eq!(f.denied, vec!["the spotlight", "the siren", "infrared"]);
+        // An admin has them all.
+        let admin = json!({ "floodLight": { "permit": 6, "ver": 2 }, "alarmAudio": { "permit": 6, "ver": 1 } });
+        let f = parse_abilities(&admin);
+        assert!(f.spotlight && f.siren && f.denied.is_empty());
     }
 
     #[test]

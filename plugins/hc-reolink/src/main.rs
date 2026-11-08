@@ -289,6 +289,15 @@ fn alert_kinds() -> Vec<PluginAlertKind> {
             default_on: true,
         },
         PluginAlertKind {
+            topic: "account_limited".into(),
+            label: "A camera's account may not use everything it has".into(),
+            description: Some(
+                "Its spotlight, siren or infrared aren't offered, as the account signed in may not use them.".into(),
+            ),
+            severity: AlertSeverity::Info,
+            default_on: true,
+        },
+        PluginAlertKind {
             topic: "go2rtc_unreachable".into(),
             label: "go2rtc isn't answering".into(),
             description: Some("Cameras still report what they see; there's no live video.".into()),

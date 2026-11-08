@@ -303,6 +303,29 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         json!({ "ok": true, "model": dev.model, "firmware": dev.firmware, "hub": dev.hub,
                 "cameras": cams.iter().map(|c| json!({ "id": c.id, "name": c.name, "channel": c.channel + 1, "online": c.online })).collect::<Vec<_>>() }),
     );
+    // A camera has more than this account may use: say so, once, by address.
+    let denied: Vec<&str> = {
+        let mut d: Vec<&str> = cams
+            .iter()
+            .flat_map(|c| c.features.denied.iter().copied())
+            .collect();
+        d.sort();
+        d.dedup();
+        d
+    };
+    ctx.alert(
+        "account_limited",
+        &e.id,
+        (!denied.is_empty()).then(|| {
+            format!(
+                "{} is signed in as {}, who may not use {}. Sign in with an account that may, to control them here.",
+                host.label(),
+                e.username,
+                list(&denied)
+            )
+        }),
+    )
+    .await;
     let live: std::collections::HashSet<String> = cams
         .iter()
         .flat_map(|c| {
@@ -633,6 +656,15 @@ async fn prune(dir: &std::path::Path, camera: &str, keep: usize) {
     let extra = mine.len().saturating_sub(keep);
     for (_, path) in mine.into_iter().take(extra) {
         let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+/// "a, b and c".
+fn list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 

@@ -333,6 +333,7 @@ mod tests {
             siren: true,
             ptz: true,
             ir: true,
+            denied: Vec::new(),
         }
     }
 
