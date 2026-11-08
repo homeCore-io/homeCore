@@ -3,6 +3,7 @@
 //
 //   hc-reolink-card   (device.card)   host, deviceId, form
 //   hc-reolink-panel  (device.panel)  host, deviceId
+//   hc-reolink-cameras (dashboard.card) host, form, config: several cameras
 //
 // Live video is go2rtc's, played from the app's own address (`/video`, which
 // only passes it on for someone signed in): MSE over a WebSocket, the sub
@@ -431,3 +432,179 @@ class CameraPanel extends Screen {
 
 customElements.define('hc-reolink-card', CameraCard);
 customElements.define('hc-reolink-panel', CameraPanel);
+
+// ---- several cameras, a card of its own (dashboard.card) ----
+
+/** The most a card plays at once: past this, the rest show their newest still. */
+const LIVE_AT_ONCE = 4;
+
+/** The cameras a card shows: those its settings chose, in that order, else all by name. */
+function chosen(devices, config, label) {
+	const all = devices.filter((d) => d.device_type === 'camera');
+	const ids = Array.isArray(config?.cameras) ? config.cameras : [];
+	if (ids.length) return ids.map((id) => all.find((d) => d.device_id === id)).filter(Boolean);
+	return all.sort((a, b) => label(a).localeCompare(label(b)));
+}
+
+/** "Cameras": several cameras, live at large, their newest stills otherwise; one tap opens one. */
+class CameraWall extends Screen {
+	#form = 'large';
+	#config = {};
+	#drawn = '';
+	lives = new Map();
+
+	set form(v) {
+		this.#form = v;
+		this.draw();
+	}
+	set config(v) {
+		this.#config = v ?? {};
+		this.draw();
+	}
+
+	disconnectedCallback() {
+		super.disconnectedCallback();
+		this.stopAll();
+	}
+	stopAll() {
+		for (const l of this.lives.values()) l.stop();
+		this.lives.clear();
+	}
+
+	draw() {
+		const h = this.host;
+		if (!h) return;
+		const label = (d) => h.devices.label(d);
+		const cams = chosen(this.devices, this.#config, label);
+		const big = this.#form === 'large';
+		const live = big && this.#config.live !== false;
+		const shown = big ? cams : cams.slice(0, 4);
+		const plays = (d, i) => live && i < LIVE_AT_ONCE && d.available !== false && d.attributes.stream;
+		// Redrawn only when what is shown changes, so the videos keep playing.
+		const key = JSON.stringify([this.#form, live, shown.map((d, i) => [d.device_id, !!plays(d, i)])]);
+		if (key !== this.#drawn) {
+			this.#drawn = key;
+			this.stopAll();
+			const title = this.#config.name || 'Cameras';
+			this.shadowRoot.innerHTML = `<style>${STYLE}
+					.wall { display: flex; flex-direction: column; gap: 10px; flex: 1; box-sizing: border-box; }
+					.grid { display: grid; grid-template-columns: repeat(${shown.length > 1 ? 2 : 1}, minmax(0, 1fr)); gap: 8px; }
+					.tile { all: unset; cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+					.tile:focus-visible .view { outline: 2px solid var(--accent, #f2b544); outline-offset: 2px; }
+					.tile .name { font-size: 13px; }
+					.none { color: var(--ink-muted, #9aa4b2); font-size: 13px; }
+					[hidden] { display: none !important; }
+				</style>
+				<div class="hc-card wall">
+					<span class="hc-tile-name">${this.esc(title)}</span>
+					${
+						shown.length
+							? `<div class="grid">${shown
+									.map(
+										(d, i) => `<button class="tile" data-id="${this.esc(d.device_id)}">
+											<div class="view">
+												<img class="under" alt="" />
+												${plays(d, i) ? '<video muted autoplay playsinline></video><span class="tag live">Connecting…</span>' : '<span class="tag live" data-state="still"></span>'}
+												<div class="off" hidden>Offline</div>
+												<div class="tag seen"></div>
+											</div>
+											<div class="name">${this.esc(label(d))}</div>
+										</button>`
+									)
+									.join('')}</div>`
+							: '<div class="none">No cameras yet. Add one in the plugin’s settings.</div>'
+					}
+				</div>`;
+			for (const t of this.shadowRoot.querySelectorAll('.tile'))
+				t.onclick = () => h.ui.openDevice(t.dataset.id);
+			shown.forEach((d, i) => {
+				if (!plays(d, i)) return;
+				const tile = this.shadowRoot.querySelector(`.tile[data-id="${CSS.escape(d.device_id)}"]`);
+				const tag = tile.querySelector('.live');
+				this.lives.set(
+					d.device_id,
+					new Live(tile.querySelector('video'), d.attributes.stream, (s) => {
+						tag.textContent = s === 'live' ? 'Live' : s === 'connecting' ? 'Connecting…' : s === 'unsupported' ? 'Stills only here' : 'Reconnecting…';
+						tag.dataset.state = s;
+					})
+				);
+			});
+		}
+		// What changes often, without touching the videos.
+		for (const d of shown) {
+			const tile = this.shadowRoot.querySelector(`.tile[data-id="${CSS.escape(d.device_id)}"]`);
+			if (!tile) continue;
+			const a = d.attributes;
+			const snap = this.snapUrl(a);
+			const img = tile.querySelector('img');
+			if (snap && img.getAttribute('src') !== snap) img.setAttribute('src', snap);
+			img.hidden = !snap;
+			const still = tile.querySelector('.live[data-state=still]');
+			if (still) still.textContent = snap ? `Still · ${when(a.snapshot_at)}` : 'No still yet';
+			tile.querySelector('.off').hidden = d.available !== false;
+			tile.querySelector('.seen').innerHTML = seeing(a)
+				.map((s) => `<span class="${s === 'Motion' ? 'motion' : ''}">${this.esc(s)}</span>`)
+				.join('');
+		}
+	}
+}
+
+/** The card's settings: its name, which cameras, and live or stills. */
+class CameraWallSettings extends Screen {
+	#config = {};
+	#draft = null;
+
+	set config(v) {
+		this.#config = v ?? {};
+		this.draw();
+	}
+	get cfg() {
+		return this.#draft ?? { name: '', cameras: [], live: true, ...this.#config };
+	}
+	save(next) {
+		this.#draft = next;
+		this.dispatchEvent(new CustomEvent('change', { detail: { config: next } }));
+		this.draw();
+	}
+
+	draw() {
+		const h = this.host;
+		if (!h) return;
+		const label = (d) => h.devices.label(d);
+		const all = this.devices.filter((d) => d.device_type === 'camera').sort((a, b) => label(a).localeCompare(label(b)));
+		const cfg = this.cfg;
+		const picked = cfg.cameras ?? [];
+		const on = (id) => !picked.length || picked.includes(id);
+		// Keep the name field as it is while someone types in it.
+		const typing = this.shadowRoot.activeElement?.classList.contains('nm');
+		if (!typing || !this.shadowRoot.querySelector('.nm')) {
+			this.shadowRoot.innerHTML = `<style>${STYLE}
+					.settings { display: flex; flex-direction: column; gap: 10px; }
+					.check { display: flex; gap: 8px; align-items: center; }
+				</style>
+				<div class="settings">
+					<label class="hc-field"><span class="hc-label">Name</span><input class="nm" placeholder="Cameras" /></label>
+					<span class="hc-label">Cameras: all of them, or the ones you tick</span>
+					${all.map((d) => `<label class="check"><input type="checkbox" class="cam" data-id="${this.esc(d.device_id)}" /> ${this.esc(label(d))}</label>`).join('')}
+					<label class="check"><input type="checkbox" class="lv" /> Live video when it’s large (the first ${LIVE_AT_ONCE}; the rest show their newest still)</label>
+				</div>`;
+			const nm = this.shadowRoot.querySelector('.nm');
+			nm.value = cfg.name ?? '';
+			nm.onchange = () => this.save({ ...this.cfg, name: nm.value });
+		}
+		for (const c of this.shadowRoot.querySelectorAll('.cam')) {
+			c.checked = on(c.dataset.id);
+			c.onchange = () => {
+				const now = this.cfg.cameras?.length ? this.cfg.cameras : all.map((d) => d.device_id);
+				const next = now.includes(c.dataset.id) ? now.filter((x) => x !== c.dataset.id) : [...now, c.dataset.id];
+				this.save({ ...this.cfg, cameras: next.length === all.length ? [] : next });
+			};
+		}
+		const lv = this.shadowRoot.querySelector('.lv');
+		lv.checked = cfg.live !== false;
+		lv.onchange = () => this.save({ ...this.cfg, live: lv.checked });
+	}
+}
+
+customElements.define('hc-reolink-cameras', CameraWall);
+customElements.define('hc-reolink-cameras-settings', CameraWallSettings);
