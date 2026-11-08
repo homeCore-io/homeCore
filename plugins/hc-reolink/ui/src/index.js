@@ -210,7 +210,7 @@ class Screen extends HTMLElement {
 }
 
 const STYLE = `
-	:host { display: block; height: 100%; }
+	:host { display: flex; flex-direction: column; height: 100%; }
 	.view { position: relative; border-radius: 12px; overflow: hidden; background: #0a0c10; aspect-ratio: 16 / 9; }
 	.view video, .view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 	.view img.under { z-index: 0; } .view video { z-index: 1; }
@@ -264,8 +264,12 @@ class CameraCard extends Screen {
 			this.live?.stop();
 			this.live = undefined;
 			this.shadowRoot.innerHTML = `<style>${STYLE}
-					.card { display: flex; flex-direction: column; gap: 8px; height: 100%; box-sizing: border-box; }
+					.card { display: flex; flex-direction: column; gap: 8px; flex: 1; box-sizing: border-box; }
 					.card.big .view { flex: 1; min-height: 160px; aspect-ratio: auto; }
+					/* Narrow, the buttons go under the name rather than over it. */
+					.foot { flex-wrap: wrap; }
+					.foot .grow { flex: 1 1 120px; }
+					.foot .hc-pill { white-space: nowrap; }
 				</style>
 				<div class="hc-card card ${big ? 'big' : ''}">
 					<div class="view">
@@ -274,7 +278,7 @@ class CameraCard extends Screen {
 						${online ? '' : '<div class="off">Offline</div>'}
 						<div class="tag seen"></div>
 					</div>
-					<div class="row">
+					<div class="row foot">
 						<div class="grow"><div class="name">${this.esc(h.devices.label(d))}</div><div class="hc-quiet line"></div></div>
 						${light ? `<button class="hc-pill light">☀ Spotlight</button>` : ''}
 						<button class="hc-pill open">Open ›</button>
