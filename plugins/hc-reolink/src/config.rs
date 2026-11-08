@@ -43,6 +43,7 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::secret("password").label("Password"),
                             Field::toggle("https").label("HTTPS"),
                             Field::port("rtsp_port").label("RTSP port"),
+                            Field::port("push_port").label("Push port"),
                             Field::list("streams", "text").label("go2rtc streams"),
                             Field::list("streams_hd", "text").label("go2rtc streams, HD"),
                         ])
@@ -55,6 +56,15 @@ pub fn config_descriptor() -> serde_json::Value {
         )
         .section(
             Section::new("watching", "Watching")
+                .field(
+                    Field::toggle("reolink.push")
+                        .label("Events as they happen")
+                        .default(true)
+                        .help(
+                            "Reolink's push (port 9000): motion and detections arrive at once. \
+                             Off, or when a camera doesn't push, they're asked for instead.",
+                        ),
+                )
                 .field(
                     Field::int("reolink.poll_secs")
                         .label("Ask for detections every")
@@ -167,6 +177,10 @@ pub struct ReolinkSection {
     pub snapshots_kept: usize,
     #[serde(default = "default_siren_times")]
     pub siren_times: u32,
+    /// Events the moment they happen, by Reolink's push (port 9000), with
+    /// asking kept behind it. Off: asked every `poll_secs` only.
+    #[serde(default = "yes")]
+    pub push: bool,
     #[serde(default)]
     pub go2rtc: Go2rtcSection,
 }
@@ -178,6 +192,7 @@ impl Default for ReolinkSection {
             poll_secs: default_poll_secs(),
             snapshots_kept: default_snapshots_kept(),
             siren_times: default_siren_times(),
+            push: true,
             go2rtc: Go2rtcSection::default(),
         }
     }
@@ -215,6 +230,9 @@ pub struct HostEntry {
     /// Its RTSP port, for go2rtc; 554 unless it was changed.
     #[serde(default = "default_rtsp_port")]
     pub rtsp_port: u16,
+    /// Its push port (Baichuan); 9000 unless it was changed.
+    #[serde(default = "default_push_port")]
+    pub push_port: u16,
     /// go2rtc's names for its cameras' streams when the plugin doesn't add
     /// its own (`add_streams` off): the first camera's, the second's, …
     /// An empty name is a camera without one.
@@ -227,6 +245,10 @@ pub struct HostEntry {
 
 fn default_rtsp_port() -> u16 {
     554
+}
+
+fn default_push_port() -> u16 {
+    9000
 }
 
 fn default_username() -> String {

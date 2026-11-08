@@ -135,6 +135,8 @@ pub struct Cam {
 pub struct Host {
     pub entry: HostEntry,
     pub api: Reolink,
+    /// Events are arriving by push now: asking can be rare.
+    pub pushing: std::sync::atomic::AtomicBool,
     pub cams: tokio::sync::Mutex<Vec<Cam>>,
     pub hub: Mutex<bool>,
 }
@@ -150,6 +152,7 @@ impl Host {
         Ok(Arc::new(Self {
             entry,
             api,
+            pushing: std::sync::atomic::AtomicBool::new(false),
             cams: tokio::sync::Mutex::new(Vec::new()),
             hub: Mutex::new(false),
         }))
@@ -171,6 +174,9 @@ pub const AFTER_REFUSAL: Duration = Duration::from_secs(600);
 
 /// Keep one address signed in and watched, for as long as the plugin runs.
 pub async fn run(ctx: Arc<Ctx>, host: Arc<Host>) {
+    if ctx.cfg.push {
+        tokio::spawn(push_loop(ctx.clone(), host.clone()));
+    }
     let mut wait = Duration::from_secs(5);
     loop {
         match connect(&ctx, &host).await {
@@ -548,13 +554,23 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
     Ok(())
 }
 
-/// Ask what each camera sees, every `poll_secs`, until the address stops answering.
+/// While push is up, asking is only a backstop.
+const ASK_WHILE_PUSHING: Duration = Duration::from_secs(30);
+
+/// Ask what each camera sees, every `poll_secs` (rarely while push is up),
+/// until the address stops answering.
 async fn watch(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
     let every = Duration::from_secs(ctx.cfg.poll_secs.max(1));
     let mut ticks: u64 = 0;
     let mut use_events = true;
+    let mut since = Duration::ZERO;
     loop {
         tokio::time::sleep(every).await;
+        since += every;
+        if host.pushing.load(std::sync::atomic::Ordering::Relaxed) && since < ASK_WHILE_PUSHING {
+            continue;
+        }
+        since = Duration::ZERO;
         ticks += 1;
         // An NVR's cameras come and go: look again now and then.
         if *host.hub.lock().expect("hub") && ticks.is_multiple_of(30) {
@@ -621,6 +637,77 @@ async fn watch(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
             &host.entry.id,
             json!({ "ok": true, "watching": channels.len() }),
         );
+    }
+}
+
+/// Events by push, for as long as the plugin runs: connect, sign in,
+/// subscribe, and hand each to `seen` as asking does. Down, asking carries on
+/// every `poll_secs` and an alert says so; it's tried again with a growing
+/// wait, and ten minutes after a refused sign-in.
+async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
+    use std::sync::atomic::Ordering;
+    let e = &host.entry;
+    let addr = e
+        .address
+        .split(':')
+        .next()
+        .unwrap_or(&e.address)
+        .to_string();
+    let mut wait = Duration::from_secs(5);
+    loop {
+        // Only once the address has answered and its cameras are known.
+        if host.cams.lock().await.is_empty() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        match crate::push::Push::connect(&addr, e.push_port, &e.username, &e.password).await {
+            Ok(mut p) => {
+                info!(host = %e.id, "events by push");
+                host.pushing.store(true, Ordering::Relaxed);
+                ctx.alert("push_down", &e.id, None).await;
+                wait = Duration::from_secs(5);
+                let why = loop {
+                    match p.next().await {
+                        Ok(list) => {
+                            for s in list {
+                                let d = Detections {
+                                    motion: s.motion,
+                                    person: s.person,
+                                    vehicle: s.vehicle,
+                                    animal: s.animal,
+                                    package: s.package,
+                                    visitor: s.visitor,
+                                };
+                                seen(&ctx, &host, s.channel, d).await;
+                            }
+                        }
+                        Err(err) => break err,
+                    }
+                };
+                host.pushing.store(false, Ordering::Relaxed);
+                warn!(host = %e.id, error = %why, "push stopped");
+            }
+            Err(err) => {
+                let refused = err.downcast_ref::<api::LoginRefused>().is_some();
+                warn!(host = %e.id, error = %err, "no push");
+                ctx.alert(
+                    "push_down",
+                    &e.id,
+                    Some(format!(
+                        "{} isn't pushing events ({err}), so they're asked for every {} s.",
+                        host.label(),
+                        ctx.cfg.poll_secs
+                    )),
+                )
+                .await;
+                if refused {
+                    tokio::time::sleep(AFTER_REFUSAL).await;
+                    continue;
+                }
+            }
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(300));
     }
 }
 

@@ -16,6 +16,7 @@ mod camera;
 mod config;
 mod go2rtc;
 mod host;
+mod push;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::{AlertSeverity, PluginAlertKind, PluginNotice};
@@ -293,6 +294,15 @@ fn alert_kinds() -> Vec<PluginAlertKind> {
             label: "A camera's account may not use everything it has".into(),
             description: Some(
                 "Its spotlight, siren or infrared aren't offered, as the account signed in may not use them.".into(),
+            ),
+            severity: AlertSeverity::Info,
+            default_on: true,
+        },
+        PluginAlertKind {
+            topic: "push_down".into(),
+            label: "A camera or NVR isn't pushing events".into(),
+            description: Some(
+                "Its detections are asked for every few seconds instead of arriving the moment they happen.".into(),
             ),
             severity: AlertSeverity::Info,
             default_on: true,
