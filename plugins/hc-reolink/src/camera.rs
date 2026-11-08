@@ -158,7 +158,7 @@ pub fn camera_schema(f: &Features, presets: &[(u32, String)]) -> Value {
             AttributeSchema {
                 kind: AttributeKind::Integer,
                 writable: false,
-                display_name: Some("Doorbell pressed".to_string()),
+                display_name: Some("Doorbell rings".to_string()),
                 ..Default::default()
             },
         );
