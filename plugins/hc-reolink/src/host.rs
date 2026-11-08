@@ -53,6 +53,9 @@ pub struct Ctx {
     pub alerts: Mutex<HashMap<(String, String), PluginAlert>>,
     /// Each address's last word, for the status action.
     pub status: Mutex<HashMap<String, Value>>,
+    /// How many addresses are configured, and each one's devices once it has answered.
+    pub hosts: usize,
+    pub live: Mutex<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl Ctx {
@@ -75,6 +78,28 @@ impl Ctx {
         };
         if let Err(e) = self.publisher.set_plugin_alerts(&list).await {
             warn!(error = %e, "alerts not published");
+        }
+    }
+
+    /// An address answered with these devices. Once every address has, what
+    /// homeCore holds that none of them has (a camera taken off an NVR, an
+    /// NVR's empty slots) is retired; never sooner, or a camera behind an
+    /// address that hadn't answered yet would go too.
+    pub async fn answered(&self, host: &str, devices: std::collections::HashSet<String>) {
+        let all = {
+            let mut live = self.live.lock().expect("live");
+            live.insert(host.to_string(), devices);
+            (live.len() >= self.hosts).then(|| live.values().flatten().cloned().collect())
+        };
+        if let Some(all) = all {
+            match self.publisher.reconcile_devices(all).await {
+                Ok(r) => {
+                    for id in &r.stale_unregistered {
+                        info!(device_id = %id, "retired: no longer there");
+                    }
+                }
+                Err(e) => warn!(error = %e, "reconcile failed"),
+            }
         }
     }
 
@@ -207,8 +232,10 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
             },
             online: true,
             model: dev.model.clone(),
+            uid: String::new(),
         }]
     };
+    let channels: Vec<api::ChannelInfo> = channels.into_iter().filter(|c| !c.empty()).collect();
     let ability = host
         .api
         .one(api::cmd(
@@ -242,15 +269,23 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         } else {
             ch.name.clone()
         };
+        // An NVR's list leaves out each camera's model: ask.
+        let model = if !ch.model.is_empty() {
+            ch.model.clone()
+        } else if dev.hub {
+            host.api
+                .one(api::cmd("GetChnTypeInfo", json!({ "channel": ch.channel })))
+                .await
+                .map(|v| api::parse_type_info(&v))
+                .unwrap_or_default()
+        } else {
+            dev.model.clone()
+        };
         cams.push(Cam {
             id,
             channel: ch.channel,
             name,
-            model: if ch.model.is_empty() {
-                dev.model.clone()
-            } else {
-                ch.model.clone()
-            },
+            model,
             online: ch.online,
             features: f,
             presets,
@@ -268,7 +303,21 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         json!({ "ok": true, "model": dev.model, "firmware": dev.firmware, "hub": dev.hub,
                 "cameras": cams.iter().map(|c| json!({ "id": c.id, "name": c.name, "channel": c.channel + 1, "online": c.online })).collect::<Vec<_>>() }),
     );
+    let live: std::collections::HashSet<String> = cams
+        .iter()
+        .flat_map(|c| {
+            let mut ids = vec![c.id.clone()];
+            if c.features.spotlight {
+                ids.push(camera::spotlight_id(&c.id));
+            }
+            if c.features.siren {
+                ids.push(camera::siren_id(&c.id));
+            }
+            ids
+        })
+        .collect();
     *host.cams.lock().await = cams;
+    ctx.answered(&e.id, live).await;
     Ok(())
 }
 
@@ -310,17 +359,28 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
     p.register_device_schema_json(&c.id, &camera::camera_schema(&c.features, &c.presets))
         .await?;
     p.subscribe_commands(&c.id).await?;
-    let (sub, hd) = camera::stream_names(&c.id);
     let mut state = camera::detections_state(&c.seen, &c.features);
     state["model"] = json!(c.model);
     if let Some(g) = &ctx.go2rtc {
+        let (sub, hd) = if ctx.cfg.go2rtc.add_streams {
+            let (s, h) = camera::stream_names(&c.id);
+            (Some(s), Some(h))
+        } else {
+            // Names someone set up in go2rtc, by the camera's place in the list.
+            let named = |l: &Vec<String>| {
+                l.get(c.channel as usize)
+                    .filter(|n| !n.trim().is_empty())
+                    .map(|n| n.trim().to_string())
+            };
+            (named(&host.entry.streams), named(&host.entry.streams_hd))
+        };
         state["stream"] = json!(sub);
         state["stream_hd"] = json!(hd);
-        if ctx.cfg.go2rtc.add_streams {
+        if let (true, Some(sub), Some(hd)) = (ctx.cfg.go2rtc.add_streams, &sub, &hd) {
             let e = &host.entry;
             let (s_sub, s_main) =
                 camera::rtsp_sources(&e.address, e.rtsp_port, &e.username, &e.password, c.channel);
-            let ok = g.put(&sub, &s_sub).await.and(g.put(&hd, &s_main).await);
+            let ok = g.put(sub, &s_sub).await.and(g.put(hd, &s_main).await);
             ctx.alert(
                 "go2rtc_unreachable",
                 "",

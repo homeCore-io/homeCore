@@ -292,7 +292,7 @@ class CameraCard extends Screen {
 			: sees.length
 				? `${sees[0]} now`
 				: a.snapshot_at
-					? `Quiet · last seen ${when(a.snapshot_at)}`
+					? `Quiet · newest still ${when(a.snapshot_at)}`
 					: 'Quiet';
 		const lb = this.shadowRoot.querySelector('.light');
 		if (lb && light) {

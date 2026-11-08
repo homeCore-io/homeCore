@@ -43,6 +43,8 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::secret("password").label("Password"),
                             Field::toggle("https").label("HTTPS"),
                             Field::port("rtsp_port").label("RTSP port"),
+                            Field::list("streams", "text").label("go2rtc streams"),
+                            Field::list("streams_hd", "text").label("go2rtc streams, HD"),
                         ])
                         .help(
                             "The id names its cameras in homeCore for good (reolink_<id>, \
@@ -211,6 +213,14 @@ pub struct HostEntry {
     /// Its RTSP port, for go2rtc; 554 unless it was changed.
     #[serde(default = "default_rtsp_port")]
     pub rtsp_port: u16,
+    /// go2rtc's names for its cameras' streams when the plugin doesn't add
+    /// its own (`add_streams` off): the first camera's, the second's, …
+    /// An empty name is a camera without one.
+    #[serde(default)]
+    pub streams: Vec<String>,
+    /// The same for HD (main) streams, if go2rtc has them.
+    #[serde(default)]
+    pub streams_hd: Vec<String>,
 }
 
 fn default_rtsp_port() -> u16 {

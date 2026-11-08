@@ -116,6 +116,24 @@ pub struct ChannelInfo {
     pub name: String,
     pub online: bool,
     pub model: String,
+    pub uid: String,
+}
+
+impl ChannelInfo {
+    /// A slot with no camera in it: no name, no uid, not online. An RLN36
+    /// lists all 36 whether or not a camera was ever added.
+    pub fn empty(&self) -> bool {
+        !self.online && self.name.trim().is_empty() && self.uid.trim().is_empty()
+    }
+}
+
+/// A channel's own model (`GetChnTypeInfo`), which the channel list leaves out.
+pub fn parse_type_info(value: &Value) -> String {
+    value["typeInfo"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 pub fn parse_channels(value: &Value) -> Vec<ChannelInfo> {
@@ -128,6 +146,7 @@ pub fn parse_channels(value: &Value) -> Vec<ChannelInfo> {
                     name: c["name"].as_str().unwrap_or_default().to_string(),
                     online: c["online"].as_i64().unwrap_or(0) == 1,
                     model: c["typeInfo"].as_str().unwrap_or_default().to_string(),
+                    uid: c["uid"].as_str().unwrap_or_default().to_string(),
                 })
                 .collect()
         })
@@ -540,6 +559,25 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert!(c[0].online && !c[1].online);
         assert_eq!(c[1].name, "Driveway");
+        assert!(!c[1].empty());
+    }
+
+    #[test]
+    fn skips_an_nvrs_empty_slots() {
+        // As an RLN36 answers: 36 slots, 4 with cameras.
+        let v = json!({ "status": [
+            { "channel": 0, "name": "Driveway", "online": 1, "sleep": 0, "uid": "95270008A6281Y33" },
+            { "channel": 4, "name": "", "online": 0, "sleep": 0, "uid": "" },
+            { "channel": 5, "name": "Shed", "online": 0, "sleep": 0, "uid": "" }
+        ]});
+        let c = parse_channels(&v);
+        assert!(!c[0].empty() && c[1].empty());
+        // A camera that's off still has its name: kept, as offline.
+        assert!(!c[2].empty());
+        assert_eq!(
+            parse_type_info(&json!({ "typeInfo": "E1 Outdoor SE PoE", "firmVer": "v3.1" })),
+            "E1 Outdoor SE PoE"
+        );
     }
 
     #[test]

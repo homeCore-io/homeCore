@@ -132,6 +132,8 @@ async fn run(
         targets: Mutex::new(HashMap::new()),
         alerts: Mutex::new(HashMap::new()),
         status: Mutex::new(HashMap::new()),
+        hosts: cfg.reolink.hosts.len(),
+        live: Mutex::new(HashMap::new()),
     });
 
     let ctx_for_status = ctx.clone();
