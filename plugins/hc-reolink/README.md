@@ -2,6 +2,9 @@
 
 Reolink cameras, NVRs and Home Hubs in homeCore.
 
+- **Cameras on their own and NVRs or Home Hubs** alike: each address is
+  either. A camera with two lenses (a Duo) is a camera per lens, with one
+  spotlight and one siren.
 - **Cameras** are `camera` devices reporting what they see in homeCore's
   shared names: `motion`, `person_detected`, `vehicle_detected`,
   `animal_detected`, `package_detected`. A doorbell's press is a button press

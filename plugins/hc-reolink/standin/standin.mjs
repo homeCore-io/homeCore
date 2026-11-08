@@ -1,8 +1,10 @@
-// A stand-in Reolink NVR for the sandbox: two cameras behind one address,
-// answering /cgi-bin/api.cgi in Reolink's shapes. Channel 0 is a doorbell
-// (person, package, visitor); channel 1 a PTZ camera with spotlight, siren,
-// infrared and presets (person, vehicle, animal). Sessions are limited, as a
-// real device's are, and refused sign-ins lock it for a while.
+// A stand-in Reolink for the sandbox, answering /cgi-bin/api.cgi in Reolink's
+// shapes. By default an NVR with two cameras: channel 0 a doorbell (person,
+// package, visitor), channel 1 a PTZ camera with spotlight, siren, infrared
+// and presets (person, vehicle, animal). MODE=camera makes it a camera on its
+// own (type IPC, no channel list): one PTZ camera, or LENSES=2 a two-lens one
+// (a Duo). Sessions are limited, as a real device's are, and refused sign-ins
+// lock it for a while.
 //
 //   POST /standin/set  {"channel":1,"md":1,"people":1,...}  what a camera sees
 //   GET  /standin/log  the commands it was sent
@@ -12,6 +14,8 @@ import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 const PORT = Number(process.env.PORT ?? 18996);
+const CAMERA = process.env.MODE === 'camera';
+const LENSES = Number(process.env.LENSES ?? 1);
 const USER = 'admin';
 const PASS = process.env.PASS ?? 'standin-pass';
 const MAX_SESSIONS = 4;
@@ -27,6 +31,12 @@ const chans = [
 	{ name: 'Driveway', type: 'RLC-823A', online: 1, ev: { md: 0, people: 0, vehicle: 0, dog_cat: 0, package: 0, visitor: 0 },
 		support: { people: 1, vehicle: 1, dog_cat: 1, package: 0, visitor: 0 }, led: { state: 0, bright: 80 }, ir: 'Auto', ptz: true }
 ];
+// A camera on its own is the PTZ camera, once per lens.
+if (CAMERA) {
+	const cam = chans[1];
+	chans.length = 0;
+	for (let i = 0; i < LENSES; i++) chans.push({ ...structuredClone(cam), name: 'Porch' });
+}
 const presets = [{ enable: 1, id: 1, name: 'Gate' }, { enable: 1, id: 2, name: 'Garage' }, { enable: 0, id: 3, name: '' }];
 
 const ok = (cmd, value) => ({ cmd, code: 0, value });
@@ -38,8 +48,11 @@ function answer(c, token) {
 	const ch = chans[p.channel ?? p.WhiteLed?.channel ?? p.IrLights?.channel ?? 0];
 	switch (c.cmd) {
 		case 'GetDevInfo':
-			return ok(c.cmd, { DevInfo: { model: 'RLN8-410', name: 'Stand-in NVR', type: 'NVR', exactType: 'NVR', channelNum: chans.length, firmVer: 'v3.3.0.stand-in', hardVer: 'H3MB18', serial: '0000' } });
+			return CAMERA
+				? ok(c.cmd, { DevInfo: { model: LENSES > 1 ? 'Reolink Duo 2 PoE' : 'RLC-823A', name: 'Porch', type: 'IPC', exactType: 'IPC', channelNum: chans.length, firmVer: 'v3.1.0.stand-in', hardVer: 'IPC_523', serial: '0001' } })
+				: ok(c.cmd, { DevInfo: { model: 'RLN8-410', name: 'Stand-in NVR', type: 'NVR', exactType: 'NVR', channelNum: chans.length, firmVer: 'v3.3.0.stand-in', hardVer: 'H3MB18', serial: '0000' } });
 		case 'GetChannelstatus':
+			if (CAMERA) return err(c.cmd, -9, 'not support');
 			return ok(c.cmd, { count: chans.length, status: chans.map((x, i) => ({ channel: i, name: x.name, online: x.online, typeInfo: x.type, uid: 'X' + i })) });
 		case 'GetAbility':
 			return ok(c.cmd, { Ability: { abilityChn: chans.map((x) => ({ floodLight: ver(!!x.led), alarmAudio: ver(x.ptz), ptzCtrl: ver(x.ptz), ptzPreset: ver(x.ptz), alarmIrLights: ver(true) })) } });
@@ -132,4 +145,4 @@ http
 			send(200, out);
 		});
 	})
-	.listen(PORT, '127.0.0.1', () => console.log(`Reolink stand-in on ${PORT}`));
+	.listen(PORT, '127.0.0.1', () => console.log(`Reolink stand-in ${CAMERA ? `camera (${LENSES} lens)` : 'NVR'} on ${PORT}`));
