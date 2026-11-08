@@ -815,6 +815,8 @@ async fn main() -> Result<()> {
 
     let hub_vars = core.hub_vars_handle();
     let pauses = core.pauses_handle();
+    // Filled once the management channel exists, below: Notify steps' pictures.
+    let plugin_files = core.plugin_files_slot();
     let (rules_handle, fire_history, calendar_handle, purge_fn) = core.start(rules).await?;
 
     // ── 14. MQTT event loop ────────────────────────────────────────────────
@@ -1210,6 +1212,7 @@ async fn main() -> Result<()> {
         hc_influx::spawn(config.influx.clone(), pub_bus.subscribe());
     }
 
+    let store_for_pictures = store.clone();
     let app_state = AppState::new(hc_api::AppStateParams {
         raw_bus: Some(internal_bus.clone()),
         publish: Some(publish_handle),
@@ -1266,10 +1269,14 @@ async fn main() -> Result<()> {
     }))
     .with_plugin_runtimes(config.plugin_runtimes.clone())
     .with_plugin_spawn(plugin_spawn_tx)
-    .with_management_rpc(hc_api::management_rpc::ManagementRpc::new(
-        publish_handle_rpc,
-        &pub_bus_rpc,
-    ))
+    .with_management_rpc({
+        let rpc = hc_api::management_rpc::ManagementRpc::new(publish_handle_rpc, &pub_bus_rpc);
+        let _ = plugin_files.set(std::sync::Arc::new(hc_api::PluginFilesRpc {
+            rpc: rpc.clone(),
+            store: store_for_pictures,
+        }));
+        rpc
+    })
     .with_log_level_handle(log_level_handle)
     .with_uds_allowed_uids(hc_api::admin_uds::resolve_allowed_uids(
         &config.auth.admin_uds.allowed_uids,

@@ -106,6 +106,11 @@ backoff.
   names.
 - **Availability** is its own retained topic; set it when you lose and regain
   the device.
+- **A device that takes pictures** (a camera) keeps its newest in its files
+  folder and names it in a `snapshot` attribute (a path there, a new name each
+  time), and takes a fresh one on a `take_snapshot` action. Then a rule's
+  Notify step can send its picture (`picture_from`) with nothing else to do.
+  hc-reolink is the example.
 
 The public page "Developing Plugins" has the long version of each rule.
 

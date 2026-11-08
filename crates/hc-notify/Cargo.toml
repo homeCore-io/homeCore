@@ -16,6 +16,6 @@ async-trait = { workspace = true }
 serde      = { workspace = true }
 tracing    = { workspace = true }
 tokio      = { workspace = true }
-reqwest    = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+reqwest    = { version = "0.13.2", default-features = false, features = ["json", "rustls", "multipart"] }
 lettre     = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname", "pool"] }
 schemars        = { workspace = true, optional = true }

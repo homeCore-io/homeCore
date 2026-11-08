@@ -30,5 +30,6 @@ icalendar    = { workspace = true }
 rrule        = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 mockito = "1"
 tempfile = "3"

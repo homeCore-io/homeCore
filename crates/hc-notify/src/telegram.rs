@@ -53,8 +53,59 @@ struct SendMessage<'a> {
     parse_mode: Option<&'static str>,
 }
 
+/// A photo's caption: Telegram takes up to 1024 characters.
+pub fn caption(title: &str, message: &str) -> String {
+    let text = if title.is_empty() {
+        message.to_string()
+    } else {
+        format!("{title}\n{message}")
+    };
+    if text.chars().count() <= 1024 {
+        return text;
+    }
+    let mut out: String = text.chars().take(1023).collect();
+    out.push('…');
+    out
+}
+
 #[async_trait]
 impl NotifyChannel for TelegramChannel {
+    async fn send_picture(
+        &self,
+        title: &str,
+        message: &str,
+        picture: &crate::Picture,
+    ) -> Result<()> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendPhoto",
+            self.cfg.bot_token
+        );
+        let photo = reqwest::multipart::Part::bytes(picture.bytes.clone())
+            .file_name(picture.name.clone())
+            .mime_str(&picture.mime)
+            .context("Telegram: the picture's type")?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", self.cfg.chat_id.clone())
+            .text("caption", caption(title, message))
+            .part("photo", photo);
+        if self.cfg.markdown {
+            form = form.text("parse_mode", "MarkdownV2");
+        }
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .context("Telegram HTTP request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Telegram API returned {status}: {body}");
+        }
+        Ok(())
+    }
+
     async fn send(&self, title: &str, message: &str) -> Result<()> {
         let text = if title.is_empty() {
             message.to_string()
@@ -91,5 +142,19 @@ impl NotifyChannel for TelegramChannel {
             anyhow::bail!("Telegram API returned {status}: {body}");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::caption;
+
+    #[test]
+    fn a_caption_fits_telegrams_limit() {
+        assert_eq!(caption("Front Deck", "a person"), "Front Deck\na person");
+        assert_eq!(caption("", "a person"), "a person");
+        let long = caption("t", &"x".repeat(2000));
+        assert_eq!(long.chars().count(), 1024);
+        assert!(long.ends_with('…'));
     }
 }

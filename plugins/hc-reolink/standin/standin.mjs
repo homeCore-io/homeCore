@@ -144,7 +144,7 @@ http
 			if (cmd === 'Login') return send(200, [login(cmds[0])]);
 			const out = cmds.map((c) => {
 				if (!sessions.has(token)) return err(c.cmd, -6, 'please login first');
-				if (!c.cmd.startsWith('Get')) log.push({ cmd: c.cmd, param: c.param });
+				if (!c.cmd.startsWith('Get')) log.push({ cmd: c.cmd, param: c.param, at: Date.now() });
 				return answer(c, token);
 			});
 			send(200, out);

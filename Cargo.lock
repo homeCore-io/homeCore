@@ -1630,6 +1630,7 @@ name = "hc-core"
 version = "0.1.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "chrono-tz",
  "cron",

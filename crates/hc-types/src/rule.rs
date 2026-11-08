@@ -700,6 +700,12 @@ pub enum Action {
         message: String,
         #[serde(default)]
         title: Option<String>,
+        /// A device to send a picture from: one that keeps its newest in a
+        /// `snapshot` attribute and takes one on `take_snapshot` (a camera).
+        /// A fresh one is asked for; a channel that can't send pictures gets
+        /// the words alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picture_from: Option<String>,
     },
     /// Suspend the action sequence without blocking the async runtime.
     ///

@@ -33,7 +33,7 @@ pub mod email;
 pub mod pushover;
 pub mod telegram;
 
-pub use channel::NotifyChannel;
+pub use channel::{NotifyChannel, Picture};
 pub use email::{EmailChannel, EmailConfig};
 pub use pushover::{PushoverChannel, PushoverConfig};
 pub use telegram::{TelegramChannel, TelegramConfig};
@@ -161,10 +161,32 @@ impl NotificationService {
     /// Returns an error if a specific channel name is not registered, or if
     /// the underlying provider returns an error.
     pub async fn notify(&self, channel: &str, title: &str, message: &str) -> Result<()> {
+        self.notify_with(channel, title, message, None).await
+    }
+
+    /// The same, with a picture where the channel can send one.
+    pub async fn notify_with(
+        &self,
+        channel: &str,
+        title: &str,
+        message: &str,
+        picture: Option<&Picture>,
+    ) -> Result<()> {
+        async fn one(
+            ch: &Arc<dyn NotifyChannel>,
+            title: &str,
+            message: &str,
+            picture: Option<&Picture>,
+        ) -> Result<()> {
+            match picture {
+                Some(p) => ch.send_picture(title, message, p).await,
+                None => ch.send(title, message).await,
+            }
+        }
         if channel == "all" {
             let mut last_err: Option<anyhow::Error> = None;
             for (name, ch) in &self.channels {
-                if let Err(e) = ch.send(title, message).await {
+                if let Err(e) = one(ch, title, message, picture).await {
                     warn!(channel = %name, error = %e, "notify_all: channel delivery failed");
                     last_err = Some(e);
                 }
@@ -179,7 +201,7 @@ impl NotificationService {
             .channels
             .get(channel)
             .with_context(|| format!("Notification channel '{channel}' not configured"))?;
-        ch.send(title, message).await
+        one(ch, title, message, picture).await
     }
 
     pub fn is_empty(&self) -> bool {
