@@ -157,6 +157,11 @@ impl Host {
     }
 }
 
+/// After a refused sign-in, this long before the next: Reolink locks an
+/// account for a while after five refusals, and a quick retry would lock it,
+/// for everything else that signs in with it too.
+pub const AFTER_REFUSAL: Duration = Duration::from_secs(600);
+
 /// Keep one address signed in and watched, for as long as the plugin runs.
 pub async fn run(ctx: Arc<Ctx>, host: Arc<Host>) {
     let mut wait = Duration::from_secs(5);
@@ -174,6 +179,11 @@ pub async fn run(ctx: Arc<Ctx>, host: Arc<Host>) {
             Err(e) => {
                 warn!(host = %host.entry.id, error = %e, "can't connect");
                 went_offline(&ctx, &host, &e).await;
+                if e.downcast_ref::<api::LoginRefused>().is_some() {
+                    // A refusal isn't fixed by trying again: wait for a new password.
+                    tokio::time::sleep(AFTER_REFUSAL).await;
+                    continue;
+                }
             }
         }
         tokio::time::sleep(wait).await;
@@ -187,7 +197,7 @@ async fn went_offline(ctx: &Ctx, host: &Host, e: &anyhow::Error) {
         (
             "login_refused",
             format!(
-                "{} refused the sign-in: check the user name and password.",
+                "{} refused the sign-in: check the user name and password. Trying again in 10 minutes, or when the settings change.",
                 host.label()
             ),
         )
