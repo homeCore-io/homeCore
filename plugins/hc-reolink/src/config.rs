@@ -197,7 +197,9 @@ fn default_siren_times() -> u32 {
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HostEntry {
-    /// Stable: its cameras' homeCore ids are made from it.
+    /// Stable: its cameras' homeCore ids are made from it. Left out (a row
+    /// added in the form), it's made from the name, else the address.
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
@@ -265,7 +267,25 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("could not read config at {path}"))?;
-        toml::from_str(&text).with_context(|| format!("could not parse config at {path}"))
+        let mut cfg: Self =
+            toml::from_str(&text).with_context(|| format!("could not parse config at {path}"))?;
+        cfg.fill_ids();
+        Ok(cfg)
+    }
+
+    /// A row without an id gets one from its name, else its address, so a
+    /// row added in the form can never stop the plugin.
+    pub fn fill_ids(&mut self) {
+        for h in &mut self.reolink.hosts {
+            if h.id.trim().is_empty() {
+                let from = if h.name.trim().is_empty() {
+                    &h.address
+                } else {
+                    &h.name
+                };
+                h.id = crate::camera::slug(from);
+            }
+        }
     }
 }
 
@@ -285,6 +305,17 @@ mod tests {
             missing.is_empty(),
             "config fields missing from the descriptor: {missing:?}"
         );
+    }
+
+    #[test]
+    fn a_row_without_an_id_gets_one() {
+        let mut cfg: Config = toml::from_str(
+            "[homecore]\nplugin_id = \"plugin.reolink\"\n\n[[reolink.hosts]]\nname = \"Front Deck\"\naddress = \"10.0.0.5\"\n\n[[reolink.hosts]]\naddress = \"10.0.0.6\"\n",
+        )
+        .expect("loads without ids");
+        cfg.fill_ids();
+        assert_eq!(cfg.reolink.hosts[0].id, "front_deck");
+        assert_eq!(cfg.reolink.hosts[1].id, "10_0_0_6");
     }
 
     #[test]

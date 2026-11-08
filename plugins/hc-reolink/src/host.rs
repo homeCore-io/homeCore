@@ -277,7 +277,8 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
     let channels: Vec<api::ChannelInfo> = channels.into_iter().filter(|c| !c.empty()).collect();
     // Channels are told apart by number: an NVR's cameras, a camera's lenses.
     let several = dev.hub || dev.channels > 1;
-    *host.hub.lock().expect("hub") = several;
+    // Only an NVR or Hub is asked again which cameras it has.
+    *host.hub.lock().expect("hub") = dev.hub;
     let ability = host
         .api
         .one(api::cmd(
