@@ -24,8 +24,15 @@ back when the plugin stops: a Reolink device allows only a few sessions.
 What each camera can do is read from it (`GetAbility`, `GetEvents`), never
 guessed.
 
-Detections are polled every `poll_secs` (`GetEvents`, or `GetMdState` and
-`GetAiState` on older firmware). Reolink's push on port 9000 comes next.
+Detections arrive the moment they happen by Reolink's push (Baichuan, port
+9000), with `GetEvents` (or `GetMdState` and `GetAiState` on older firmware)
+asked every 30 seconds behind it. With `push = false`, they're asked every
+`poll_secs`.
+
+Its screens (`ui/`): a camera card and panel, and a "Cameras" dashboard card
+showing several cameras, live through the app's `/video` (go2rtc).
+
+User docs: <https://homecore.io/docs/plugins/reolink>.
 
 The protocol is Reolink's HTTP API (`/cgi-bin/api.cgi`). No AGPL code is used;
 the Python library reolink_aio (MIT) was the reference for its quirks.
