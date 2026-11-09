@@ -19,6 +19,7 @@ pub mod engine;
 pub mod executor;
 pub mod glue;
 pub mod mode_manager;
+pub mod pictures;
 pub mod rooms;
 pub mod rule_loader;
 pub mod rule_resolver;
@@ -80,6 +81,8 @@ pub struct Core {
     router: Option<Arc<EcosystemRouter>>,
     device_types: Option<Arc<DeviceTypeRegistry>>,
     notify: Option<Arc<NotificationService>>,
+    /// Where a Notify step's picture is fetched from, filled by the API layer.
+    plugin_files: pictures::PluginFilesSlot,
     modes_path: Option<std::path::PathBuf>,
     glue_path: Option<std::path::PathBuf>,
     startup_delay_secs: u64,
@@ -133,6 +136,7 @@ impl Core {
             router: None,
             device_types: None,
             notify: None,
+            plugin_files: Default::default(),
             modes_path: None,
             glue_path: None,
             startup_delay_secs: 10,
@@ -232,6 +236,12 @@ impl Core {
     pub fn with_notify(mut self, svc: Arc<NotificationService>) -> Self {
         self.notify = Some(svc);
         self
+    }
+
+    /// The slot a Notify step's pictures are fetched through: the API layer
+    /// fills it once it can ask plugins (`PluginFiles`).
+    pub fn plugin_files_slot(&self) -> pictures::PluginFilesSlot {
+        Arc::clone(&self.plugin_files)
     }
 
     pub fn with_modes(mut self, path: std::path::PathBuf) -> Self {
@@ -385,7 +395,8 @@ impl Core {
         .with_drain_timeout(self.drain_timeout_secs)
         .with_calendars(Arc::clone(&early_calendar_handle))
         .with_hub_vars(Arc::clone(&self.hub_vars))
-        .with_pauses(Arc::clone(&self.pauses));
+        .with_pauses(Arc::clone(&self.pauses))
+        .with_plugin_files(Arc::clone(&self.plugin_files));
         let engine = match &self.alerts {
             Some(a) => engine.with_alerts(a.clone()),
             None => engine,

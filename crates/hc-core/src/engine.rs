@@ -133,6 +133,7 @@ pub struct RuleEngine {
     state: StateStore,
     publish: Option<hc_mqtt_client::PublishHandle>,
     notify: Option<Arc<NotificationService>>,
+    plugin_files: crate::pictures::PluginFilesSlot,
     /// In-memory device attribute cache.
     device_cache: Arc<DashMap<String, HashMap<String, JsonValue>>>,
     /// Per-attribute last-changed timestamps for `Condition::TimeElapsed`.
@@ -194,6 +195,7 @@ impl RuleEngine {
             state,
             publish,
             notify,
+            plugin_files: Default::default(),
             device_cache: Arc::new(DashMap::new()),
             attr_changed_at: Arc::new(DashMap::new()),
             fire_history: Arc::new(DashMap::new()),
@@ -254,6 +256,12 @@ impl RuleEngine {
     }
 
     /// Keep hub variables in `handle`, shared with whoever lists them.
+    /// Where Notify steps fetch their pictures.
+    pub fn with_plugin_files(mut self, slot: crate::pictures::PluginFilesSlot) -> Self {
+        self.plugin_files = slot;
+        self
+    }
+
     pub fn with_hub_vars(mut self, handle: HubVars) -> Self {
         self.hub_vars = handle;
         self
@@ -1048,6 +1056,7 @@ impl RuleEngine {
         let ctx = Arc::new(ExecutorContext {
             publish: self.publish.clone(),
             notify: self.notify.clone(),
+            plugin_files: Arc::clone(&self.plugin_files),
             event_bus: Some(self.pub_bus.clone()),
             device_cache: Arc::clone(&self.device_cache),
             delay_registry: Arc::clone(&self.delay_registry),

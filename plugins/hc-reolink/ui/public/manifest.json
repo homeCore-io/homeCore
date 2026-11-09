@@ -1,0 +1,16 @@
+{
+	"host_api": 1,
+	"entry": "index.js",
+	"slots": [
+		{ "slot": "device.card", "element": "hc-reolink-card", "device_types": ["camera"], "forms": ["standard", "large", "compact"] },
+		{ "slot": "device.panel", "element": "hc-reolink-panel", "device_types": ["camera"] },
+		{
+			"slot": "dashboard.card",
+			"element": "hc-reolink-cameras",
+			"label": "Cameras",
+			"description": "several cameras at once, live or their newest stills",
+			"forms": ["large", "standard"],
+			"settings": "hc-reolink-cameras-settings"
+		}
+	]
+}

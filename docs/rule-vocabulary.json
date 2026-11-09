@@ -859,6 +859,11 @@
           "required": true
         },
         {
+          "name": "picture_from",
+          "type": "string",
+          "required": false
+        },
+        {
           "name": "title",
           "type": "string",
           "required": false

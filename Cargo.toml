@@ -23,6 +23,7 @@ members = [
     "plugins/hc-mysa",
     "plugins/hc-nuheat",
     "plugins/hc-plugin-template",
+    "plugins/hc-reolink",
     "plugins/hc-roku",
     "plugins/hc-sonos",
     "plugins/hc-thermostat",

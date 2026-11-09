@@ -272,6 +272,30 @@ impl PluginRecord {
     }
 }
 
+/// A plugin's files over its management channel, for a rule's Notify step
+/// to fetch a picture with (`hc_core::pictures`).
+pub struct PluginFilesRpc {
+    pub rpc: management_rpc::ManagementRpc,
+    pub store: StateStore,
+}
+
+impl hc_core::pictures::PluginFiles for PluginFilesRpc {
+    fn fetch(&self, device_id: &str, path: &str) -> hc_core::pictures::FetchFuture {
+        let (rpc, store) = (self.rpc.clone(), self.store.clone());
+        let (device, path) = (device_id.to_string(), path.to_string());
+        Box::pin(async move {
+            let plugin = store
+                .get_device(&device)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no device {device}"))?
+                .plugin_id;
+            handlers::fetch_plugin_file_with(&rpc, &plugin, "plugin_file", &path)
+                .await
+                .map_err(|(status, body)| anyhow::anyhow!("{status}: {body}"))
+        })
+    }
+}
+
 /// Shared state injected into every handler via axum's `State` extractor.
 #[derive(Clone)]
 pub struct AppState {

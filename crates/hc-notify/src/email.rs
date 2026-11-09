@@ -79,6 +79,36 @@ impl EmailChannel {
 
 #[async_trait]
 impl NotifyChannel for EmailChannel {
+    async fn send_picture(
+        &self,
+        title: &str,
+        message: &str,
+        picture: &crate::Picture,
+    ) -> Result<()> {
+        use lettre::message::{Attachment, MultiPart, SinglePart};
+        let kind = ContentType::parse(&picture.mime).context("Email: the picture's type")?;
+        for recipient in &self.to {
+            let email = Message::builder()
+                .from(self.from.parse().context("Invalid SMTP from address")?)
+                .to(recipient.parse().context("Invalid SMTP to address")?)
+                .subject(title)
+                .multipart(
+                    MultiPart::mixed()
+                        .singlepart(SinglePart::plain(message.to_string()))
+                        .singlepart(
+                            Attachment::new(picture.name.clone())
+                                .body(picture.bytes.clone(), kind.clone()),
+                        ),
+                )
+                .context("Failed to build email message")?;
+            self.transport
+                .send(email)
+                .await
+                .context("SMTP send failed")?;
+        }
+        Ok(())
+    }
+
     async fn send(&self, title: &str, message: &str) -> Result<()> {
         for recipient in &self.to {
             let email = Message::builder()

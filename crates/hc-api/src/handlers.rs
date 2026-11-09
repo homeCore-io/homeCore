@@ -4577,13 +4577,24 @@ async fn fetch_plugin_file(
     request: &str,
     file: &str,
 ) -> Result<Vec<u8>, (StatusCode, Value)> {
-    use base64::Engine;
     let Some(ref rpc) = s.management_rpc else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             json!({ "error": "plugins can't be asked" }),
         ));
     };
+    fetch_plugin_file_with(rpc, id, request, file).await
+}
+
+/// The same, given the management channel: also what a rule's Notify step
+/// fetches a picture with (`PluginFilesRpc`).
+pub(crate) async fn fetch_plugin_file_with(
+    rpc: &crate::management_rpc::ManagementRpc,
+    id: &str,
+    request: &str,
+    file: &str,
+) -> Result<Vec<u8>, (StatusCode, Value)> {
+    use base64::Engine;
     let mut bytes: Vec<u8> = Vec::new();
     loop {
         let reply = match rpc

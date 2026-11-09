@@ -96,8 +96,56 @@ struct PushoverPayload<'a> {
     expire: Option<u32>,
 }
 
+/// Pushover takes attachments up to 5 MB.
+pub const PUSHOVER_MAX_ATTACHMENT: usize = 5 * 1024 * 1024;
+
 #[async_trait]
 impl NotifyChannel for PushoverChannel {
+    async fn send_picture(
+        &self,
+        title: &str,
+        message: &str,
+        picture: &crate::Picture,
+    ) -> Result<()> {
+        if picture.bytes.len() > PUSHOVER_MAX_ATTACHMENT {
+            tracing::warn!("Pushover: the picture is over 5 MB, sent without it");
+            return self.send(title, message).await;
+        }
+        let mut form = reqwest::multipart::Form::new()
+            .text("token", self.cfg.api_token.clone())
+            .text("user", self.cfg.user_key.clone())
+            .text("title", title.to_string())
+            .text("message", message.to_string());
+        if let Some(d) = &self.cfg.device {
+            form = form.text("device", d.clone());
+        }
+        if let Some(p) = self.cfg.priority {
+            form = form.text("priority", p.to_string());
+        }
+        if let Some((retry, expire)) = self.cfg.emergency() {
+            form = form
+                .text("retry", retry.to_string())
+                .text("expire", expire.to_string());
+        }
+        let part = reqwest::multipart::Part::bytes(picture.bytes.clone())
+            .file_name(picture.name.clone())
+            .mime_str(&picture.mime)
+            .context("Pushover: the picture's type")?;
+        let resp = self
+            .client
+            .post(PUSHOVER_API_URL)
+            .multipart(form.part("attachment", part))
+            .send()
+            .await
+            .context("Pushover HTTP request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Pushover API returned {status}: {body}");
+        }
+        Ok(())
+    }
+
     async fn send(&self, title: &str, message: &str) -> Result<()> {
         let payload = PushoverPayload {
             token: &self.cfg.api_token,

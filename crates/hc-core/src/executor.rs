@@ -180,6 +180,58 @@ async fn fill_alert(text: &str, ctx: &ExecutorContext) -> String {
     .fold(text.to_string(), |t, (k, v)| t.replace(k, v))
 }
 
+/// How long a Notify step waits for a fresh picture before sending the newest it has.
+const FRESH_PICTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// A device's newest picture, asked for fresh: `take_snapshot`, then its
+/// `snapshot` attribute naming a new file, fetched from its plugin. The
+/// newest it already had if a fresh one doesn't come in time; `None` (the
+/// words go alone) if it has none or it can't be fetched.
+async fn fresh_picture(ctx: &ExecutorContext, device_id: &str) -> Option<hc_notify::Picture> {
+    let files = ctx.plugin_files.get()?.clone();
+    let snapshot = |ctx: &ExecutorContext| {
+        ctx.device_cache.get(device_id).and_then(|a| {
+            a.get("snapshot")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+    };
+    let before = snapshot(ctx);
+    if let Err(e) = publish_device_command(
+        ctx,
+        device_id,
+        serde_json::json!({ "action": "take_snapshot" }),
+        rule_change(ctx, "rule"),
+    )
+    .await
+    {
+        warn!(device_id, error = %e, "action: Notify — couldn't ask for a picture");
+    }
+    let started = std::time::Instant::now();
+    let mut path = before.clone();
+    while started.elapsed() < FRESH_PICTURE_WAIT {
+        let now = snapshot(ctx);
+        if now.is_some() && now != before {
+            path = now;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let path = path?;
+    let mime = crate::pictures::mime_of(&path)?;
+    match files.fetch(device_id, &path).await {
+        Ok(bytes) => Some(hc_notify::Picture {
+            bytes,
+            mime: mime.to_string(),
+            name: path.rsplit('/').next().unwrap_or("picture").to_string(),
+        }),
+        Err(e) => {
+            warn!(device_id, error = %e, "action: Notify — picture not fetched, sending the words");
+            None
+        }
+    }
+}
+
 async fn publish_device_command(
     ctx: &ExecutorContext,
     device_id: &str,
@@ -251,6 +303,8 @@ pub type Judge = Arc<
 pub struct ExecutorContext {
     pub publish: Option<PublishHandle>,
     pub notify: Option<Arc<NotificationService>>,
+    /// Where a Notify step's picture is fetched from (`crate::pictures`).
+    pub plugin_files: crate::pictures::PluginFilesSlot,
     pub event_bus: Option<EventBus>,
     /// Live device attribute cache — used by `WaitForExpression` for fresh reads
     /// and by `RunRuleActions` to build a current snapshot for the called rule.
@@ -306,6 +360,7 @@ impl ExecutorContext {
         Arc::new(Self {
             publish: None,
             notify: None,
+            plugin_files: Default::default(),
             event_bus: None,
             device_cache: Arc::new(DashMap::new()),
             delay_registry: Arc::new(DashMap::new()),
@@ -1097,6 +1152,7 @@ fn run_single_action(
                 channel,
                 message,
                 title,
+                picture_from,
             } => {
                 let message = fill_alert(&message, &ctx).await;
                 let title = match title {
@@ -1105,9 +1161,16 @@ fn run_single_action(
                 };
                 let title_str = title.as_deref().unwrap_or("HomeCore Alert");
                 debug!(channel, title = title_str, message = %message, "action: Notify");
+                let picture = match &picture_from {
+                    Some(device) => fresh_picture(&ctx, device).await,
+                    None => None,
+                };
                 match &ctx.notify {
                     Some(svc) => {
-                        if let Err(e) = svc.notify(&channel, title_str, &message).await {
+                        if let Err(e) = svc
+                            .notify_with(&channel, title_str, &message, picture.as_ref())
+                            .await
+                        {
                             warn!(channel, error = %e, "action: Notify — failed");
                         } else {
                             info!(channel, "action: Notify — sent");
@@ -1298,6 +1361,7 @@ fn run_single_action(
                         let sub_ctx = Arc::new(ExecutorContext {
                             publish: ctx.publish.clone(),
                             notify: ctx.notify.clone(),
+                            plugin_files: Arc::clone(&ctx.plugin_files),
                             event_bus: ctx.event_bus.clone(),
                             device_cache: Arc::clone(&ctx.device_cache),
                             delay_registry: Arc::clone(&ctx.delay_registry),
@@ -3065,5 +3129,136 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex as StdMutex;
+
+    /// Each notification sent: its words, and its picture said in a line.
+    type Sent = Arc<StdMutex<Vec<(String, Option<String>)>>>;
+
+    /// A notification channel that keeps what it was sent.
+    struct Kept(Sent);
+
+    #[async_trait::async_trait]
+    impl hc_notify::NotifyChannel for Kept {
+        async fn send(&self, _title: &str, message: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push((message.to_string(), None));
+            Ok(())
+        }
+        async fn send_picture(
+            &self,
+            _title: &str,
+            message: &str,
+            picture: &hc_notify::Picture,
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push((
+                message.to_string(),
+                Some(format!(
+                    "{} {} {}",
+                    picture.name,
+                    picture.mime,
+                    picture.bytes.len()
+                )),
+            ));
+            Ok(())
+        }
+    }
+
+    /// A plugin's files: each path asked for is three bytes, and is remembered.
+    struct Files(Arc<StdMutex<Vec<String>>>);
+
+    impl crate::pictures::PluginFiles for Files {
+        fn fetch(&self, device_id: &str, path: &str) -> crate::pictures::FetchFuture {
+            self.0.lock().unwrap().push(format!("{device_id} {path}"));
+            Box::pin(async { Ok(vec![0xff, 0xd8, 0xff]) })
+        }
+    }
+
+    fn ctx(files: Option<Files>) -> (Arc<ExecutorContext>, Sent) {
+        let kept = Arc::new(StdMutex::new(Vec::new()));
+        let mut svc = NotificationService::new();
+        svc.register("phone", Kept(Arc::clone(&kept)));
+        let slot: crate::pictures::PluginFilesSlot = Default::default();
+        if let Some(f) = files {
+            let _ = slot.set(Arc::new(f));
+        }
+        let base = Arc::try_unwrap(ExecutorContext::for_test())
+            .ok()
+            .expect("one owner");
+        let ctx = Arc::new(ExecutorContext {
+            notify: Some(Arc::new(svc)),
+            plugin_files: slot,
+            ..base
+        });
+        ctx.device_cache.insert(
+            "cam".into(),
+            HashMap::from([("snapshot".to_string(), json!("snap/cam-1.jpg"))]),
+        );
+        (ctx, kept)
+    }
+
+    fn notify(picture_from: Option<&str>) -> Action {
+        Action::Notify {
+            channel: "phone".into(),
+            message: "Someone at the door".into(),
+            title: None,
+            picture_from: picture_from.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notification_carries_a_fresh_picture_from_the_camera() {
+        let fetched = Arc::new(StdMutex::new(Vec::new()));
+        let (ctx, kept) = ctx(Some(Files(Arc::clone(&fetched))));
+        // The camera takes the new still a moment after it's asked.
+        let cache = Arc::clone(&ctx.device_cache);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            cache.insert(
+                "cam".into(),
+                HashMap::from([("snapshot".to_string(), json!("snap/cam-2.jpg"))]),
+            );
+        });
+        execute_actions_inner(
+            vec![notify(Some("cam"))],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *fetched.lock().unwrap(),
+            vec!["cam snap/cam-2.jpg".to_string()]
+        );
+        assert_eq!(
+            *kept.lock().unwrap(),
+            vec![(
+                "Someone at the door".to_string(),
+                Some("cam-2.jpg image/jpeg 3".to_string())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_way_to_fetch_pictures_the_words_still_go() {
+        let (ctx, kept) = ctx(None);
+        execute_actions_inner(
+            vec![notify(Some("cam"))],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *kept.lock().unwrap(),
+            vec![("Someone at the door".to_string(), None)]
+        );
     }
 }

@@ -191,6 +191,16 @@ pub const TERMS: &[Term] = &[
     term("open", Bool, "A door, window or contact: `true` when open.")
         .replaces(&[was("contact_open", Same), was("door_open", Same)]),
     term("motion", Bool, "Motion seen now."),
+    // What a camera's own detection says it sees now (Reolink and the like),
+    // beside `motion`, which it also reports.
+    term("person_detected", Bool, "A camera sees a person now."),
+    term("vehicle_detected", Bool, "A camera sees a vehicle now."),
+    term("animal_detected", Bool, "A camera sees an animal now."),
+    term(
+        "package_detected",
+        Bool,
+        "A camera sees a package left now.",
+    ),
     term("occupied", Bool, "Someone is in the area.").replaces(&[was("occupancy", Same)]),
     term("water_detected", Bool, "A leak sensor is wet."),
     term(
