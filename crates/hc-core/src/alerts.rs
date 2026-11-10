@@ -44,6 +44,9 @@ use crate::EventBus;
 /// How long a device must be offline before it is an alert — long enough
 /// that a bridge restarting doesn't raise one for every device behind it.
 pub const OFFLINE_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How long a plugin must be down before it is an alert: long enough for a
+/// crash and its restart to pass unremarked.
+pub const PLUGIN_DOWN_AFTER: Duration = Duration::from_secs(60);
 /// How often the whole set is worked out again, for rules that depend on
 /// the time of day or on how long something has lasted.
 const TICK: Duration = Duration::from_secs(30);
@@ -71,6 +74,17 @@ pub struct PluginAlerts {
     pub kinds: BTreeMap<String, Vec<PluginAlertKind>>,
     /// By device id (a plugin's own id for its alerts about itself).
     pub reported: BTreeMap<String, Reported>,
+    /// Plugins core runs that are down, by plugin id: exited, or running but
+    /// not heard from. Starting again doesn't end it; being heard from does.
+    pub down: BTreeMap<String, Down>,
+}
+
+/// A plugin that is down: since when, and its last status ("offline",
+/// "not_responding").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Down {
+    pub since: DateTime<Utc>,
+    pub status: String,
 }
 
 /// One device's alerts, as its plugin last published them.
@@ -127,6 +141,24 @@ impl PluginAlerts {
                 true
             }
             Event::DeviceRemoved { device_id, .. } => self.reported.remove(device_id).is_some(),
+            Event::PluginStatusChanged {
+                plugin_id,
+                status,
+                timestamp,
+                ..
+            } => match status.as_str() {
+                "offline" | "not_responding" => {
+                    let d = self.down.entry(plugin_id.clone()).or_insert(Down {
+                        since: *timestamp,
+                        status: status.clone(),
+                    });
+                    d.status = status.clone();
+                    true
+                }
+                // Stopped by someone is not down; active is back.
+                "active" | "stopped" => self.down.remove(plugin_id).is_some(),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -317,6 +349,7 @@ async fn run(
         );
         let plugins = handle.plugins.read().map(|p| p.clone()).unwrap_or_default();
         after.extend(from_plugins(&devices, &plugins, &topics, &before, now));
+        after.extend(plugins_down(&plugins.down, &before, now));
         unignored(&mut after, &ignores, now);
         if let Ok(mut acks) = handle.acks.write() {
             acks.retain(|id, _| after.contains_key(id));
@@ -414,6 +447,44 @@ async fn send(
     if let Err(e) = svc.notify(channel, title, &alert.message).await {
         warn!(channel, alert = %alert.id, error = %e, "Alert notification failed");
     }
+}
+
+/// An alert for each plugin down for [`PLUGIN_DOWN_AFTER`]: an offline alert
+/// whose subject is the plugin, so it goes where offline alerts go.
+pub fn plugins_down(
+    down: &BTreeMap<String, Down>,
+    active: &BTreeMap<String, Alert>,
+    now: DateTime<Utc>,
+) -> BTreeMap<String, Alert> {
+    down.iter()
+        .filter(|(_, d)| (now - d.since).to_std().is_ok_and(|e| e >= PLUGIN_DOWN_AFTER))
+        .map(|(id, d)| {
+            let name = plugin_name(id);
+            let reason = if d.status == "not_responding" {
+                "Started, but hasn't connected to homeCore. homeCore keeps restarting it; its log says why."
+            } else {
+                "Keeps stopping. homeCore keeps restarting it; its log says why."
+            };
+            let alert_id = format!("offline:{id}");
+            let alert = Alert {
+                raised_at: active.get(&alert_id).map_or(d.since, |a| a.raised_at),
+                id: alert_id,
+                kind: AlertKind::Offline,
+                device_id: id.clone(),
+                rule_id: None,
+                message: format!("{name} isn't running: {}", lower_first(reason)),
+                reason: reason.to_string(),
+                severity: AlertSeverity::Error,
+                acknowledged: None,
+                plugin_id: Some(id.clone()),
+                topic: Some("not_running".into()),
+                key: None,
+                action: None,
+                device_plugin_id: Some(id.clone()),
+            };
+            (alert.id.clone(), alert)
+        })
+        .collect()
 }
 
 /// Events that can change what is alarming. The engine's own are not.
@@ -724,6 +795,42 @@ mod tests {
     use chrono::Duration as Span;
     use hc_types::alert::same;
     use serde_json::json;
+
+    fn status(id: &str, status: &str, at: DateTime<Utc>) -> Event {
+        Event::PluginStatusChanged {
+            timestamp: at,
+            plugin_id: id.into(),
+            status: status.into(),
+            previous_status: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_plugin_down_a_minute_is_an_alert_until_it_is_heard_from() {
+        let t0 = Utc::now();
+        let mut p = PluginAlerts::default();
+        assert!(p.absorb(&status("plugin.lutron", "not_responding", t0)));
+        let none = BTreeMap::new();
+        assert!(plugins_down(&p.down, &none, t0 + Span::seconds(30)).is_empty());
+        let out = plugins_down(&p.down, &none, t0 + Span::seconds(61));
+        let a = &out["offline:plugin.lutron"];
+        assert!(a
+            .message
+            .starts_with("Lutron isn't running: started, but hasn't connected"));
+        assert_eq!(a.raised_at, t0);
+        // Starting again isn't back; a heartbeat (active) is.
+        assert!(!p.absorb(&status("plugin.lutron", "starting", t0 + Span::seconds(70))));
+        assert_eq!(
+            plugins_down(&p.down, &none, t0 + Span::seconds(80)).len(),
+            1
+        );
+        assert!(p.absorb(&status("plugin.lutron", "active", t0 + Span::seconds(90))));
+        assert!(plugins_down(&p.down, &none, t0 + Span::seconds(100)).is_empty());
+        // Stopped by someone is not an alert.
+        p.absorb(&status("plugin.hue", "offline", t0));
+        p.absorb(&status("plugin.hue", "stopped", t0 + Span::seconds(1)));
+        assert!(plugins_down(&p.down, &none, t0 + Span::seconds(120)).is_empty());
+    }
 
     fn device(id: &str, attrs: Value) -> DeviceState {
         let mut d = DeviceState::new(id, id.replace('_', " "), "test");

@@ -20,6 +20,7 @@ use hc_types::event::Event;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -72,6 +73,15 @@ const MAX_BACKOFF: u64 = 60;
 /// A run lasting at least this many seconds resets the backoff.
 const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// How long a plugin has from launch to send its first heartbeat. The SDKs
+/// send one as soon as their loop runs, so this is generous; until then the
+/// plugin is "starting", never "active".
+const CONNECT_GRACE: Duration = Duration::from_secs(120);
+/// A plugin that has said nothing for this long has hung. The SDKs beat
+/// every 60 s.
+const SILENT_AFTER: Duration = Duration::from_secs(300);
+/// How often the supervisor looks for a heartbeat.
+const QUIET_CHECK: Duration = Duration::from_secs(5);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -156,6 +166,9 @@ async fn supervise(
         }
     }
 
+    // Whether the last run went quiet: until it is heard from, a relaunch is
+    // still "not responding", not "starting".
+    let mut was_quiet = false;
     // Main supervisor loop — exits via break/return, not by mutating `running`.
     #[allow(clippy::while_immutable_condition)]
     while running {
@@ -164,7 +177,9 @@ async fn supervise(
             break;
         }
 
-        set_status(&plugins, &event_bus, &entry.id, "starting").await;
+        if !was_quiet {
+            set_status(&plugins, &event_bus, &entry.id, "starting").await;
+        }
         record_restart(&plugins, &entry.id).await;
 
         // Read binary/config from the plugin's record so an upgrade (which
@@ -241,6 +256,11 @@ async fn supervise(
         // these same lines arrive over MQTT, and logging them here too would
         // double every plugin's output in the stream.
         let tail = Arc::new(std::sync::Mutex::new(VecDeque::<String>::new()));
+        // Until the plugin is heard from over MQTT its output is the only word
+        // of it, so it goes into our log, where the app shows it. After that
+        // the same lines arrive over MQTT and only the tail is kept.
+        let heard = Arc::new(AtomicBool::new(false));
+        let launched = Utc::now();
         for stream in [
             child.stdout.take().map(OutputStream::Out),
             child.stderr.take().map(OutputStream::Err),
@@ -249,6 +269,8 @@ async fn supervise(
         .flatten()
         {
             let tail = Arc::clone(&tail);
+            let heard = Arc::clone(&heard);
+            let plugin_id = entry.id.clone();
             tokio::spawn(async move {
                 let mut lines = match stream {
                     OutputStream::Out(o) => {
@@ -261,6 +283,9 @@ async fn supervise(
                 while let Ok(Some(line)) = lines.next_line().await {
                     println!("{line}");
                     let line = strip_ansi(&line);
+                    if !heard.load(Ordering::Relaxed) && !line.trim().is_empty() {
+                        info!(plugin_id = %plugin_id, "{line}");
+                    }
                     if let Ok(mut t) = tail.lock() {
                         if t.len() == EXIT_CONTEXT_LINES {
                             t.pop_front();
@@ -283,6 +308,8 @@ async fn supervise(
 
         // Wait for exit, command, or shutdown.
         let mut stopped_by_command = false;
+        let mut went_quiet = false;
+        was_quiet = false;
         let uptime = tokio::select! {
             result = child.wait() => {
                 let uptime = started_at.elapsed();
@@ -310,6 +337,23 @@ async fn supervise(
                     }
                 }
                 uptime
+            }
+            why = gone_quiet(&plugins, &entry.id, launched, &heard) => {
+                // Running but silent is the worst way to fail: it looks fine.
+                // Say so, with what it printed, and start it again.
+                let last = tail
+                    .lock()
+                    .map(|t| t.iter().cloned().collect::<Vec<_>>().join(" | "))
+                    .unwrap_or_default();
+                warn!(
+                    plugin_id = %entry.id,
+                    output = %last,
+                    "Plugin {why}; restarting it"
+                );
+                set_status(&plugins, &event_bus, &entry.id, "not_responding").await;
+                kill_child(&mut child, &entry.id).await;
+                went_quiet = true;
+                started_at.elapsed()
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
@@ -364,8 +408,12 @@ async fn supervise(
             continue;
         }
 
-        // Process exited on its own — restart with backoff.
-        set_status(&plugins, &event_bus, &entry.id, "offline").await;
+        // Process exited on its own, or was stopped for going quiet — restart
+        // with backoff. A quiet one keeps saying so until it is heard from.
+        if !went_quiet {
+            set_status(&plugins, &event_bus, &entry.id, "offline").await;
+        }
+        was_quiet = went_quiet;
 
         if uptime >= HEALTHY_UPTIME {
             backoff_secs = MIN_BACKOFF;
@@ -381,6 +429,48 @@ async fn supervise(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Resolves only when a running plugin has gone quiet: no heartbeat within
+/// [`CONNECT_GRACE`] of its launch, or none for [`SILENT_AFTER`] since its
+/// last. Says which. Sets `heard` once one arrives.
+async fn gone_quiet(
+    plugins: &Arc<RwLock<HashMap<String, PluginRecord>>>,
+    plugin_id: &str,
+    launched: chrono::DateTime<Utc>,
+    heard: &AtomicBool,
+) -> &'static str {
+    loop {
+        tokio::time::sleep(QUIET_CHECK).await;
+        let beat = plugins
+            .read()
+            .await
+            .get(plugin_id)
+            .and_then(|r| r.last_heartbeat)
+            .filter(|t| *t >= launched);
+        if let Some(why) = quiet(launched, beat, Utc::now()) {
+            return why;
+        }
+        if beat.is_some() {
+            heard.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Whether a plugin launched at `launched`, last heard at `beat`, is quiet
+/// `now`, and why.
+fn quiet(
+    launched: chrono::DateTime<Utc>,
+    beat: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> Option<&'static str> {
+    let past =
+        |since: chrono::DateTime<Utc>, d: Duration| (now - since).to_std().is_ok_and(|e| e > d);
+    match beat {
+        None if past(launched, CONNECT_GRACE) => Some("hasn't connected since it started"),
+        Some(t) if past(t, SILENT_AFTER) => Some("has stopped answering"),
+        _ => None,
+    }
+}
 
 /// Stop a plugin: ask first (SIGTERM), so it can leave what it controls
 /// safe — hc-thermostat turns off the heaters it was running — and only kill
@@ -597,5 +687,32 @@ mod stop_tests {
         kill_child(&mut child, "test").await;
         assert!(child.try_wait().unwrap().is_some(), "still running");
         assert!(t.elapsed() >= SHUTDOWN_GRACE);
+    }
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    use super::*;
+    use chrono::{Duration as Span, TimeZone};
+
+    #[test]
+    fn a_plugin_that_never_beats_is_quiet_after_the_grace() {
+        let t0 = Utc.with_ymd_and_hms(2026, 11, 10, 19, 0, 0).unwrap();
+        assert_eq!(quiet(t0, None, t0 + Span::seconds(60)), None);
+        assert_eq!(
+            quiet(t0, None, t0 + Span::seconds(121)),
+            Some("hasn't connected since it started")
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_beat_is_quiet_only_once_it_stops() {
+        let t0 = Utc.with_ymd_and_hms(2026, 11, 10, 19, 0, 0).unwrap();
+        let beat = t0 + Span::seconds(1);
+        assert_eq!(quiet(t0, Some(beat), t0 + Span::seconds(200)), None);
+        assert_eq!(
+            quiet(t0, Some(beat), beat + Span::seconds(301)),
+            Some("has stopped answering")
+        );
     }
 }
