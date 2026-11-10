@@ -14,7 +14,8 @@ shapes, and two go2rtc instances.
     `online`).
   - `GET /standin/log`: the commands it was sent.
   - `MODE=camera` makes it a camera on its own (type IPC, no channel
-    list): the PTZ camera, or with `LENSES=2` a two-lens one like a Duo.
+    list): the PTZ camera. `LENSES=2` makes it report two channels, as a
+    Duo may; the plugin should still show one camera.
     Give each its own `PORT`.
 - `cam-go2rtc.yaml`: go2rtc playing the cameras' RTSP on `127.0.0.1:18554`,
   test patterns under Reolink's stream names (needs ffmpeg).
@@ -24,7 +25,7 @@ shapes, and two go2rtc instances.
 ```sh
 node standin.mjs &                              # the NVR, 18996
 MODE=camera PORT=18997 node standin.mjs &       # a camera on its own
-MODE=camera LENSES=2 PORT=18998 node standin.mjs &  # a two-lens camera
+MODE=camera LENSES=2 PORT=18998 node standin.mjs &  # reports two channels, like a Duo
 go2rtc -config cam-go2rtc.yaml &
 go2rtc -config house-go2rtc.yaml &
 ```

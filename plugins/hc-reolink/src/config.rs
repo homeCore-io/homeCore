@@ -83,15 +83,17 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .placeholder("driveway")
                                 .visible_when(Cond::falsy("reolink.go2rtc.add_streams"))
                                 .help(
-                                    "Your own go2rtc streams for its cameras, in channel order: \
-                                     one name per camera.",
+                                    "Names of streams already in your go2rtc config, one per \
+                                     camera. For an NVR, the first is channel 1. A camera with \
+                                     no name shows snapshots.",
                                 ),
                             Field::list("streams_hd", "text")
                                 .label("go2rtc streams, HD")
                                 .placeholder("driveway_hd")
                                 .visible_when(Cond::falsy("reolink.go2rtc.add_streams"))
                                 .help(
-                                    "The same for the high-definition streams, if you have them.",
+                                    "The same for high-definition streams, if you have them. \
+                                     Leave it empty if not.",
                                 ),
                         ]),
                 ),
