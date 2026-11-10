@@ -166,11 +166,11 @@ async fn supervise(
         }
     }
 
-    // Main supervisor loop — exits via break/return, not by mutating `running`.
-    #[allow(clippy::while_immutable_condition)]
     // Whether the last run went quiet: until it is heard from, a relaunch is
     // still "not responding", not "starting".
     let mut was_quiet = false;
+    // Main supervisor loop — exits via break/return, not by mutating `running`.
+    #[allow(clippy::while_immutable_condition)]
     while running {
         if shutdown_requested(&shutdown) {
             info!(plugin_id = %entry.id, "Plugin supervisor stopping for shutdown");
