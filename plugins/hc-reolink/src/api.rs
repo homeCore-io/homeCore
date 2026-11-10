@@ -434,6 +434,28 @@ impl Reolink {
         })
     }
 
+    /// Why a request got no answer, in words someone can act on. reqwest's
+    /// own message carries the URL, and with it the session token.
+    fn unreachable(&self, e: &reqwest::Error) -> anyhow::Error {
+        let https = self.base.starts_with("https");
+        let hint = if https {
+            " If HTTPS is off on the device, turn HTTPS off in this row."
+        } else {
+            " If the device only answers HTTPS, turn HTTPS on in this row."
+        };
+        let what = if e.is_timeout() {
+            format!("{} didn't answer in 15 s. Is the address right?", self.base)
+        } else if e.is_connect() {
+            format!(
+                "{} refused the connection or couldn't be reached.{hint}",
+                self.base
+            )
+        } else {
+            format!("{} broke off the request.{hint}", self.base)
+        };
+        anyhow!(what)
+    }
+
     fn url(&self, cmd: &str, token: Option<&str>) -> String {
         match token {
             Some(t) => format!("{}/cgi-bin/api.cgi?cmd={cmd}&token={t}", self.base),
@@ -470,7 +492,7 @@ impl Reolink {
             .json(&body)
             .send()
             .await
-            .context("not answering")?
+            .map_err(|e| self.unreachable(&e))?
             .json()
             .await
             .context("not a Reolink answer")?;
@@ -505,7 +527,7 @@ impl Reolink {
                 .json(&cmds)
                 .send()
                 .await
-                .context("not answering")?
+                .map_err(|e| self.unreachable(&e))?
                 .json()
                 .await
                 .context("not a Reolink answer")?;
@@ -540,7 +562,7 @@ impl Reolink {
             ))
             .send()
             .await
-            .context("not answering")?;
+            .map_err(|e| self.unreachable(&e))?;
         let bytes = res.bytes().await?.to_vec();
         if bytes.starts_with(&[0xff, 0xd8]) {
             Ok(bytes)
