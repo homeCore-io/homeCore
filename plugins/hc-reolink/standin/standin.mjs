@@ -2,8 +2,8 @@
 // shapes. By default an NVR with two cameras: channel 0 a doorbell (person,
 // package, visitor), channel 1 a PTZ camera with spotlight, siren, infrared
 // and presets (person, vehicle, animal). MODE=camera makes it a camera on its
-// own (type IPC, no channel list): one PTZ camera, or LENSES=2 a two-lens one
-// (a Duo). Sessions are limited, as a real device's are, and refused sign-ins
+// own (type IPC, no channel list): one PTZ camera; LENSES=2 makes it report
+// two channels, as a Duo may, which the plugin still shows as one camera. Sessions are limited, as a real device's are, and refused sign-ins
 // lock it for a while. PUSH_PORT starts its push (Baichuan): it signs in a
 // client as Reolink does, takes a subscription, and pushes an AlarmEventList
 // whenever /standin/set changes what a camera sees.

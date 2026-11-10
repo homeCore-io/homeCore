@@ -127,9 +127,6 @@ pub struct Cam {
     pub presets: Vec<(u32, String)>,
     pub seen: Detections,
     pub last_snap: Option<Instant>,
-    /// What its spotlight and siren are named after: the camera, for one with
-    /// two lenses, whose light and siren are the whole camera's.
-    pub parts_name: String,
 }
 
 impl Cam {
@@ -260,29 +257,9 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
                 .one(api::cmd("GetChannelstatus", json!({})))
                 .await?,
         )
-    } else if dev.channels > 1 {
-        // A camera of its own with two lenses: each a camera. Its list if it
-        // has one, else one per lens.
-        let listed = host
-            .api
-            .one(api::cmd("GetChannelstatus", json!({})))
-            .await
-            .map(|v| api::parse_channels(&v))
-            .unwrap_or_default();
-        if listed.is_empty() {
-            (0..dev.channels)
-                .map(|c| api::ChannelInfo {
-                    channel: c,
-                    name: format!("{own_name} lens {}", c + 1),
-                    online: true,
-                    model: dev.model.clone(),
-                    uid: String::new(),
-                })
-                .collect()
-        } else {
-            listed
-        }
     } else {
+        // A camera on its own is one camera, whatever channelNum says: a Duo
+        // joins its lenses into one picture on channel 0.
         vec![api::ChannelInfo {
             channel: 0,
             name: own_name.clone(),
@@ -292,8 +269,6 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         }]
     };
     let channels: Vec<api::ChannelInfo> = channels.into_iter().filter(|c| !c.empty()).collect();
-    // Channels are told apart by number: an NVR's cameras, a camera's lenses.
-    let several = dev.hub || dev.channels > 1;
     // Only an NVR or Hub is asked again which cameras it has.
     *host.hub.lock().expect("hub") = dev.hub;
     let ability = host
@@ -307,7 +282,7 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
 
     let mut cams = Vec::new();
     for ch in channels {
-        let id = camera::camera_id(&e.id, several.then_some(ch.channel));
+        let id = camera::camera_id(&e.id, dev.hub.then_some(ch.channel));
         let mut f = api::parse_abilities(&api::ability_for(&ability, ch.channel));
         let (seen, sees) = read_events(host, ch.channel).await.unwrap_or_default();
         f.person = sees.person;
@@ -341,17 +316,9 @@ async fn connect(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         } else {
             dev.model.clone()
         };
-        // A two-lens camera has one spotlight and one siren: they go with its first lens.
-        let lens = !dev.hub && several;
-        if lens && ch.channel > 0 {
-            f.spotlight = false;
-            f.siren = false;
-        }
-        let parts_name = if lens { own_name.clone() } else { name.clone() };
         cams.push(Cam {
             id,
             channel: ch.channel,
-            parts_name,
             name,
             model,
             online: ch.online,
@@ -498,7 +465,7 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
         let id = camera::spotlight_id(&c.id);
         p.register_device_full(
             &id,
-            &format!("{} spotlight", c.parts_name),
+            &format!("{} spotlight", c.name),
             Some("light"),
             None,
             None,
@@ -523,14 +490,8 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
     }
     if c.features.siren {
         let id = camera::siren_id(&c.id);
-        p.register_device_full(
-            &id,
-            &format!("{} siren", c.parts_name),
-            Some("siren"),
-            None,
-            None,
-        )
-        .await?;
+        p.register_device_full(&id, &format!("{} siren", c.name), Some("siren"), None, None)
+            .await?;
         p.register_device_schema_json(&id, &camera::siren_schema())
             .await?;
         p.subscribe_commands(&id).await?;

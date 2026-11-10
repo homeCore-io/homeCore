@@ -91,8 +91,8 @@ pub struct DevInfo {
     pub name: String,
     pub firmware: String,
     pub channels: u32,
-    /// An NVR or Home Hub, whose cameras are channels. A camera with two
-    /// lenses (a Duo, a TrackMix) also has two channels, and isn't one.
+    /// An NVR or Home Hub, whose cameras are channels. A camera that reports
+    /// two channels (a Duo) isn't one: it is still one camera.
     pub hub: bool,
 }
 
@@ -592,7 +592,7 @@ mod tests {
         let d = parse_dev_info(&cam);
         assert!(!d.hub);
         assert_eq!(d.model, "RLC-510A");
-        // Two lenses are two channels on a camera of its own: still a camera.
+        // A Duo may report two channels: still a camera, not a hub.
         let duo =
             json!({ "DevInfo": { "model": "Reolink Duo 3 PoE", "channelNum": 2, "type": "IPC" } });
         let d = parse_dev_info(&duo);
