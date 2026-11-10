@@ -41,7 +41,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — Build
 # -----------------------------------------------------------------------------
-FROM rust:1.99-alpine3.24@sha256:557a94c82b485a14b569120e00867267108c734efe33f10cc31ca0cd5dd1eca9 AS builder
+FROM rust:1.99-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS builder
 
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev pkgconfig
 
@@ -61,7 +61,7 @@ RUN cargo build --release --bin homecore
 # -----------------------------------------------------------------------------
 # Stage 2 — Runtime
 # -----------------------------------------------------------------------------
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 # `apk upgrade` first pulls CVE patches for packages baked into the
 # alpine:3.24 base since the upstream image was last rebuilt. Defense
