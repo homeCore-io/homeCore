@@ -587,7 +587,7 @@ pub fn spawn_plugin_registry_listener(
                         rec.version = Some(v);
                     }
                     if let Some(u) = uptime_secs {
-                        rec.uptime_started = Some(timestamp - chrono::Duration::seconds(u as i64));
+                        rec.uptime_started = Some(started_at(rec.uptime_started, timestamp, u));
                     }
                     if let Some(d) = device_count {
                         rec.device_count = d;
@@ -1727,6 +1727,40 @@ async fn prepare_uds(cfg: &AdminUdsConfig) -> Result<tokio::net::UnixListener> {
         "Admin UDS listener bound"
     );
     Ok(listener)
+}
+
+/// When a plugin started, from a heartbeat's time and whole seconds of uptime.
+/// Those wander by a second or so from beat to beat, so the time held is kept
+/// unless it moved further: only a restart changes it, as clients read a
+/// change to mean.
+fn started_at(
+    was: Option<chrono::DateTime<chrono::Utc>>,
+    beat: chrono::DateTime<chrono::Utc>,
+    uptime_secs: u64,
+) -> chrono::DateTime<chrono::Utc> {
+    let now = beat - chrono::Duration::seconds(uptime_secs as i64);
+    match was {
+        Some(was) if (now - was).num_seconds().abs() <= 5 => was,
+        _ => now,
+    }
+}
+
+#[cfg(test)]
+mod started_at_tests {
+    use super::started_at;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn a_heartbeat_keeps_it_and_a_restart_moves_it() {
+        let start =
+            Utc.with_ymd_and_hms(2026, 11, 9, 15, 0, 0).unwrap() + Duration::milliseconds(400);
+        let first = started_at(None, start + Duration::milliseconds(900), 0);
+        // 30 s later, the beat's fraction differs and the uptime is truncated.
+        let beat = start + Duration::milliseconds(30_100);
+        assert_eq!(started_at(Some(first), beat, 29), first);
+        let restart = start + Duration::seconds(600);
+        assert_eq!(started_at(Some(first), restart, 0), restart);
+    }
 }
 
 #[cfg(test)]

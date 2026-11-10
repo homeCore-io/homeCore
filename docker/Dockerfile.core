@@ -70,6 +70,12 @@ RUN chmod +x /usr/local/bin/homecore /entrypoint.sh
 # from this image — hc-web does that and proxies /api/v1 to 8080.
 EXPOSE 1883 8080
 
+# Asks the API's own health route. 8080 is homecore.toml's default port, and
+# the image can't read that file: if you moved the port, set `healthcheck:`
+# in compose, which replaces this one. busybox's wget is in the base image.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
+    CMD wget -qO- http://127.0.0.1:8080/api/v1/health || exit 1
+
 # Single base directory. Operator bind-mounts a host dir here; the
 # entrypoint detects the owner UID and drops privileges to match
 # before the daemon writes anything.
