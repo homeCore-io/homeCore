@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "hc-reolink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.99"
+version = "0.1.100"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
