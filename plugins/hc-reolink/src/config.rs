@@ -21,37 +21,79 @@ pub fn config_schema() -> Option<serde_json::Value> {
 
 /// How the settings form presents this configuration (see the template).
 pub fn config_descriptor() -> serde_json::Value {
-    use plugin_sdk_rs::config_descriptor::{Descriptor, Field, Section};
+    use plugin_sdk_rs::config_descriptor::{Cond, Descriptor, Field, Section};
 
     Descriptor::new("plugin.reolink")
         .title("Reolink")
         .section(
             Section::new("hosts", "Cameras and NVRs")
                 .help(
-                    "Each row is one address: a camera on its own, or an NVR or Home Hub, \
-                     whose cameras arrive as channels. The plugin signs in once to each and \
-                     finds out what it is.",
+                    "Add a row for each Reolink address on your network: a camera on its own, \
+                     or an NVR or Home Hub, whose cameras come with it. The plugin signs in \
+                     once to each and finds out what it is and what each camera can do. \
+                     Usually only the name, address, user name and password need filling in.",
                 )
                 .field(
                     Field::table("reolink.hosts")
                         .label("Cameras and NVRs")
-                        .key_by("id")
+                        .key_by("name")
                         .columns([
-                            Field::text("name").label("Name"),
-                            Field::host("address").label("Address"),
-                            Field::text("username").label("User name"),
-                            Field::secret("password").label("Password"),
-                            Field::toggle("https").label("HTTPS"),
-                            Field::port("rtsp_port").label("RTSP port"),
-                            Field::port("push_port").label("Push port"),
-                            Field::list("streams", "text").label("go2rtc streams"),
-                            Field::list("streams_hd", "text").label("go2rtc streams, HD"),
-                        ])
-                        .help(
-                            "The id names its cameras in homeCore for good (reolink_<id>, \
-                             reolink_<id>_<channel> for an NVR's), so renaming the row is \
-                             safe and changing its id is not.",
-                        ),
+                            Field::text("name")
+                                .label("Name")
+                                .placeholder("Driveway")
+                                .help(
+                                    "What it's called here. Its cameras' device ids are made \
+                                     from it (reolink_driveway), so choose it before you write \
+                                     rules: renaming it later gives them new ids.",
+                                ),
+                            Field::host("address")
+                                .label("Address")
+                                .required()
+                                .placeholder("192.168.1.20")
+                                .help("Its IP address or host name on your network."),
+                            Field::text("username")
+                                .label("User name")
+                                .default("admin")
+                                .help(
+                                    "An account on the camera or NVR. One of its own is best: \
+                                     Reolink allows only a few sign-ins at once.",
+                                ),
+                            Field::secret("password").label("Password").required(),
+                            Field::toggle("https").label("HTTPS").default(true).help(
+                                "Leave it on unless HTTPS is turned off on the device. If \
+                                     it can't sign in and the password is right, try it off.",
+                            ),
+                            Field::port("rtsp_port")
+                                .label("RTSP port")
+                                .default(554)
+                                .help(
+                                    "Where it serves video, for go2rtc. Change it only if you \
+                                     changed it on the device.",
+                                ),
+                            Field::port("push_port")
+                                .label("Push port")
+                                .default(9000)
+                                .help(
+                                    "Where it tells the plugin the moment it sees something \
+                                     (Reolink's own protocol, as its app uses). Change it only \
+                                     if you changed it on the device.",
+                                ),
+                            Field::list("streams", "text")
+                                .label("go2rtc streams")
+                                .placeholder("driveway")
+                                .visible_when(Cond::falsy("reolink.go2rtc.add_streams"))
+                                .help(
+                                    "Your own go2rtc streams for its cameras, in channel order: \
+                                     one name per camera.",
+                                ),
+                            Field::list("streams_hd", "text")
+                                .label("go2rtc streams, HD")
+                                .placeholder("driveway_hd")
+                                .visible_when(Cond::falsy("reolink.go2rtc.add_streams"))
+                                .help(
+                                    "The same for the high-definition streams, if you have them.",
+                                ),
+                        ]),
                 ),
         )
         .section(
@@ -91,13 +133,23 @@ pub fn config_descriptor() -> serde_json::Value {
                     "Live video comes from go2rtc. The app reaches it through its own server, \
                      for people signed in only.",
                 )
-                .field(Field::url("reolink.go2rtc.url").label("go2rtc address"))
+                .field(
+                    Field::url("reolink.go2rtc.url")
+                        .label("go2rtc address")
+                        .placeholder("http://127.0.0.1:1984")
+                        .help(
+                            "go2rtc's address as this plugin reaches it, port 1984 unless \
+                             changed. Empty: cameras show snapshots, no live video.",
+                        ),
+                )
                 .field(
                     Field::toggle("reolink.go2rtc.add_streams")
                         .label("Add the cameras' streams to go2rtc")
+                        .default(true)
                         .help(
                             "Adds reolink_<camera> and reolink_<camera>_hd to go2rtc and keeps \
-                             them current. Off: name each camera's streams yourself.",
+                             them current, and touches no other stream. Off: name your own \
+                             go2rtc streams in each camera or NVR's row instead.",
                         ),
                 ),
         )
@@ -321,7 +373,8 @@ mod tests {
         let missing = plugin_sdk_rs::config_descriptor::missing_schema_coverage(
             &config_schema().expect("the schema feature is on in this build"),
             &config_descriptor(),
-            &["homecore.plugin_id"],
+            // A row's id is set only in the file; the plugin makes one from the name.
+            &["homecore.plugin_id", "reolink.hosts[].id"],
         );
         assert!(
             missing.is_empty(),
