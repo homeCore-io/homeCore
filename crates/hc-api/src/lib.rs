@@ -87,7 +87,8 @@ pub type PluginCommandChannels =
 pub struct PluginRecord {
     pub plugin_id: String,
     pub registered_at: chrono::DateTime<chrono::Utc>,
-    /// "active" | "offline" | "stopped" | "starting"
+    /// "active" | "offline" | "stopped" | "starting" | "not_responding" (running
+    /// but not heard from: core restarts it)
     pub status: String,
     /// Whether this plugin is enabled in homecore.toml.
     #[serde(default)]
@@ -530,10 +531,16 @@ pub fn spawn_plugin_registry_listener(
                             notices: Vec::new(),
                             installed_version: None,
                         });
-                    let prev = std::mem::replace(&mut rec.status, "active".into());
                     rec.registered_at = timestamp;
-                    if prev != "active" {
-                        announce_back(&event_bus, &plugin_id, timestamp, prev);
+                    // A plugin core runs is active when it says so itself, by
+                    // its heartbeat: a registration can be a retained copy from
+                    // its last run, and took a plugin that never connected for
+                    // a running one.
+                    if !rec.managed {
+                        let prev = std::mem::replace(&mut rec.status, "active".into());
+                        if prev != "active" {
+                            announce_back(&event_bus, &plugin_id, timestamp, prev);
+                        }
                     }
                 }
                 Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
@@ -592,7 +599,10 @@ pub fn spawn_plugin_registry_listener(
                     if let Some(d) = device_count {
                         rec.device_count = d;
                     }
-                    if rec.status == "offline" || rec.status == "starting" {
+                    if matches!(
+                        rec.status.as_str(),
+                        "offline" | "starting" | "not_responding"
+                    ) {
                         let prev = std::mem::replace(&mut rec.status, "active".into());
                         announce_back(&event_bus, &plugin_id, timestamp, prev);
                     }
