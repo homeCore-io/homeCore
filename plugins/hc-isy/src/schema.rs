@@ -377,6 +377,44 @@ mod tests {
         }
     }
 
+    /// Every temperature any kind publishes is declared, in °C — a sensor in
+    /// °C, °F or K, and a thermostat in °F or half-degrees.
+    ///
+    /// UOM 14 and 76 are angles (76 is wind direction), so their `value` keeps
+    /// "°": it is not a temperature, and the checks do not count it as one.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        for kind in ALL {
+            for st_uom in ["4", "17", "26", "101", "14", "76", "100"] {
+                let mut node = IsyNode::default();
+                for prop in ["ST", "CLITEMP", "CLISPH", "CLISPC"] {
+                    node.properties.insert(
+                        prop.into(),
+                        crate::isy::IsyProperty {
+                            value: 70,
+                            formatted: "70".into(),
+                            uom: if prop == "ST" { st_uom } else { "101" }.into(),
+                            prec: 0,
+                        },
+                    );
+                }
+                let published = node_to_state(&node, kind);
+                let schema = schema_for(kind, &NodeContext::from_node(&node));
+                plugin_sdk_rs::conformance::check_state_temperatures(&schema, &published)
+                    .assert_ok();
+            }
+        }
+        let angle = schema_for(
+            &DeviceKind::Sensor,
+            &NodeContext {
+                st_uom: "76".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(angle.attributes["value"].unit.as_deref(), Some("°"));
+        assert!(plugin_sdk_rs::conformance::check_temperatures(&angle).is_empty());
+    }
+
     /// The shared names are declared in the shared units, and the old ones
     /// are gone.
     #[test]

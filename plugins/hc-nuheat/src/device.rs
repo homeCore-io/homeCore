@@ -761,6 +761,19 @@ mod tests {
         assert_eq!(state["schedule_mode"], Value::Null);
     }
 
+    /// Every temperature the thermostat publishes is declared, in °C.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let t = Thermostat {
+            serial_number: "1".into(),
+            current_temperature: Some(2150),
+            ..Default::default()
+        };
+        let (state, _) = state_payload(&t);
+        let schema = device_schema(units::SetpointLimits::default());
+        plugin_sdk_rs::conformance::check_state_temperatures(&schema, &state).assert_ok();
+    }
+
     /// The schema's promise: anything marked writable must be something
     /// `interpret` actually acts on, or clients render dead controls.
     #[test]

@@ -788,6 +788,16 @@ mod tests {
         assert_eq!(s["swing_vertical"], 1);
     }
 
+    /// Every temperature a baseboard or an AC publishes is declared, in °C.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        for (caps, state) in [(bb(), bb_state()), (ac(), ac_state())] {
+            let published = state_payload(&state, &caps, None);
+            plugin_sdk_rs::conformance::check_state_temperatures(&device_schema(&caps), &published)
+                .assert_ok();
+        }
+    }
+
     #[test]
     fn the_schema_offers_only_what_the_hardware_can_do() {
         let s = device_schema(&bb());
