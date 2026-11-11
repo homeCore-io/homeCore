@@ -21,7 +21,9 @@
 //! 2. **Convert at the edge.** The plugin turns its device's scale into this
 //!    one when publishing, and back when commanding. Temperatures are °C, rain
 //!    mm (named `…_mm`), pressure hPa, wind m/s — whatever the device or the person prefers:
-//!    showing °F is the app's job, from the person's setting.
+//!    showing °F is the app's job, from the person's setting. A temperature
+//!    that still arrives in °F or K is converted by core as it is stored, and
+//!    reported, as a backstop (`hc_core::unit_ingest`).
 //! 3. **Units in names.** A number names its unit as a suffix (`_pct`, `_ms`,
 //!    `_secs`, `_w`, `_kwh`) except the terms here without one, whose unit this
 //!    table defines (`temperature`, `humidity`, `illuminance`, `volume`,

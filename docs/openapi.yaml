@@ -7690,7 +7690,8 @@ paths:
         declared), `undeclared` (a key or attribute the schema does not have
         — the plugin may still take it), `rename` (an old spelling or the
         retired `{"command": …}` shape, with `instead`), `unit` (a shared name
-        with another unit or kind). Requires `devices:read` and
+        with another unit or kind, a temperature not in °C or with no unit,
+        or one core converted to °C as it arrived). Requires `devices:read` and
         `automations:read`.
       tags: [system]
       security:
@@ -7732,6 +7733,24 @@ paths:
                         name: { type: string, description: The attribute, action or key }
                         message: { type: string }
                         instead: { type: string, description: What to use instead }
+                  conversions:
+                    type: array
+                    description: |
+                      Temperatures core converted to °C as they arrived since it
+                      started, because a plugin sent °F or K (declared in its
+                      schema or an `<attr>_unit` sibling). Each also appears as
+                      a `unit` finding.
+                    items:
+                      type: object
+                      properties:
+                        device_id: { type: string }
+                        plugin_id: { type: string }
+                        attribute: { type: string }
+                        from: { type: string, description: "The unit it arrived in: °F or K" }
+                        declared_by: { type: string, enum: [schema, sibling] }
+                        count: { type: integer, description: Readings converted }
+                        first_at: { type: string, format: date-time }
+                        last_at: { type: string, format: date-time }
         "401":
           $ref: "#/components/responses/Unauthorized"
   /system/status:

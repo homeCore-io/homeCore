@@ -714,6 +714,8 @@ async fn main() -> Result<()> {
 
     // Alerts (H4): the engine runs inside core; the API serves what it keeps.
     let alerts = hc_core::alerts::AlertsHandle::new();
+    // Temperatures converted to °C as they arrive; the vocabulary check reports them.
+    let unit_conversions = hc_core::unit_ingest::Conversions::default();
 
     let mut core = Core::new(
         internal_bus.clone(),
@@ -734,6 +736,7 @@ async fn main() -> Result<()> {
     .with_log_stream(log_tx.clone(), log_ring.clone())
     .with_battery_config(battery_rx)
     .with_alerts(alerts.clone())
+    .with_unit_conversions(unit_conversions.clone())
     .with_alert_channel(config.alerts.notify_channel.clone());
 
     let device_types_path = Path::new(&config.profiles.dir).join("device-types.toml");
@@ -1240,6 +1243,7 @@ async fn main() -> Result<()> {
     .with_group_store(group_store, groups)
     .with_battery_config(battery_tx)
     .with_alerts(alerts)
+    .with_unit_conversions(unit_conversions)
     .with_homecore_config_path(config_path.clone())
     // Inject the binary crate's CARGO_PKG_VERSION so /health,
     // /system/status, and /system/versions all report the homecore

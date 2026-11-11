@@ -75,6 +75,8 @@ pub struct Inputs<'a> {
     pub schemas: &'a HashMap<String, DeviceSchema>,
     pub rules: &'a [Rule],
     pub scenes: &'a [Scene],
+    /// Temperatures core converted to °C as they arrived.
+    pub conversions: &'a [crate::unit_ingest::Conversion],
 }
 
 /// Every finding, most serious first.
@@ -84,6 +86,24 @@ pub fn check(i: &Inputs) -> Vec<Finding> {
 
     for d in i.devices {
         check_device(d, i.schemas.get(&d.device_id), &mut out);
+    }
+    for c in i.conversions {
+        let said = match c.declared_by {
+            crate::unit_ingest::DeclaredBy::Schema => "its schema says so",
+            crate::unit_ingest::DeclaredBy::Sibling => "its `_unit` says so",
+        };
+        out.insert(finding(
+            Severity::Unit,
+            &Place::Device,
+            &c.device_id,
+            Some(&c.plugin_id),
+            Some(&c.attribute),
+            format!(
+                "`{}` arrives in {} ({said}); core converts it to °C as it is stored",
+                c.attribute, c.from
+            ),
+            Some("°C".to_string()),
+        ));
     }
     for r in i.rules {
         let place = Place::Automation {
@@ -588,6 +608,7 @@ mod tests {
             schemas: &schemas,
             rules,
             scenes: &[],
+            conversions: &[],
         })
     }
 
@@ -727,5 +748,30 @@ mod tests {
         assert_eq!(named, ["floor_temperature", "heat_setpoint"], "{f:#?}");
         assert!(f.iter().all(|x| x.severity == Severity::Unit));
         assert!(f[1].message.contains("no unit"), "{}", f[1].message);
+    }
+
+    #[test]
+    fn a_conversion_at_ingest_is_a_finding() {
+        let now = chrono::Utc::now();
+        let c = [crate::unit_ingest::Conversion {
+            device_id: "porch".into(),
+            plugin_id: "plugin.old".into(),
+            attribute: "temperature".into(),
+            from: "°F",
+            declared_by: crate::unit_ingest::DeclaredBy::Sibling,
+            count: 3,
+            first_at: now,
+            last_at: now,
+        }];
+        let f = check(&Inputs {
+            devices: &[],
+            schemas: &HashMap::new(),
+            rules: &[],
+            scenes: &[],
+            conversions: &c,
+        });
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Unit);
+        assert!(f[0].message.contains("arrives in °F"), "{}", f[0].message);
     }
 }

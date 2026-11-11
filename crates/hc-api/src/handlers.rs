@@ -240,11 +240,13 @@ pub async fn vocabulary_check(
         Some(rh) => rh.read().await.clone(),
         None => Vec::new(),
     };
+    let conversions = s.unit_conversions.list();
     let findings = hc_core::vocabulary_check::check(&hc_core::vocabulary_check::Inputs {
         devices: &devices,
         schemas: &schemas,
         rules: &rules,
         scenes: &scenes,
+        conversions: &conversions,
     });
     let count = |sev| findings.iter().filter(|f| f.severity == sev).count();
     use hc_core::vocabulary_check::Severity;
@@ -256,6 +258,9 @@ pub async fn vocabulary_check(
             "unit": count(Severity::Unit),
         },
         "findings": findings,
+        // What core converted to °C as it arrived: the diagnostic behind
+        // the "arrives in °F" findings.
+        "conversions": conversions,
     }))
     .into_response()
 }
