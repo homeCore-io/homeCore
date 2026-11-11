@@ -1861,6 +1861,104 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /areas/{id}/on:
+    post:
+      operationId: roomOn
+      summary: Turn a room's lights back on
+      description: |
+        Brings the room's lights back the way Room off left them. The scenes
+        that were showing are activated first (`{"action": "activate"}`), then
+        each light that was on is sent its saved settings with `"on": true`,
+        except lights a re-activated Hue scene covers (a room scene covers the
+        Hue lights in that Hue room; a zone scene covers its group device's
+        `light_ids` when grouped lights are published). When coverage can't be
+        told, every saved light is sent after the scenes. Lights saved as off
+        stay off.
+
+        With nothing saved, every light in the room goes on with
+        `brightness_pct: 100` (just `"on": true` where brightness isn't
+        writable).
+
+        A room's lights are its devices of type `light` and switches whose
+        `ui_hint` is `light`; Hue groups and scenes are not. What was saved
+        stays after Room on. Takes the scope commanding a device takes
+        (`devices:command`, or `devices:write`), and raises a
+        `room_lights_changed` event. The `RoomOn` rule action does the same.
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      responses:
+        "200":
+          description: What was done
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomLightsOutcome"
+        "403":
+          description: The caller may not command devices
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /areas/{id}/off:
+    post:
+      operationId: roomOff
+      summary: Turn a room's lights off, saving how they were
+      description: |
+        Turns every light in the room off (`{"on": false}`). First, when at
+        least one light is on, it saves the room's lights for Room on,
+        replacing what was saved before: whether each was on, its
+        `brightness_pct` and one colour (`color_temp` or `color_xy`, the one
+        the light says it is showing, else white first), each only where the
+        light's schema marks it writable, and the room's scene devices that
+        report `active: true`. When every light is already off, the earlier
+        saving is kept.
+
+        The saving is kept per room, survives a restart, and goes when the
+        room is deleted; merging a room folds it into the other room's. Same
+        scope as Room on; raises `room_lights_changed`. The `RoomOff` rule
+        action does the same.
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      responses:
+        "200":
+          description: What was done
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomLightsOutcome"
+        "403":
+          description: The caller may not command devices
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /areas/{id}/saved-lights:
+    get:
+      operationId: getRoomSavedLights
+      summary: What Room off last saved for a room
+      description: |
+        The lights and scenes Room on would bring back. Requires `areas:read`.
+      tags: [areas]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AreaId"
+      responses:
+        "200":
+          description: The saved lights
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomLightsSnapshot"
+        "204":
+          description: Room off has saved nothing for this room
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /displays:
     get:
       operationId: listDisplays
@@ -2567,11 +2665,15 @@ paths:
         `rule_removed` its `rule_id`. `plugin_status_changed`
         (`plugin_id`, `status`, `previous_status`) covers a plugin starting,
         stopping, going offline and coming back to `active`. A device's room is the area whose `slug` or
-        `aliases` contain its `area_override`, else its `area`.
+        `aliases` contain its `area_override`, else its `area`; the device
+        record carries that slug as `room`. `room_lights_changed` says Room on
+        or Room off ran: `room_id`, `room_name`, `on`, the `lights` and
+        `scenes` it commanded, `snapshot_saved`, `snapshot_used`, and `source`
+        (`api` or `rule`).
 
         **Event types:** `device_state_changed`, `device_availability_changed`,
         `device_added`, `device_removed`, `device_metadata_changed`,
-        `room_changed`, `room_removed`, `scene_changed`, `scene_removed`,
+        `room_changed`, `room_removed`, `room_lights_changed`, `scene_changed`, `scene_removed`,
         `rule_changed`, `rule_removed`, `device_name_changed`, `device_schema_changed`, `device_command_sent`,
         `device_battery_low`, `device_battery_recovered`, `rule_fired`,
         `scene_activated`, `plugin_registered`, `plugin_offline`,
@@ -8996,6 +9098,82 @@ components:
         last_seen:
           type: string
           format: date-time
+
+    RoomLightsOutcome:
+      type: object
+      required: [room_id, room_name, on, lights, scenes, covered_by_scenes, snapshot_saved, snapshot_used, commands]
+      properties:
+        room_id:
+          type: string
+          format: uuid
+        room_name:
+          type: string
+        on:
+          type: boolean
+          description: "`true` for Room on, `false` for Room off"
+        lights:
+          type: array
+          items:
+            type: string
+          description: The lights sent a command
+        scenes:
+          type: array
+          items:
+            type: string
+          description: The scene devices activated (Room on only)
+        covered_by_scenes:
+          type: array
+          items:
+            type: string
+          description: Lights that were on when saved and that an activated scene brings back, so they got no command of their own
+        snapshot_saved:
+          type: boolean
+          description: Room off saved the lights, replacing what was saved before
+        snapshot_used:
+          type: boolean
+          description: Room on brought back what Room off saved
+        commands:
+          type: array
+          description: Every command sent, in order (scenes first)
+          items:
+            type: object
+            required: [device_id, command]
+            properties:
+              device_id:
+                type: string
+              command:
+                type: object
+                additionalProperties: true
+
+    RoomLightsSnapshot:
+      type: object
+      required: [room_id, saved_at, lights]
+      properties:
+        room_id:
+          type: string
+          format: uuid
+        saved_at:
+          type: string
+          format: date-time
+        lights:
+          type: array
+          items:
+            type: object
+            required: [device_id, on]
+            properties:
+              device_id:
+                type: string
+              on:
+                type: boolean
+              settings:
+                type: object
+                additionalProperties: true
+                description: "`brightness_pct` and one of `color_temp` or `color_xy`, as Room on sends them back. Absent when there are none."
+        scenes:
+          type: array
+          items:
+            type: string
+          description: Scene devices that were showing. Absent when there were none.
 
     HistoryEntry:
       type: object
