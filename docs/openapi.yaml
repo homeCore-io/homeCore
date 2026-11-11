@@ -8953,6 +8953,20 @@ components:
             `area_override` uses. It used to serialise as `null` while its own
             override was omitted, so a client had two spellings of one absence
             for this field alone.
+        area_override:
+          type: string
+          description: |
+            Room slug a person set for this device. It wins over the
+            plugin-delivered `area`, and registration never touches it, so it
+            survives plugin restarts. Absent when nobody has set one.
+        room:
+          type: string
+          readOnly: true
+          description: |
+            The room slug the device is in: `area_override` when set, otherwise
+            `area`. Absent when neither is set. Worked out on every response
+            and ignored if sent back, so group devices by this and leave
+            `area` and `area_override` for editing.
         available:
           type: boolean
         attributes_changed_at:
