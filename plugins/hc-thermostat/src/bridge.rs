@@ -27,6 +27,8 @@ pub enum Event {
     State(String, Value),
     /// `homecore/devices/{id}/availability` of a subscribed device.
     Availability(String, bool),
+    /// `homecore/devices/{id}/schema` of a subscribed device.
+    Schema(String, Value),
     /// A command on one of our devices.
     Command(String, Value),
     /// Core's learned-state document for the plugin.
@@ -164,6 +166,10 @@ impl Bridge {
         if let Err(e) = self.publisher.subscribe_availability(id).await {
             warn!(device = %id, error = %e, "Failed to subscribe to availability");
         }
+        // What the device's readings are in, so a sensor in °F is read as °C.
+        if let Err(e) = self.publisher.subscribe_schema(id).await {
+            warn!(device = %id, error = %e, "Failed to subscribe to schema");
+        }
     }
 
     /// Until the channel closes or the plugin stops.
@@ -196,6 +202,7 @@ impl Bridge {
         match ev {
             Event::State(id, p) => self.ctl.on_state(&id, &p, now),
             Event::Availability(id, online) => self.ctl.on_availability(&id, online, now),
+            Event::Schema(id, s) => self.ctl.on_schema(&id, &s),
             Event::Command(id, p) => self.ctl.on_command(&id, &p, now),
             Event::Learned(doc) => self.ctl.apply_learned(&doc, Utc::now()),
             Event::SyncRemaining(tx) => {
@@ -357,6 +364,7 @@ impl Bridge {
             }
             Effect::Unsubscribe(id) => {
                 let _ = p.unsubscribe_state(&id).await;
+                let _ = p.unsubscribe_schema(&id).await;
                 p.unsubscribe_availability(&id).await
             }
             Effect::UnsubscribeOwn(id) => p.unsubscribe_state(&id).await,
