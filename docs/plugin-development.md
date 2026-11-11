@@ -137,6 +137,10 @@ attribute.
   Write the conversion as a function with a test at each end of the scale:
   a dimmer's lowest step must not read as 0 % (off) and 100 % must reach the
   device's maximum (99 on Z-Wave, 254 on Zigbee and Matter, 255 on WLED).
+  Declare a temperature with `AttributeSchema::temperature()` (or `.celsius()`
+  on a setpoint), and test it with `conformance::check_state_temperatures`:
+  one with no unit fails the check, and one that arrives in °F is converted
+  by core and reported by the vocabulary check.
 - **Units in names.** A number names its unit as a suffix — `_pct`, `_ms`,
   `_secs`, `_w`, `_kwh` — unless it is a term whose unit the table sets
   (`temperature`, `humidity`, `volume`, `position`, …). Fades are `_ms`.
@@ -480,6 +484,7 @@ point — not the SDKs, which pass slots through.
 | Pictures it keeps (`with_files_dir`, `plugin_file`) | ✓ | — | — | — |
 | Actions answered asynchronously (`with_async_handler`) | ✓ | — | — | — |
 | Other devices' availability (`subscribe_availability`) | ✓ | — | — | — |
+| Other devices' schemas (`subscribe_schema`) | ✓ | — | — | — |
 
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release; none is on a package registry yet (see
