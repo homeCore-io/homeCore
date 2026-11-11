@@ -21,7 +21,7 @@ fn it_finds_every_variant_the_rule_types_declare() {
         "conditions: {:?}",
         v.tags()["conditions"]
     );
-    assert_eq!(v.actions.len(), 40, "actions: {:?}", v.tags()["actions"]);
+    assert_eq!(v.actions.len(), 42, "actions: {:?}", v.tags()["actions"]);
 }
 
 #[test]

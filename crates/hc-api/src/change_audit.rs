@@ -91,6 +91,10 @@ pub fn change_of(method: &Method, route: &str) -> Option<Change> {
         ("DELETE", "/areas/{id}") => c("area.deleted", "area"),
         ("PUT", "/areas/{id}/devices") => c("area.devices_set", "area"),
         ("POST", "/areas/{id}/merge") => c("area.merged", "area"),
+        // Room on and off are uses, like a scene, but Room off also saves the
+        // room's lights, which is a change worth finding later.
+        ("POST", "/areas/{id}/on") => c("area.lights_on", "area"),
+        ("POST", "/areas/{id}/off") => c("area.lights_off", "area"),
         // Scenes
         ("POST", "/scenes") => c("scene.created", "scene"),
         ("PUT", "/scenes/{id}") => c("scene.updated", "scene"),
@@ -351,6 +355,11 @@ mod tests {
             Some("area.merged")
         );
         assert_eq!(at(Method::POST, "/api/v1/glue"), Some("helper.created"));
+        assert_eq!(
+            at(Method::POST, "/api/v1/areas/{id}/off"),
+            Some("area.lights_off")
+        );
+        assert_eq!(at(Method::GET, "/api/v1/areas/{id}/saved-lights"), None);
         // Reads, uses and tests are not changes.
         assert_eq!(at(Method::GET, "/api/v1/automations/{id}"), None);
         assert_eq!(at(Method::PATCH, "/api/v1/devices/{id}/state"), None);

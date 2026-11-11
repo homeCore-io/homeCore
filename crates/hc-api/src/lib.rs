@@ -54,6 +54,7 @@ pub mod plugin_runtime_handlers;
 pub mod plugin_runtimes;
 pub mod rate_limit;
 pub mod registry;
+pub mod room_lights_handlers;
 pub mod rule_file_store;
 pub mod streaming;
 pub mod ws;
@@ -1325,6 +1326,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route("/areas/{id}/devices", put(handlers::set_area_devices))
         .route("/areas/{id}/merge", post(handlers::merge_area))
+        .route("/areas/{id}/on", post(room_lights_handlers::room_on))
+        .route("/areas/{id}/off", post(room_lights_handlers::room_off))
+        .route(
+            "/areas/{id}/saved-lights",
+            get(room_lights_handlers::saved_lights),
+        )
         // Displays and PINs (H3, H5)
         .route(
             "/displays",

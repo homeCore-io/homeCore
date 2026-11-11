@@ -738,6 +738,49 @@ async fn execute_one(
     result
 }
 
+/// `RoomOn` / `RoomOff`: the room's lights through [`crate::room_lights`],
+/// each command sent as this rule's.
+async fn run_room_lights(ctx: &Arc<ExecutorContext>, name: &str, on: bool) -> Result<()> {
+    let step = if on { "RoomOn" } else { "RoomOff" };
+    let Some(store) = ctx.state.as_ref() else {
+        warn!(rule = %ctx.rule_name, room = name, "action: {step} — no state store");
+        return Ok(());
+    };
+    let Some(room) = crate::rooms::find(store, name).await? else {
+        warn!(rule = %ctx.rule_name, room = name, "action: {step} — no room by that name");
+        return Ok(());
+    };
+    let origin = crate::room_lights::Origin {
+        source: "rule".into(),
+        correlation_id: ctx.correlation_id.clone(),
+    };
+    let outcome = crate::room_lights::switch(
+        store,
+        ctx.event_bus.as_ref(),
+        &room,
+        on,
+        origin,
+        |device_id, command| {
+            let ctx = Arc::clone(ctx);
+            async move {
+                let change = rule_change(&ctx, "rule");
+                publish_device_command(&ctx, &device_id, command, change).await
+            }
+        },
+    )
+    .await?;
+    debug!(
+        rule = %ctx.rule_name,
+        room = %room.name,
+        lights = outcome.lights.len(),
+        scenes = outcome.scenes.len(),
+        snapshot_saved = outcome.snapshot_saved,
+        snapshot_used = outcome.snapshot_used,
+        "action: {step}"
+    );
+    Ok(())
+}
+
 fn run_single_action(
     action: Action,
     ctx: Arc<ExecutorContext>,
@@ -1658,6 +1701,9 @@ fn run_single_action(
                 }
             }
 
+            Action::RoomOn { room } => run_room_lights(&ctx, &room, true).await?,
+            Action::RoomOff { room } => run_room_lights(&ctx, &room, false).await?,
+
             // ── PingHost ──────────────────────────────────────────────────────────
             Action::PingHost {
                 host,
@@ -2408,6 +2454,8 @@ async fn action_description(ctx: Arc<ExecutorContext>, action: &Action) -> Strin
             Some(m) => format!("ignore alerts like that for {m} min"),
             None => "ignore alerts like that".into(),
         },
+        Action::RoomOn { room } => format!("turn on the lights in {room}"),
+        Action::RoomOff { room } => format!("turn off the lights in {room}"),
     }
 }
 
@@ -2453,6 +2501,8 @@ fn action_type_name(action: &Action) -> &'static str {
         Action::AcknowledgeAlert { .. } => "AcknowledgeAlert",
         Action::SkipAlert { .. } => "SkipAlert",
         Action::IgnoreAlerts { .. } => "IgnoreAlerts",
+        Action::RoomOn { .. } => "RoomOn",
+        Action::RoomOff { .. } => "RoomOff",
     }
 }
 
@@ -3260,5 +3310,125 @@ mod picture_tests {
             *kept.lock().unwrap(),
             vec![("Someone at the door".to_string(), None)]
         );
+    }
+}
+
+#[cfg(test)]
+mod room_step_tests {
+    use super::*;
+    use hc_types::device::{Area, DeviceState};
+
+    async fn house() -> (tempfile::TempDir, StateStore, Area) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            dir.path().join("state.redb").to_str().unwrap(),
+            dir.path().join("history.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let (room, _) = crate::rooms::create(&store, None, "Living Room")
+            .await
+            .unwrap();
+        for (id, on) in [("lamp", true), ("ceiling", false)] {
+            let mut d = DeviceState::new(id, id, "plugin.test");
+            d.device_type = Some("light".into());
+            d.area = Some("living_room".into());
+            d.attributes.insert("on".into(), serde_json::json!(on));
+            store.upsert_device(&d).await.unwrap();
+        }
+        (dir, store, room)
+    }
+
+    fn ctx(store: &StateStore) -> (Arc<ExecutorContext>, EventBus) {
+        let bus = EventBus::new(64);
+        let mut ctx = Arc::try_unwrap(ExecutorContext::for_test()).ok().unwrap();
+        ctx.state = Some(store.clone());
+        ctx.event_bus = Some(bus.clone());
+        ctx.rule_name = "Movie time".into();
+        (Arc::new(ctx), bus)
+    }
+
+    #[tokio::test]
+    async fn room_off_in_a_rule_turns_the_room_s_lights_off_and_saves_them() {
+        let (_dir, store, room) = house().await;
+        let (ctx, bus) = ctx(&store);
+        let mut rx = bus.subscribe();
+
+        execute_actions_inner(
+            vec![Action::RoomOff {
+                room: "living room".into(),
+            }],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+
+        let mut commands = Vec::new();
+        let mut announced = false;
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                Event::DeviceCommandSent {
+                    device_id,
+                    command,
+                    source,
+                    ..
+                } => {
+                    assert_eq!(source, "rule");
+                    assert_eq!(command["on"], serde_json::json!(false));
+                    commands.push(device_id);
+                }
+                Event::RoomLightsChanged {
+                    room_id,
+                    on,
+                    snapshot_saved,
+                    source,
+                    ..
+                } => {
+                    assert_eq!(room_id, room.id);
+                    assert!(!on && snapshot_saved);
+                    assert_eq!(source, "rule");
+                    announced = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(commands, vec!["ceiling", "lamp"]);
+        assert!(announced);
+        let saved = store.room_lights_get(room.id).await.unwrap().unwrap();
+        assert!(saved.lights.iter().any(|l| l.device_id == "lamp" && l.on));
+    }
+
+    #[tokio::test]
+    async fn room_on_in_a_rule_finds_the_room_by_id_and_a_missing_room_does_nothing() {
+        let (_dir, store, room) = house().await;
+        let (ctx, bus) = ctx(&store);
+        let mut rx = bus.subscribe();
+
+        execute_actions_inner(
+            vec![
+                Action::RoomOn {
+                    room: "attic".into(),
+                },
+                Action::RoomOn {
+                    room: room.id.to_string(),
+                },
+            ],
+            Arc::clone(&ctx),
+            Arc::new(HashMap::new()),
+            0,
+        )
+        .await
+        .unwrap();
+
+        let mut commands = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Event::DeviceCommandSent { device_id, .. } = e {
+                commands.push(device_id);
+            }
+        }
+        // Nothing saved yet, so every light in the room comes on.
+        assert_eq!(commands, vec!["ceiling", "lamp"]);
     }
 }

@@ -2128,6 +2128,8 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `PingHost` | `host`, `count?`, `timeout_ms?`, `then_actions?`, `else_actions?`, `response_event?` | ICMP ping via system `ping` binary. Runs `then_actions` on success, `else_actions` on failure. Optionally fires a `Custom` event with `{host, reachable, rtt_ms}`. See [Action: PingHost](#action-pinghost). |
 | `CaptureDeviceState` | `key`, `device_ids` | Snapshot current state of listed devices under a named key. Persists across firings. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
 | `RestoreDeviceState` | `key` | Re-publish device states saved by `CaptureDeviceState`. See [Action: CaptureDeviceState / RestoreDeviceState](#action-capturedevicestate--restoredevicestate). |
+| `RoomOff` | `room` | Turn every light in the room off, first saving how they were when at least one is on. See [Action: RoomOn / RoomOff](#action-roomon--roomoff). |
+| `RoomOn` | `room` | Bring the room's lights back as Room off saved them (scenes first), or every light fully on when nothing is saved. See [Action: RoomOn / RoomOff](#action-roomon--roomoff). |
 | `FadeDevice` | `device_id`, `target`, `duration_secs`, `steps?` | Gradually interpolate numeric attributes (`brightness_pct`, `color_temp`, …) to target over `duration_secs`. Non-numeric fields pass through unchanged. See [Action: FadeDevice](#action-fadedevice). |
 | `DelayPerMode` | `modes`, `default_secs?` | Delay for a duration that depends on the active mode. First matching mode wins. `duration_secs = 0` skips the delay. See [Action: DelayPerMode](#action-delaypermode). |
 | `SetHubVariable` | `name`, `value`, `op?` | Write a cross-rule hub variable. Fires `hub_variable_changed` event. Supports all `VariableOp` operators. See [Hub Variables](#hub-variables). |
@@ -3801,9 +3803,15 @@ When Claude (or you) adds a new feature, here is where each piece typically goes
 ## Adding a new action type — checklist
 
 1. Add the variant to `Action` in `crates/hc-types/src/rule.rs`.
-2. Add a match arm in `run_single_action` in `crates/hc-core/src/executor.rs`.
+2. Add a match arm in `run_single_action` in `crates/hc-core/src/executor.rs`,
+   plus its arms in `action_description` and `action_type_name` there.
 3. Add at least one unit test in `executor.rs` — see the existing `RepeatUntil` and `Delay` tests as templates.
-4. Run `cargo test -p hc-core` to verify.
+4. Add an example to `crates/hc-core/tests/rule_corpus/` and a row to the
+   action table above.
+5. Regenerate `docs/rule-vocabulary.json`:
+   `UPDATE_VOCABULARY=1 cargo test -p hc-types --features schema`, and add the
+   variant to the `Action` schema in `docs/openapi.yaml`.
+6. Run `cargo test -p hc-core` to verify.
 
 ---
 
@@ -7741,6 +7749,53 @@ key  = "pre_movie"
 - If a device in `device_ids` is not in the cache at capture time, it is silently skipped.
 - `RestoreDeviceState` warns at log level if the key has never been captured; it does not error.
 - Captured state is the full attribute map — restoring sends the entire map as a command.
+
+---
+
+## Action: RoomOn / RoomOff
+
+Turn every light in a room off and back on again the way it was. The same
+thing runs behind `POST /areas/{id}/off` and `POST /areas/{id}/on`; the code is
+`crates/hc-core/src/room_lights.rs`.
+
+```ron
+RuleAction(action: RoomOff(room: "Living Room")),
+RuleAction(action: Delay(duration_secs: 7200)),
+RuleAction(action: RoomOn(room: "living_room")),
+```
+
+`room` is the room's id, its slug, one of its aliases or its name in any case.
+A room that can't be found logs a warning and the rule carries on.
+
+**A room's lights** are the devices in it (by `area_override`, else `area`)
+whose `device_type` is `light`, plus switches whose `ui_hint` is `light`. Hue
+room and zone groups (`group`) and scenes are not lights.
+
+**Room off** turns every light off. First, if at least one is on, it saves the
+room's lights, replacing whatever was saved before: for each light whether it
+was on, and the `brightness_pct` and one colour it was showing (`color_mode`
+decides; otherwise `color_temp` before `color_xy`), each only when the light
+reported it and its schema marks it writable. It also saves the room's scene
+devices that report `active: true`. When every light is already off, the
+earlier saving is kept.
+
+**Room on** with something saved activates the saved scenes
+(`{"action": "activate"}`), then sends each light that was on its saved
+settings with `"on": true`, except lights a re-activated scene covers. A Hue
+room scene covers the Hue lights on its bridge whose `room_rid` is the scene's
+`group_rid`; a zone scene covers the `light_ids` of the zone's group device,
+which exists only when hc-hue publishes grouped lights. When coverage can't be
+told (another plugin's scene, an unpublished zone), every saved light is sent
+after the scenes. Lights saved as off are left alone. With nothing saved,
+every light goes on at `brightness_pct: 100` (or just `"on": true` where
+brightness isn't writable).
+
+The saving is per room in redb (`room_lights` table), survives a restart, and
+stays after Room on. Deleting a room deletes it; merging a room folds it into
+the other room's. `GET /areas/{id}/saved-lights` shows it.
+
+Both raise `room_lights_changed` with the room, the lights and scenes
+commanded, `snapshot_saved`, `snapshot_used` and `source` (`rule` or `api`).
 
 ---
 

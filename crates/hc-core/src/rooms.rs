@@ -146,6 +146,28 @@ pub async fn get(store: &StateStore, id: Uuid) -> Result<Option<Area>> {
     Ok(list(store).await?.into_iter().find(|r| r.id == id))
 }
 
+/// The room someone means by `name`: its id, its slug, one of its aliases, or
+/// its name in any case. A rule names a room however its author thought of it.
+pub async fn find(store: &StateStore, name: &str) -> Result<Option<Area>> {
+    let rooms = list(store).await?;
+    Ok(pick(rooms, name))
+}
+
+fn pick(rooms: Vec<Area>, name: &str) -> Option<Area> {
+    let name = name.trim();
+    if let Ok(id) = Uuid::parse_str(name) {
+        if let Some(room) = rooms.iter().find(|r| r.id == id) {
+            return Some(room.clone());
+        }
+    }
+    let wanted = slug(name);
+    rooms
+        .iter()
+        .find(|r| r.answers_to(&wanted))
+        .or_else(|| rooms.iter().find(|r| r.name.eq_ignore_ascii_case(name)))
+        .cloned()
+}
+
 async fn announce(store: &StateStore, bus: Option<&EventBus>, id: Uuid) -> Result<Area> {
     let room = get(store, id)
         .await?
@@ -440,6 +462,13 @@ pub async fn merge(
     let mut target = store.get_area(into).await?.ok_or(RoomError::NotFound)?;
 
     repoint(store, &from, &target.slug.clone()).await?;
+    // The merged room's lights are the other room's now, and so is what
+    // Room off saved of them.
+    if let Some(saved) = store.room_lights_get(id).await? {
+        let kept = store.room_lights_get(into).await?;
+        let combined = crate::room_lights::combine(kept, saved, into);
+        store.room_lights_put(&combined).await?;
+    }
     for s in std::iter::once(&from.slug).chain(from.aliases.iter()) {
         if *s != target.slug && !target.aliases.contains(s) {
             target.aliases.push(s.clone());
@@ -718,5 +747,78 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A rule names a room by id, slug, an old name, or its name as shown.
+    #[tokio::test]
+    async fn a_room_is_found_by_id_slug_alias_or_name() {
+        let (_dir, store) = store().await;
+        let (room, _) = create(&store, None, "Tv room").await.unwrap();
+        let room = rename(&store, None, room.id, "Family Den").await.unwrap();
+        create(&store, None, "Office").await.unwrap();
+
+        for name in [
+            room.id.to_string(),
+            "family_den".to_string(),
+            "tv_room".to_string(),
+            "Family Den".to_string(),
+            "family den".to_string(),
+            " Tv Room ".to_string(),
+        ] {
+            let found = find(&store, &name).await.unwrap();
+            assert_eq!(found.map(|r| r.id), Some(room.id), "{name}");
+        }
+        assert!(find(&store, "garage").await.unwrap().is_none());
+        assert!(find(&store, &Uuid::new_v4().to_string())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    fn saved(room_id: Uuid, light: &str) -> hc_types::device::RoomLightsSnapshot {
+        hc_types::device::RoomLightsSnapshot {
+            room_id,
+            saved_at: Utc::now(),
+            lights: vec![hc_types::device::SavedLight {
+                device_id: light.into(),
+                on: true,
+                settings: Default::default(),
+            }],
+            scenes: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_room_takes_its_saved_lights_with_it() {
+        let (_dir, store) = store().await;
+        let (room, _) = create(&store, None, "Den").await.unwrap();
+        store
+            .room_lights_put(&saved(room.id, "lamp"))
+            .await
+            .unwrap();
+        delete(&store, None, room.id).await.unwrap();
+        assert!(store.room_lights_get(room.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_merged_room_s_saved_lights_join_the_other_room_s() {
+        let (_dir, store) = store().await;
+        let (lounge, _) = create(&store, None, "Lounge").await.unwrap();
+        let (living, _) = create(&store, None, "Living Room").await.unwrap();
+        store
+            .room_lights_put(&saved(lounge.id, "bulb"))
+            .await
+            .unwrap();
+        store
+            .room_lights_put(&saved(living.id, "lamp"))
+            .await
+            .unwrap();
+        merge(&store, None, lounge.id, living.id).await.unwrap();
+
+        assert!(store.room_lights_get(lounge.id).await.unwrap().is_none());
+        let kept = store.room_lights_get(living.id).await.unwrap().unwrap();
+        assert_eq!(kept.room_id, living.id);
+        let lights: Vec<&str> = kept.lights.iter().map(|l| l.device_id.as_str()).collect();
+        assert_eq!(lights, vec!["lamp", "bulb"]);
     }
 }

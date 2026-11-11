@@ -21,6 +21,7 @@ pub mod glue;
 pub mod household;
 pub mod mode_manager;
 pub mod pictures;
+pub mod room_lights;
 pub mod rooms;
 pub mod rule_loader;
 pub mod rule_resolver;

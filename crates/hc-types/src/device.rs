@@ -258,7 +258,13 @@ pub fn extract_change_from_state_payload(payload: &JsonValue) -> Option<DeviceCh
 ///
 /// The `attributes` map holds all device-specific key/value pairs described
 /// by the device's capability schema (e.g. `"on"`, `"brightness"`, `"color_temp"`).
+///
+/// On the wire it also carries `room`, the slug [`DeviceState::effective_area`]
+/// returns, so a client can group devices without knowing which of `area` and
+/// `area_override` wins. It is worked out on every write and ignored on read:
+/// a stored record that carries it loads the same as one that does not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct DeviceState {
     /// Stable, unique identifier assigned at plugin registration time.
     pub device_id: String,
@@ -459,6 +465,43 @@ impl DeviceState {
     }
 }
 
+/// The derived fields plus `room`. The derive above is `remote = "Self"`, so
+/// it writes inherent `DeviceState::serialize` and `DeviceState::deserialize`
+/// functions; these trait impls wrap them, which keeps every field's serde
+/// attributes in one place.
+impl Serialize for DeviceState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Fields<'a>(&'a DeviceState);
+        impl Serialize for Fields<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                DeviceState::serialize(self.0, serializer)
+            }
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(flatten)]
+            fields: Fields<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            room: Option<&'a str>,
+        }
+
+        Wire {
+            fields: Fields(self),
+            room: self.effective_area(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Reads the derived fields. An incoming `room` is dropped like any other
+/// unknown key, so it can never disagree with `area` and `area_override`.
+impl<'de> Deserialize<'de> for DeviceState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        DeviceState::deserialize(deserializer)
+    }
+}
+
 /// The [`DeviceState`] fields a state report moves. Everything else is
 /// metadata — see [`DeviceState::same_metadata`].
 const STATE_FIELDS: &[&str] = &[
@@ -533,6 +576,37 @@ impl Area {
     pub fn answers_to(&self, slug: &str) -> bool {
         !slug.is_empty() && (self.slug == slug || self.aliases.iter().any(|a| a == slug))
     }
+}
+
+/// How a room's lights were when Room off last turned them off, so Room on
+/// can bring them back.
+///
+/// Kept apart from [`Area`] because an `Area` goes out whole in every room
+/// event and in `GET /areas`, and this is nobody's business but Room on's.
+/// Stored by the room's id; one per room, replaced by the next Room off that
+/// finds a light on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomLightsSnapshot {
+    pub room_id: Uuid,
+    pub saved_at: DateTime<Utc>,
+    /// Every light the room had, on or off.
+    pub lights: Vec<SavedLight>,
+    /// Scene devices in the room that were showing when it was saved. Room on
+    /// activates them before it restores any light.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<String>,
+}
+
+/// One light in a [`RoomLightsSnapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedLight {
+    pub device_id: String,
+    pub on: bool,
+    /// What to send back with `on`: `brightness_pct` and one of `color_temp`
+    /// or `color_xy`, each only when the light reported it and its schema
+    /// lets it be written.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub settings: serde_json::Map<String, JsonValue>,
 }
 
 /// Where a room's name came from.
@@ -615,6 +689,46 @@ mod tests {
         let obj = wire.as_object().unwrap();
         assert!(!obj.contains_key("area"), "area should be absent, not null");
         assert!(!obj.contains_key("area_override"));
+    }
+
+    /// `room` is the slug a client should group by: the override when there
+    /// is one, otherwise the plugin's area, and absent when neither is set.
+    #[test]
+    fn room_is_the_effective_area() {
+        let mut d = DeviceState::new("dev_1", "Lamp", "plugin.test");
+        let wire = serde_json::to_value(&d).unwrap();
+        assert!(!wire.as_object().unwrap().contains_key("room"));
+
+        d.area = Some("kitchen".into());
+        let wire = serde_json::to_value(&d).unwrap();
+        assert_eq!(wire["room"], json!("kitchen"));
+        assert_eq!(wire["area"], json!("kitchen"));
+
+        d.area_override = Some("den".into());
+        let wire = serde_json::to_value(&d).unwrap();
+        assert_eq!(wire["room"], json!("den"));
+        assert_eq!(wire["area"], json!("kitchen"));
+        assert_eq!(wire["area_override"], json!("den"));
+    }
+
+    /// `room` is worked out, never read. A stored record carrying a stale one
+    /// loads by its `area` alone.
+    #[test]
+    fn a_stored_room_is_ignored_on_read() {
+        let mut d = DeviceState::new("dev_1", "Lamp", "plugin.test");
+        d.area = Some("kitchen".into());
+        let mut wire = serde_json::to_value(&d).unwrap();
+        wire["room"] = json!("garage");
+
+        let back: DeviceState = serde_json::from_value(wire).expect("loads");
+        assert_eq!(back.effective_area(), Some("kitchen"));
+        let text = serde_json::to_string(&back).unwrap();
+        let again: DeviceState = serde_json::from_str(&text).unwrap();
+        assert_eq!(again.area.as_deref(), Some("kitchen"));
+        assert_eq!(
+            serde_json::to_value(&again).unwrap()["room"],
+            json!("kitchen")
+        );
     }
 
     /// Both spellings still read back the same, so a client written against
