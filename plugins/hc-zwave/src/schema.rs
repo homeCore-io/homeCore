@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use crate::translator::Translator;
 use crate::types::NodeState;
 use plugin_sdk_rs::device_actions::{with_actions, Action, Param, Role};
+use plugin_sdk_rs::types::temperature;
 use std::collections::BTreeMap;
 
 /// The unit for a canonical attribute, where the alias table fixes one.
@@ -268,6 +269,13 @@ pub fn node_schema(
     }
     let mut schema = schema_for_state(node.node_id, obj, translator);
     let a = &mut schema.attributes;
+    // An unmapped setpoint or temperature is published in °C; say so.
+    for name in translator.synthetic_temperatures(node) {
+        if let Some(attr) = a.get_mut(&name) {
+            attr.kind = AttributeKind::Float;
+            attr.unit = Some(temperature::CELSIUS.into());
+        }
+    }
     a.insert(
         "last_command_error".into(),
         diagnostic(
