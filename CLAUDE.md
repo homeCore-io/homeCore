@@ -206,8 +206,10 @@ Each plugin registers its devices with a JSON Schema document describing attribu
 
 **Shared names and units** — `brightness_pct` 0–100, `color_temp` kelvin,
 `transition_ms`, temperatures in °C and the rest — are defined once in
-`crates/hc-types/src/device_vocabulary.rs`. Plugins convert to them; nothing
-downstream converts.
+`crates/hc-types/src/device_vocabulary.rs`. Plugins convert to them. Core
+converts a stray °F or K reading to °C at ingest as a safety net and flags it
+as a vocabulary finding (`crates/hc-core/src/unit_ingest.rs`). A cross-device
+plugin such as hc-thermostat checks its source's declared unit itself.
 
 ---
 

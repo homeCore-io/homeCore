@@ -45,6 +45,10 @@ pub const JUSTIFIED_OMISSIONS: &[&str] = &[
     // Does nothing without `dist_path`, so a switch for it in the form was a
     // switch that did nothing. Set both in homecore.toml to serve a UI.
     "web_admin.enabled",
+    // Owned by the System screen, through PUT /system/temperature-unit, which
+    // takes effect at once and can leave it unset; a form here would show °C
+    // for a household that never chose, and change nothing until a restart.
+    "location.temperature_unit",
 ];
 
 /// The descriptor for `homecore.toml`.
@@ -192,8 +196,6 @@ fn location() -> Section {
                 .help("IANA name, e.g. America/New_York.")
                 .placeholder("America/New_York"),
         )
-    // `temperature_unit` is left out: it's set at once through
-    // PUT /system/temperature-unit, and a form here would show °C while unset.
 }
 
 fn auth() -> Section {
