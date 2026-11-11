@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use hc_auth::User;
-use hc_types::device::{Area, DeviceState};
+use hc_types::device::{Area, DeviceState, RoomLightsSnapshot};
 use hc_types::event::Event;
 use hc_types::rule::{Rule, Scene};
 use redb::Database;
@@ -25,6 +25,7 @@ pub mod history;
 pub mod plugin_runtime_store;
 pub mod plugin_state_store;
 pub mod refresh_token_store;
+pub mod room_lights_store;
 pub mod rule_store;
 pub mod schema_store;
 pub mod user_store;
@@ -37,6 +38,7 @@ use device_store::{DeviceStore, DeviceWrite};
 use history::HistoryStore;
 use plugin_state_store::PluginStateStore;
 use refresh_token_store::RefreshTokenStore;
+use room_lights_store::RoomLightsStore;
 use rule_store::RuleStore;
 use schema_store::SchemaStore;
 use user_store::UserStore;
@@ -64,6 +66,7 @@ pub struct StateStore {
     alert_rules: Arc<AlertRuleStore>,
     plugin_state: Arc<PluginStateStore>,
     plugin_runtimes: Arc<PluginRuntimeStore>,
+    room_lights: Arc<RoomLightsStore>,
     /// Where changes to the house's catalogue are announced. See [`on_change`].
     ///
     /// [`on_change`]: StateStore::on_change
@@ -133,6 +136,7 @@ impl StateStore {
             alert_rules,
             plugin_state,
             plugin_runtimes,
+            room_lights,
         ) = tokio::task::spawn_blocking(move || {
             // Ensure parent directories exist before opening databases.
             if let Some(parent) = std::path::Path::new(&state_path).parent() {
@@ -170,6 +174,7 @@ impl StateStore {
             let alert_rules = AlertRuleStore::new(Arc::clone(&db))?;
             let plugin_state = PluginStateStore::new(Arc::clone(&db))?;
             let plugin_runtimes = PluginRuntimeStore::new(Arc::clone(&db))?;
+            let room_lights = RoomLightsStore::new(Arc::clone(&db))?;
             Ok::<_, anyhow::Error>((
                 devices,
                 rules,
@@ -183,6 +188,7 @@ impl StateStore {
                 alert_rules,
                 plugin_state,
                 plugin_runtimes,
+                room_lights,
             ))
         })
         .await??;
@@ -200,6 +206,7 @@ impl StateStore {
             alert_rules: Arc::new(alert_rules),
             plugin_state: Arc::new(plugin_state),
             plugin_runtimes: Arc::new(plugin_runtimes),
+            room_lights: Arc::new(room_lights),
             changes: Arc::new(OnceLock::new()),
         })
     }
@@ -679,12 +686,36 @@ impl StateStore {
 
     pub async fn delete_area(&self, id: Uuid) -> Result<bool> {
         let store = Arc::clone(&self.rules);
-        tokio::task::spawn_blocking(move || store.delete_area(id)).await?
+        let removed = tokio::task::spawn_blocking(move || store.delete_area(id)).await??;
+        // A room's saved lights go with it.
+        self.room_lights_delete(id).await?;
+        Ok(removed)
     }
 
     pub async fn list_areas(&self) -> Result<Vec<Area>> {
         let store = Arc::clone(&self.rules);
         tokio::task::spawn_blocking(move || store.list_areas()).await?
+    }
+
+    // --- Room lights (what Room off saved) ---
+
+    /// What Room off last saved for a room, if anything.
+    pub async fn room_lights_get(&self, room_id: Uuid) -> Result<Option<RoomLightsSnapshot>> {
+        let store = Arc::clone(&self.room_lights);
+        tokio::task::spawn_blocking(move || store.get(room_id)).await?
+    }
+
+    /// Replace a room's saved lights.
+    pub async fn room_lights_put(&self, snapshot: &RoomLightsSnapshot) -> Result<()> {
+        let store = Arc::clone(&self.room_lights);
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || store.put(&snapshot)).await?
+    }
+
+    /// Forget a room's saved lights. Returns whether there were any.
+    pub async fn room_lights_delete(&self, room_id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.room_lights);
+        tokio::task::spawn_blocking(move || store.delete(room_id)).await?
     }
 
     // --- History ---

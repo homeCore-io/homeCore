@@ -578,6 +578,37 @@ impl Area {
     }
 }
 
+/// How a room's lights were when Room off last turned them off, so Room on
+/// can bring them back.
+///
+/// Kept apart from [`Area`] because an `Area` goes out whole in every room
+/// event and in `GET /areas`, and this is nobody's business but Room on's.
+/// Stored by the room's id; one per room, replaced by the next Room off that
+/// finds a light on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomLightsSnapshot {
+    pub room_id: Uuid,
+    pub saved_at: DateTime<Utc>,
+    /// Every light the room had, on or off.
+    pub lights: Vec<SavedLight>,
+    /// Scene devices in the room that were showing when it was saved. Room on
+    /// activates them before it restores any light.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<String>,
+}
+
+/// One light in a [`RoomLightsSnapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedLight {
+    pub device_id: String,
+    pub on: bool,
+    /// What to send back with `on`: `brightness_pct` and one of `color_temp`
+    /// or `color_xy`, each only when the light reported it and its schema
+    /// lets it be written.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub settings: serde_json::Map<String, JsonValue>,
+}
+
 /// Where a room's name came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -694,7 +725,10 @@ mod tests {
         let text = serde_json::to_string(&back).unwrap();
         let again: DeviceState = serde_json::from_str(&text).unwrap();
         assert_eq!(again.area.as_deref(), Some("kitchen"));
-        assert_eq!(serde_json::to_value(&again).unwrap()["room"], json!("kitchen"));
+        assert_eq!(
+            serde_json::to_value(&again).unwrap()["room"],
+            json!("kitchen")
+        );
     }
 
     /// Both spellings still read back the same, so a client written against
