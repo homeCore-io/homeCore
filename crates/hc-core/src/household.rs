@@ -11,14 +11,21 @@ use std::sync::RwLock;
 
 // A `RwLock` rather than a `OnceLock` so the API can change it while running,
 // the same way `hc_time` keeps the configured zone.
-static TEMPERATURE_UNIT: RwLock<TemperatureUnit> = RwLock::new(TemperatureUnit::Celsius);
+static TEMPERATURE_UNIT: RwLock<Option<TemperatureUnit>> = RwLock::new(None);
 
 /// The household's temperature unit; °C until set.
 pub fn temperature_unit() -> TemperatureUnit {
+    chosen_temperature_unit().unwrap_or_default()
+}
+
+/// The unit the household chose, or `None` if nobody has. An app reads
+/// this to know whether to fall back to the browser's language instead.
+pub fn chosen_temperature_unit() -> Option<TemperatureUnit> {
     TEMPERATURE_UNIT.read().map(|g| *g).unwrap_or_default()
 }
 
-pub fn set_temperature_unit(unit: TemperatureUnit) {
+/// Set the household's unit, or `None` to go back to unset.
+pub fn set_temperature_unit(unit: Option<TemperatureUnit>) {
     if let Ok(mut g) = TEMPERATURE_UNIT.write() {
         *g = unit;
     }
@@ -38,6 +45,7 @@ mod tests {
     #[test]
     fn text_is_celsius_until_the_household_says_otherwise() {
         assert_eq!(temperature_unit(), TemperatureUnit::Celsius);
+        assert_eq!(chosen_temperature_unit(), None);
         assert_eq!(format_temperature(20.0), "20 °C");
         assert_eq!(TemperatureUnit::Fahrenheit.format(20.0), "68 °F");
     }

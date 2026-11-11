@@ -8559,9 +8559,14 @@ pub async fn put_system_config(
 ///
 /// The household's temperature unit (`"°C"` or `"°F"`): what server-side
 /// text shows a temperature in, and what an app can fall back to before a
-/// person picks their own. Any signed-in user may read it.
+/// person picks their own. `chosen` is false while nobody has set it; the
+/// unit is then °C for core's own text, and an app goes by the browser.
+/// Any signed-in user may read it.
 pub async fn get_temperature_unit(AuthUser(_claims): AuthUser) -> impl IntoResponse {
-    Json(json!({ "temperature_unit": hc_core::household::temperature_unit() }))
+    Json(json!({
+        "temperature_unit": hc_core::household::temperature_unit(),
+        "chosen": hc_core::household::chosen_temperature_unit().is_some(),
+    }))
 }
 
 /// `PUT /api/v1/system/temperature-unit` — `{"temperature_unit": "°F"}`.
@@ -8569,6 +8574,7 @@ pub async fn get_temperature_unit(AuthUser(_claims): AuthUser) -> impl IntoRespo
 /// Admin-only. Takes effect at once and is written to `[location]` in
 /// homecore.toml, so it survives a restart. `"C"`, `"F"`, `"celsius"` and
 /// `"fahrenheit"` are read too; the answer always spells it `°C` / `°F`.
+/// `null` takes the setting out, back to unset.
 pub async fn put_temperature_unit(
     State(s): State<AppState>,
     AuthUser(claims): AuthUser,
@@ -8581,11 +8587,14 @@ pub async fn put_temperature_unit(
         )
             .into_response();
     }
-    let Some(unit) = body
-        .get("temperature_unit")
-        .and_then(Value::as_str)
-        .and_then(hc_types::temperature::TemperatureUnit::parse)
-    else {
+    let unit = match body.get("temperature_unit") {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(u)) => hc_types::temperature::TemperatureUnit::parse(u)
+            .map(Some)
+            .ok_or(()),
+        _ => Err(()),
+    };
+    let Ok(unit) = unit else {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": "`temperature_unit` must be \"°C\" or \"°F\"" })),
@@ -8607,7 +8616,7 @@ pub async fn put_temperature_unit(
         .and_then(|current| {
             crate::config_writer::apply_section_patch(
                 &current,
-                &json!({ "location": { "temperature_unit": unit.symbol() } }),
+                &json!({ "location": { "temperature_unit": unit.map(|u| u.symbol()) } }),
             )
             .map_err(|e| format!("patch failed: {e}"))
         })
@@ -8623,14 +8632,21 @@ pub async fn put_temperature_unit(
             .into_response();
     }
     hc_core::household::set_temperature_unit(unit);
-    tracing::info!(unit = unit.symbol(), "Household temperature unit changed");
+    tracing::info!(
+        unit = unit.map_or("unset", |u| u.symbol()),
+        "Household temperature unit changed"
+    );
 
     let mut e = audit::entry_from_claims(&claims, "system.temperature_unit_updated")
         .with_target("config", "location.temperature_unit");
     e.detail = json!({ "temperature_unit": unit });
     audit::emit(&s, e).await;
 
-    Json(json!({ "temperature_unit": unit })).into_response()
+    Json(json!({
+        "temperature_unit": hc_core::household::temperature_unit(),
+        "chosen": unit.is_some(),
+    }))
+    .into_response()
 }
 
 /// `POST /api/v1/system/restart`
@@ -9873,6 +9889,7 @@ mod temperature_unit_tests {
         let (st, body) = call(&app, "GET", &kid, Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["temperature_unit"], json!("°C"));
+        assert_eq!(body["chosen"], json!(false));
 
         let (st, _) = call(&app, "PUT", &kid, json!({"temperature_unit": "°F"})).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
@@ -9883,6 +9900,7 @@ mod temperature_unit_tests {
         let (st, body) = call(&app, "PUT", &admin, json!({"temperature_unit": "F"})).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["temperature_unit"], json!("°F"));
+        assert_eq!(body["chosen"], json!(true));
         assert_eq!(
             hc_core::household::temperature_unit(),
             TemperatureUnit::Fahrenheit
@@ -9893,6 +9911,13 @@ mod temperature_unit_tests {
 
         let (_, body) = call(&app, "GET", &kid, Value::Null).await;
         assert_eq!(body["temperature_unit"], json!("°F"));
-        hc_core::household::set_temperature_unit(TemperatureUnit::Celsius);
+
+        // Back to unset: the line leaves homecore.toml.
+        let (st, body) = call(&app, "PUT", &admin, json!({"temperature_unit": null})).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["chosen"], json!(false));
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(!written.contains("temperature_unit"), "{written}");
+        hc_core::household::set_temperature_unit(None);
     }
 }

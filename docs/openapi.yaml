@@ -7684,8 +7684,9 @@ paths:
         `°C` or `°F`: what server-side text (notifications, alert messages)
         shows a temperature in, and what an app can use before a person picks
         their own. Devices, rules and history keep °C whatever this says. Set
-        by `[location].temperature_unit` in homecore.toml; °C when unset. Any
-        signed-in user may read it.
+        by `[location].temperature_unit` in homecore.toml. While unset,
+        `chosen` is false and the unit is °C for core's own text; an app then
+        goes by the browser's language. Any signed-in user may read it.
       tags: [system]
       security:
         - bearerAuth: []
@@ -7705,7 +7706,8 @@ paths:
         Admin only. Takes effect at once and is written to
         `[location].temperature_unit` in homecore.toml, so it survives a
         restart. `C`, `F`, `celsius` and `fahrenheit` are accepted too; the
-        answer always spells it `°C` or `°F`.
+        answer always spells it `°C` or `°F`. `null` takes the setting
+        out, back to unset.
       tags: [system]
       security:
         - bearerAuth: []
@@ -7714,7 +7716,12 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TemperatureUnit"
+              type: object
+              required: [temperature_unit]
+              properties:
+                temperature_unit:
+                  type: [string, "null"]
+                  enum: ["°C", "°F", null]
             example: { temperature_unit: "°F" }
       responses:
         "200":
@@ -8668,12 +8675,15 @@ components:
   schemas:
     TemperatureUnit:
       type: object
-      required: [temperature_unit]
+      required: [temperature_unit, chosen]
       properties:
         temperature_unit:
           type: string
           enum: ["°C", "°F"]
           example: "°F"
+        chosen:
+          type: boolean
+          description: Whether the household set it; false means unset, shown as °C
 
     RuntimeCapabilities:
       type: object

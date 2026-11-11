@@ -470,7 +470,7 @@ async fn main() -> Result<()> {
     // The household's temperature unit, for server-side text. °C if unset.
     if let Some(unit) = config.location.temperature_unit.as_deref() {
         match hc_types::temperature::TemperatureUnit::parse(unit) {
-            Some(u) => hc_core::household::set_temperature_unit(u),
+            Some(u) => hc_core::household::set_temperature_unit(Some(u)),
             None => warn!(
                 unit,
                 "[location].temperature_unit is not °C or °F; using °C"
