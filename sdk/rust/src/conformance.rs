@@ -79,8 +79,10 @@ impl Findings {
 ///   that carries no `category` is declared as primary as the reading it sits
 ///   beside.
 /// - **A range is a range.** `min` above `max` draws a slider that cannot move.
+/// - **Temperatures are °C.** See [`check_temperatures`].
 pub fn check_device_schema(schema: &DeviceSchema) -> Findings {
     let mut f = Findings::default();
+    f.merge(check_temperatures(schema));
 
     for (name, attr) in &schema.attributes {
         if name.contains('.') {
@@ -163,6 +165,27 @@ pub fn check_device_schema(schema: &DeviceSchema) -> Findings {
         }
     }
 
+    f
+}
+
+/// Check that every temperature is declared in °C.
+///
+/// A temperature is a number named like one (`temperature`, `heat_setpoint`,
+/// anything `_temperature` or `_setpoint`, the `temp_*` limits) or one that
+/// declares a temperature unit. homeCore keeps every temperature in °C, so one
+/// with no unit leaves a client guessing, and one in °F is converted by core
+/// as it arrives, with a finding. Declare it with
+/// [`AttributeSchema::temperature`] or `.celsius()`.
+///
+/// [`AttributeSchema::temperature`]: crate::types::schema::AttributeSchema::temperature
+pub fn check_temperatures(schema: &DeviceSchema) -> Findings {
+    let mut f = Findings::default();
+    for (name, unit) in hc_types::temperature::not_celsius(schema) {
+        match unit {
+            None => f.push(format!("temperature `{name}` declares no unit; it is °C")),
+            Some(u) => f.push(format!("temperature `{name}` is declared in {u}; it is °C")),
+        }
+    }
     f
 }
 
@@ -321,6 +344,25 @@ mod tests {
         let f = check_device_schema(&schema(vec![("battery_pct", battery)]));
         assert_eq!(f.iter().count(), 1);
         assert!(f.iter().next().unwrap().contains("housekeeping"));
+    }
+
+    #[test]
+    fn a_temperature_without_celsius_is_caught() {
+        let mut f_unit = AttributeSchema::read_only(AttributeKind::Float);
+        f_unit.unit = Some("°F".into());
+        let f = check_device_schema(&schema(vec![
+            ("temperature", AttributeSchema::temperature()),
+            (
+                "floor_temperature",
+                AttributeSchema::read_only(AttributeKind::Float),
+            ),
+            ("dewpoint", f_unit),
+        ]));
+        assert_eq!(f.iter().count(), 2, "{f:?}");
+        assert!(f
+            .iter()
+            .any(|m| m.contains("`floor_temperature` declares no unit")));
+        assert!(f.iter().any(|m| m.contains("`dewpoint` is declared in °F")));
     }
 
     #[test]

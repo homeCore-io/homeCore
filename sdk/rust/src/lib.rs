@@ -50,9 +50,11 @@ pub mod types {
     // this module exists to avoid — and 0.3.7 shipped the handle without it,
     // making the feature uncallable.
     pub use hc_types::schema;
+    // Which attributes are temperatures, and the °C helpers.
     pub use hc_types::schema::{
         AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
     };
+    pub use hc_types::temperature;
     pub use hc_types::{NoticeLevel, PluginNotice};
     // Alerts about a plugin's devices (and itself): declared on the manifest
     // with `ManagementHandle::with_alert_kinds`, published with
