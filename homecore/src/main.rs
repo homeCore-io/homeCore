@@ -467,6 +467,17 @@ async fn main() -> Result<()> {
 
     info!(base = %base_dir.display(), config = %config_path.display(), "HomeCore starting");
 
+    // The household's temperature unit, for server-side text. °C if unset.
+    if let Some(unit) = config.location.temperature_unit.as_deref() {
+        match hc_types::temperature::TemperatureUnit::parse(unit) {
+            Some(u) => hc_core::household::set_temperature_unit(u),
+            None => warn!(
+                unit,
+                "[location].temperature_unit is not °C or °F; using °C"
+            ),
+        }
+    }
+
     // Log core's own SDK protocol version at startup. Plugins emit their
     // SDK version on heartbeat (component_versioning Phase B); state_bridge
     // compares incoming heartbeats against this `core_compat_version` and

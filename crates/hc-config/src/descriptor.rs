@@ -192,6 +192,18 @@ fn location() -> Section {
                 .help("IANA name, e.g. America/New_York.")
                 .placeholder("America/New_York"),
         )
+        .field(
+            Field::enumeration("location.temperature_unit")
+                .label("Temperature unit")
+                .render("segmented")
+                .help(
+                    "What notifications and alert messages show temperatures in. \
+                     Devices and rules keep °C; each person can still choose their own in the app.",
+                )
+                .option("°C", "°C")
+                .option("°F", "°F")
+                .default("°C"),
+        )
 }
 
 fn auth() -> Section {

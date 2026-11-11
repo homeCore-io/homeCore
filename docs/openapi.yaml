@@ -7676,6 +7676,61 @@ paths:
   # ---------------------------------------------------------------------------
   # System
   # ---------------------------------------------------------------------------
+  /system/temperature-unit:
+    get:
+      operationId: getTemperatureUnit
+      summary: The household's temperature unit
+      description: |
+        `°C` or `°F`: what server-side text (notifications, alert messages)
+        shows a temperature in, and what an app can use before a person picks
+        their own. Devices, rules and history keep °C whatever this says. Set
+        by `[location].temperature_unit` in homecore.toml; °C when unset. Any
+        signed-in user may read it.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The unit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemperatureUnit"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      operationId: putTemperatureUnit
+      summary: Change the household's temperature unit
+      description: |
+        Admin only. Takes effect at once and is written to
+        `[location].temperature_unit` in homecore.toml, so it survives a
+        restart. `C`, `F`, `celsius` and `fahrenheit` are accepted too; the
+        answer always spells it `°C` or `°F`.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemperatureUnit"
+            example: { temperature_unit: "°F" }
+      responses:
+        "200":
+          description: The unit now in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemperatureUnit"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Not °C or °F
+        "503":
+          description: Core was started without a config file to write to
   /system/vocabulary-check:
     get:
       operationId: getVocabularyCheck
@@ -7811,6 +7866,10 @@ paths:
                   timezone:
                     type: string
                     description: Configured IANA timezone (e.g. `America/New_York`)
+                  temperature_unit:
+                    type: string
+                    enum: ["°C", "°F"]
+                    description: The household's temperature unit; see `/system/temperature-unit`
                   last_backup_at:
                     type: [string, "null"]
                     format: date-time
@@ -8607,6 +8666,15 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    TemperatureUnit:
+      type: object
+      required: [temperature_unit]
+      properties:
+        temperature_unit:
+          type: string
+          enum: ["°C", "°F"]
+          example: "°F"
+
     RuntimeCapabilities:
       type: object
       description: |

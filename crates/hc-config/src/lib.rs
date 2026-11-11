@@ -664,6 +664,13 @@ pub struct LocationSection {
     /// without reading the source.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// The household's temperature unit, `"°C"` or `"°F"` (`"C"`, `"F"`,
+    /// `"celsius"`, `"fahrenheit"` are read too). What server-side text —
+    /// notifications, alert messages — shows a temperature in. Devices and
+    /// rules stay °C; a person's own setting in the app still wins there.
+    /// Unset or unreadable is °C, and an unreadable value is logged at startup.
+    #[serde(default)]
+    pub temperature_unit: Option<String>,
 }
 
 impl Default for LocationSection {
@@ -672,6 +679,7 @@ impl Default for LocationSection {
             latitude: 38.9072,
             longitude: -77.0369,
             timezone: None,
+            temperature_unit: None,
         }
     }
 }

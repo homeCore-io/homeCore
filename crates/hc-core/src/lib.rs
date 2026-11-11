@@ -18,6 +18,7 @@ pub mod device_naming;
 pub mod engine;
 pub mod executor;
 pub mod glue;
+pub mod household;
 pub mod mode_manager;
 pub mod pictures;
 pub mod rooms;
