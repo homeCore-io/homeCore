@@ -9569,6 +9569,8 @@ components:
         | `Parallel` | `actions` (array — run concurrently) |
         | `RepeatUntil` | `condition` (Rhai bool), `actions`, `max_iterations?`, `interval_ms?` |
         | `Conditional` | `condition` — a Rhai bool expression (string) or a `Condition` (object, `if_checks`), `then_actions`, `else_if` (`[{condition, actions}]`), `else_actions` |
+        | `RoomOn` | `room` — id, slug, alias or name. Brings back what Room off saved, or every light fully on |
+        | `RoomOff` | `room`. Saves the room's lights when one is on, then turns them all off |
 
         For device-targeting actions, prefer `device` in authored rules so the
         automation remains readable and stable across plugin-specific ID
@@ -9577,7 +9579,7 @@ components:
       properties:
         type:
           type: string
-          enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil]
+          enum: [SetDeviceState, PublishMqtt, CallService, FireEvent, RunScript, Notify, Delay, Parallel, RepeatUntil, RoomOn, RoomOff]
         device:
           type: string
         device_id:
@@ -9618,6 +9620,9 @@ components:
           default: 100
         interval_ms:
           type: integer
+        room:
+          type: string
+          description: The room for `RoomOn` and `RoomOff`, by id, slug, alias or name
         actions:
           type: array
           items:

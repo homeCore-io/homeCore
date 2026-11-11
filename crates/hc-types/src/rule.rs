@@ -1101,6 +1101,23 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// Turn a room's lights back on the way Room off left them: its saved
+    /// scenes, then each saved light that was on. With nothing saved, every
+    /// light in the room goes fully on.
+    ///
+    /// `room` is the room's id, slug, an alias or its name.
+    ///
+    /// ```ron
+    /// (enabled: true, action: RoomOn(room: "Living Room"))
+    /// ```
+    RoomOn { room: String },
+    /// Turn every light in a room off, first saving how they were (when at
+    /// least one is on) for Room on to bring back.
+    ///
+    /// ```ron
+    /// (enabled: true, action: RoomOff(room: "living_room"))
+    /// ```
+    RoomOff { room: String },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

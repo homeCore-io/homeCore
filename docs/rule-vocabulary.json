@@ -1046,6 +1046,26 @@
       ]
     },
     {
+      "tag": "RoomOff",
+      "fields": [
+        {
+          "name": "room",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "RoomOn",
+      "fields": [
+        {
+          "name": "room",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
       "tag": "RunRuleActions",
       "fields": [
         {

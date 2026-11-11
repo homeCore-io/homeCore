@@ -1,0 +1,18 @@
+Rule(
+    id: "00000000-0000-0000-0000-000000000000",
+    name: "Movie time in the living room",
+    enabled: true,
+    priority: 10,
+
+    trigger: DeviceStateChanged(
+        device: "living_room.movie_button",
+        attribute: Some("pressed"),
+        to: Some(true),
+    ),
+
+    actions: [
+        RuleAction(action: RoomOff(room: "Living Room")),
+        RuleAction(action: Delay(duration_secs: 7200)),
+        RuleAction(action: RoomOn(room: "living_room")),
+    ],
+)
