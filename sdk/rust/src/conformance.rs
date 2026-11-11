@@ -189,6 +189,22 @@ pub fn check_temperatures(schema: &DeviceSchema) -> Findings {
     f
 }
 
+/// [`check_temperatures`], and that every temperature `state` publishes is
+/// one the schema declares — a reading the schema leaves out has no unit at
+/// all.
+pub fn check_state_temperatures(schema: &DeviceSchema, state: &Value) -> Findings {
+    let mut f = check_temperatures(schema);
+    for name in state.as_object().into_iter().flat_map(|o| o.keys()) {
+        if hc_types::temperature::is_temperature_name(name) && !schema.attributes.contains_key(name)
+        {
+            f.push(format!(
+                "temperature `{name}` is published but not declared, so it has no unit"
+            ));
+        }
+    }
+    f
+}
+
 /// The same checks against the JSON form [`with_actions`] produces.
 ///
 /// [`with_actions`]: crate::device_actions::with_actions
@@ -363,6 +379,14 @@ mod tests {
             .iter()
             .any(|m| m.contains("`floor_temperature` declares no unit")));
         assert!(f.iter().any(|m| m.contains("`dewpoint` is declared in °F")));
+
+        let s = schema(vec![("temperature", AttributeSchema::temperature())]);
+        let state = serde_json::json!({ "temperature": 21.0, "floor_temperature": 24.0 });
+        let f = check_state_temperatures(&s, &state);
+        assert_eq!(f.iter().count(), 1, "{f:?}");
+        assert!(f
+            .iter()
+            .any(|m| m.contains("`floor_temperature` is published")));
     }
 
     #[test]
