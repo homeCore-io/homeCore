@@ -191,6 +191,29 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         merged_into: Option<uuid::Uuid>,
     },
+    /// Room on or Room off ran: which lights it commanded, which scenes it
+    /// activated, and whether it saved or used the room's saved lights.
+    RoomLightsChanged {
+        timestamp: DateTime<Utc>,
+        room_id: uuid::Uuid,
+        room_name: String,
+        /// `true` for Room on, `false` for Room off.
+        on: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lights: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scenes: Vec<String>,
+        /// Room off saved how the lights were.
+        #[serde(default)]
+        snapshot_saved: bool,
+        /// Room on brought back what Room off saved.
+        #[serde(default)]
+        snapshot_used: bool,
+        /// What asked for it: `"api"` or `"rule"`.
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    },
     /// A homeCore scene was created or edited. Plugin scenes (Hue, Lutron,
     /// ISY) are devices, and change through the device events.
     SceneChanged {
@@ -384,6 +407,7 @@ impl Event {
             | Event::DeviceMetadataChanged { timestamp, .. }
             | Event::RoomChanged { timestamp, .. }
             | Event::RoomRemoved { timestamp, .. }
+            | Event::RoomLightsChanged { timestamp, .. }
             | Event::SceneChanged { timestamp, .. }
             | Event::SceneRemoved { timestamp, .. }
             | Event::RuleChanged { timestamp, .. }

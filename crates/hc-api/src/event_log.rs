@@ -188,6 +188,7 @@ pub fn event_type_name(event: &Event) -> &'static str {
         Event::DeviceMetadataChanged { .. } => "device_metadata_changed",
         Event::RoomChanged { .. } => "room_changed",
         Event::RoomRemoved { .. } => "room_removed",
+        Event::RoomLightsChanged { .. } => "room_lights_changed",
         Event::SceneChanged { .. } => "scene_changed",
         Event::SceneRemoved { .. } => "scene_removed",
         Event::RuleChanged { .. } => "rule_changed",
