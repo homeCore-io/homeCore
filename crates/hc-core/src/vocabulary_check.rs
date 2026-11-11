@@ -204,6 +204,24 @@ fn check_device(d: &DeviceState, schema: Option<&DeviceSchema>, out: &mut BTreeS
     }
 
     let Some(schema) = schema else { return };
+    // A temperature says it is °C. The shared names' units are checked below;
+    // here, one with no unit at all, and the plugin's own names.
+    for (name, unit) in hc_types::temperature::not_celsius(schema) {
+        let message = match unit {
+            None => format!("`{name}` is a temperature with no unit; temperatures are °C"),
+            Some(_) if term_named(name).is_some() => continue,
+            Some(have) => format!("`{name}` is declared in {have}; temperatures are °C"),
+        };
+        out.insert(finding(
+            Severity::Unit,
+            &place,
+            &d.device_id,
+            plugin,
+            Some(name),
+            message,
+            Some("°C".to_string()),
+        ));
+    }
     for (name, a) in &schema.attributes {
         let Some(term) = term_named(name) else {
             continue;
@@ -682,5 +700,32 @@ mod tests {
         assert!(f
             .iter()
             .any(|x| x.severity == Severity::Unit && x.name.as_deref() == Some("temperature")));
+    }
+
+    #[test]
+    fn a_temperature_says_it_is_celsius() {
+        let d = [device(
+            "floor",
+            "thermostat",
+            json!({"temperature": 21.0, "floor_temperature": 75.0}),
+        )];
+        let s = HashMap::from([(
+            "floor".into(),
+            schema(
+                &[
+                    ("temperature", AttributeKind::Float, false, Some("°C")),
+                    ("heat_setpoint", AttributeKind::Float, true, None),
+                    ("floor_temperature", AttributeKind::Float, false, Some("°F")),
+                    ("dewpoint", AttributeKind::Float, false, Some("°C")),
+                    ("temperature_unit", AttributeKind::String, false, None),
+                ],
+                &[],
+            ),
+        )]);
+        let f = run(&d, s, &[]);
+        let named: Vec<_> = f.iter().filter_map(|x| x.name.as_deref()).collect();
+        assert_eq!(named, ["floor_temperature", "heat_setpoint"], "{f:#?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Unit));
+        assert!(f[1].message.contains("no unit"), "{}", f[1].message);
     }
 }
