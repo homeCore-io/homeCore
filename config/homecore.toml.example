@@ -101,6 +101,9 @@ latitude  = 38.9072
 longitude = -77.0369
 # timezone is informational only; the local system timezone is used at runtime
 timezone  = "America/New_York"
+# What notifications and alert messages show temperatures in: "°C" (the
+# default) or "°F". Devices and rules always keep °C.
+# temperature_unit = "°F"
 
 # ---------------------------------------------------------------------------
 # Battery alerts

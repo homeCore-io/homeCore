@@ -18,6 +18,7 @@ pub mod device_naming;
 pub mod engine;
 pub mod executor;
 pub mod glue;
+pub mod household;
 pub mod mode_manager;
 pub mod pictures;
 pub mod rooms;
@@ -26,6 +27,7 @@ pub mod rule_resolver;
 pub mod scheduler;
 pub mod state_bridge;
 pub mod timer_manager;
+pub mod unit_ingest;
 pub mod vocabulary_check;
 
 pub use calendar_store::CalendarHandle;
@@ -118,6 +120,8 @@ pub struct Core {
     hub_vars: engine::HubVars,
     /// Rules paused by other rules, shared with the API.
     pauses: engine::Pauses,
+    /// Temperatures converted to °C as they arrived, shared with the API.
+    unit_conversions: unit_ingest::Conversions,
 }
 
 impl Core {
@@ -153,6 +157,7 @@ impl Core {
             alert_channel: None,
             hub_vars: Default::default(),
             pauses: Default::default(),
+            unit_conversions: Default::default(),
         }
     }
 
@@ -160,6 +165,13 @@ impl Core {
     /// with the API, which lists them and tells the engine when rules change.
     pub fn with_alerts(mut self, handle: alerts::AlertsHandle) -> Self {
         self.alerts = Some(handle);
+        self
+    }
+
+    /// Record the temperatures converted to °C as they arrive here, shared
+    /// with the API's vocabulary check.
+    pub fn with_unit_conversions(mut self, conversions: unit_ingest::Conversions) -> Self {
+        self.unit_conversions = conversions;
         self
     }
 
@@ -319,13 +331,15 @@ impl Core {
         let bridge_publish = self.publish.clone();
         let bridge_log_tx = self.log_tx.clone();
         let bridge_log_ring = self.log_ring.clone();
+        let bridge_conversions = self.unit_conversions.clone();
         tokio::spawn(async move {
             loop {
                 let mut bridge = state_bridge::StateBridge::new(
                     bridge_bus.clone(),
                     bridge_pub_bus.clone(),
                     bridge_state.clone(),
-                );
+                )
+                .with_conversions(bridge_conversions.clone());
                 if let Some(router) = bridge_router.clone() {
                     bridge = bridge.with_router(router);
                 }

@@ -548,9 +548,21 @@ impl AlertRule {
     }
 
     /// What the rule says, after the device's name: "open after 22:00 for 10 min".
+    /// A temperature reads in °C; see [`describe_in`](Self::describe_in).
     pub fn describe(&self) -> String {
+        self.describe_in(crate::temperature::TemperatureUnit::Celsius)
+    }
+
+    /// [`describe`](Self::describe), with a temperature in `unit`:
+    /// "temperature above 14 °F". The rule's value is °C, as the reading is.
+    pub fn describe_in(&self, unit: crate::temperature::TemperatureUnit) -> String {
         let mut s = self.state_label.clone().unwrap_or_else(|| {
-            let v = plain(&self.value);
+            let v = match self.value.as_f64() {
+                Some(c) if crate::temperature::is_temperature_name(&self.attribute) => {
+                    unit.format(c)
+                }
+                _ => plain(&self.value),
+            };
             match self.op {
                 AlertOp::Eq => format!("{} is {v}", self.attribute),
                 AlertOp::Ne => format!("{} is not {v}", self.attribute),
@@ -664,7 +676,11 @@ mod tests {
         assert!(r.matches(&serde_json::json!("-2")));
         assert!(!r.matches(&serde_json::json!(-10)));
         assert!(!r.matches(&serde_json::json!(true)));
-        assert_eq!(r.describe(), "temperature above -10");
+        assert_eq!(r.describe(), "temperature above -10 °C");
+        assert_eq!(
+            r.describe_in(crate::temperature::TemperatureUnit::Fahrenheit),
+            "temperature above 14 °F"
+        );
         r.op = AlertOp::Below;
         assert!(r.matches(&serde_json::json!(-12)));
         r.op = AlertOp::Ne;

@@ -234,6 +234,7 @@ pub fn uom_unit(uom: &str) -> Option<&'static str> {
         "8" => Some("m³"),
         "12" => Some("dB"),
         "13" => Some("dBA"),
+        // Degrees of angle (76 is wind direction), not a temperature.
         "14" | "76" => Some("°"),
         "17" => Some("°F"),
         "18" => Some("ft"),

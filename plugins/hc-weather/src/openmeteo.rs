@@ -389,6 +389,27 @@ mod tests {
         assert!(now["wind_direction"].is_i64());
     }
 
+    /// Every temperature the device publishes — now and the forecast's
+    /// highs and lows — is declared, in °C.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let schema = crate::schema::device_schema();
+        for state in [
+            parse_current(&fixture("current")).unwrap(),
+            parse_forecast(&fixture("forecast")).unwrap(),
+        ] {
+            plugin_sdk_rs::conformance::check_state_temperatures(&schema, &Value::Object(state))
+                .assert_ok();
+        }
+        for name in ["feels_like", "dewpoint", "today_high", "tomorrow_low"] {
+            assert_eq!(
+                schema.attributes[name].unit.as_deref(),
+                Some("°C"),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn seven_days_each_at_local_midnight_today_first() {
         let f = parse_forecast(&fixture("forecast")).unwrap();

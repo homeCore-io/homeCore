@@ -19,6 +19,7 @@
 
 use crate::{
     device_naming::{ensure_unique_canonical_name, normalize_name_segment},
+    unit_ingest::{self, Conversions, DeviceUnits, UnitCache},
     EventBus,
 };
 use anyhow::Result;
@@ -62,6 +63,10 @@ pub struct StateBridge {
     log_tx: Option<broadcast::Sender<LogLine>>,
     /// Ring buffer backing the log stream history replay.
     log_ring: Option<Arc<Mutex<VecDeque<LogLine>>>>,
+    /// Each device's declared temperature units, read once from its schema.
+    units: UnitCache,
+    /// The temperatures converted to °C as they arrived. Shared with the API.
+    conversions: Conversions,
 }
 
 impl StateBridge {
@@ -78,7 +83,15 @@ impl StateBridge {
             seen_sdk_versions: Mutex::new(HashSet::new()),
             log_tx: None,
             log_ring: None,
+            units: UnitCache::default(),
+            conversions: Conversions::default(),
         }
+    }
+
+    /// Record temperature conversions here, where the API can read them.
+    pub fn with_conversions(mut self, conversions: Conversions) -> Self {
+        self.conversions = conversions;
+        self
     }
 
     pub fn with_router(mut self, router: Arc<EcosystemRouter>) -> Self {
@@ -495,6 +508,9 @@ impl StateBridge {
         if had_origin {
             attrs.remove("timestamp");
         }
+        // Temperatures are stored in °C, whatever the plugin sent.
+        self.normalize_temperatures(device_id, &device.plugin_id, &mut attrs)
+            .await;
 
         // Extract "name" before attrs is potentially consumed by into_iter().
         let incoming_name: Option<String> = attrs
@@ -615,6 +631,48 @@ impl StateBridge {
         Self::persist_history_async(self.store.clone(), device_id.to_string(), history_entries);
 
         Ok(())
+    }
+
+    /// Convert a report's °F and K temperatures to °C, in place. See
+    /// [`unit_ingest`]. The schema is read once per device, then kept.
+    async fn normalize_temperatures(
+        &self,
+        device_id: &str,
+        plugin_id: &str,
+        attrs: &mut serde_json::Map<String, Value>,
+    ) {
+        if !self.units.contains(device_id) {
+            let schema = match self.store.get_device_schema(device_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(device_id, error = %e, "Couldn't read the schema for its units");
+                    None
+                }
+            };
+            self.units
+                .insert(device_id, DeviceUnits::from_schema(schema.as_ref()));
+        }
+        let done = match self.units.get_mut(device_id) {
+            Some(mut units) => units.normalize(attrs),
+            None => return,
+        };
+        if done.is_empty() {
+            return;
+        }
+        for name in unit_ingest::record(&self.conversions, device_id, plugin_id, &done) {
+            let from = done
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, s, _)| s.symbol())
+                .unwrap_or_default();
+            warn!(
+                device_id,
+                plugin_id,
+                attribute = %name,
+                from,
+                "Temperature arrived in {from}; stored in °C. The plugin should publish °C"
+            );
+        }
     }
 
     /// Parse a plugin registration payload and upsert the device record.
@@ -788,6 +846,7 @@ impl StateBridge {
                 match registry.get_device_schema(device_type) {
                     Some(schema) => {
                         self.store.upsert_device_schema(device_id, &schema).await?;
+                        self.units.schema_changed(device_id, &schema);
                         debug!(device_id, device_type, "Typed device schema stored");
                         // The type registry writes the same slot a plugin's
                         // own schema does, so this is a schema change like any
@@ -810,6 +869,7 @@ impl StateBridge {
     async fn handle_device_schema(&self, device_id: &str, payload: &[u8]) -> Result<()> {
         let schema: hc_types::DeviceSchema = serde_json::from_slice(payload)?;
         self.store.upsert_device_schema(device_id, &schema).await?;
+        self.units.schema_changed(device_id, &schema);
         debug!(device_id, "Device schema stored");
         self.announce_schema(device_id, &schema);
         Ok(())
@@ -860,6 +920,8 @@ impl StateBridge {
 
         let device_removed = self.store.delete_device(device_id).await?;
         let schema_removed = self.store.delete_device_schema(device_id).await?;
+        self.units.remove(device_id);
+        self.conversions.forget(device_id);
 
         if device_removed || schema_removed {
             let _ = self.pub_bus.publish(Event::Custom {
@@ -1642,5 +1704,63 @@ mod alert_tests {
         while let Ok(e) = rx.try_recv() {
             assert!(!matches!(e, Event::DeviceAvailabilityChanged { .. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use hc_types::device::DeviceState;
+
+    /// A plugin that still sends °F has its readings stored in °C, and the
+    /// conversion is recorded; one that sends °C is left alone.
+    #[tokio::test]
+    async fn fahrenheit_is_stored_as_celsius_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        store
+            .upsert_device(&DeviceState::new("old_1", "Porch", "plugin.old"))
+            .await
+            .unwrap();
+        let conversions = Conversions::default();
+        let bridge = StateBridge::new(EventBus::new(16), EventBus::new(16), store.clone())
+            .with_conversions(conversions.clone());
+        bridge
+            .handle_mqtt(
+                "homecore/devices/old_1/schema",
+                br#"{"attributes": {"temperature": {"kind": "float", "unit": "F"}}}"#,
+            )
+            .await
+            .unwrap();
+        bridge
+            .handle_mqtt("homecore/devices/old_1/state", br#"{"temperature": 68}"#)
+            .await
+            .unwrap();
+        bridge
+            .handle_mqtt(
+                "homecore/devices/old_1/state/partial",
+                br#"{"temperature": 77}"#,
+            )
+            .await
+            .unwrap();
+        let stored = store.get_device("old_1").await.unwrap().unwrap();
+        assert_eq!(stored.attributes["temperature"], serde_json::json!(25.0));
+        let c = conversions.list();
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].from, c[0].count), ("°F", 2));
+
+        // A °C plugin, with no schema at all.
+        bridge
+            .handle_mqtt("homecore/devices/new_1/state", br#"{"temperature": 21.5}"#)
+            .await
+            .unwrap();
+        let stored = store.get_device("new_1").await.unwrap().unwrap();
+        assert_eq!(stored.attributes["temperature"], serde_json::json!(21.5));
+        assert_eq!(conversions.list().len(), 1);
     }
 }

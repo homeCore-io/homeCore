@@ -433,6 +433,8 @@ pub struct AppState {
         Option<Arc<tokio::sync::watch::Sender<hc_core::battery_watcher::BatteryConfig>>>,
     /// The alert engine's active alerts (H4) — `None` when it isn't running.
     pub alerts: Option<hc_core::alerts::AlertsHandle>,
+    /// Temperatures core converted to °C as they arrived, for the vocabulary check.
+    pub unit_conversions: hc_core::unit_ingest::Conversions,
     /// Path to homecore.toml — used by handlers that need to write
     /// runtime changes back to disk (currently the plugin
     /// enable/disable toggle persists via this). `None` if hc-core
@@ -911,6 +913,7 @@ impl AppState {
             stream_cache: streaming::StreamCache::new(),
             battery_config: None,
             alerts: None,
+            unit_conversions: Default::default(),
             homecore_config_path: None,
             shutdown_tx: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -973,6 +976,12 @@ impl AppState {
     /// Serve the alert engine's alerts, and wake it when rules change (H4).
     pub fn with_alerts(mut self, handle: hc_core::alerts::AlertsHandle) -> Self {
         self.alerts = Some(handle);
+        self
+    }
+
+    /// Read the temperatures core converted at ingest from here.
+    pub fn with_unit_conversions(mut self, c: hc_core::unit_ingest::Conversions) -> Self {
+        self.unit_conversions = c;
         self
     }
 
@@ -1531,6 +1540,10 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         // System
         .route("/system/status", get(handlers::system_status))
         .route("/system/vocabulary-check", get(handlers::vocabulary_check))
+        .route(
+            "/system/temperature-unit",
+            get(handlers::get_temperature_unit).put(handlers::put_temperature_unit),
+        )
         .route("/system/battery_settings", get(handlers::battery_settings))
         .route("/system/backup", post(backup::backup_handler))
         .route("/system/backups", get(backup::list_kept_handler))

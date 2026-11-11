@@ -34,6 +34,7 @@
 
 use crate::convert::{self, Sensor};
 use crate::types::NodeState;
+use plugin_sdk_rs::types::temperature::TemperatureScale;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -747,6 +748,33 @@ impl NodeInfo {
         self.units.get(key).map(String::as_str)
     }
 
+    /// The scale of a value the alias table does not name, when it is a
+    /// temperature: any Thermostat Setpoint (CC 67), and a Multilevel Sensor
+    /// (CC 49) reading whose unit is one. A setpoint with no unit is °C, as
+    /// the named ones are.
+    fn temperature_scale(
+        &self,
+        cc: u32,
+        endpoint: u32,
+        property: &str,
+        property_key: Option<&str>,
+    ) -> Option<TemperatureScale> {
+        let ep = if self.role(endpoint) == EpRole::Root {
+            0
+        } else {
+            endpoint
+        };
+        let unit = self.unit(&Translator::alias_key(cc, ep, property, property_key));
+        match cc {
+            67 if property == "setpoint" => Some(
+                unit.and_then(TemperatureScale::parse)
+                    .unwrap_or(TemperatureScale::Celsius),
+            ),
+            49 => unit.and_then(TemperatureScale::parse),
+            _ => None,
+        }
+    }
+
     fn has_color(&self, c: &str) -> bool {
         self.color_components.iter().any(|k| k == c)
     }
@@ -1187,6 +1215,54 @@ impl Translator {
             ),
             _ => synthetic_attr_name(cc, endpoint, property, property_key),
         })
+    }
+
+    /// A value nothing maps, as published: its synthetic name, and the value
+    /// in °C when it is a temperature, so `cc67_setpoint_pk11` and
+    /// `cc49_water_temperature` are °C like `heat_setpoint` and `temperature`.
+    pub fn synthetic_pair(
+        &self,
+        node_id: u32,
+        cc: u32,
+        endpoint: u32,
+        property: &str,
+        property_key: Option<&str>,
+        raw: &Value,
+    ) -> (String, Value) {
+        let name = self.synthetic_name(node_id, cc, endpoint, property, property_key);
+        let scale = self.with_node(node_id, |i| {
+            i.temperature_scale(cc, endpoint, property, property_key)
+        });
+        let value = match (scale, raw.as_f64()) {
+            (Some(s), Some(v)) => json!(s.to_celsius(v)),
+            _ => raw.clone(),
+        };
+        (name, value)
+    }
+
+    /// The synthetic names of a node's values that are temperatures, so its
+    /// schema can declare them °C.
+    pub fn synthetic_temperatures(&self, node: &NodeState) -> BTreeSet<String> {
+        node.values
+            .iter()
+            .filter(|v| {
+                let pk = v.property_key.as_ref().and_then(property_key_str);
+                self.with_node(node.node_id, |i| {
+                    i.temperature_scale(v.command_class, v.endpoint, &v.property, pk.as_deref())
+                        .is_some()
+                })
+            })
+            .map(|v| {
+                let pk = v.property_key.as_ref().and_then(property_key_str);
+                self.synthetic_name(
+                    node.node_id,
+                    v.command_class,
+                    v.endpoint,
+                    &v.property,
+                    pk.as_deref(),
+                )
+            })
+            .collect()
     }
 }
 

@@ -543,6 +543,32 @@ mod tests {
         })
     }
 
+    /// Every temperature any device publishes is declared °C — the outdoor
+    /// station, indoor, the channel probes and the CO₂ sensor, from a gateway
+    /// set to °F, by the poll and by the upload.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let pushed = crate::form_parser::parse_form_data(
+            &[
+                ("tempf", "68.0"),
+                ("tempinf", "72.5"),
+                ("temp2f", "32.0"),
+                ("tf_ch1", "50.0"),
+                ("humidity", "45"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            "eco",
+        );
+        let polled = parse_livedata(&imperial(), "eco");
+        for u in pushed.iter().chain(&polled) {
+            let s = crate::schema::schema_for_state(u.state.as_object().unwrap());
+            plugin_sdk_rs::conformance::check_temperatures(&s).assert_ok();
+        }
+        assert!(polled.iter().any(|u| u.state.get("temperature").is_some()));
+    }
+
     #[test]
     fn readings_get_the_shared_names_in_homecores_units() {
         let u = parse_livedata(&imperial(), "eco");

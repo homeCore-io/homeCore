@@ -75,6 +75,8 @@ pub struct Inputs<'a> {
     pub schemas: &'a HashMap<String, DeviceSchema>,
     pub rules: &'a [Rule],
     pub scenes: &'a [Scene],
+    /// Temperatures core converted to °C as they arrived.
+    pub conversions: &'a [crate::unit_ingest::Conversion],
 }
 
 /// Every finding, most serious first.
@@ -84,6 +86,24 @@ pub fn check(i: &Inputs) -> Vec<Finding> {
 
     for d in i.devices {
         check_device(d, i.schemas.get(&d.device_id), &mut out);
+    }
+    for c in i.conversions {
+        let said = match c.declared_by {
+            crate::unit_ingest::DeclaredBy::Schema => "its schema says so",
+            crate::unit_ingest::DeclaredBy::Sibling => "its `_unit` says so",
+        };
+        out.insert(finding(
+            Severity::Unit,
+            &Place::Device,
+            &c.device_id,
+            Some(&c.plugin_id),
+            Some(&c.attribute),
+            format!(
+                "`{}` arrives in {} ({said}); core converts it to °C as it is stored",
+                c.attribute, c.from
+            ),
+            Some("°C".to_string()),
+        ));
     }
     for r in i.rules {
         let place = Place::Automation {
@@ -204,6 +224,24 @@ fn check_device(d: &DeviceState, schema: Option<&DeviceSchema>, out: &mut BTreeS
     }
 
     let Some(schema) = schema else { return };
+    // A temperature says it is °C. The shared names' units are checked below;
+    // here, one with no unit at all, and the plugin's own names.
+    for (name, unit) in hc_types::temperature::not_celsius(schema) {
+        let message = match unit {
+            None => format!("`{name}` is a temperature with no unit; temperatures are °C"),
+            Some(_) if term_named(name).is_some() => continue,
+            Some(have) => format!("`{name}` is declared in {have}; temperatures are °C"),
+        };
+        out.insert(finding(
+            Severity::Unit,
+            &place,
+            &d.device_id,
+            plugin,
+            Some(name),
+            message,
+            Some("°C".to_string()),
+        ));
+    }
     for (name, a) in &schema.attributes {
         let Some(term) = term_named(name) else {
             continue;
@@ -570,6 +608,7 @@ mod tests {
             schemas: &schemas,
             rules,
             scenes: &[],
+            conversions: &[],
         })
     }
 
@@ -682,5 +721,57 @@ mod tests {
         assert!(f
             .iter()
             .any(|x| x.severity == Severity::Unit && x.name.as_deref() == Some("temperature")));
+    }
+
+    #[test]
+    fn a_temperature_says_it_is_celsius() {
+        let d = [device(
+            "floor",
+            "thermostat",
+            json!({"temperature": 21.0, "floor_temperature": 75.0}),
+        )];
+        let s = HashMap::from([(
+            "floor".into(),
+            schema(
+                &[
+                    ("temperature", AttributeKind::Float, false, Some("°C")),
+                    ("heat_setpoint", AttributeKind::Float, true, None),
+                    ("floor_temperature", AttributeKind::Float, false, Some("°F")),
+                    ("dewpoint", AttributeKind::Float, false, Some("°C")),
+                    ("temperature_unit", AttributeKind::String, false, None),
+                ],
+                &[],
+            ),
+        )]);
+        let f = run(&d, s, &[]);
+        let named: Vec<_> = f.iter().filter_map(|x| x.name.as_deref()).collect();
+        assert_eq!(named, ["floor_temperature", "heat_setpoint"], "{f:#?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Unit));
+        assert!(f[1].message.contains("no unit"), "{}", f[1].message);
+    }
+
+    #[test]
+    fn a_conversion_at_ingest_is_a_finding() {
+        let now = chrono::Utc::now();
+        let c = [crate::unit_ingest::Conversion {
+            device_id: "porch".into(),
+            plugin_id: "plugin.old".into(),
+            attribute: "temperature".into(),
+            from: "°F",
+            declared_by: crate::unit_ingest::DeclaredBy::Sibling,
+            count: 3,
+            first_at: now,
+            last_at: now,
+        }];
+        let f = check(&Inputs {
+            devices: &[],
+            schemas: &HashMap::new(),
+            rules: &[],
+            scenes: &[],
+            conversions: &c,
+        });
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Unit);
+        assert!(f[0].message.contains("arrives in °F"), "{}", f[0].message);
     }
 }

@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.101"
+  version: "0.1.102"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -7676,6 +7676,68 @@ paths:
   # ---------------------------------------------------------------------------
   # System
   # ---------------------------------------------------------------------------
+  /system/temperature-unit:
+    get:
+      operationId: getTemperatureUnit
+      summary: The household's temperature unit
+      description: |
+        `°C` or `°F`: what server-side text (notifications, alert messages)
+        shows a temperature in, and what an app can use before a person picks
+        their own. Devices, rules and history keep °C whatever this says. Set
+        by `[location].temperature_unit` in homecore.toml. While unset,
+        `chosen` is false and the unit is °C for core's own text; an app then
+        goes by the browser's language. Any signed-in user may read it.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The unit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemperatureUnit"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      operationId: putTemperatureUnit
+      summary: Change the household's temperature unit
+      description: |
+        Admin only. Takes effect at once and is written to
+        `[location].temperature_unit` in homecore.toml, so it survives a
+        restart. `C`, `F`, `celsius` and `fahrenheit` are accepted too; the
+        answer always spells it `°C` or `°F`. `null` takes the setting
+        out, back to unset.
+      tags: [system]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [temperature_unit]
+              properties:
+                temperature_unit:
+                  type: [string, "null"]
+                  enum: ["°C", "°F", null]
+            example: { temperature_unit: "°F" }
+      responses:
+        "200":
+          description: The unit now in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemperatureUnit"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Not °C or °F
+        "503":
+          description: Core was started without a config file to write to
   /system/vocabulary-check:
     get:
       operationId: getVocabularyCheck
@@ -7690,7 +7752,8 @@ paths:
         declared), `undeclared` (a key or attribute the schema does not have
         — the plugin may still take it), `rename` (an old spelling or the
         retired `{"command": …}` shape, with `instead`), `unit` (a shared name
-        with another unit or kind). Requires `devices:read` and
+        with another unit or kind, a temperature not in °C or with no unit,
+        or one core converted to °C as it arrived). Requires `devices:read` and
         `automations:read`.
       tags: [system]
       security:
@@ -7732,6 +7795,24 @@ paths:
                         name: { type: string, description: The attribute, action or key }
                         message: { type: string }
                         instead: { type: string, description: What to use instead }
+                  conversions:
+                    type: array
+                    description: |
+                      Temperatures core converted to °C as they arrived since it
+                      started, because a plugin sent °F or K (declared in its
+                      schema or an `<attr>_unit` sibling). Each also appears as
+                      a `unit` finding.
+                    items:
+                      type: object
+                      properties:
+                        device_id: { type: string }
+                        plugin_id: { type: string }
+                        attribute: { type: string }
+                        from: { type: string, description: "The unit it arrived in: °F or K" }
+                        declared_by: { type: string, enum: [schema, sibling] }
+                        count: { type: integer, description: Readings converted }
+                        first_at: { type: string, format: date-time }
+                        last_at: { type: string, format: date-time }
         "401":
           $ref: "#/components/responses/Unauthorized"
   /system/status:
@@ -7792,6 +7873,10 @@ paths:
                   timezone:
                     type: string
                     description: Configured IANA timezone (e.g. `America/New_York`)
+                  temperature_unit:
+                    type: string
+                    enum: ["°C", "°F"]
+                    description: The household's temperature unit; see `/system/temperature-unit`
                   last_backup_at:
                     type: [string, "null"]
                     format: date-time
@@ -8588,6 +8673,18 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    TemperatureUnit:
+      type: object
+      required: [temperature_unit, chosen]
+      properties:
+        temperature_unit:
+          type: string
+          enum: ["°C", "°F"]
+          example: "°F"
+        chosen:
+          type: boolean
+          description: Whether the household set it; false means unset, shown as °C
+
     RuntimeCapabilities:
       type: object
       description: |

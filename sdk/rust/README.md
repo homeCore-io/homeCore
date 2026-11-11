@@ -169,7 +169,9 @@ last level. The whole of it is "Names and units" in
   for a plugin that consumes *other* plugins' devices the way hc-thermostat
   reads sensors it does not own; `subscribe_availability` plus
   `ManagementHandle::with_availability_handler` to hear whether those devices
-  are online (`(device_id, online)` per retained availability message).
+  are online (`(device_id, online)` per retained availability message), and
+  `subscribe_schema` plus `with_schema_handler` to read their schemas (a
+  thermostat checking its sensor's unit).
 - **Log forwarding** — `MqttLogLayer` ships tracing logs to core, so they
   appear in the live log stream alongside core's own.
 - **Conformance** — `conformance::check_all` holds the rules every homeCore

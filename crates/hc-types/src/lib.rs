@@ -32,6 +32,9 @@ pub mod plugin_notice;
 pub mod plugin_ui;
 pub mod rule;
 pub mod schema;
+/// Which attributes are temperatures, the scales they arrive in, and how to
+/// show one in the household's unit.
+pub mod temperature;
 
 /// The rule vocabulary, derived from the rule types rather than written down.
 /// See [`vocabulary`] for why that distinction is the whole point.

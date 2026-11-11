@@ -240,11 +240,13 @@ pub async fn vocabulary_check(
         Some(rh) => rh.read().await.clone(),
         None => Vec::new(),
     };
+    let conversions = s.unit_conversions.list();
     let findings = hc_core::vocabulary_check::check(&hc_core::vocabulary_check::Inputs {
         devices: &devices,
         schemas: &schemas,
         rules: &rules,
         scenes: &scenes,
+        conversions: &conversions,
     });
     let count = |sev| findings.iter().filter(|f| f.severity == sev).count();
     use hc_core::vocabulary_check::Severity;
@@ -256,6 +258,9 @@ pub async fn vocabulary_check(
             "unit": count(Severity::Unit),
         },
         "findings": findings,
+        // What core converted to °C as it arrived: the diagnostic behind
+        // the "arrives in °F" findings.
+        "conversions": conversions,
     }))
     .into_response()
 }
@@ -333,6 +338,7 @@ pub async fn system_status(State(s): State<AppState>) -> impl IntoResponse {
         "state_db_bytes":    state_db_bytes,
         "history_db_bytes":  history_db_bytes,
         "timezone":          hc_time::configured_tz().to_string(),
+        "temperature_unit":  hc_core::household::temperature_unit(),
         "last_backup_at":    last_backup_at,
     }))
 }
@@ -8549,6 +8555,100 @@ pub async fn put_system_config(
         .into_response()
 }
 
+/// `GET /api/v1/system/temperature-unit`
+///
+/// The household's temperature unit (`"°C"` or `"°F"`): what server-side
+/// text shows a temperature in, and what an app can fall back to before a
+/// person picks their own. `chosen` is false while nobody has set it; the
+/// unit is then °C for core's own text, and an app goes by the browser.
+/// Any signed-in user may read it.
+pub async fn get_temperature_unit(AuthUser(_claims): AuthUser) -> impl IntoResponse {
+    Json(json!({
+        "temperature_unit": hc_core::household::temperature_unit(),
+        "chosen": hc_core::household::chosen_temperature_unit().is_some(),
+    }))
+}
+
+/// `PUT /api/v1/system/temperature-unit` — `{"temperature_unit": "°F"}`.
+///
+/// Admin-only. Takes effect at once and is written to `[location]` in
+/// homecore.toml, so it survives a restart. `"C"`, `"F"`, `"celsius"` and
+/// `"fahrenheit"` are read too; the answer always spells it `°C` / `°F`.
+/// `null` takes the setting out, back to unset.
+pub async fn put_temperature_unit(
+    State(s): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !claims.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    let unit = match body.get("temperature_unit") {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(u)) => hc_types::temperature::TemperatureUnit::parse(u)
+            .map(Some)
+            .ok_or(()),
+        _ => Err(()),
+    };
+    let Ok(unit) = unit else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "`temperature_unit` must be \"°C\" or \"°F\"" })),
+        )
+            .into_response();
+    };
+    let Some(path) = s.homecore_config_path.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({ "error": "config path not available — hc-core started without --config" }),
+            ),
+        )
+            .into_response();
+    };
+
+    let written = std::fs::read_to_string(path.as_path())
+        .map_err(|e| format!("read failed: {e}"))
+        .and_then(|current| {
+            crate::config_writer::apply_section_patch(
+                &current,
+                &json!({ "location": { "temperature_unit": unit.map(|u| u.symbol()) } }),
+            )
+            .map_err(|e| format!("patch failed: {e}"))
+        })
+        .and_then(|new_raw| {
+            crate::config_writer::write_atomic(path.as_path(), new_raw.as_bytes())
+                .map_err(|e| format!("write failed: {e}"))
+        });
+    if let Err(error) = written {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
+            .into_response();
+    }
+    hc_core::household::set_temperature_unit(unit);
+    tracing::info!(
+        unit = unit.map_or("unset", |u| u.symbol()),
+        "Household temperature unit changed"
+    );
+
+    let mut e = audit::entry_from_claims(&claims, "system.temperature_unit_updated")
+        .with_target("config", "location.temperature_unit");
+    e.detail = json!({ "temperature_unit": unit });
+    audit::emit(&s, e).await;
+
+    Json(json!({
+        "temperature_unit": hc_core::household::temperature_unit(),
+        "chosen": unit.is_some(),
+    }))
+    .into_response()
+}
+
 /// `POST /api/v1/system/restart`
 ///
 /// Triggers graceful shutdown via the broadcast channel hc-core's
@@ -9700,5 +9800,124 @@ mod event_stream_tests {
         assert!(frame.get("devices").is_some());
         assert!(frame.get("rooms").is_none(), "left out, not sent empty");
         assert!(frame.get("scenes").is_none());
+    }
+}
+
+#[cfg(test)]
+mod temperature_unit_tests {
+    //! The household temperature unit: anyone signed in reads it, only an
+    //! admin changes it, and a change lands in homecore.toml.
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use hc_auth::{Role, User};
+    use hc_types::temperature::TemperatureUnit;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    async fn call(
+        app: &axum::Router,
+        method: &str,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri("/api/v1/system/temperature-unit")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(std::net::SocketAddr::from((
+                [10, 9, 8, 7],
+                1234,
+            ))));
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn anyone_reads_it_and_only_an_admin_changes_it() {
+        let base = std::env::temp_dir().join(format!("hc_api_unit_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let config = base.join("homecore.toml");
+        std::fs::write(&config, "[location]\nlatitude = 1.0\nlongitude = 2.0\n").unwrap();
+        let store = hc_state::StateStore::open(
+            &base.join("state.redb").to_string_lossy(),
+            &base.join("history.sqlite").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let mut people = Vec::new();
+        for (name, role) in [("ada", Role::Admin), ("kid", Role::HouseholdMember)] {
+            let u = User {
+                id: Uuid::new_v4(),
+                username: name.into(),
+                password_hash: hc_auth::hash_pin("correct horse").unwrap(),
+                role,
+                created_at: chrono::Utc::now(),
+                token_version: 0,
+                pin_hash: None,
+            };
+            store.create_user(&u).await.unwrap();
+            people.push(u);
+        }
+        const SECRET: &[u8] = b"unit-test-secret-32-bytes-minimum!";
+        let jwt = hc_auth::JwtService::new_hs256(SECRET, 24);
+        let token = |u: &User| {
+            jwt.issue(&u.id.to_string(), &u.username, u.role, u.token_version)
+                .unwrap()
+        };
+        let state = crate::AppState::new(crate::AppStateParams::new(
+            store,
+            hc_core::EventBus::new(16),
+            hc_auth::JwtService::new_hs256(SECRET, 24),
+        ))
+        .with_homecore_config_path(config.clone());
+        let app = crate::router(state, None);
+        let (admin, kid) = (token(&people[0]), token(&people[1]));
+
+        let (st, body) = call(&app, "GET", &kid, Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["temperature_unit"], json!("°C"));
+        assert_eq!(body["chosen"], json!(false));
+
+        let (st, _) = call(&app, "PUT", &kid, json!({"temperature_unit": "°F"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        let (st, _) = call(&app, "PUT", &admin, json!({"temperature_unit": "K"})).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (st, body) = call(&app, "PUT", &admin, json!({"temperature_unit": "F"})).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["temperature_unit"], json!("°F"));
+        assert_eq!(body["chosen"], json!(true));
+        assert_eq!(
+            hc_core::household::temperature_unit(),
+            TemperatureUnit::Fahrenheit
+        );
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(written.contains("temperature_unit = \"°F\""), "{written}");
+        assert!(written.contains("latitude = 1.0"), "{written}");
+
+        let (_, body) = call(&app, "GET", &kid, Value::Null).await;
+        assert_eq!(body["temperature_unit"], json!("°F"));
+
+        // Back to unset: the line leaves homecore.toml.
+        let (st, body) = call(&app, "PUT", &admin, json!({"temperature_unit": null})).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["chosen"], json!(false));
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(!written.contains("temperature_unit"), "{written}");
+        hc_core::household::set_temperature_unit(None);
     }
 }

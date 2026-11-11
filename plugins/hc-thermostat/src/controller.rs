@@ -32,6 +32,8 @@
 use crate::config::{setpoint_problem, Kind, Loaded, SkippedEntry, ThermostatEntry};
 use crate::control::{aggregate, compute_call_for, lockout_remaining};
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use plugin_sdk_rs::types::temperature::{is_temperature_name, TemperatureScale};
+use plugin_sdk_rs::types::DeviceSchema;
 use plugin_sdk_rs::types::{AlertAction, AlertActionTarget, PluginAlert, PluginNotice};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -477,6 +479,9 @@ pub struct Controller {
     runtime_kept: Option<Value>,
     candidates: HashMap<String, Candidate>,
     sync_pending: Option<HashSet<String>>,
+    /// Each sensor's readings that its schema declares in °F or K, by
+    /// attribute. Empty for a sensor in °C, which is every one today.
+    source_units: HashMap<String, HashMap<String, TemperatureScale>>,
     fx: Vec<Effect>,
 }
 
@@ -507,6 +512,7 @@ impl Controller {
             runtime_kept: None,
             candidates: HashMap::new(),
             sync_pending: None,
+            source_units: HashMap::new(),
             fx: Vec::new(),
         };
         c.refresh_notices();
@@ -793,11 +799,21 @@ impl Controller {
             .filter(|t| t.cfg.sensor_device_ids.iter().any(|s| s == device_id))
             .map(|t| t.cfg.sensor_attribute.clone())
             .collect();
-        let Some(raw) = attrs.iter().find_map(|a| payload.get(a)) else {
+        let Some((attr, raw)) = attrs
+            .iter()
+            .find_map(|a| payload.get(a).map(|v| (a.as_str(), v)))
+        else {
             return; // a partial without the reading
         };
+        // Readings are °C; a sensor whose schema says otherwise is converted.
+        // Core stores °C, but this is the plugin's own publish, as it sent it.
+        let scale = self
+            .source_units
+            .get(device_id)
+            .and_then(|u| u.get(attr))
+            .copied();
         let r = self.readings.entry(device_id.to_string()).or_default();
-        match raw.as_f64() {
+        match raw.as_f64().map(|v| scale.map_or(v, |s| s.to_celsius(v))) {
             // "No reading" is something heard: the sensor is there and has none.
             None if raw.is_null() => {
                 r.value = None;
@@ -890,6 +906,36 @@ impl Controller {
 
     /// An availability message: a sensor offline no longer counts; a switch
     /// offline can't be told anything, and back online it is asked again.
+    /// A sensor's schema: note the temperatures it declares in °F or K, so
+    /// their readings are converted to °C. One that doesn't parse changes
+    /// nothing.
+    pub fn on_schema(&mut self, device_id: &str, schema: &Value) {
+        let Ok(schema) = serde_json::from_value::<DeviceSchema>(schema.clone()) else {
+            return;
+        };
+        let units: HashMap<String, TemperatureScale> = schema
+            .attributes
+            .iter()
+            .filter_map(|(name, a)| {
+                let s = TemperatureScale::parse(a.unit.as_deref()?)?;
+                // K alone is also a colour temperature.
+                let temperature = s == TemperatureScale::Fahrenheit
+                    || (s == TemperatureScale::Kelvin && is_temperature_name(name));
+                temperature.then(|| (name.clone(), s))
+            })
+            .collect();
+        if units.is_empty() {
+            self.source_units.remove(device_id);
+        } else {
+            warn!(
+                sensor = device_id,
+                attributes = ?units.keys().collect::<Vec<_>>(),
+                "Sensor declares temperatures not in °C; converting them"
+            );
+            self.source_units.insert(device_id.to_string(), units);
+        }
+    }
+
     pub fn on_availability(&mut self, device_id: &str, online: bool, now: DateTime<Utc>) {
         if self.own_id(device_id).is_some() {
             return;
@@ -2185,6 +2231,31 @@ actuator_device_id = "den_ac"
         temp(&mut c, "mbr_temp", 85.0, 40);
         assert!(last_state(&c.take_effects(), "thermostat_mbr").is_none());
         assert!(c.t("mbr").stale);
+    }
+
+    /// A sensor whose schema says °F has its reading taken as °C: 77 °F is a
+    /// warm 25 °C room the AC cools, not a broken sensor.
+    #[test]
+    fn a_sensor_declared_in_fahrenheit_is_read_in_celsius() {
+        let mut c = started(19.0);
+        c.take_effects();
+        c.on_schema(
+            "mbr_temp",
+            &json!({"attributes": {"temperature": {"kind": "float", "unit": "°F"}}}),
+        );
+        temp(&mut c, "mbr_temp", 77.0, 10);
+        let fx = c.take_effects();
+        assert_eq!(sent(&fx, "mbr_ac"), [true]);
+        let s = last_state(&fx, "thermostat_mbr").unwrap();
+        assert_eq!(s["temperature"], json!(25.0));
+
+        // Back to °C: the same number is read as it is, and is impossible.
+        c.on_schema(
+            "mbr_temp",
+            &json!({"attributes": {"temperature": {"kind": "float", "unit": "°C"}}}),
+        );
+        temp(&mut c, "mbr_temp", 77.0, 20);
+        assert!(last_state(&c.take_effects(), "thermostat_mbr").is_none());
     }
 
     /// H1: `on_stale = "hold"` keeps the switch as it is, still said.

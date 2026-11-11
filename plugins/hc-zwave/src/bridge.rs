@@ -274,10 +274,7 @@ fn value_pairs(
     }
     match translator.translate(node_id, cc, endpoint, property, pk, raw) {
         Some(pairs) => pairs,
-        None => vec![(
-            translator.synthetic_name(node_id, cc, endpoint, property, pk),
-            raw.clone(),
-        )],
+        None => vec![translator.synthetic_pair(node_id, cc, endpoint, property, pk, raw)],
     }
 }
 
@@ -1440,6 +1437,61 @@ mod tests {
                 "specific": { "key": 0, "label": specific },
             },
         }))
+    }
+
+    /// Every temperature a node publishes — named or not — is °C and says so.
+    /// An unmapped setpoint (`cc67_…`) or temperature (`cc49_…`) used to go
+    /// out in the device's own unit with none declared.
+    #[test]
+    fn every_temperature_is_published_and_declared_in_celsius() {
+        let n = node(json!({
+            "nodeId": 9,
+            "deviceClass": {
+                "generic":  { "key": 8, "label": "Thermostat" },
+                "specific": { "key": 6, "label": "General Thermostat V2" },
+            },
+            "values": [
+                { "commandClass": 49, "endpoint": 0, "property": "Air temperature",
+                  "value": 68, "metadata": { "unit": "°F" } },
+                // A scale the alias table does not take: the raw name, in °C.
+                { "commandClass": 49, "endpoint": 0, "property": "Water temperature",
+                  "value": 104, "metadata": { "unit": "°F" } },
+                { "commandClass": 67, "endpoint": 0, "property": "setpoint",
+                  "propertyKey": 1, "value": 68, "metadata": { "unit": "°F" } },
+                { "commandClass": 67, "endpoint": 0, "property": "setpoint",
+                  "propertyKey": 11, "value": 62.6, "metadata": { "unit": "°F" } },
+                { "commandClass": 67, "endpoint": 0, "property": "setpoint",
+                  "propertyKey": 13, "value": 18 },
+                { "commandClass": 49, "endpoint": 0, "property": "Humidity",
+                  "value": 40, "metadata": { "unit": "%" } },
+            ],
+        }));
+        let t = Translator::new();
+        t.learn_node(&n);
+        let state = build_state(&n, &t);
+        assert_eq!(state["temperature"].as_f64(), Some(20.0));
+        assert_eq!(state["heat_setpoint"].as_f64(), Some(20.0));
+        assert_eq!(state["cc49_water_temperature"].as_f64(), Some(40.0));
+        assert_eq!(state["cc67_setpoint_pk11"].as_f64(), Some(17.0));
+        assert_eq!(state["cc67_setpoint_pk13"].as_f64(), Some(18.0));
+        assert_eq!(state["humidity"].as_f64(), Some(40.0));
+
+        let schema = crate::schema::node_schema(&n, &state, &t, &Default::default()).unwrap();
+        let schema: plugin_sdk_rs::types::DeviceSchema = serde_json::from_value(schema).unwrap();
+        for name in [
+            "temperature",
+            "heat_setpoint",
+            "cc49_water_temperature",
+            "cc67_setpoint_pk11",
+            "cc67_setpoint_pk13",
+        ] {
+            assert_eq!(
+                schema.attributes[name].unit.as_deref(),
+                Some("°C"),
+                "{name}"
+            );
+        }
+        plugin_sdk_rs::conformance::check_temperatures(&schema).assert_ok();
     }
 
     #[test]

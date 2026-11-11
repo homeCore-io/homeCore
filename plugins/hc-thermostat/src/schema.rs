@@ -491,6 +491,16 @@ mod tests {
         assert_eq!(a["hysteresis"].unit, None);
     }
 
+    /// Every temperature the thermostat publishes is declared, in °C.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let published = crate::controller::sample_state_payload();
+        for k in KINDS {
+            plugin_sdk_rs::conformance::check_state_temperatures(&device_schema(k), &published)
+                .assert_ok();
+        }
+    }
+
     /// The schema must not drift from what the device publishes.
     #[test]
     fn the_declared_attributes_are_exactly_what_is_published() {

@@ -50,9 +50,11 @@ pub mod types {
     // this module exists to avoid — and 0.3.7 shipped the handle without it,
     // making the feature uncallable.
     pub use hc_types::schema;
+    // Which attributes are temperatures, and the °C helpers.
     pub use hc_types::schema::{
         AttributeKind, AttributeSchema, BoolStates, DeviceSchema, StateLabel,
     };
+    pub use hc_types::temperature;
     pub use hc_types::{NoticeLevel, PluginNotice};
     // Alerts about a plugin's devices (and itself): declared on the manifest
     // with `ManagementHandle::with_alert_kinds`, published with
@@ -817,6 +819,28 @@ impl DevicePublisher {
         Ok(())
     }
 
+    /// Subscribe to the schema of a device this plugin does **not** own
+    /// (`homecore/devices/{id}/schema`, retained). Messages go to
+    /// [`ManagementHandle::with_schema_handler`]. Tracked, so a reconnect
+    /// restores it.
+    pub async fn subscribe_schema(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/schema");
+        self.client
+            .subscribe(&topic, QoS::AtLeastOnce)
+            .await
+            .context("DevicePublisher::subscribe_schema failed")?;
+        self.subscriptions.lock().unwrap().insert(topic);
+        Ok(())
+    }
+
+    /// Remove a subscription added with [`subscribe_schema`].
+    pub async fn unsubscribe_schema(&self, device_id: &str) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/schema");
+        let _ = self.client.unsubscribe(&topic).await;
+        self.subscriptions.lock().unwrap().remove(&topic);
+        Ok(())
+    }
+
     /// Create a `DevicePublisher` for use in unit tests.
     ///
     /// The underlying MQTT client is connected to `127.0.0.1:1883` and will
@@ -905,6 +929,10 @@ pub struct ManagementHandle {
     /// message on a topic subscribed with `subscribe_availability`. Set via
     /// [`ManagementHandle::with_availability_handler`].
     availability_handler: Option<Arc<dyn Fn(String, bool) + Send + Sync>>,
+    /// Callback invoked with `(device_id, schema)` for every schema on a
+    /// topic subscribed with `subscribe_schema`. Set via
+    /// [`ManagementHandle::with_schema_handler`].
+    schema_handler: Option<Arc<dyn Fn(String, Value) + Send + Sync>>,
     /// Registered streaming action handlers, indexed by action id.
     streaming_actions: Arc<HashMap<String, StreamingAction>>,
     /// Live streams, keyed by `request_id`. Entries are added on
@@ -1089,6 +1117,22 @@ impl ManagementHandle {
         F: Fn(String, bool) + Send + Sync + 'static,
     {
         self.availability_handler = Some(Arc::new(f));
+        self
+    }
+
+    /// Hear the schemas of devices this plugin does **not** own: `f` gets
+    /// `(device_id, schema)` for each `homecore/devices/{id}/schema` message
+    /// on a topic subscribed with [`DevicePublisher::subscribe_schema`]
+    /// (retained, so once at subscribe and again on every change). A cleared
+    /// topic is not passed on.
+    ///
+    /// For a plugin that reads other plugins' devices and needs to know what
+    /// their readings mean — a thermostat checking its sensor's unit.
+    pub fn with_schema_handler<F>(mut self, f: F) -> Self
+    where
+        F: Fn(String, Value) + Send + Sync + 'static,
+    {
+        self.schema_handler = Some(Arc::new(f));
         self
     }
 
@@ -1747,6 +1791,7 @@ impl PluginClient {
             files_dir: None,
             state_handler: None,
             availability_handler: None,
+            schema_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -2071,6 +2116,27 @@ impl PluginClient {
                             match parse_availability(&p.payload) {
                                 Some(online) => handler(parts[2].to_string(), online),
                                 None => debug!(topic = %p.topic, "Unreadable availability payload"),
+                            }
+                        }
+                        continue;
+                    }
+
+                    // homecore/devices/{id}/schema — another device's, for a
+                    // plugin that subscribed with `subscribe_schema`.
+                    if parts.len() == 4
+                        && parts[0] == "homecore"
+                        && parts[1] == "devices"
+                        && parts[3] == "schema"
+                    {
+                        if let Some(handler) = mgmt.as_ref().and_then(|m| m.schema_handler.as_ref())
+                        {
+                            if !p.payload.is_empty() {
+                                match serde_json::from_slice::<Value>(&p.payload) {
+                                    Ok(schema) => handler(parts[2].to_string(), schema),
+                                    Err(e) => {
+                                        debug!(topic = %p.topic, error = %e, "Unreadable schema payload")
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -2772,6 +2838,7 @@ mod async_and_files_tests {
             files_dir: None,
             state_handler: None,
             availability_handler: None,
+            schema_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }

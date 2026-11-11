@@ -652,7 +652,7 @@ pub fn desired(
             if !held || !rule.in_window(local) {
                 continue;
             }
-            let reason = rule.describe();
+            let reason = rule.describe_in(crate::household::temperature_unit());
             add(Alert {
                 id,
                 kind: AlertKind::Rule,
@@ -1251,7 +1251,7 @@ mod tests {
         );
         assert_eq!(
             out["rule:r3:freezer"].reason,
-            "temperature above -10 for 15 min"
+            "temperature above -10 °C for 15 min"
         );
         assert_eq!(out["rule:r3:freezer"].raised_at, now);
     }

@@ -346,6 +346,22 @@ mod tests {
         }
     }
 
+    /// Every temperature any kind declares — readings and `temp_limit_*` — is °C.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let probe = Caps {
+            metering: false,
+            temp_only: true,
+        };
+        for kind in all_kinds() {
+            for caps in [Caps::default(), meter(), probe.clone()] {
+                if let Some(s) = schema_for(&kind, &caps) {
+                    plugin_sdk_rs::conformance::check_temperatures(&s).assert_ok();
+                }
+            }
+        }
+    }
+
     #[test]
     fn temperature_is_celsius_and_a_probe_has_no_humidity() {
         let s = schema_for(&DeviceKind::THSensor, &Caps::default()).unwrap();

@@ -192,6 +192,8 @@ fn location() -> Section {
                 .help("IANA name, e.g. America/New_York.")
                 .placeholder("America/New_York"),
         )
+    // `temperature_unit` is left out: it's set at once through
+    // PUT /system/temperature-unit, and a form here would show °C while unset.
 }
 
 fn auth() -> Section {

@@ -199,6 +199,12 @@ async fn run(
                 let _ = tx.send(Event::Availability(id, online));
             }
         })
+        .with_schema_handler({
+            let tx = tx.clone();
+            move |id, schema| {
+                let _ = tx.send(Event::Schema(id, schema));
+            }
+        })
         .with_config_descriptor(config::config_descriptor());
     let mgmt = match config::config_schema() {
         Some(schema) => mgmt.with_config_schema(schema),

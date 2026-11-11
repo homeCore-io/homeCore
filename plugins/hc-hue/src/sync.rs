@@ -1572,6 +1572,27 @@ mod tests {
     /// Sensor readings publish under the shared names in the shared units —
     /// `temperature` °C, `illuminance` lux — with no unit siblings and no
     /// second spelling.
+    /// The temperature a sensor publishes is declared °C in its schema.
+    #[test]
+    fn every_temperature_is_declared_in_celsius() {
+        let mut attrs = serde_json::Map::new();
+        insert_motion_patch(
+            &mut attrs,
+            &json!({ "motion": { "motion": true, "motion_valid": true } }),
+        );
+        insert_temperature_patch(
+            &mut attrs,
+            &json!({ "temperature": { "temperature": 2234.0, "temperature_valid": true } }),
+        );
+        insert_light_level_patch(
+            &mut attrs,
+            &json!({ "light": { "light_level": 20001.0, "light_level_valid": true } }),
+        );
+        assert!(attrs.contains_key("temperature"));
+        let s = crate::aux_schema::schema_for_state(&attrs);
+        plugin_sdk_rs::conformance::check_temperatures(&s).assert_ok();
+    }
+
     #[test]
     fn sensor_patches_use_the_shared_names() {
         let mut attrs = serde_json::Map::new();
