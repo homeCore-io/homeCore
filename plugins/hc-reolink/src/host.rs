@@ -48,6 +48,8 @@ pub enum Kind {
 
 /// What the plugin shares between its addresses and its command loop.
 pub struct Ctx {
+    /// Each siren sounding, and its end.
+    pub sirens: Arc<crate::siren::Sirens>,
     pub publisher: DevicePublisher,
     pub cfg: ReolinkSection,
     pub files_dir: PathBuf,
@@ -495,7 +497,9 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
         p.register_device_schema_json(&id, &camera::siren_schema())
             .await?;
         p.subscribe_commands(&id).await?;
-        p.publish_state(&id, &json!({ "on": false })).await?;
+        // Quiet unless one it started is still sounding (an address reconnecting).
+        p.publish_state(&id, &json!({ "on": ctx.sirens.sounding(&id) }))
+            .await?;
         p.set_available(&id, c.online).await?;
         targets.push((id, Kind::Siren));
     }
@@ -624,7 +628,10 @@ async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
                 wait = Duration::from_secs(5);
                 let why = loop {
                     match p.next().await {
-                        Ok(list) => {
+                        Ok(crate::push::Pushed::Sirens(list)) => {
+                            heard_sirens(&ctx, &host, &list).await;
+                        }
+                        Ok(crate::push::Pushed::Seen(list)) => {
                             for s in list {
                                 let d = Detections {
                                     motion: s.motion,
@@ -664,6 +671,21 @@ async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(Duration::from_secs(300));
+    }
+}
+
+/// Sirens sounding or quiet, as the address pushed it: published for the
+/// cameras that have a siren here.
+async fn heard_sirens(ctx: &Ctx, host: &Arc<Host>, list: &[(u32, bool)]) {
+    let cams = host.cams.lock().await;
+    for (channel, on) in list {
+        if let Some(c) = cams
+            .iter()
+            .find(|c| c.channel == *channel && c.features.siren)
+        {
+            ctx.sirens
+                .heard(host, *channel, &camera::siren_id(&c.id), *on);
+        }
     }
 }
 
@@ -821,23 +843,7 @@ pub async fn command(ctx: &Ctx, device_id: &str, payload: &Value) -> Result<()> 
             }
         }
         Kind::Siren => {
-            let times = match (action, payload.get("on").and_then(Value::as_bool)) {
-                (Some("sound"), _) => payload["times"]
-                    .as_u64()
-                    .unwrap_or(ctx.cfg.siren_times as u64)
-                    as u32,
-                (None, Some(true)) => ctx.cfg.siren_times,
-                (None, Some(false)) => return Ok(()),
-                (Some(other), _) => anyhow::bail!("unknown action: {other}"),
-                _ => return Ok(()),
-            };
-            h.api.one(api::siren(t.channel, times)).await?;
-            p.publish_state_for_command(device_id, &json!({ "on": true }), payload, "reolink")
-                .await?;
-            // There's no reading a siren back: it's quiet again once it has sounded.
-            tokio::time::sleep(Duration::from_secs(2 * times.max(1) as u64)).await;
-            p.publish_state_partial(device_id, &json!({ "on": false }))
-                .await?;
+            ctx.sirens.command(h, t.channel, device_id, payload).await?;
         }
         Kind::Camera => match action {
             Some("take_snapshot") => {

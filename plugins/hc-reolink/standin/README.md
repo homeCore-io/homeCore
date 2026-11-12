@@ -13,6 +13,14 @@ shapes, and two go2rtc instances.
     sees (`md`, `people`, `vehicle`, `dog_cat`, `package`, `visitor`,
     `online`).
   - `GET /standin/log`: the commands it was sent.
+  - `GET /standin/siren`: each channel's siren, sounding or not and how
+    (`manul` or `times`). It takes `AudioAlarmPlay` as a Reolink does, and
+    pushes a `SirenStatus` when one starts or stops. `SIREN_PLAY_MS` is one
+    "times" play (5000); `SIREN_PERMIT=4` is an account that may only watch
+    (no siren offered); `SIREN_MANUAL=0` refuses a manual play, as some
+    firmware does. A siren test against it:
+    `PORT=18980 PUSH_PORT=18981 SIREN_PLAY_MS=300 node standin.mjs`, then
+    `REOLINK_STANDIN=127.0.0.1:18980 REOLINK_STANDIN_PUSH=18981 cargo test -p hc-reolink -- --ignored standin`.
   - `MODE=camera` makes it a camera on its own (type IPC, no channel
     list): the PTZ camera. `LENSES=2` makes it report two channels, as a
     Duo may; the plugin should still show one camera.

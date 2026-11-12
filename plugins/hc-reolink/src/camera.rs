@@ -273,7 +273,9 @@ pub fn spotlight_schema() -> DeviceSchema {
     }
 }
 
-/// The siren: `on` sounds it, and it reads off again once it has.
+/// The siren: `on: true` sounds it until `on: false` (or the plugin's
+/// `siren_max_secs`), and `on` reads whether it is sounding. The `sound`
+/// action plays it a few times instead, after which it is quiet by itself.
 pub fn siren_schema() -> Value {
     let mut a = HashMap::new();
     a.insert(
@@ -295,6 +297,7 @@ pub fn siren_schema() -> Value {
             ..Default::default()
         },
         vec![Action::new("sound")
+            .description("Plays it a few times, about five seconds each, then it stops by itself.")
             .label("Sound it")
             .icon("siren")
             .confirm("Sound the siren?")
@@ -421,5 +424,15 @@ mod tests {
             vec![],
         ))
         .assert_ok();
+    }
+
+    #[test]
+    fn a_siren_is_turned_on_and_off_by_writing_on() {
+        let s = siren_schema();
+        let on = &s["attributes"]["on"];
+        assert_eq!(on["kind"], "bool");
+        assert_eq!(on["writable"], true);
+        assert_eq!(on["states"]["when_false"]["label"], "quiet");
+        assert_eq!(s["actions"][0]["id"], "sound");
     }
 }

@@ -11,6 +11,13 @@
 //   POST /standin/set  {"channel":1,"md":1,"people":1,...}  what a camera sees
 //   GET  /standin/log  the commands it was sent
 //   GET  /standin/state
+//   GET  /standin/siren  each channel's siren: sounding or not, and how
+//
+// Its siren takes AudioAlarmPlay as Reolink's does: "manul" with manual_switch
+// 1 or 0 starts or stops it, "times" plays it (SIREN_PLAY_MS each) and stops
+// by itself. A change is pushed as a SirenStatus (command 547). SIREN_PERMIT
+// sets the account's permission on it (4: may only watch); SIREN_MANUAL=0
+// refuses a manual play, as some firmware does.
 import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
@@ -45,7 +52,44 @@ const presets = [{ enable: 1, id: 1, name: 'Gate' }, { enable: 1, id: 2, name: '
 
 const ok = (cmd, value) => ({ cmd, code: 0, value });
 const err = (cmd, rspCode, detail) => ({ cmd, code: 1, error: { rspCode, detail } });
-const ver = (on) => ({ permit: on ? 6 : 0, ver: on ? 1 : 0 });
+const ver = (on, permit = 6) => ({ permit: on ? permit : 0, ver: on ? 1 : 0 });
+// The siren's permission for the account (4 read, 2 change, 1 operate):
+// SIREN_PERMIT=4 is an account that may only watch, so no siren is offered.
+const SIREN_PERMIT = Number(process.env.SIREN_PERMIT ?? 6);
+// SIREN_MANUAL=0 refuses a manual play, as some firmware does.
+const SIREN_MANUAL = process.env.SIREN_MANUAL !== '0';
+// One "times" play lasts about this long.
+const PLAY_MS = Number(process.env.SIREN_PLAY_MS ?? 5000);
+
+// A siren: sounding or not, and a "times" play's timer. A manual stop is
+// ignored while a "times" play sounds unless a manual play started first,
+// as Reolink's firmware does (reolink_aio works around the same).
+const sirenTimers = new Map();
+function siren(i, p) {
+	const ch = chans[i];
+	ch.siren ??= { on: false, mode: null };
+	const s = ch.siren;
+	const was = s.on;
+	if (p.alarm_mode === 'times') {
+		clearTimeout(sirenTimers.get(i));
+		Object.assign(s, { on: true, mode: 'times' });
+		sirenTimers.set(i, setTimeout(() => {
+			Object.assign(s, { on: false, mode: null });
+			sirenPushed(i);
+		}, Math.max(1, p.times ?? 1) * PLAY_MS));
+	} else if (p.alarm_mode === 'manul' && p.manual_switch === 1) {
+		if (!SIREN_MANUAL) return false;
+		clearTimeout(sirenTimers.get(i));
+		Object.assign(s, { on: true, mode: 'manul' });
+	} else if (p.alarm_mode === 'manul') {
+		if (s.mode !== 'times') {
+			clearTimeout(sirenTimers.get(i));
+			Object.assign(s, { on: false, mode: null });
+		}
+	}
+	if (s.on !== was) sirenPushed(i);
+	return true;
+}
 
 function answer(c, token) {
 	const p = c.param ?? {};
@@ -59,7 +103,7 @@ function answer(c, token) {
 			if (CAMERA) return err(c.cmd, -9, 'not support');
 			return ok(c.cmd, { count: chans.length, status: chans.map((x, i) => ({ channel: i, name: x.name, online: x.online, typeInfo: x.type, uid: 'X' + i })) });
 		case 'GetAbility':
-			return ok(c.cmd, { Ability: { abilityChn: chans.map((x) => ({ floodLight: ver(!!x.led), alarmAudio: ver(x.ptz), ptzCtrl: ver(x.ptz), ptzPreset: ver(x.ptz), alarmIrLights: ver(true) })) } });
+			return ok(c.cmd, { Ability: { abilityChn: chans.map((x) => ({ floodLight: ver(!!x.led), alarmAudio: ver(x.ptz, SIREN_PERMIT), ptzCtrl: ver(x.ptz), ptzPreset: ver(x.ptz), alarmIrLights: ver(true) })) } });
 		case 'GetEvents': {
 			if (!ch) return err(c.cmd, -4, 'param error');
 			const s = (k) => ({ alarm_state: ch.ev[k] ? 1 : 0, support: ch.support[k] ? 1 : 0 });
@@ -81,7 +125,9 @@ function answer(c, token) {
 			ch.ir = p.IrLights.state;
 			return ok(c.cmd, { rspCode: 200 });
 		case 'AudioAlarmPlay':
-			return ch?.ptz ? ok(c.cmd, { rspCode: 200 }) : err(c.cmd, -9, 'not support');
+			if (!ch?.ptz) return err(c.cmd, -9, 'not support');
+			if (!(SIREN_PERMIT & 3)) return err(c.cmd, -26, 'ability error');
+			return siren(p.channel ?? 0, p) ? ok(c.cmd, { rspCode: 200 }) : err(c.cmd, -9, 'not support');
 		case 'PtzCtrl':
 			return ch?.ptz ? ok(c.cmd, { rspCode: 200 }) : err(c.cmd, -9, 'not support');
 		case 'Logout':
@@ -127,6 +173,7 @@ http
 			}
 			if (url.pathname === '/standin/log') return send(200, log.slice(-50));
 			if (url.pathname === '/standin/state') return send(200, { sessions: sessions.size, chans, lockedUntil });
+			if (url.pathname === '/standin/siren') return send(200, chans.map((x, i) => ({ channel: i, on: !!x.siren?.on, mode: x.siren?.mode ?? null })));
 			if (url.pathname !== '/cgi-bin/api.cgi') return send(404, {});
 			const cmd = url.searchParams.get('cmd');
 			const token = url.searchParams.get('token');
@@ -187,6 +234,16 @@ function pushAlarm(i) {
 		const body = aes(sub.key, Buffer.from(alarmXml(i)));
 		const id = Buffer.from([251, 0, 0, 0]);
 		sub.socket.write(Buffer.concat([header(33, body.length, id, 200, '1464'), body]));
+	}
+}
+// A siren started or stopped (command 547), as firmware that says so pushes it.
+function sirenPushed(i) {
+	const on = chans[i].siren?.on ? 1 : 0;
+	log.push({ cmd: 'SirenStatus', channel: i, on: !!on, at: Date.now() });
+	const xml = `<?xml version="1.0" encoding="UTF-8" ?>\n<body>\n<SirenStatusList version="1.1">\n<SirenStatus>\n<channel>${i}</channel>\n<status>${on}</status>\n</SirenStatus>\n</SirenStatusList>\n</body>\n`;
+	for (const sub of subscribers) {
+		const body = aes(sub.key, Buffer.from(xml));
+		sub.socket.write(Buffer.concat([header(547, body.length, Buffer.from([251, 0, 0, 0]), 200, '1464'), body]));
 	}
 }
 if (process.env.PUSH_PORT) {

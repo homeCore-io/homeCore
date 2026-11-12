@@ -382,7 +382,7 @@ class CameraPanel extends Screen {
 					</div>
 					<div><h3>It sees</h3><div class="chips sees"></div></div>
 					${light ? `<div><h3>Spotlight</h3><div class="row"><button class="hc-pill lt"></button><input class="br" type="range" min="1" max="100" /><span class="hc-num brn"></span></div></div>` : ''}
-					${siren ? `<div><h3>Siren</h3><div class="row"><button class="hc-pill sr">Sound the siren</button><span class="hc-quiet">Asks first.</span></div></div>` : ''}
+					${siren ? `<div><h3>Siren</h3><div class="row"><button class="hc-pill sr"></button><span class="hc-quiet srn"></span></div></div>` : ''}
 					${this.presets.length ? `<div><h3>Go to</h3><div class="row" style="flex-wrap:wrap">${this.presets.map((p) => `<button class="hc-pill preset" data-id="${this.esc(p.value)}">${this.esc(p.label ?? p.value)}</button>`).join('')}</div></div>` : ''}
 					${'ir_mode' in a ? `<div><h3>At night</h3><div class="row"><button class="hc-pill ir" data-v="auto">Infrared when dark</button><button class="hc-pill ir" data-v="off">No infrared</button></div></div>` : ''}
 					<div><h3>Newest stills</h3><div class="strip">${
@@ -401,7 +401,9 @@ class CameraPanel extends Screen {
 			$('.snap').onclick = () => h.command(d.device_id, { action: 'take_snapshot' });
 			if (siren)
 				$('.sr').onclick = async () => {
-					if (await h.ui.confirm({ title: 'Sound the siren?', body: 'Everyone near the camera hears it.', go: 'Sound it', danger: true })) h.command(siren.device_id, { on: true });
+					// Sounding: stop it at once. Quiet: ask first.
+					if (this.part('siren')?.attributes.on === true) h.command(siren.device_id, { on: false });
+					else if (await h.ui.confirm({ title: 'Sound the siren?', body: 'Everyone near the camera hears it, until it is stopped here or stops itself.', go: 'Sound it', danger: true })) h.command(siren.device_id, { on: true });
 				};
 			if (light) {
 				$('.lt').onclick = () => h.command(light.device_id, { on: light.attributes.on !== true });
@@ -421,6 +423,13 @@ class CameraPanel extends Screen {
 			const br = this.shadowRoot.querySelector('.br');
 			if (document.activeElement !== this && br) br.value = String(light.attributes.brightness_pct || 80);
 			this.shadowRoot.querySelector('.brn').textContent = on ? `${light.attributes.brightness_pct}%` : '';
+		}
+		if (siren) {
+			const on = siren.attributes.on === true;
+			const sr = this.shadowRoot.querySelector('.sr');
+			sr.textContent = on ? 'Stop the siren' : 'Sound the siren';
+			sr.setAttribute('aria-pressed', String(on));
+			this.shadowRoot.querySelector('.srn').textContent = on ? 'Sounding.' : 'Asks first.';
 		}
 		for (const b of this.shadowRoot.querySelectorAll('.ir')) b.setAttribute('aria-pressed', String(a.ir_mode === b.dataset.v));
 	}
