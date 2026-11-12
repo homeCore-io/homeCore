@@ -11,6 +11,14 @@ Reolink cameras, NVRs and Home Hubs in homeCore.
   (`pushed`), so the button trigger reads it.
 - **Spotlights** are `light` devices and **sirens** `siren` devices of their
   own, so cards, rules and scenes treat them like any other.
+- **A siren** is turned on and off by writing `on`: `{"on": true}` sounds
+  it until `{"on": false}`, and the plugin stops it itself after
+  `siren_max_secs` (60 s unless changed, 5 to 600) and when the plugin
+  stops, so none is left sounding. `on` reads what was asked and taken; where
+  a camera pushes its siren's status, that is published as it comes. The
+  `sound` action (`times`, 1 to 10) plays it a few times instead, about five
+  seconds each, and it reads quiet again after. A siren is offered only when
+  the account signed in may use it.
 - **PTZ** cameras have `ptz_move` and `goto_preset` actions; `ir_mode` turns
   infrared on or off.
 - **Snapshots** are taken when a detection starts and kept in the plugin's

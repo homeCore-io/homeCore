@@ -17,6 +17,10 @@ mod config;
 mod go2rtc;
 mod host;
 mod push;
+mod siren;
+
+#[cfg(test)]
+mod fake;
 
 use anyhow::Result;
 use plugin_sdk_rs::types::{AlertSeverity, PluginAlertKind, PluginNotice};
@@ -125,7 +129,33 @@ async fn run(
     } else {
         Some(go2rtc::Go2rtc::new(cfg.reolink.go2rtc.url.trim())?)
     };
+    // Each siren's `on` as it changes, published in order: a command's
+    // answer with the command, the rest (an auto-stop, a pushed status) plain.
+    let (sirens, mut siren_reports) =
+        siren::Sirens::new(cfg.reolink.siren_max_secs, cfg.reolink.siren_times);
+    let siren_publisher = publisher.clone();
+    tokio::spawn(async move {
+        while let Some(r) = siren_reports.recv().await {
+            let state = json!({ "on": r.on });
+            let sent = match &r.command {
+                Some(cmd) => {
+                    siren_publisher
+                        .publish_state_partial_for_command(&r.device, &state, cmd, "reolink")
+                        .await
+                }
+                None => {
+                    siren_publisher
+                        .publish_state_partial(&r.device, &state)
+                        .await
+                }
+            };
+            if let Err(e) = sent {
+                warn!(device_id = %r.device, error = %e, "siren state not published");
+            }
+        }
+    });
     let ctx = Arc::new(host::Ctx {
+        sirens,
         publisher: publisher.clone(),
         cfg: cfg.reolink.clone(),
         files_dir: files_dir.clone(),
@@ -233,8 +263,11 @@ async fn run(
 
     // Stopped or restarted by homeCore: give each session back. A device
     // allows only a few, and one left behind holds its place for an hour.
+    let ctx_for_stop = ctx.clone();
     tokio::spawn(async move {
         stopping().await;
+        // No siren this plugin started outlives it.
+        ctx_for_stop.sirens.stop_all().await;
         for h in &hosts {
             h.api.logout().await;
         }
@@ -242,7 +275,7 @@ async fn run(
         std::process::exit(0);
     });
 
-    // Commands, each on its own task: a siren's few seconds don't hold the rest.
+    // Commands, each on its own task: a slow camera doesn't hold the rest.
     while let Some((device_id, payload)) = rx.recv().await {
         let ctx = ctx.clone();
         tokio::spawn(async move {

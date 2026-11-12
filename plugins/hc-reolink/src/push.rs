@@ -4,8 +4,10 @@
 //! sign in, subscribe (command 31 on channel 251), and from then on the
 //! device sends an `AlarmEventList` (command 33) whenever what a camera sees
 //! changes: motion (`MD`), the doorbell (`visitor`), and the AI types
-//! (`people`, `vehicle`, `dog_cat`, `package`). The connection is kept with
-//! a link message (command 93) when nothing has come for a while.
+//! (`people`, `vehicle`, `dog_cat`, `package`). Where firmware does, it
+//! also sends a `SirenStatus` (command 547) when a siren starts or stops.
+//! The connection is kept with a link message (command 93) when nothing has
+//! come for a while.
 //!
 //! Messages are a header — `f0debc0a`, the command, the body's length, the
 //! channel and a message number, a status and a class — then a body of XML.
@@ -30,6 +32,8 @@ pub const LOGIN: u32 = 1;
 pub const SUBSCRIBE: u32 = 31;
 pub const ALARM: u32 = 33;
 pub const LINK: u32 = 93;
+/// A siren started or stopped, on any firmware that says so.
+pub const SIREN_STATUS: u32 = 547;
 /// Keep the connection with a link message when nothing has come for this long.
 pub const KEEPALIVE: Duration = Duration::from_secs(30);
 /// No message at all for this long: the connection is gone.
@@ -225,6 +229,35 @@ pub fn parse_alarms(xml: &str) -> Vec<Seen> {
     out
 }
 
+/// Each `<SirenStatus>`: its channel, and whether it's sounding (`status` 1).
+pub fn parse_siren_status(xml: &str) -> Vec<(u32, bool)> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<SirenStatus") {
+        let after = &rest[i..];
+        let end = after.find("</SirenStatus>").map_or(after.len(), |e| e + 14);
+        let item = &after[..end];
+        rest = &after[end..];
+        let channel = tag(item, "channel")
+            .or_else(|| tag(item, "channelId"))
+            .and_then(|c| c.parse().ok());
+        let status = tag(item, "status").and_then(|s| s.parse::<i64>().ok());
+        if let (Some(c), Some(s)) = (channel, status) {
+            out.push((c, s == 1));
+        }
+    }
+    out
+}
+
+/// What a push says.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pushed {
+    /// What cameras see now.
+    Seen(Vec<Seen>),
+    /// Sirens sounding or quiet, by channel.
+    Sirens(Vec<(u32, bool)>),
+}
+
 fn login_xml(user_hash: &str, pass_hash: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<LoginUser version=\"1.1\">\n<userName>{user_hash}</userName>\n<password>{pass_hash}</password>\n<userVer>1</userVer>\n</LoginUser>\n<LoginNet version=\"1.1\">\n<type>LAN</type>\n<udpPort>0</udpPort>\n</LoginNet>\n</body>\n"
@@ -301,14 +334,20 @@ impl Push {
 
     /// The next events, sending a link message when it's been quiet. An error
     /// is the connection gone.
-    pub async fn next(&mut self) -> Result<Vec<Seen>> {
+    pub async fn next(&mut self) -> Result<Pushed> {
         let mut quiet = Duration::ZERO;
         loop {
             match tokio::time::timeout(KEEPALIVE, read_message(&mut self.stream)).await {
                 Ok(m) => {
                     let m = m?;
                     if m.cmd == ALARM {
-                        return Ok(parse_alarms(&m.text(Some(&self.key))));
+                        return Ok(Pushed::Seen(parse_alarms(&m.text(Some(&self.key)))));
+                    }
+                    if m.cmd == SIREN_STATUS {
+                        let s = parse_siren_status(&m.text(Some(&self.key)));
+                        if !s.is_empty() {
+                            return Ok(Pushed::Sirens(s));
+                        }
                     }
                     quiet = Duration::ZERO;
                 }
@@ -395,6 +434,28 @@ mod tests {
                 vehicle: true,
                 ..Default::default()
             }]
+        );
+    }
+
+    #[test]
+    fn reads_a_sirens_status() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<SirenStatusList version="1.1">
+<SirenStatus>
+<channel>1</channel>
+<status>1</status>
+</SirenStatus>
+<SirenStatus>
+<channel>0</channel>
+<status>0</status>
+</SirenStatus>
+</SirenStatusList>
+</body>"#;
+        assert_eq!(parse_siren_status(xml), vec![(1, true), (0, false)]);
+        assert!(
+            parse_siren_status("<body><SirenStatus><status>1</status></SirenStatus></body>")
+                .is_empty()
         );
     }
 

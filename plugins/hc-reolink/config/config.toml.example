@@ -15,8 +15,11 @@ log_forward_level = "info"
 poll_secs = 2
 # Snapshots kept per camera, taken when a detection starts.
 snapshots_kept = 20
-# How many times the siren sounds.
+# How many times the siren's "sound" action plays it (about 5 s each).
 siren_times = 3
+# A siren turned on (`on: true`) sounds until it's turned off, or this many
+# seconds at most (5 to 600).
+siren_max_secs = 60
 
 # Live video: go2rtc's API as the plugin reaches it. The plugin adds
 # reolink_<camera> (sub stream) and reolink_<camera>_hd (main stream) to it.

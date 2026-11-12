@@ -126,7 +126,22 @@ pub fn config_descriptor() -> serde_json::Value {
                     Field::int("reolink.siren_times")
                         .label("The siren sounds")
                         .unit("times")
-                        .default(3),
+                        .default(3)
+                        .min(1)
+                        .max(10)
+                        .help("For its \"sound\" action, about five seconds each."),
+                )
+                .field(
+                    Field::int("reolink.siren_max_secs")
+                        .label("A siren turned on stops after")
+                        .unit("s")
+                        .default(60)
+                        .min(5)
+                        .max(600)
+                        .help(
+                            "A siren turned on sounds until it's turned off, \
+                             or this long at most.",
+                        ),
                 ),
         )
         .section(
@@ -231,6 +246,10 @@ pub struct ReolinkSection {
     pub snapshots_kept: usize,
     #[serde(default = "default_siren_times")]
     pub siren_times: u32,
+    /// The longest a siren sounds before the plugin stops it, in seconds
+    /// (5 to 600): none is left sounding when whoever started it is gone.
+    #[serde(default = "default_siren_max_secs")]
+    pub siren_max_secs: u64,
     /// Events the moment they happen, by Reolink's push (port 9000), with
     /// asking kept behind it. Off: asked every `poll_secs` only.
     #[serde(default = "yes")]
@@ -246,6 +265,7 @@ impl Default for ReolinkSection {
             poll_secs: default_poll_secs(),
             snapshots_kept: default_snapshots_kept(),
             siren_times: default_siren_times(),
+            siren_max_secs: default_siren_max_secs(),
             push: true,
             go2rtc: Go2rtcSection::default(),
         }
@@ -257,6 +277,9 @@ fn default_poll_secs() -> u64 {
 }
 fn default_snapshots_kept() -> usize {
     20
+}
+fn default_siren_max_secs() -> u64 {
+    60
 }
 fn default_siren_times() -> u32 {
     3
@@ -402,6 +425,7 @@ mod tests {
         )
         .expect("should load");
         assert_eq!(cfg.reolink.poll_secs, 2);
+        assert_eq!(cfg.reolink.siren_max_secs, 60);
         assert_eq!(cfg.reolink.hosts[0].username, "admin");
         assert!(cfg.reolink.hosts[0].https);
         assert!(cfg.reolink.go2rtc.add_streams);

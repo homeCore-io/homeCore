@@ -370,12 +370,21 @@ pub fn set_spotlight(channel: u32, on: bool, bright: Option<u8>) -> Value {
     cmd("SetWhiteLed", json!({ "WhiteLed": led }))
 }
 
-/// Sound the siren `times` times. Only "times" works: firmware takes the
-/// manual mode's command and does nothing (Reolink's own notes).
-pub fn siren(channel: u32, times: u32) -> Value {
+/// Sound the siren `times` times (about five seconds each); it stops by
+/// itself after.
+pub fn siren_times(channel: u32, times: u32) -> Value {
     cmd(
         "AudioAlarmPlay",
-        json!({ "alarm_mode": "times", "manual_switch": 0, "times": times.max(1), "channel": channel }),
+        json!({ "alarm_mode": "times", "times": times.max(1), "channel": channel }),
+    )
+}
+
+/// Start (`true`) or stop (`false`) the siren. Started this way it sounds
+/// until it's stopped. reolink_aio (MIT) does the same.
+pub fn siren_manual(channel: u32, on: bool) -> Value {
+    cmd(
+        "AudioAlarmPlay",
+        json!({ "alarm_mode": "manul", "manual_switch": u8::from(on), "channel": channel }),
     )
 }
 
@@ -742,8 +751,15 @@ mod tests {
             set_spotlight(2, true, Some(0))["param"]["WhiteLed"]["bright"],
             1
         );
-        assert_eq!(siren(0, 0)["param"]["times"], 1);
-        assert_eq!(siren(0, 3)["param"]["alarm_mode"], "times");
+        assert_eq!(siren_times(0, 0)["param"]["times"], 1);
+        assert_eq!(siren_times(0, 3)["param"]["alarm_mode"], "times");
+        // Reolink spells the mode "manul".
+        let on = siren_manual(1, true);
+        assert_eq!(on["cmd"], "AudioAlarmPlay");
+        assert_eq!(on["param"]["alarm_mode"], "manul");
+        assert_eq!(on["param"]["manual_switch"], 1);
+        assert_eq!(on["param"]["channel"], 1);
+        assert_eq!(siren_manual(1, false)["param"]["manual_switch"], 0);
         assert_eq!(ptz(1, "ToPos", 32, Some(4))["param"]["id"], 4);
         assert_eq!(set_ir(0, false)["param"]["IrLights"]["state"], "Off");
         assert_eq!(ptz_op("zoom_in"), Some("ZoomInc"));
