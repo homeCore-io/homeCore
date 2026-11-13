@@ -1360,6 +1360,7 @@ mod scene_schema_tests {
         );
         let schema = scene_schema_for(&relax());
         assert_eq!(schema["attributes"]["lights"]["kind"], "json");
+        plugin_sdk_rs::conformance::check_device_schema_json(&schema).assert_ok();
     }
 
     #[test]
@@ -1388,6 +1389,8 @@ mod scene_schema_tests {
         assert_eq!(params, ["scene_id", "transition_ms"]);
         let schema = light_schema(&light);
         assert!(schema.attributes.contains_key("scene"));
+        let full = with_actions(&schema, actions);
+        plugin_sdk_rs::conformance::check_device_schema_json(&full).assert_ok();
         assert!(schema.attributes.contains_key("scene_name"));
     }
 

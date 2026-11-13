@@ -22,7 +22,7 @@ use crate::lip::protocol::{
     PHANTOM_LED_COMPONENT_OFFSET,
 };
 use plugin_sdk_rs::types::PluginNotice;
-use plugin_sdk_rs::{DevicePublisher, PluginNotices};
+use plugin_sdk_rs::{DevicePublisher, PluginNotices, PluginStateWriter};
 
 // ---------------------------------------------------------------------------
 // Bridge
@@ -55,9 +55,12 @@ pub struct Bridge {
     notices: PluginNotices,
     /// Whether the session is up, for the plugin page's `status` action.
     link: crate::ui_actions::LinkHandle,
+    /// Keeps the household's button names in the learned state.
+    state_writer: PluginStateWriter,
 }
 
 impl Bridge {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         devices: Vec<DeviceEntry>,
         scenes: Vec<SceneEntry>,
@@ -66,6 +69,7 @@ impl Bridge {
         lutron_cfg: LutronConfig,
         notices: PluginNotices,
         link: crate::ui_actions::LinkHandle,
+        state_writer: PluginStateWriter,
     ) -> Self {
         let global_fade = lutron_cfg.default_fade_secs;
         let hold_threshold_ms = lutron_cfg.hold_threshold_ms;
@@ -109,6 +113,7 @@ impl Bridge {
             hold_threshold_ms,
             notices,
             link,
+            state_writer,
         }
     }
 
@@ -116,11 +121,15 @@ impl Bridge {
     // Outer reconnect loop
     // -----------------------------------------------------------------------
 
-    pub async fn run(mut self, mut homecore_rx: mpsc::Receiver<(String, serde_json::Value)>) {
+    pub async fn run(
+        mut self,
+        mut homecore_rx: mpsc::Receiver<(String, serde_json::Value)>,
+        mut learned_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
         let mut backoff = Duration::from_secs(self.lutron_cfg.reconnect_delay_secs);
 
         loop {
-            match self.run_once(&mut homecore_rx).await {
+            match self.run_once(&mut homecore_rx, &mut learned_rx).await {
                 Ok(()) => {
                     // HomeCore channel closed — clean shutdown
                     info!("Bridge shutting down");
@@ -164,6 +173,7 @@ impl Bridge {
     async fn run_once(
         &mut self,
         homecore_rx: &mut mpsc::Receiver<(String, serde_json::Value)>,
+        learned_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
     ) -> anyhow::Result<()> {
         let (mut reader, write_tx) = connect(
             &self.lutron_cfg.host,
@@ -231,6 +241,11 @@ impl Bridge {
                         }
                         None => return Ok(()), // HomeCore channel closed
                     }
+                }
+
+                // ── The learned state: the household's button names ────
+                Some(doc) = learned_rx.recv() => {
+                    self.adopt_button_names(&doc).await;
                 }
 
                 // ── Hold timer fired ──────────────────────────────────────
@@ -428,7 +443,7 @@ impl Bridge {
                     .devices
                     .get(&integration_id)
                     .and_then(|dev| {
-                        crate::schema::buttons_with_labels(&dev.config)
+                        crate::schema::buttons_named(&dev.config, &dev.button_labels)
                             .into_iter()
                             .find(|(b, _)| *b == component)
                             .map(|(_, label)| label)
@@ -603,6 +618,11 @@ impl Bridge {
 
         // Regular device command
         if let Some(&integration_id) = self.hc_to_id.get(hc_id) {
+            // Naming a button stays here; nothing goes to the repeater.
+            if cmd.get("action").and_then(serde_json::Value::as_str) == Some("set_button_name") {
+                self.set_button_name(integration_id, &cmd).await;
+                return;
+            }
             if let Some(dev) = self.devices.get(&integration_id) {
                 // press_button requires an async press+release with a gap — handle before
                 // translate_command (which is synchronous and cannot produce the delay).
@@ -636,6 +656,100 @@ impl Bridge {
                 }
                 debug!(hc_id, "Command sent to RA2");
             }
+        }
+    }
+
+    /// `{"action": "set_button_name", "button": 3, "name": "Movie"}`: keep the
+    /// household's name for a button, or with no name (or an empty one) go
+    /// back to the engraving. Kept in the learned state, one key per button,
+    /// then said on the keypad at once.
+    async fn set_button_name(&mut self, integration_id: u32, cmd: &serde_json::Value) {
+        let Some(dev) = self.devices.get_mut(&integration_id) else {
+            return;
+        };
+        let hc_id = dev.hc_id.clone();
+        if !matches!(
+            dev.config.kind,
+            DeviceKind::Keypad | DeviceKind::Pico | DeviceKind::Vcrx
+        ) {
+            warn!(hc_id, "set_button_name: this device has no buttons");
+            return;
+        }
+        let Some(button) = cmd.get("button").and_then(as_number).map(|b| b as u32) else {
+            warn!(hc_id, ?cmd, "set_button_name: missing or invalid button");
+            return;
+        };
+        if !dev.config.all_buttons.is_empty() && !dev.config.all_buttons.contains(&button) {
+            warn!(
+                hc_id,
+                button, "set_button_name: this keypad has no such button"
+            );
+            return;
+        }
+        let name = cmd
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::labels::clean);
+        let changed = match &name {
+            Some(n) => dev.button_labels.insert(button, n.clone()).as_ref() != Some(n),
+            None => dev.button_labels.remove(&button).is_some(),
+        };
+        if !changed {
+            debug!(hc_id, button, "set_button_name: unchanged");
+            return;
+        }
+        let delta = crate::labels::delta(&hc_id, button, name.as_deref());
+        if let Err(e) = self.state_writer.persist(&delta).await {
+            // Said on the keypad anyway; it is lost at the next restart.
+            warn!(hc_id, button, error = %e, "Failed to keep the button name");
+        }
+        info!(hc_id, button, name = ?name, "Button named");
+        self.publish_buttons(integration_id).await;
+    }
+
+    /// The household's names, from a learned-state document: once shortly
+    /// after start, then whenever it changes. Republishes each keypad whose
+    /// names changed.
+    async fn adopt_button_names(&mut self, doc: &serde_json::Value) {
+        let mut all = crate::labels::from_doc(doc);
+        let mut changed = Vec::new();
+        for (id, dev) in self.devices.iter_mut() {
+            let labels = all.remove(&dev.hc_id).unwrap_or_default();
+            if labels != dev.button_labels {
+                dev.button_labels = labels;
+                changed.push(*id);
+            }
+        }
+        if !changed.is_empty() {
+            info!(devices = changed.len(), "Button names loaded");
+        }
+        for id in changed {
+            self.publish_buttons(id).await;
+        }
+    }
+
+    /// A keypad's schema and button names, said again after a name changed.
+    async fn publish_buttons(&self, integration_id: u32) {
+        let Some(dev) = self.devices.get(&integration_id) else {
+            return;
+        };
+        if let Some(schema) =
+            crate::schema::device_schema_json_named(&dev.config, &dev.button_labels)
+        {
+            if let Err(e) = self
+                .publisher
+                .register_device_schema_json(&dev.hc_id, &schema)
+                .await
+            {
+                warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish device schema");
+            }
+        }
+        // No catalogue left (the last name cleared on a keypad discovery never
+        // listed): clear the names rather than leave the old ones standing.
+        let cat = crate::schema::button_catalogue_named(&dev.config, &dev.button_labels)
+            .unwrap_or_else(|| serde_json::json!({ "button_names": null }));
+        if let Err(e) = self.publisher.publish_state_partial(&dev.hc_id, &cat).await {
+            warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish button names");
         }
     }
 
@@ -689,7 +803,9 @@ impl Bridge {
                 warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish availability");
             }
             // Buttons: the list DbXML has always known, finally said out loud.
-            if let Some(schema) = crate::schema::device_schema_json(&dev.config) {
+            if let Some(schema) =
+                crate::schema::device_schema_json_named(&dev.config, &dev.button_labels)
+            {
                 if let Err(e) = self
                     .publisher
                     .register_device_schema_json(&dev.hc_id, &schema)
@@ -709,7 +825,9 @@ impl Bridge {
                     warn!(hc_id = %dev.hc_id, error = %e, "Failed to clear retired state");
                 }
             }
-            if let Some(cat) = crate::schema::button_catalogue(&dev.config) {
+            if let Some(cat) =
+                crate::schema::button_catalogue_named(&dev.config, &dev.button_labels)
+            {
                 if let Err(e) = self.publisher.publish_state_partial(&dev.hc_id, &cat).await {
                     warn!(hc_id = %dev.hc_id, error = %e, "Failed to publish button catalogue");
                 }
@@ -1043,7 +1161,8 @@ mod action_style_tests {
             .iter()
             .map(|a| a["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["press_button", "set_led"]);
+        // `set_button_name` is the bridge's own; nothing goes to the repeater.
+        assert_eq!(ids, ["press_button", "set_led", "set_button_name"]);
 
         assert_eq!(
             normalise_action_style(&json!({"action": "press_button", "button": "2"})),
