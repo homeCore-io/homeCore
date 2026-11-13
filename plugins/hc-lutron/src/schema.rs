@@ -17,6 +17,7 @@ use plugin_sdk_rs::types::schema::{
 use serde_json::Value;
 
 use crate::config::{DeviceConfig, DeviceKind, SceneConfig};
+use crate::labels::Labels;
 use crate::lip::protocol::led_component_for_phantom_button;
 
 fn ro(kind: AttributeKind, display: &str) -> AttributeSchema {
@@ -153,11 +154,18 @@ fn activate_action() -> Action {
         .sentence("activate {device}")
 }
 
-/// The schema for one device, or `None` for kinds with nothing to declare.
-///
-/// A Pico gets one: it accepts no commands at all (truly read-only hardware),
-/// but its button catalogue is exactly what a trigger picker needs.
+#[cfg(test)]
 pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
+    device_schema_json_named(cfg, &Labels::new())
+}
+
+/// The schema for one device, or `None` for kinds with nothing to declare.
+/// `labels` are the household's names for its buttons.
+///
+/// A Pico gets one: it sends no commands to the repeater (truly read-only
+/// hardware), but its button catalogue is exactly what a trigger picker
+/// needs, and its buttons can still be named.
+pub fn device_schema_json_named(cfg: &DeviceConfig, labels: &Labels) -> Option<Value> {
     if let Some(attrs) = output_attributes(&cfg.kind) {
         let schema = DeviceSchema {
             attributes: attrs.into_iter().collect(),
@@ -215,8 +223,16 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
     // A button only appears in state after someone presses it, so listing them
     // from the schema is what makes an untouched keypad show all six — and
     // they are all pressable from the UI regardless.
-    for (b, label) in buttons_with_labels(cfg) {
+    for (b, label) in buttons_named(cfg, labels) {
         attrs.insert(format!("button_{b}"), ro(AttributeKind::String, &label));
+    }
+    // What each button is called, by number: the household's name, else
+    // the engraving, else what it does. What a screen draws on a keypad.
+    if !cfg.all_buttons.is_empty() || !labels.is_empty() {
+        attrs.insert(
+            "button_names".into(),
+            ro(AttributeKind::Json, "Button names"),
+        );
     }
 
     // **A keypad's news is which button was pressed.** `button_N` accumulates
@@ -268,12 +284,6 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
         ..Default::default()
     };
 
-    // A Pico accepts nothing — `translate_command` returns an empty command
-    // list for it, so declaring an action would be a control that does nothing.
-    if cfg.kind == DeviceKind::Pico {
-        return Some(with_actions(&schema, vec![]));
-    }
-
     let button_param = || {
         let p = Param::int("button").label("Button").required();
         if cfg.all_buttons.is_empty() {
@@ -290,6 +300,25 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
             )
         }
     };
+    // Naming a button is the household's, kept by the plugin; nothing goes
+    // to the repeater, so a Pico takes it too.
+    let name_action = Action::new("set_button_name")
+        .label("Name a button")
+        .category("Buttons")
+        .icon("edit")
+        .description(
+            "What the household calls it. Leave the name empty to go back to the engraving.",
+        )
+        .sentence("call button {button} on {device} {name}")
+        .param(button_param())
+        .param(Param::string("name").label("Name"));
+
+    // A Pico sends nothing to the repeater: `translate_command` returns an
+    // empty command list for it, so a press or an LED would be a control
+    // that does nothing.
+    if cfg.kind == DeviceKind::Pico {
+        return Some(with_actions(&schema, vec![name_action]));
+    }
 
     Some(with_actions(
         &schema,
@@ -319,6 +348,7 @@ pub fn device_schema_json(cfg: &DeviceConfig) -> Option<Value> {
                         ])
                         .default("1"),
                 ),
+            name_action,
         ],
     ))
 }
@@ -498,13 +528,22 @@ pub fn retired_state(cfg: &DeviceConfig) -> Option<Value> {
 
 /// Number and engraving for every button, with a sensible name where Lutron
 /// engraved nothing.
+#[cfg(test)]
 pub fn buttons_with_labels(cfg: &DeviceConfig) -> Vec<(u32, String)> {
+    buttons_named(cfg, &Labels::new())
+}
+
+/// Number and name for every button: the household's name when it gave one,
+/// else the engraving, else a sensible name where Lutron engraved nothing.
+pub fn buttons_named(cfg: &DeviceConfig, labels: &Labels) -> Vec<(u32, String)> {
     cfg.all_buttons
         .iter()
         .enumerate()
         .map(|(i, b)| {
             let engraved = cfg.button_names.get(i).map(String::as_str).unwrap_or("");
-            let label = if engraved.is_empty() {
+            let label = if let Some(named) = labels.get(b) {
+                named.clone()
+            } else if engraved.is_empty() {
                 unengraved_name(&cfg.kind, *b).map_or_else(|| format!("Button {b}"), str::to_string)
             } else {
                 engraved.to_string()
@@ -538,19 +577,42 @@ fn unengraved_name(kind: &DeviceKind, component: u32) -> Option<&'static str> {
 }
 
 /// The state a device publishes about its own buttons, merged into its first
-/// state publish. Empty when discovery never learned them.
+/// state publish and again whenever a button is named. `None` when discovery
+/// never learned them and nobody has named one.
 ///
-/// Objects rather than bare numbers so a client can show the engraving and
-/// send the number — `label_key` / `value_key` on the action parameter.
+/// `available_buttons` is objects rather than bare numbers so a client can
+/// show the name and send the number — `label_key` / `value_key` on the
+/// action parameter. `button_names` is the same names keyed by number, for
+/// a screen drawing the keypad; it also carries a name given to a button
+/// discovery never listed.
+#[cfg(test)]
 pub fn button_catalogue(cfg: &DeviceConfig) -> Option<Value> {
-    if cfg.all_buttons.is_empty() {
+    button_catalogue_named(cfg, &Labels::new())
+}
+
+pub fn button_catalogue_named(cfg: &DeviceConfig, labels: &Labels) -> Option<Value> {
+    if cfg.all_buttons.is_empty() && labels.is_empty() {
         return None;
     }
-    let list: Vec<Value> = buttons_with_labels(cfg)
-        .into_iter()
-        .map(|(number, name)| serde_json::json!({ "number": number, "name": name }))
-        .collect();
-    Some(serde_json::json!({ "available_buttons": list }))
+    let named = buttons_named(cfg, labels);
+    let mut names = serde_json::Map::new();
+    for (number, name) in &named {
+        names.insert(number.to_string(), serde_json::json!(name));
+    }
+    for (number, name) in labels {
+        names
+            .entry(number.to_string())
+            .or_insert_with(|| serde_json::json!(name));
+    }
+    let mut out = serde_json::json!({ "button_names": names });
+    if !cfg.all_buttons.is_empty() {
+        let list: Vec<Value> = named
+            .into_iter()
+            .map(|(number, name)| serde_json::json!({ "number": number, "name": name }))
+            .collect();
+        out["available_buttons"] = serde_json::json!(list);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -575,21 +637,27 @@ mod tests {
     /// The whole point: a Pico has no LEDs, so the old `buttons` list is empty
     /// for it, and it still has buttons a person presses.
     #[test]
-    fn a_pico_publishes_its_buttons_and_no_actions() {
+    fn a_pico_publishes_its_buttons_and_only_a_naming_action() {
         let v = device_schema_json(&cfg(DeviceKind::Pico, vec![2, 3, 4, 5, 6])).unwrap();
         assert!(v["attributes"]["available_buttons"].is_object());
         assert!(v["attributes"]["button_2"].is_object());
-        assert!(
-            v.get("actions").is_none(),
-            "a Pico accepts no commands; declaring one would be a dead control"
-        );
+        // Nothing it sends the repeater: only naming its buttons, which the
+        // plugin keeps.
+        let ids: Vec<&str> = v["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["set_button_name"]);
     }
 
     #[test]
     fn a_keypad_declares_press_and_led_against_its_own_buttons() {
         let v = device_schema_json(&cfg(DeviceKind::Keypad, vec![1, 2, 3])).unwrap();
         let actions = v["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[2]["id"], "set_button_name");
 
         let press = &actions[0];
         assert_eq!(press["id"], "press_button");
@@ -694,6 +762,64 @@ mod tests {
         assert_eq!(names, ["Lamps", "Off"]);
         let v = cfg(DeviceKind::Vcrx, vec![18]);
         assert_eq!(buttons_with_labels(&v)[0].1, "Button 18");
+    }
+
+    /// The household's name wins over the engraving, which wins over the
+    /// number; `button_names` says all of them by number.
+    #[test]
+    fn button_names_carry_the_households_names_over_the_engravings() {
+        let mut c = cfg(DeviceKind::Keypad, vec![1, 2, 3, 18]);
+        c.button_names = vec!["Scene 1".into(), "Scene 2".into(), String::new()];
+        let labels: Labels = [(1, "Movie".to_string())].into_iter().collect();
+        let v = button_catalogue_named(&c, &labels).unwrap();
+        assert_eq!(
+            v["button_names"],
+            serde_json::json!({ "1": "Movie", "2": "Scene 2", "3": "Button 3", "18": "Lower" })
+        );
+        assert_eq!(v["available_buttons"][0]["name"], "Movie");
+        // With no names given, the engravings from discovery.
+        let plain = button_catalogue(&c).unwrap();
+        assert_eq!(plain["button_names"]["1"], "Scene 1");
+        // The device sheet and the pickers read the same names.
+        let schema = device_schema_json_named(&c, &labels).unwrap();
+        assert_eq!(schema["attributes"]["button_1"]["display_name"], "Movie");
+        assert_eq!(schema["attributes"]["button_names"]["kind"], "json");
+    }
+
+    /// A config from before discovery knows no buttons, but a name given to
+    /// one is still said.
+    #[test]
+    fn a_name_without_a_catalogue_is_still_said() {
+        let c = cfg(DeviceKind::Keypad, vec![]);
+        let labels: Labels = [(4, "Porch".to_string())].into_iter().collect();
+        let v = button_catalogue_named(&c, &labels).unwrap();
+        assert_eq!(v, serde_json::json!({ "button_names": { "4": "Porch" } }));
+        assert!(button_catalogue_named(&c, &Labels::new()).is_none());
+        let schema = device_schema_json_named(&c, &labels).unwrap();
+        assert!(schema["attributes"].get("button_names").is_some());
+        assert!(device_schema_json(&c).unwrap()["attributes"]
+            .get("button_names")
+            .is_none());
+    }
+
+    #[test]
+    fn naming_a_button_is_declared_against_the_keypads_own_buttons() {
+        let v = device_schema_json(&cfg(DeviceKind::Keypad, vec![1, 2])).unwrap();
+        let name = v["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "set_button_name")
+            .expect("declared");
+        assert_eq!(
+            name["params"][0]["options_from"]["attribute"]["attribute"],
+            "available_buttons"
+        );
+        assert_eq!(name["params"][1]["name"], "name");
+        assert_ne!(name["params"][1]["required"], true);
+        plugin_sdk_rs::conformance::check_device_schema_json(&v).assert_ok();
+        let pico = device_schema_json(&cfg(DeviceKind::Pico, vec![2, 4])).unwrap();
+        plugin_sdk_rs::conformance::check_device_schema_json(&pico).assert_ok();
     }
 
     /// The picker must send a number while showing the engraving.

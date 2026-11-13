@@ -2,6 +2,7 @@ mod bridge;
 mod config;
 mod dbxml;
 mod devices;
+mod labels;
 mod lip;
 mod schema;
 mod ui_actions;
@@ -125,6 +126,10 @@ async fn try_start(
     // Conditions the operator needs on the plugin page, not only in the log.
     // Taken before run() consumes the client.
     let notices = client.notices();
+    // Where the household's button names are kept: the learned state,
+    // which homeCore stores and hands back on every start.
+    let state_writer = client.state_writer();
+    let (learned_tx, learned_rx) = mpsc::unbounded_channel::<serde_json::Value>();
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
 
     // Enable management protocol (heartbeat + remote config/log commands).
@@ -213,6 +218,12 @@ async fn try_start(
     let link = ui_actions::link();
     let status_link = link.clone();
     let (status_host, status_port) = (cfg.lutron.host.clone(), cfg.lutron.port);
+    let mgmt = mgmt.with_state_handler(move |doc| {
+        if learned_tx.send(doc).is_err() {
+            warn!("Learned state arrived after the bridge stopped; button names not applied");
+        }
+    });
+
     let mgmt = mgmt
         .with_capabilities(ui_actions::capabilities())
         .with_custom_handler(move |cmd| {
@@ -386,9 +397,10 @@ async fn try_start(
         cfg.lutron.clone(),
         notices,
         link,
+        state_writer,
     );
 
-    bridge.run(cmd_rx).await;
+    bridge.run(cmd_rx, learned_rx).await;
     Ok(())
 }
 

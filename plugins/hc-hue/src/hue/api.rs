@@ -528,6 +528,9 @@ impl HueApiClient {
                     .and_then(|c| c.as_array())
                     .is_some_and(|c| c.len() > 1),
                 smart: false,
+                lights: super::scene_lights::parse_actions(item, |l| {
+                    self.target.light_device_id(l)
+                }),
             });
         }
         // Smart scenes: a scene per time of day. Their colours are the first
@@ -579,6 +582,7 @@ impl HueApiClient {
                 status: state,
                 dynamic_capable: false,
                 smart: true,
+                lights: Vec::new(),
             });
         }
         scenes
@@ -1897,5 +1901,31 @@ mod tests {
     fn a_contact_sensor_is_open_when_its_halves_part() {
         assert!(!open_from_contact_report("contact"));
         assert!(open_from_contact_report("no_contact"));
+    }
+
+    /// A bridge's scene, as `GET /clip/v2/resource` has it, keeps each
+    /// light's part under the light's homeCore device id.
+    #[test]
+    fn a_scene_keeps_each_lights_part() {
+        let client = test_client();
+        let r = Resources::from_body(&json!({ "errors": [], "data": [
+            { "id": "r1", "type": "room", "metadata": { "name": "Living Room" },
+              "children": [] },
+            { "id": "s1", "type": "scene", "metadata": { "name": "Relax" },
+              "group": { "rid": "r1", "rtype": "room" },
+              "status": { "active": "static" },
+              "actions": [
+                { "target": { "rid": "L-1", "rtype": "light" },
+                  "action": { "on": { "on": true }, "dimming": { "brightness": 40.0 },
+                              "color_temperature": { "mirek": 400 } } }
+              ] }
+        ]}));
+        let scenes = client.scenes(&r);
+        assert_eq!(scenes.len(), 1);
+        let l = &scenes[0].lights[0];
+        assert_eq!(l.device_id, "hue_bridge_1_light_l_1");
+        assert_eq!(l.light_rid, "L-1");
+        assert_eq!(l.mirek, Some(400));
+        assert_eq!(scenes[0].active, Some(true));
     }
 }

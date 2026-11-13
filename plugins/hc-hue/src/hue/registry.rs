@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight, HueLight, HueScene};
+use super::scene_lights::SceneMatcher;
 
 #[derive(Debug, Clone)]
 pub struct RegisteredLight {
@@ -68,9 +69,43 @@ pub struct HueRegistry {
     registered_as: HashMap<String, (String, Option<String>)>,
     /// Devices whose retired attribute names have been cleared this run.
     retired_cleared: HashSet<String>,
+    /// bridge id → its scenes and lights, for which scene each shows.
+    scene_matchers: HashMap<String, SceneMatcher>,
 }
 
 impl HueRegistry {
+    /// A bridge's scenes and lights as of its last refresh. What was said for
+    /// each light carries over, so a light whose scene did not change stays
+    /// quiet on its next event.
+    pub fn set_scene_matcher(&mut self, bridge_id: &str, mut matcher: SceneMatcher) {
+        if let Some(older) = self.scene_matchers.get(bridge_id) {
+            matcher.carry_said(older);
+        }
+        self.scene_matchers.insert(bridge_id.to_string(), matcher);
+    }
+
+    pub fn scene_matcher(&self, bridge_id: &str) -> Option<&SceneMatcher> {
+        self.scene_matchers.get(bridge_id)
+    }
+
+    pub fn scene_matcher_mut(&mut self, bridge_id: &str) -> Option<&mut SceneMatcher> {
+        self.scene_matchers.get_mut(bridge_id)
+    }
+
+    /// The published grouped light of a room or zone.
+    pub fn find_group_device_id_by_owner(
+        &self,
+        bridge_id: &str,
+        owner_rid: &str,
+    ) -> Option<String> {
+        self.groups_by_device_id
+            .iter()
+            .find_map(|(device_id, binding)| {
+                (binding.bridge_id == bridge_id && binding.owner_rid.as_deref() == Some(owner_rid))
+                    .then(|| device_id.clone())
+            })
+    }
+
     /// A bridge's `update_state`, from its last summary.
     pub fn bridge_update_state(&self, device_id: &str) -> Option<&str> {
         self.bridge_updates.get(device_id).map(String::as_str)
@@ -539,6 +574,7 @@ impl HueRegistry {
         if self.by_device_id.remove(bridge_device_id).is_some() {
             removed.insert(bridge_device_id.to_string());
         }
+        self.scene_matchers.retain(|b, _| !matches(b));
 
         let light_ids: Vec<String> = self
             .lights_by_device_id
@@ -612,6 +648,7 @@ mod tests {
             status: None,
             dynamic_capable: false,
             smart: false,
+            lights: vec![],
         }
     }
 

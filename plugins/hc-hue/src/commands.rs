@@ -21,6 +21,11 @@ pub enum PluginCommand {
         name: String,
     },
     DeleteScene,
+    /// Give one light its part of a scene and leave the rest alone.
+    ApplySceneToLight {
+        scene_id: Option<String>,
+        transition_ms: Option<u32>,
+    },
     SetEntertainmentActive {
         config_id: Option<String>,
         active: bool,
@@ -130,6 +135,12 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         }
         if action == "delete" {
             return PluginCommand::DeleteScene;
+        }
+        if action == "apply_scene" {
+            return PluginCommand::ApplySceneToLight {
+                scene_id: scene_of(&payload),
+                transition_ms: transition_ms(&payload),
+            };
         }
         if action == "breathe" {
             return PluginCommand::SetLightState(LightCommand {
@@ -321,6 +332,35 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn apply_scene_takes_the_scene_and_an_optional_fade() {
+        match parse_homecore_command(json!({
+            "action": "apply_scene",
+            "scene_id": "hue_b1_scene_s1",
+            "transition_ms": 800
+        })) {
+            PluginCommand::ApplySceneToLight {
+                scene_id,
+                transition_ms,
+            } => {
+                assert_eq!(scene_id.as_deref(), Some("hue_b1_scene_s1"));
+                assert_eq!(transition_ms, Some(800));
+            }
+            other => panic!("expected ApplySceneToLight, got {other:?}"),
+        }
+        // `scene` is taken quietly, as it is for `activate`.
+        match parse_homecore_command(json!({ "action": "apply_scene", "scene": "s1" })) {
+            PluginCommand::ApplySceneToLight {
+                scene_id,
+                transition_ms,
+            } => {
+                assert_eq!(scene_id.as_deref(), Some("s1"));
+                assert_eq!(transition_ms, None);
+            }
+            other => panic!("expected ApplySceneToLight, got {other:?}"),
+        }
+    }
 
     /// The mirror of the declaration: `activate` is the action id a scene's
     /// schema offers, so the parser has to accept it. `activate_scene` is what

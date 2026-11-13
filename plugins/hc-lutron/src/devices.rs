@@ -19,6 +19,8 @@ pub struct DeviceEntry {
     /// restores it rather than jumping to full. LIP has no "on at last level"
     /// for a zone; the plugin is the only place that can remember it.
     pub last_level: Option<f64>,
+    /// What the household calls its buttons, from the learned state.
+    pub button_labels: crate::labels::Labels,
 }
 
 /// A LIP zone level (0–100, hundredths) as `brightness_pct` / `speed_pct`.
@@ -54,6 +56,7 @@ impl DeviceEntry {
             config,
             hc_id,
             last_level: None,
+            button_labels: Default::default(),
         }
     }
 

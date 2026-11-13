@@ -195,6 +195,9 @@ pub struct HueScene {
     /// A smart scene: one that changes through the day ("Natural light"),
     /// recalled with `PUT /smart_scene/{id}`.
     pub smart: bool,
+    /// What it sets each of its lights to, from `actions[]`. Empty for a
+    /// smart scene, which has none of its own.
+    pub lights: Vec<super::scene_lights::SceneLight>,
 }
 
 #[derive(Debug, Clone)]
