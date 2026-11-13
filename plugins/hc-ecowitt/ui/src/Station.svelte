@@ -10,7 +10,7 @@
 <script>
 	import Now from './lib/Now.svelte';
 	import Spark from './lib/Spark.svelte';
-	import { adopt, ago, kindOf, reading, trend, u } from './lib/weather.js';
+	import { adopt, ago, kindOf, reading, tempUnit, trend, u } from './lib/weather.js';
 	import { follow, series } from './lib/units.svelte.js';
 
 	/** @type {{ host: import('../../../../sdk/ui/index.js').Host, deviceId?: string }} */
@@ -21,6 +21,7 @@
 
 	let devices = $state([]);
 	$effect(() => hc?.devices.subscribe((list) => (devices = list)));
+	const station = $derived(devices.find((d) => d.device_id === deviceId));
 
 	const DAY = 24 * 3600_000;
 	let temp = $state([]);
@@ -47,7 +48,7 @@
 	<section class="hc-card">
 		<span class="hc-label">The last day</span>
 		<div class="days">
-			<Spark points={series(temp, '°C')} label="Temperature" unit={u('°C')} />
+			<Spark points={series(temp, tempUnit(station?.attributes))} label="Temperature" unit={u(tempUnit(station?.attributes))} />
 			<Spark points={series(wind, 'm/s')} label="Wind" unit={` ${u('m/s')}`} />
 			<Spark
 				points={series(pressure, 'hPa')}

@@ -2,7 +2,7 @@
      wind, rain, the sky, and inside. -->
 <script>
 	import Compass from './Compass.svelte';
-	import { ago, fmt, isRaining, n, num, rainGauge, stale, u, uvWords } from './weather.js';
+	import { ago, fmt, isRaining, n, num, own, rainGauge, stale, u, unitFor, uvWords, value } from './weather.js';
 
 	/** @type {{ devices: import('./weather.js').Device[], pressureTrend?: string }} */
 	let { devices = [], pressureTrend = '' } = $props();
@@ -16,8 +16,10 @@
 	const r = $derived(rain?.attributes ?? {});
 	const raining = $derived(isRaining(r));
 	const strikeAt = $derived(Number(lightning?.attributes.last_strike) * 1000);
-	// In the person's units: °F, mph, in, inHg where they read those.
-	const deg = $derived(u('°C'));
+	// In the person's units: °F, mph, in, inHg where they read those, from the
+	// unit each device wrote its reading in.
+	const deg = $derived(unitFor(s, 'temperature'));
+	const inDeg = $derived(unitFor(indoor?.attributes, 'temperature'));
 	const rainUnit = $derived(u('mm'));
 </script>
 
@@ -30,14 +32,14 @@
 				<span class="hc-label">Outside</span>
 				<span class="hc-quiet" class:late={stale(station.last_seen)}>{ago(station.last_seen)}</span>
 			</div>
-			<div class="temp"><b class="hc-num">{n(s.temperature, '°C')}</b><span>{deg}</span></div>
+			<div class="temp"><b class="hc-num">{value(s, 'temperature')}</b><span>{deg}</span></div>
 			<div class="facts">
 				<span><span class="hc-label">Humidity</span> <b class="hc-num">{fmt(s.humidity, 0)}%</b></span>
 				{#if num(s.feels_like) !== undefined}<span
-						><span class="hc-label">Feels like</span> <b class="hc-num">{n(s.feels_like, '°C')}{deg}</b></span
+						><span class="hc-label">Feels like</span> <b class="hc-num">{value(s, 'feels_like')}{deg}</b></span
 					>{/if}
 				{#if num(s.dewpoint) !== undefined}<span
-						><span class="hc-label">Dew point</span> <b class="hc-num">{n(s.dewpoint, '°C')}{deg}</b></span
+						><span class="hc-label">Dew point</span> <b class="hc-num">{value(s, 'dewpoint')}{deg}</b></span
 					>{/if}
 				{#if num(s.vpd) !== undefined}<span
 						><span class="hc-label">VPD</span> <b class="hc-num">{fmt(s.vpd, 2)} kPa</b></span
@@ -47,8 +49,16 @@
 
 		<section class="hc-card wind">
 			<span class="hc-label">Wind</span>
-			<Compass dir={s.wind_direction} avg={s.wind_direction_avg10m} speed={s.wind_speed} gust={s.wind_gust} />
-			<span class="hc-quiet">Strongest today {n(s.wind_gust_daily_max, 'm/s')} {u('m/s')}</span>
+			<Compass
+				dir={s.wind_direction}
+				avg={s.wind_direction_avg10m}
+				speed={own(s, 'wind_speed')[0]}
+				gust={own(s, 'wind_gust')[0]}
+				unit={own(s, 'wind_speed')[1]}
+			/>
+			<span class="hc-quiet"
+				>Strongest today {value(s, 'wind_gust_daily_max')} {unitFor(s, 'wind_gust_daily_max')}</span
+			>
 		</section>
 
 		<section class="hc-card">
@@ -76,7 +86,7 @@
 			<span class="hc-label">Sky and air</span>
 			<dl>
 				<dt>Pressure</dt>
-				<dd>{n(s.pressure, 'hPa', 0)} {u('hPa')}{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
+				<dd>{value(s, 'pressure', unitFor(s, 'pressure') === 'hPa' ? 0 : 2)} {unitFor(s, 'pressure')}{pressureTrend ? ` · ${pressureTrend}` : ''}</dd>
 				<dt>UV index</dt><dd>{fmt(s.uvi, 0)} {uvWords(s.uvi)}</dd>
 				<dt>Sunlight</dt><dd>{fmt(s.solar_radiation, 0)} W/m²</dd>
 				{#if lightning}
@@ -89,7 +99,7 @@
 				{/if}
 				{#if indoor}
 					<dt>Inside</dt>
-					<dd>{n(indoor.attributes.temperature, '°C')}{deg} · {fmt(indoor.attributes.humidity, 0)}%</dd>
+					<dd>{value(indoor.attributes, 'temperature')}{inDeg} · {fmt(indoor.attributes.humidity, 0)}%</dd>
 				{/if}
 			</dl>
 		</section>

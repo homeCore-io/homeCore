@@ -2,11 +2,12 @@
      faint one), and how hard, in the middle. -->
 <script>
 	import { compass, n, num, u } from './weather.js';
-	let { dir, avg, speed, gust } = $props();
+	// `unit`: what speed and gust are in (homeCore's m/s, or an older plugin's mph).
+	let { dir, avg, speed, gust, unit = 'm/s' } = $props();
 	const at = (deg) => `rotate(${num(deg) ?? 0} 50 50)`;
 </script>
 
-<figure class="compass" aria-label={`Wind from ${compass(dir)} at ${n(speed, 'm/s')} ${u('m/s')}, gusting ${n(gust, 'm/s')}`}>
+<figure class="compass" aria-label={`Wind from ${compass(dir)} at ${n(speed, unit)} ${u(unit)}, gusting ${n(gust, unit)}`}>
 	<svg viewBox="0 0 100 100" aria-hidden="true">
 		<circle cx="50" cy="50" r="44" class="ring" />
 		{#each Array.from({ length: 36 }, (_, i) => i * 10) as d (d)}
@@ -24,8 +25,8 @@
 		{/if}
 	</svg>
 	<figcaption>
-		<b class="hc-num">{n(speed, 'm/s')}</b><span>{u('m/s')}</span>
-		<small>{compass(dir)} · gust {n(gust, 'm/s')}</small>
+		<b class="hc-num">{n(speed, unit)}</b><span>{u(unit)}</span>
+		<small>{compass(dir)} · gust {n(gust, unit)}</small>
 	</figcaption>
 </figure>
 
