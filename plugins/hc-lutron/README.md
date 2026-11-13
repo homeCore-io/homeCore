@@ -29,7 +29,7 @@ The names are homeCore's shared device vocabulary (`hc_types::device_vocabulary`
 | fan | `on`, `speed` (`off`/`low`/`medium`/`medium-high`/`high`), `speed_pct` | `on`, `speed`, `speed_pct`, optional `transition_ms` |
 | shade | `position` (0–100, 100 = open) | `position`; actions `raise`, `lower`, `stop` |
 | occupancy group | `occupied` | — |
-| keypad / VCRX | `button_N`, `last_button`, `last_button_name`, `led_N` (0 off, 1 on, 2 slow flash, 3 rapid) | actions `press_button {button}`, `set_led {button, state}` |
+| keypad / VCRX | `button_N`, `button_names`, `last_button`, `last_button_name`, `led_N` (0 off, 1 on, 2 slow flash, 3 rapid) | actions `press_button {button}`, `set_led {button, state}`, `set_button_name {button, name}` |
 | VCRX contact inputs | `cci_N_open` (true = contact open) | — |
 | scene | `active` | action `activate` |
 | timeclock event | `enabled` | `enabled`; action `execute` |
@@ -58,6 +58,15 @@ seeTouch's raise/lower rocker (16/18 **Lower**, 17/19 **Raise**), a Pico's 2
 **On**, 3 **Favorite**, 4 **Off**, 5 **Raise**, 6 **Lower** — and otherwise
 keeps "Button N", for the installer to name. A VCRX's contact inputs 32 and
 33 are its **Input 1** and **Input 2**.
+
+The household can give a button its own name with
+`{"action": "set_button_name", "button": 3, "name": "Movie"}` (a Pico too); an
+empty name goes back to the engraving. Names are kept in the plugin's learned
+state, one key per button, so they survive restarts and a reinstall of the
+same plugin id. `button_names` says every button's name by number
+(`{"1": "Movie", "2": "Dinner"}`): the household's, else the engraving, else
+the names above. `available_buttons`, `button_N` and `last_button_name` use the
+same names.
 
 ## Its screens
 
