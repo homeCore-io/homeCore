@@ -8,6 +8,8 @@ use plugin_sdk_rs::types::schema::{
 };
 
 use crate::hue::models::{BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene};
+use crate::hue::resources::{white_swatch, xy_to_hex};
+use crate::hue::scene_lights::SceneLight;
 
 pub fn bridge_state(target: &BridgeTarget, online: bool, summary: Value) -> Value {
     let integration_state = summary
@@ -453,10 +455,95 @@ pub fn light_schema(light: &HueLight) -> DeviceSchema {
     attrs.insert("product_name".into(), diagnostic("Product"));
     attrs.insert("sw_version".into(), diagnostic("Software"));
     attrs.insert("update_state".into(), diagnostic("Software update"));
+    insert_showing_attrs(&mut attrs);
     DeviceSchema {
         attributes: attrs,
         ..Default::default()
     }
+}
+
+/// `scene` and `scene_name`: the scene a light or room shows now. Declared
+/// rather than left to the published values, which are absent whenever no
+/// scene matches.
+fn insert_showing_attrs(attrs: &mut HashMap<String, AttributeSchema>) {
+    attrs.insert(
+        "scene".into(),
+        AttributeSchema {
+            kind: AttributeKind::String,
+            display_name: Some("Scene".into()),
+            ..Default::default()
+        },
+    );
+    attrs.insert(
+        "scene_name".into(),
+        AttributeSchema {
+            kind: AttributeKind::String,
+            display_name: Some("Scene name".into()),
+            ..Default::default()
+        },
+    );
+}
+
+/// `{"action": "apply_scene", "scene_id": …}`: this light's part of a scene
+/// and nothing else, the rest of the room left as it is.
+fn apply_scene_action() -> Action {
+    Action::new("apply_scene")
+        .label("Show its part of a scene")
+        .category("Scenes")
+        .icon("scene")
+        .description("Sets this light as the scene would, leaving the other lights alone.")
+        .param(Param::device_ref("scene_id").label("Scene").required())
+        .param(
+            Param::int("transition_ms")
+                .label("Fade over")
+                .unit("ms")
+                .range(0.0, 6_000_000.0),
+        )
+        .sentence("set {device} as in the scene {scene_id}")
+}
+
+/// One light's part of a scene, in the light's own attribute names.
+pub fn scene_light_entry(l: &SceneLight) -> Value {
+    let mut e = json!({ "device_id": l.device_id });
+    if let Some(on) = l.on {
+        e["on"] = json!(on);
+    }
+    if let Some(b) = l.brightness_pct {
+        e["brightness_pct"] = json!(published_brightness(b));
+    }
+    let bri = l.brightness_pct.unwrap_or(100.0);
+    if let Some(k) = l.mirek.and_then(|m| kelvin_from_event_mirek(u64::from(m))) {
+        e["color_temp"] = json!(k);
+    }
+    if let Some((x, y)) = l.xy {
+        e["color_xy"] = json!({ "x": x, "y": y });
+    }
+    if l.gradient.len() > 1 {
+        e["gradient_points"] = json!(l
+            .gradient
+            .iter()
+            .map(|(x, y)| json!({ "x": x, "y": y }))
+            .collect::<Vec<_>>());
+    }
+    if let Some(effect) = &l.effect {
+        e["effect"] = json!(effect);
+    }
+    // A swatch for a screen, the way the scene's palette is drawn.
+    let hex = if l.on == Some(false) {
+        None
+    } else if let Some(m) = l.mirek {
+        Some(white_swatch(f64::from(m)))
+    } else if let Some((x, y)) = l.gradient.first().copied().or(l.xy) {
+        Some(xy_to_hex(x, y, bri))
+    } else if l.brightness_pct.is_some() {
+        Some(white_swatch(366.0))
+    } else {
+        None
+    };
+    if let Some(hex) = hex {
+        e["color_hex"] = json!(hex);
+    }
+    e
 }
 
 /// A light's declared actions, beside its attributes.
@@ -481,6 +568,7 @@ pub fn light_actions(light: &HueLight) -> Vec<Action> {
     if !light.signal_values.is_empty() {
         out.push(signal_action());
     }
+    out.push(apply_scene_action());
     out
 }
 
@@ -710,6 +798,7 @@ pub fn group_schema(group: &HueGroupedLight) -> Value {
     // a declared attribute that never arrives is a control that reads
     // nothing. `supports_color_xy` / `supports_color_temp` say what a
     // write would reach.
+    insert_showing_attrs(&mut attrs);
     let filled = crate::aux_schema::with_published(
         DeviceSchema {
             attributes: attrs,
@@ -773,6 +862,12 @@ pub fn scene_state(scene: &HueScene) -> Value {
     state["palette"] = json!(scene.palette);
     if scene.smart {
         state["smart"] = json!(true);
+    } else {
+        state["lights"] = json!(scene
+            .lights
+            .iter()
+            .map(scene_light_entry)
+            .collect::<Vec<_>>());
     }
     state["dynamic_capable"] = json!(scene.dynamic_capable);
 
@@ -933,7 +1028,21 @@ pub fn bridge_schema() -> Value {
 pub fn scene_schema_for(scene: &HueScene) -> Value {
     let declared = scene_schema(scene.active.is_some());
     let filled = match serde_json::from_value::<DeviceSchema>(declared.clone()) {
-        Ok(parsed) => crate::aux_schema::with_published(parsed, &scene_state(scene)),
+        Ok(mut parsed) => {
+            if !scene.smart {
+                // One entry per light: its device id and what the scene sets
+                // it to, in the light's own attribute names.
+                parsed.attributes.insert(
+                    "lights".into(),
+                    AttributeSchema {
+                        kind: AttributeKind::Json,
+                        display_name: Some("Lights".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            crate::aux_schema::with_published(parsed, &scene_state(scene))
+        }
         // Unparseable is not worth losing the actions over; publish what the
         // hand-written half said.
         Err(_) => return declared,
@@ -1187,6 +1296,100 @@ mod bridge_schema_tests {
 #[cfg(test)]
 mod scene_schema_tests {
     use super::*;
+    use crate::hue::scene_lights::parse_actions;
+
+    fn relax() -> HueScene {
+        let raw = json!({ "actions": [
+            {
+                "target": { "rid": "l1", "rtype": "light" },
+                "action": {
+                    "on": { "on": true },
+                    "dimming": { "brightness": 56.3 },
+                    "color_temperature": { "mirek": 447 }
+                }
+            },
+            {
+                "target": { "rid": "l2", "rtype": "light" },
+                "action": {
+                    "on": { "on": true },
+                    "dimming": { "brightness": 0.2 },
+                    "color": { "xy": { "x": 0.6, "y": 0.35 } }
+                }
+            },
+            {
+                "target": { "rid": "l3", "rtype": "light" },
+                "action": { "on": { "on": false } }
+            }
+        ]});
+        HueScene {
+            bridge_id: "b1".into(),
+            resource_id: "s1".into(),
+            device_id: "hue_b1_scene_s1".into(),
+            name: "Relax".into(),
+            area: Some("living_room".into()),
+            group_kind: Some("room".into()),
+            active: Some(false),
+            group_rid: Some("r1".into()),
+            group_name: Some("Living Room".into()),
+            palette: vec![],
+            status: Some("inactive".into()),
+            dynamic_capable: false,
+            smart: false,
+            lights: parse_actions(&raw, |rid| format!("hue_b1_light_{rid}")),
+        }
+    }
+
+    /// Each light's part, in the light's own names: Kelvin, a percentage
+    /// that never reads 0 while on, xy as an object.
+    #[test]
+    fn a_scene_publishes_what_it_sets_each_light_to() {
+        let state = scene_state(&relax());
+        let lights = state["lights"].as_array().expect("lights");
+        assert_eq!(lights.len(), 3);
+        assert_eq!(lights[0]["device_id"], "hue_b1_light_l1");
+        assert_eq!(lights[0]["on"], true);
+        assert_eq!(lights[0]["brightness_pct"], json!(56.3));
+        assert_eq!(lights[0]["color_temp"], json!(2237));
+        assert!(lights[0].get("color_xy").is_none());
+        assert!(lights[0]["color_hex"].as_str().unwrap().starts_with('#'));
+        assert_eq!(lights[1]["brightness_pct"], json!(1.0));
+        assert_eq!(lights[1]["color_xy"], json!({ "x": 0.6, "y": 0.35 }));
+        assert_eq!(
+            lights[2],
+            json!({ "device_id": "hue_b1_light_l3", "on": false })
+        );
+        let schema = scene_schema_for(&relax());
+        assert_eq!(schema["attributes"]["lights"]["kind"], "json");
+    }
+
+    #[test]
+    fn a_smart_scene_publishes_no_lights() {
+        let mut s = relax();
+        s.smart = true;
+        assert!(scene_state(&s).get("lights").is_none());
+    }
+
+    /// The light declares the action and the two attributes a screen reads.
+    #[test]
+    fn a_light_offers_its_part_of_a_scene() {
+        let light = HueLight::sample();
+        let actions = light_actions(&light);
+        let apply = actions
+            .iter()
+            .map(|a| a.build())
+            .find(|a| a["id"] == "apply_scene")
+            .expect("apply_scene is declared");
+        let params: Vec<&str> = apply["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert_eq!(params, ["scene_id", "transition_ms"]);
+        let schema = light_schema(&light);
+        assert!(schema.attributes.contains_key("scene"));
+        assert!(schema.attributes.contains_key("scene_name"));
+    }
 
     /// A scene had capabilities but no schema, so a client had no action to
     /// offer and nothing to render.
@@ -1500,7 +1703,12 @@ mod group_schema_tests {
         assert!(attrs.contains_key("on"));
         assert!(attrs.contains_key("brightness_pct"));
         assert_eq!(attrs["brightness_pct"]["min"], json!(1.0));
-        let state = grouped_light_state(&group);
+        // Sync adds the scene it shows, null when none.
+        let mut state = grouped_light_state(&group);
+        state
+            .as_object_mut()
+            .unwrap()
+            .extend(crate::hue::scene_lights::showing_attrs(None));
         for name in attrs.keys() {
             assert!(
                 state.get(name).is_some(),

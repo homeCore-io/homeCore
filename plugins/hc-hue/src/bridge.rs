@@ -404,7 +404,7 @@ impl Bridge {
                             {
                                 match sync::apply_eventstream_update(
                                     &self.publisher,
-                                    &self.registry,
+                                    &mut self.registry,
                                     &bridge_id,
                                     &payload,
                                 ).await? {
@@ -828,6 +828,41 @@ impl Bridge {
                 }
                 ("activate_scene", r)
             }
+            (
+                Target::Light(binding),
+                PluginCommand::ApplySceneToLight {
+                    scene_id,
+                    transition_ms,
+                },
+            ) => {
+                let r = match scene_id {
+                    None => Err(anyhow::anyhow!("missing scene_id")),
+                    Some(id) => {
+                        // The Hue scene's own id, or its homeCore device id.
+                        let scene_rid = self
+                            .registry
+                            .get_scene_binding(&id)
+                            .map(|b| b.scene_rid.clone())
+                            .unwrap_or(id);
+                        let part = self
+                            .registry
+                            .scene_matcher(&binding.bridge_id)
+                            .ok_or_else(|| anyhow::anyhow!("this bridge's scenes are not read yet"))
+                            .and_then(|m| {
+                                m.part_of(&scene_rid, &binding.light_rid)
+                                    .map(|p| p.command(transition_ms))
+                                    .map_err(anyhow::Error::msg)
+                            });
+                        match part
+                            .and_then(|c| Self::validate_light_command(binding, &c).map(|()| c))
+                        {
+                            Ok(c) => api.execute_light_command(&binding.light_rid, &c).await,
+                            Err(e) => Err(e),
+                        }
+                    }
+                };
+                ("apply_scene", r)
+            }
             (Target::Aux(binding), PluginCommand::SetAccessoryState(c)) => (
                 "set_accessory_state",
                 match Self::validate_accessory_command(&binding.resource_type, &c) {
@@ -898,6 +933,7 @@ impl Bridge {
                     PluginCommand::SaveScene { .. } => "save_scene",
                     PluginCommand::RenameScene { .. } => "rename_scene",
                     PluginCommand::DeleteScene => "delete_scene",
+                    PluginCommand::ApplySceneToLight { .. } => "apply_scene",
                     _ => "command",
                 };
                 let r = Err(anyhow::anyhow!("unsupported target type"));

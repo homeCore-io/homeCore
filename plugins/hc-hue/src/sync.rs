@@ -10,6 +10,7 @@ use crate::hue::api::{
 };
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
+use crate::hue::scene_lights;
 use crate::translator;
 use plugin_sdk_rs::DevicePublisher;
 
@@ -127,6 +128,11 @@ pub async fn refresh_bridge_state(
 
     {
         let lights = api.lights(&resources);
+        let scenes = api.scenes(&resources);
+        registry.set_scene_matcher(
+            &target.bridge_id,
+            scene_lights::SceneMatcher::new(&scenes, &lights),
+        );
         let light_owner_to_device = build_light_owner_map(&lights);
         let mut published_light_ids: HashSet<String> = HashSet::new();
         for light in &lights {
@@ -166,7 +172,7 @@ pub async fn refresh_bridge_state(
             }
 
             publisher
-                .publish_state(&light.device_id, &translator::light_state(light))
+                .publish_state(&light.device_id, &with_showing(registry, light))
                 .await?;
             if registry.first_retirement(&light.device_id) {
                 publisher
@@ -233,7 +239,7 @@ pub async fn refresh_bridge_state(
                     .publish_availability(&group.device_id, true)
                     .await?;
                 publisher
-                    .publish_state(&group.device_id, &translator::grouped_light_state(&group))
+                    .publish_state(&group.device_id, &group_with_showing(registry, &group))
                     .await?;
             }
             for stale_group_id in
@@ -251,7 +257,6 @@ pub async fn refresh_bridge_state(
             }
         }
 
-        let scenes = api.scenes(&resources);
         let mut published_scene_ids: HashSet<String> = HashSet::new();
         for scene in scenes {
             published_scene_ids.insert(scene.device_id.clone());
@@ -485,6 +490,33 @@ pub async fn refresh_bridge_state(
     Ok(())
 }
 
+/// A light's full state with the scene it shows, if any.
+fn with_showing(registry: &mut HueRegistry, light: &crate::hue::models::HueLight) -> Value {
+    let mut state = translator::light_state(light);
+    if let (Some(obj), Some(m)) = (
+        state.as_object_mut(),
+        registry.scene_matcher_mut(&light.bridge_id),
+    ) {
+        obj.extend(scene_lights::showing_attrs(
+            m.light_showing(&light.resource_id).as_ref(),
+        ));
+    }
+    state
+}
+
+/// A room's or zone's full state with the scene the bridge says it shows.
+fn group_with_showing(registry: &mut HueRegistry, group: &HueGroupedLight) -> Value {
+    let mut state = translator::grouped_light_state(group);
+    if let (Some(obj), Some(owner), Some(m)) = (
+        state.as_object_mut(),
+        group.owner_rid.as_deref(),
+        registry.scene_matcher_mut(&group.bridge_id),
+    ) {
+        obj.extend(scene_lights::showing_attrs(m.group_showing(owner).as_ref()));
+    }
+    state
+}
+
 /// Map a Hue auxiliary resource type to the canonical homeCore device
 /// type. Aligning with the names in
 /// `core/config/profiles/examples/device-types.toml` lets the UI pick up
@@ -533,7 +565,7 @@ fn aux_is_available(aux: &HueAuxDevice) -> bool {
 
 pub async fn apply_eventstream_update(
     publisher: &DevicePublisher,
-    registry: &HueRegistry,
+    registry: &mut HueRegistry,
     bridge_id: &str,
     payload: &Value,
 ) -> Result<EventApplyOutcome> {
@@ -582,7 +614,7 @@ pub async fn apply_eventstream_update(
 
 async fn apply_event_item(
     publisher: &DevicePublisher,
-    registry: &HueRegistry,
+    registry: &mut HueRegistry,
     bridge_id: &str,
     event: &Value,
 ) -> Result<EventApplyOutcome> {
@@ -747,6 +779,15 @@ async fn apply_event_item(
                             .await?;
                         applied = true;
                     }
+                    // Whether it still shows the scene it did.
+                    if let Some(showing) = registry
+                        .scene_matcher_mut(bridge_id)
+                        .and_then(|m| m.on_light_event(rid, item))
+                    {
+                        publisher
+                            .publish_state_partial(&device_id, &showing)
+                            .await?;
+                    }
                 }
             }
             "grouped_light" => {
@@ -802,6 +843,33 @@ async fn apply_event_item(
                             )
                             .await?;
                         applied = true;
+                    }
+                    // Which scene its lights and its room show now. An edit
+                    // in the Hue app sends the scene's new actions too.
+                    let changes = registry
+                        .scene_matcher_mut(bridge_id)
+                        .map(|m| m.on_scene_event(rid, item))
+                        .unwrap_or_default();
+                    if let Some(actions) = &changes.actions {
+                        let lights: Vec<Value> =
+                            actions.iter().map(translator::scene_light_entry).collect();
+                        publisher
+                            .publish_state_partial(&device_id, &json!({ "lights": lights }))
+                            .await?;
+                    }
+                    for (light_device_id, showing) in &changes.lights {
+                        publisher
+                            .publish_state_partial(light_device_id, showing)
+                            .await?;
+                    }
+                    for (owner_rid, showing) in &changes.groups {
+                        if let Some(group_device_id) =
+                            registry.find_group_device_id_by_owner(bridge_id, owner_rid)
+                        {
+                            publisher
+                                .publish_state_partial(&group_device_id, showing)
+                                .await?;
+                        }
                     }
                 }
             }
@@ -1890,7 +1958,7 @@ mod tests {
     #[tokio::test]
     async fn ignores_known_event_type_without_registered_device() {
         let publisher = dummy_publisher();
-        let registry = HueRegistry::default();
+        let mut registry = HueRegistry::default();
         let payload = json!({
             "data": [
                 {
@@ -1901,7 +1969,7 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+        let outcome = apply_eventstream_update(&publisher, &mut registry, "bridge-1", &payload)
             .await
             .expect("eventstream update");
 
@@ -1916,7 +1984,7 @@ mod tests {
     #[tokio::test]
     async fn grouped_sensor_events_do_not_request_refresh() {
         let publisher = dummy_publisher();
-        let registry = HueRegistry::default();
+        let mut registry = HueRegistry::default();
         let payload = json!({
             "data": [
                 {
@@ -1934,7 +2002,7 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+        let outcome = apply_eventstream_update(&publisher, &mut registry, "bridge-1", &payload)
             .await
             .expect("eventstream update");
 
@@ -1949,7 +2017,7 @@ mod tests {
     #[tokio::test]
     async fn requests_refresh_for_unknown_event_type() {
         let publisher = dummy_publisher();
-        let registry = HueRegistry::default();
+        let mut registry = HueRegistry::default();
         let payload = json!({
             "data": [
                 {
@@ -1959,7 +2027,7 @@ mod tests {
             ]
         });
 
-        let outcome = apply_eventstream_update(&publisher, &registry, "bridge-1", &payload)
+        let outcome = apply_eventstream_update(&publisher, &mut registry, "bridge-1", &payload)
             .await
             .expect("eventstream update");
 
