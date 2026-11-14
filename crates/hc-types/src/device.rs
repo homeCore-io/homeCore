@@ -324,6 +324,21 @@ pub struct DeviceState {
     /// `"window"`, `"garage"`, or `"gate"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_hint: Option<String>,
+    /// User-set choice of whether this device counts toward the house's
+    /// security — the doors, locks and windows a "secure?" glance checks.
+    ///
+    /// * `None` (absent, the default) — follow the device's type. UIs count
+    ///   locks, door/window/garage/gate contact sensors and covers that open
+    ///   as security by default.
+    /// * `Some(true)` — counts for security even if its type does not.
+    /// * `Some(false)` — never counts, e.g. an interior door.
+    ///
+    /// Stored in core rather than in any one client so that every UI agrees.
+    /// **The same contract as [`name_override`]:** registration and state
+    /// updates never touch this field, so the choice survives plugin
+    /// restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<bool>,
     /// When each attribute last held a *different* value, by attribute name.
     ///
     /// **`last_change.changed_at` cannot answer this and never could.** That
@@ -420,6 +435,7 @@ impl DeviceState {
             area_override: None,
             device_type: None,
             ui_hint: None,
+            security: None,
             manufacturer: None,
             model: None,
             sw_version: None,
@@ -677,6 +693,28 @@ mod tests {
 
         let older: DeviceState = serde_json::from_value(wire).expect("older record loads");
         assert!(older.attributes_changed_at.is_empty());
+    }
+
+    /// The security choice is absent until someone makes it, a record stored
+    /// before it existed loads as "follow the type", and making it is a
+    /// metadata change, so it is announced.
+    #[test]
+    fn the_security_choice_is_absent_until_made() {
+        let d = DeviceState::new("door_1", "Back Door", "plugin.test");
+        let wire = serde_json::to_value(&d).unwrap();
+        assert!(!wire.as_object().unwrap().contains_key("security"));
+        let older: DeviceState = serde_json::from_value(wire).expect("older record loads");
+        assert_eq!(older.security, None);
+
+        for choice in [true, false] {
+            let mut chosen = d.clone();
+            chosen.security = Some(choice);
+            let wire = serde_json::to_value(&chosen).unwrap();
+            assert_eq!(wire["security"], json!(choice));
+            let back: DeviceState = serde_json::from_value(wire).unwrap();
+            assert_eq!(back.security, Some(choice));
+            assert!(!d.same_metadata(&chosen));
+        }
     }
 
     /// One absence, spelled one way. `area` used to serialise as `null` while

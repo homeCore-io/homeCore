@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.105"
+  version: "0.1.106"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -707,7 +707,9 @@ paths:
       operationId: updateDevice
       summary: Update device metadata
       description: |
-        Updates metadata fields such as `name`, `area`, `canonical_name`, and `status_icon`.
+        Updates metadata fields such as `name`, `area`, `canonical_name`,
+        `status_icon`, and `security`. A change raises `device_metadata_changed`
+        on the event stream, so other open clients see it.
 
         `canonical_name` is the stable, rule-facing identifier used by HomeCore
         for readable automations. It must be unique across the hub after
@@ -735,6 +737,15 @@ paths:
                 status_icon:
                   type: string
                   nullable: true
+                security:
+                  type: boolean
+                  nullable: true
+                  description: |
+                    Whether the device counts toward the house's security.
+                    `true` counts it even if its type would not; `false`
+                    never counts it (an interior door); `null` clears the
+                    choice so the device follows its type again. Any other
+                    JSON type is rejected with 422 and nothing is changed.
             example:
               name: Floor Lamp
               area: living_room
@@ -747,6 +758,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeviceState"
+        "422":
+          description: "`security` was not `true`, `false` or `null`"
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
@@ -2674,7 +2687,7 @@ paths:
         for snapshots, or `{"type": "lagged", "missed": n}` otherwise.
 
         **Keeping a copy of the house current:** `device_added` and
-        `device_metadata_changed` (name, room, type, `ui_hint`, icon, button
+        `device_metadata_changed` (name, room, type, `ui_hint`, `security`, icon, button
         names — anything but what the device reports) carry the whole device
         record;
         `device_removed` its id. `room_changed` carries the room;
@@ -9104,6 +9117,17 @@ components:
             `area`. Absent when neither is set. Worked out on every response
             and ignored if sent back, so group devices by this and leave
             `area` and `area_override` for editing.
+        security:
+          type: boolean
+          description: |
+            A person's choice of whether this device counts toward the
+            house's security. **Absent** means follow the device's type: UIs
+            count locks, and door/window/garage/gate contact sensors and
+            covers that open, as security by default. `true` counts it even
+            if its type would not; `false` never counts it (an interior
+            door). Stored in core so every UI agrees; registration and state
+            updates never touch it, so it survives plugin restarts. Set it
+            with `PATCH /devices/{id}`.
         available:
           type: boolean
         attributes_changed_at:

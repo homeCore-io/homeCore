@@ -1657,6 +1657,45 @@ mod alert_tests {
         ));
     }
 
+    /// The security choice is a person's, like a name override: a plugin
+    /// registering the device again, reporting state, or going offline and
+    /// back never touches it.
+    #[tokio::test]
+    async fn re_registration_and_reports_keep_the_security_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let mut door = DeviceState::new("zwave_7", "Pantry Door", "plugin.zwave");
+        door.device_type = Some("contact_sensor".into());
+        door.security = Some(false);
+        store.upsert_device(&door).await.unwrap();
+        let bridge = StateBridge::new(EventBus::new(16), EventBus::new(16), store.clone());
+
+        bridge
+            .handle_mqtt(
+                "homecore/plugins/plugin.zwave/register",
+                br#"{"device_id":"zwave_7","name":"Pantry","device_type":"contact_sensor","security":true}"#,
+            )
+            .await
+            .unwrap();
+        bridge
+            .handle_mqtt("homecore/devices/zwave_7/state", br#"{"open":true}"#)
+            .await
+            .unwrap();
+        bridge
+            .handle_mqtt("homecore/devices/zwave_7/availability", b"offline")
+            .await
+            .unwrap();
+
+        let stored = store.get_device("zwave_7").await.unwrap().unwrap();
+        assert_eq!(stored.name, "Pantry", "the registration did land");
+        assert_eq!(stored.security, Some(false));
+    }
+
     /// A device registered unavailable that then reports is announced as
     /// available, once: its plugin's "online" after that changes nothing.
     #[tokio::test]
