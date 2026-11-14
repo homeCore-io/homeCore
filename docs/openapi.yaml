@@ -1339,6 +1339,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1369,6 +1371,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1403,6 +1407,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -1419,6 +1425,8 @@ paths:
       responses:
         "204":
           description: Deleted
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1445,6 +1453,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AutomationTestResult"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -1581,6 +1591,14 @@ paths:
                     format: uuid
                   was_paused:
                     type: boolean
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
+        "404":
+          description: No rule by this id, and nothing paused under it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /automations/{id}/run:
     post:
       operationId: runAutomation
@@ -1626,6 +1644,8 @@ paths:
                     format: uuid
                   checks:
                     type: boolean
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -4464,6 +4484,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -4649,6 +4671,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
           $ref: "#/components/responses/NotFound"
         "503":
@@ -4686,8 +4710,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/InvalidAutomationId"
         "404":
-          description: The rule has no `.ron` file backing it
+          description: No rule by this id (`rule not found`), or the rule has no `.ron` file backing it
           content:
             application/json:
               schema:
@@ -8769,6 +8795,15 @@ components:
 
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    InvalidAutomationId:
+      description: |
+        The id isn't a UUID, so it can't name a rule. A UUID that names no
+        rule is 404 instead.
       content:
         application/json:
           schema:

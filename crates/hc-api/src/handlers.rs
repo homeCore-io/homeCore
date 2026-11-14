@@ -3047,10 +3047,53 @@ pub async fn create_automation(
     (StatusCode::CREATED, Json(json!(rule))).into_response()
 }
 
+/// A rule's id, from the path.
+///
+/// A well-formed id that names no rule is the handler's 404. One that isn't
+/// a UUID at all is a 400 — the request is wrong, not the house — answered in
+/// JSON like every other refusal here, where axum's own rejection is plain
+/// text a client can't read an `error` from.
+pub struct RuleId(pub Uuid);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RuleId {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Path::<Uuid>::from_request_parts(parts, state).await {
+            Ok(Path(id)) => Ok(Self(id)),
+            Err(e) => Err((
+                e.status(),
+                Json(json!({ "error": format!("not an automation id: {}", e.body_text()) })),
+            )
+                .into_response()),
+        }
+    }
+}
+
+/// Whether the rule engine knows a rule by this id. `true` when there is no
+/// rule engine to ask, so a handler that has its own answer for that gives it.
+async fn rule_exists(s: &AppState, id: Uuid) -> bool {
+    match &s.source_rules_handle {
+        Some(rh) => rh.read().await.iter().any(|r| r.id == id),
+        None => true,
+    }
+}
+
+fn rule_not_found() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "rule not found" })),
+    )
+        .into_response()
+}
+
 pub async fn get_automation(
     State(s): State<AppState>,
     _: AutomationsRead,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
     let Some(rh) = &s.source_rules_handle else {
         return (
@@ -3098,8 +3141,11 @@ pub async fn get_rule_vocabulary(_: State<AppState>, _: AutomationsRead) -> impl
 pub async fn get_automation_ron(
     State(s): State<AppState>,
     _: AutomationsRead,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
+    if !rule_exists(&s, id).await {
+        return rule_not_found();
+    }
     let Some(ref store) = s.rule_file_store else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3151,7 +3197,7 @@ pub async fn get_automation_ron(
 pub async fn update_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     match load_mode_definitions(&s) {
@@ -3167,6 +3213,12 @@ pub async fn update_automation(
             )
                 .into_response();
         }
+    }
+
+    // A rule that isn't there is 404 whatever the body says: checked before
+    // the body is judged, so a missing rule isn't reported as a bad one.
+    if !rule_exists(&s, id).await {
+        return rule_not_found();
     }
 
     // Path id is authoritative — inject it so clients don't need to send it.
@@ -3278,7 +3330,7 @@ pub async fn update_automation(
 pub async fn delete_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
     match load_mode_definitions(&s) {
         Ok(definitions) => {
@@ -3547,7 +3599,7 @@ pub async fn import_scenes(
 pub async fn test_automation(
     State(s): State<AppState>,
     _: AutomationsRead,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
     Query(q): Query<TestAt>,
 ) -> impl IntoResponse {
     let clock = match q.clock() {
@@ -3597,7 +3649,7 @@ pub struct RunBody {
 pub async fn run_automation(
     State(s): State<AppState>,
     AutomationsWrite(claims): AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
     body: Option<Json<RunBody>>,
 ) -> impl IntoResponse {
     let checks = body.map(|Json(b)| b.checks).unwrap_or(true);
@@ -3675,13 +3727,18 @@ pub async fn list_paused_rules(State(s): State<AppState>, _: AutomationsRead) ->
 pub async fn resume_rule(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
     let was = s.pauses.as_ref().and_then(|p| p.remove(&id)).is_some();
+    // A pause is let go of even for a rule since deleted; one that was never
+    // paused and names no rule is 404.
+    if !was && !rule_exists(&s, id).await {
+        return rule_not_found();
+    }
     if was {
         announce_rules(&s, &[id]).await;
     }
-    Json(json!({ "rule_id": id, "was_paused": was }))
+    Json(json!({ "rule_id": id, "was_paused": was })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -6835,7 +6892,7 @@ pub struct PatchAutomationBody {
 pub async fn patch_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
     Json(patch): Json<PatchAutomationBody>,
 ) -> impl IntoResponse {
     match load_mode_definitions(&s) {
@@ -7077,8 +7134,12 @@ pub async fn bulk_patch_automations(
 pub async fn automation_history(
     State(s): State<AppState>,
     _: AutomationsRead,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
+    // A rule that isn't there is 404 before anything else is asked.
+    if !rule_exists(&s, id).await {
+        return rule_not_found();
+    }
     let Some(fh) = &s.fire_history else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -7086,18 +7147,6 @@ pub async fn automation_history(
         )
             .into_response();
     };
-
-    // Verify rule exists.
-    if let Some(rh) = &s.source_rules_handle {
-        let rules = rh.read().await;
-        if !rules.iter().any(|r| r.id == id) {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "rule not found" })),
-            )
-                .into_response();
-        }
-    }
 
     let history: Vec<_> = fh
         .get(&id)
@@ -7117,7 +7166,7 @@ pub async fn automation_history(
 pub async fn clone_automation(
     State(s): State<AppState>,
     _: AutomationsWrite,
-    Path(id): Path<Uuid>,
+    RuleId(id): RuleId,
 ) -> impl IntoResponse {
     let Some(source_rh) = &s.source_rules_handle else {
         return (

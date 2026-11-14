@@ -137,6 +137,32 @@ impl ManagedPluginStore {
         self.persist()
     }
 
+    /// The version installed for a plugin, from what core keeps on disk —
+    /// known whether or not the plugin is running, since only a running one
+    /// says its own version.
+    ///
+    /// The install record's version first. Failing that, the version folder
+    /// an install put the binary in (`plugins/<id>/<version>/<binary>`), which
+    /// also covers a `[[plugins]]` entry pointed at an installed binary by
+    /// hand. A plugin configured by hand anywhere else has no installed
+    /// version core could know: `None`.
+    pub fn installed_version(&self, id: &str, binary: &str) -> Option<String> {
+        let recorded = self
+            .doc
+            .read()
+            .unwrap()
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.version.trim().to_string(), r.binary.clone()));
+        match recorded {
+            Some((version, _)) if !version.is_empty() => Some(version),
+            Some((_, rec_binary)) => version_from_install_path(id, &rec_binary)
+                .or_else(|| version_from_install_path(id, binary)),
+            None => version_from_install_path(id, binary),
+        }
+    }
+
     fn persist(&self) -> std::io::Result<()> {
         let doc = self.doc.read().unwrap();
         if let Some(parent) = self.path.parent() {
@@ -147,9 +173,93 @@ impl ManagedPluginStore {
     }
 }
 
+/// The version folder of an installed binary, `…/<id>/<version>/<binary>` as
+/// `plugin_install` lays it out. Only a folder named for this plugin holding
+/// one that reads as a version counts: `target/debug/hc-hue` is no install.
+fn version_from_install_path(id: &str, binary: &str) -> Option<String> {
+    let path = std::path::Path::new(binary);
+    let version_dir = path.parent()?;
+    let id_dir = version_dir.parent()?;
+    if id_dir.file_name()?.to_str()? != id {
+        return None;
+    }
+    let version = version_dir.file_name()?.to_str()?;
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let parts: Vec<&str> = core.split('.').collect();
+    let looks_like_version = parts.len() >= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    looks_like_version.then(|| version.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_plugin_still_has_its_installed_version() {
+        let dir = tmp_dir();
+        let store = ManagedPluginStore::load(dir.clone());
+        store
+            .install(ManagedRecord {
+                id: "plugin.hue".into(),
+                version: "0.2.7".into(),
+                binary: "/home/hc/plugins/plugin.hue/0.2.7/hc-hue".into(),
+                enabled: false,
+                ..Default::default()
+            })
+            .unwrap();
+        // From the record, which survives a restart.
+        let reloaded = ManagedPluginStore::load(dir);
+        assert_eq!(
+            reloaded.installed_version("plugin.hue", "/anything"),
+            Some("0.2.7".into())
+        );
+    }
+
+    #[test]
+    fn the_install_folder_says_the_version_when_the_record_does_not() {
+        let store = ManagedPluginStore::load(tmp_dir());
+        store
+            .install(ManagedRecord {
+                id: "plugin.roku".into(),
+                binary: "/home/hc/plugins/plugin.roku/0.1.4/hc-roku".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.installed_version("plugin.roku", ""),
+            Some("0.1.4".into())
+        );
+        // A `[[plugins]]` entry pointed at an installed binary, no record.
+        assert_eq!(
+            store.installed_version(
+                "plugin.caseta",
+                "plugins/plugin.caseta/0.3.0-rc.1/hc-caseta"
+            ),
+            Some("0.3.0-rc.1".into())
+        );
+    }
+
+    #[test]
+    fn a_plugin_configured_by_hand_has_no_installed_version() {
+        let store = ManagedPluginStore::load(tmp_dir());
+        for binary in [
+            "/home/john/Github/homeCore/core/target/debug/hc-hue",
+            "plugins/hc-hue/bin/hc-hue",
+            // Another plugin's install folder is not this one's.
+            "/home/hc/plugins/plugin.lutron/0.1.24/hc-hue",
+            "/home/hc/plugins/plugin.hue/latest/hc-hue",
+            "hc-hue",
+        ] {
+            assert_eq!(
+                store.installed_version("plugin.hue", binary),
+                None,
+                "{binary}"
+            );
+        }
+    }
 
     fn tmp_dir() -> PathBuf {
         let mut p = std::env::temp_dir();
