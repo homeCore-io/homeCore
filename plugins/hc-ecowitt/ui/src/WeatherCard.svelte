@@ -9,7 +9,7 @@
      with UV, lightning and the sensors that need a battery. "Details" opens
      the station's panel. -->
 <script>
-	import { adopt, batteryLow, compass, fmt, n, num, rainGauge, trend, u, uvWords } from './lib/weather.js';
+	import { adopt, batteryLow, compass, fmt, n, num, rainGauge, trend, u, unitFor, uvWords, value } from './lib/weather.js';
 	import { follow } from './lib/units.svelte.js';
 
 	let { host: hc, form = 'standard' } = $props();
@@ -29,7 +29,7 @@
 	const r = $derived(rain?.attributes ?? {});
 	const indoor = $derived(devices.find((d) => d.device_id.endsWith('_indoor')));
 	const lightning = $derived(devices.find((d) => d.device_type === 'lightning_sensor'));
-	const deg = $derived(u('°C'));
+	const deg = $derived(unitFor(s, 'temperature'));
 	// Which way the pressure is going: the last three hours of it.
 	let pressure = $state([]);
 	$effect(() => {
@@ -48,17 +48,17 @@
 	</div>
 	{#if station}
 		<div class="glance" class:narrow={form !== 'large'}>
-			<span class="temp"><b class="hc-num">{n(s.temperature, '°C')}</b><i>{deg}</i></span>
+			<span class="temp"><b class="hc-num">{value(s, 'temperature')}</b><i>{deg}</i></span>
 			<dl>
 				<dt>Humidity</dt><dd>{fmt(s.humidity, 0)}%</dd>
 				<dt>Wind</dt>
 				<dd>
 					<span class="arrow" style:transform={`rotate(${(num(s.wind_direction) ?? 0) + 180}deg)`}>↑</span>
-					{n(s.wind_speed, 'm/s')} {u('m/s')} {compass(s.wind_direction)}
+					{value(s, 'wind_speed')} {unitFor(s, 'wind_speed')} {compass(s.wind_direction)}
 				</dd>
 				<dt>Rain</dt><dd>{n(r.rain_daily_mm, 'mm')} {u('mm')} today</dd>
-				<dt>Pressure</dt><dd>{n(s.pressure, 'hPa', 0)} {u('hPa')}{trend(pressure) ? ` · ${trend(pressure)}` : ''}</dd>
-				{#if indoor}<dt>Inside</dt><dd>{n(indoor.attributes.temperature, '°C')}{deg}</dd>{/if}
+				<dt>Pressure</dt><dd>{value(s, 'pressure', unitFor(s, 'pressure') === 'hPa' ? 0 : 2)} {unitFor(s, 'pressure')}{trend(pressure) ? ` · ${trend(pressure)}` : ''}</dd>
+				{#if indoor}<dt>Inside</dt><dd>{value(indoor.attributes, 'temperature')}{unitFor(indoor.attributes, 'temperature')}</dd>{/if}
 				{#if form === 'large'}
 					<dt>UV</dt><dd>{fmt(s.uvi, 0)} {uvWords(s.uvi)}</dd>
 					{#if lightning}<dt>Lightning</dt><dd>{fmt(lightning.attributes.strike_count, 0)} strikes today, nearest {n(lightning.attributes.distance_km, 'km', 0)} {u('km')}</dd>{/if}

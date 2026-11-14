@@ -9,6 +9,57 @@ export { fmt, n, num, u };
 /** @typedef {import('../../../../../sdk/ui/index.js').Device} Device */
 /** @typedef {import('../../../../../sdk/ui/index.js').Host} Host */
 
+// ---- the unit each reading is in ----
+
+const DEGREES = { F: '°F', '°F': '°F', '℉': '°F', C: '°C', '°C': '°C', '℃': '°C' };
+const TEMPERATURES = new Set(['temperature', 'feels_like', 'dewpoint']);
+/** homeCore's own unit for each reading the screens show. */
+const BASE = { wind_speed: 'm/s', wind_gust: 'm/s', wind_gust_daily_max: 'm/s', pressure: 'hPa' };
+/**
+ * Where a station kept a reading before hc-ecowitt 0.1.20, which published a
+ * gateway's upload as it came: miles an hour, inches of mercury, other names.
+ */
+const OLD = {
+	wind_speed: ['wind_speed', 'mph'],
+	wind_gust: ['gust_speed', 'mph'],
+	wind_gust_daily_max: ['daily_max_wind', 'mph'],
+	pressure: ['barometric_rel', 'inHg']
+};
+
+/**
+ * The unit a device wrote its temperatures in: °C, as homeCore keeps them,
+ * unless its state says otherwise (`temperature_unit` °F, kept from an older
+ * plugin). Never assumed: a °F number is not shown as °C.
+ */
+export const tempUnit = (a = {}) => DEGREES[String(a.temperature_unit ?? '').trim()] ?? '°C';
+
+/** Whether a station's state is from before 0.1.20: the old names, and none of today's. */
+const isOld = (a) =>
+	a.pressure === undefined &&
+	a.wind_gust === undefined &&
+	(a.barometric_rel !== undefined || a.gust_speed !== undefined || a.daily_max_wind !== undefined);
+
+/**
+ * A reading by its name today, as `[number, the unit it is in]`, from the
+ * state as it is: today's names in homeCore's units, or an older plugin's.
+ */
+export function own(a = {}, name) {
+	if (TEMPERATURES.has(name)) return [a[name], tempUnit(a)];
+	if (OLD[name] && isOld(a)) {
+		const [key, unit] = OLD[name];
+		return [a[key], unit];
+	}
+	return [a[name], BASE[name]];
+}
+
+/** A reading's number as the person reads it: "70.7", or a dash. */
+export const value = (a, name, digits = 1) => {
+	const [v, unit] = own(a, name);
+	return n(v, unit, digits);
+};
+/** The unit a reading is shown in, for the person: "°F", "mph", "hPa". */
+export const unitFor = (a, name) => u(own(a, name)[1]);
+
 /** Use the app's look in a component's shadow root. */
 export function adopt(el, host) {
 	const root = el?.shadowRoot;
@@ -84,9 +135,9 @@ export function reading(d) {
 	const a = d.attributes;
 	switch (d.device_type) {
 		case 'weather_station':
-			return `${n(a.temperature, '°C')}${u('°C')} · ${fmt(a.humidity, 0)}% · wind ${n(a.wind_speed, 'm/s')} ${u('m/s')}`;
+			return `${value(a, 'temperature')}${unitFor(a, 'temperature')} · ${fmt(a.humidity, 0)}% · wind ${value(a, 'wind_speed')} ${unitFor(a, 'wind_speed')}`;
 		case 'temperature_sensor':
-			return `${n(a.temperature, '°C')}${u('°C')}${num(a.humidity) !== undefined ? ` · ${fmt(a.humidity, 0)}%` : ''}`;
+			return `${value(a, 'temperature')}${unitFor(a, 'temperature')}${num(a.humidity) !== undefined ? ` · ${fmt(a.humidity, 0)}%` : ''}`;
 		case 'rain_sensor': {
 			const rate = a.rain_rate_mm_hr;
 			return `${n(a.rain_daily_mm, 'mm')} ${u('mm')} today${num(rate) ? ` · ${n(rate, 'mm/h')} ${u('mm/h')} now` : ''}`;

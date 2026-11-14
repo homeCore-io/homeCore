@@ -92,11 +92,25 @@ pub fn is_light(device: &DeviceState) -> bool {
     kind.as_deref() == Some("light") || device.ui_hint.as_deref() == Some("light")
 }
 
-/// The room's lights, in device-id order.
+/// Whether a light is a camera's own spotlight: `<camera>_spotlight`, for a
+/// camera or doorbell anywhere in `devices` (Reolink's floodlight). It belongs
+/// with its camera, so Room on never lights it, wherever either was put.
+pub fn is_camera_spotlight(device: &DeviceState, devices: &[DeviceState]) -> bool {
+    let Some(camera) = device.device_id.strip_suffix("_spotlight") else {
+        return false;
+    };
+    devices.iter().any(|d| {
+        d.device_id == camera
+            && (matches!(type_of(d).as_deref(), Some("camera") | Some("doorbell"))
+                || matches!(d.ui_hint.as_deref(), Some("camera") | Some("doorbell")))
+    })
+}
+
+/// The room's lights, in device-id order. A camera's spotlight is not one.
 pub fn lights_in<'a>(room: &Area, devices: &'a [DeviceState]) -> Vec<&'a DeviceState> {
     let mut lights: Vec<&DeviceState> = devices
         .iter()
-        .filter(|d| is_light(d) && in_room(room, d))
+        .filter(|d| is_light(d) && in_room(room, d) && !is_camera_spotlight(d, devices))
         .collect();
     lights.sort_by(|a, b| a.device_id.cmp(&b.device_id));
     lights
@@ -550,6 +564,41 @@ mod tests {
             .map(|d| d.device_id.as_str())
             .collect();
         assert_eq!(found, vec!["lamp", "moved", "switch"]);
+    }
+
+    #[test]
+    fn a_cameras_spotlight_is_never_one_of_the_rooms_lights() {
+        let r = room();
+        let lamp = light("lamp", "den", json!({ "on": false }));
+        let mut camera = light("reolink_porch", "den", json!({}));
+        camera.device_type = Some("camera".into());
+        // Its camera is in another room: still the camera's.
+        let mut far_camera = light("reolink_deck", "kitchen", json!({}));
+        far_camera.device_type = Some("camera".into());
+        let spot = light("reolink_porch_spotlight", "den", json!({ "on": false }));
+        let far_spot = light("reolink_deck_spotlight", "den", json!({ "on": false }));
+        // Named like one, but no camera by that name: an ordinary light.
+        let named = light("desk_spotlight", "den", json!({ "on": false }));
+
+        let devices = vec![lamp, camera, far_camera, spot, far_spot, named];
+        let found: Vec<&str> = lights_in(&r, &devices)
+            .iter()
+            .map(|d| d.device_id.as_str())
+            .collect();
+        assert_eq!(found, vec!["desk_spotlight", "lamp"]);
+
+        // Room on with nothing saved turns on only the room's own lights.
+        let schemas = dimmable(&["lamp", "desk_spotlight", "reolink_porch_spotlight"]);
+        let plan = plan_on(&r, &devices, &schemas, None);
+        assert!(!ids(&plan.commands).contains(&"reolink_porch_spotlight"));
+        assert!(!ids(&plan.commands).contains(&"reolink_deck_spotlight"));
+
+        // A room with only its cameras' spotlights has no lights at all.
+        let porch_only: Vec<DeviceState> = devices
+            .into_iter()
+            .filter(|d| d.device_id.starts_with("reolink"))
+            .collect();
+        assert!(lights_in(&r, &porch_only).is_empty());
     }
 
     #[test]
