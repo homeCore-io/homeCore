@@ -698,6 +698,24 @@ pub async fn update_device(
                 }
             };
 
+            // Whether the device counts toward security: `true`/`false` pin
+            // the choice, null hands it back to the device's type. Anything
+            // else is a mistake worth saying so about, not quietly ignoring.
+            // Checked first, so a bad value changes nothing — not even a room
+            // an `area` in the same body would have made.
+            if let Some(security) = body.get("security") {
+                device.security = match security {
+                    Value::Null => None,
+                    Value::Bool(b) => Some(*b),
+                    _ => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(json!({ "error": "security must be true, false or null" })),
+                        )
+                            .into_response();
+                    }
+                };
+            }
             // `name`/`area` name the *user's* intent, so they set the override —
             // never the plugin-delivered value, which registration overwrites on
             // every restart (a rename written to `device.name` silently reverted).
@@ -9553,6 +9571,98 @@ token = "TOKEN-TWO"
             .expect("load")
             .expect("exists");
         assert!(stored.button_names.is_none());
+    }
+
+    /// **Whether a device counts for security, chosen once for every UI.**
+    ///
+    /// `true` and `false` pin the choice, null hands it back to the device's
+    /// type, and each change is announced so other open screens follow. The
+    /// choice is on disk, so it outlives the store being reopened.
+    #[tokio::test]
+    async fn security_can_be_chosen_cleared_and_survives_a_reload() {
+        let (state_db, history_db) = temp_db_paths("security");
+        let store = hc_state::StateStore::open(&state_db, &history_db)
+            .await
+            .expect("state store opens");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let sink = std::sync::Arc::clone(&seen);
+        store.on_change(move |e| {
+            if matches!(e, hc_types::event::Event::DeviceMetadataChanged { .. }) {
+                *sink.lock().unwrap() += 1;
+            }
+        });
+        let bus = EventBus::new(128);
+        let jwt = JwtService::new_hs256(b"test-secret-key-32-bytes-minimum!", 24);
+        let state = AppState::new(crate::AppStateParams::new(store, bus, jwt));
+        seed_device(&state, "door_1", Some("Hallway")).await;
+        *seen.lock().unwrap() = 0;
+
+        let patch = |body: Value| {
+            let state = state.clone();
+            async move {
+                update_device(
+                    State(state),
+                    DevicesWrite(whitelist_claims()),
+                    Path("door_1".to_string()),
+                    Json(body),
+                )
+                .await
+                .into_response()
+            }
+        };
+        let stored = || async {
+            state
+                .store
+                .get_device("door_1")
+                .await
+                .expect("load")
+                .expect("exists")
+                .security
+        };
+
+        let resp = patch(json!({ "security": false })).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let wire: Value = parse_json(resp).await;
+        assert_eq!(wire["security"], json!(false));
+        assert_eq!(stored().await, Some(false));
+
+        let resp = patch(json!({ "security": true })).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored().await, Some(true));
+        assert_eq!(*seen.lock().unwrap(), 2, "each change is announced");
+
+        // Anything but a boolean or null is refused, and changes nothing —
+        // not even the other fields in the same body.
+        for bad in [json!("yes"), json!(1), json!({}), json!([true])] {
+            let resp = patch(json!({ "security": bad, "name": "Renamed" })).await;
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let err: Value = parse_json(resp).await;
+            assert!(err["error"].as_str().unwrap().contains("security"));
+        }
+        let device = state.store.get_device("door_1").await.unwrap().unwrap();
+        assert_eq!(device.security, Some(true));
+        assert_eq!(device.name_override, None);
+
+        // A body that does not mention it leaves it alone.
+        let resp = patch(json!({ "status_icon": "door" })).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored().await, Some(true));
+
+        let resp = patch(json!({ "security": null })).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let wire: Value = parse_json(resp).await;
+        assert!(wire.get("security").is_none(), "absent when unset: {wire}");
+        assert_eq!(stored().await, None);
+
+        // Persisted: set it again, close the store, open it afresh.
+        let resp = patch(json!({ "security": false })).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        drop(state);
+        let reopened = hc_state::StateStore::open(&state_db, &history_db)
+            .await
+            .expect("state store reopens");
+        let device = reopened.get_device("door_1").await.unwrap().unwrap();
+        assert_eq!(device.security, Some(false));
     }
 
     #[tokio::test]

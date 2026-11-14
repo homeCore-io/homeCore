@@ -161,7 +161,8 @@ pub enum Event {
         device_id: String,
     },
     /// Something about a device other than what it reports changed: its name
-    /// or name override, its room, its type, `ui_hint`, icon, button names,
+    /// or name override, its room, its type, `ui_hint`, `security`, icon,
+    /// button names,
     /// hardware identity. Carries the whole record as it now stands.
     ///
     /// **This is what lets two open screens agree.** Metadata edits used to
