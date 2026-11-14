@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "hc-ecowitt"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
