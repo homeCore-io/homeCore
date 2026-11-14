@@ -153,7 +153,7 @@
 			{/each}
 		</span>
 		<span class="hc-quiet"
-			>Only what this thermostat can do — {k.a}
+			>Only what this thermostat can do: {k.a}
 			{k.modes.includes('heat') ? 'has no Cool' : 'has no Heat'}.</span
 		>
 	{:else if kind === 'hold'}

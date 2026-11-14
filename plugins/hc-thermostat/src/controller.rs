@@ -894,7 +894,7 @@ impl Controller {
                 if t.active() && !t.cfg.actuator_device_id.is_empty() {
                     let secs = t.cfg.override_secs();
                     if secs > 0 {
-                        info!(thermostat = %id, on, "Switched by hand — leaving it alone");
+                        info!(thermostat = %id, on, "Switched by hand, leaving it alone");
                         t.override_until = Some(now + Duration::seconds(secs as i64));
                         t.override_at = Some(now);
                     }
@@ -997,11 +997,11 @@ impl Controller {
         t.roll_day(now, now_on == Some(true));
 
         if t.hold.is_some_and(|h| now >= h.until) {
-            info!(thermostat = %id, "Hold over — back to the usual target");
+            info!(thermostat = %id, "Hold over, back to the usual target");
             t.hold = None;
         }
         if t.override_until.is_some_and(|u| now >= u) {
-            info!(thermostat = %id, "Override over — taking over again");
+            info!(thermostat = %id, "Override over, taking over again");
             t.override_until = None;
             t.override_at = None;
             t.force = true;
@@ -1033,7 +1033,7 @@ impl Controller {
         let waiting_for_first = t.grace_until.is_some() && fresh.is_empty() && !heard_any;
         t.stale = active && fresh.is_empty() && !waiting_for_first;
         if t.stale && !was_stale {
-            warn!(thermostat = %id, "No current reading");
+            warn!(thermostat = %id, "Readings missing");
         }
 
         // The longest run.
@@ -1041,7 +1041,7 @@ impl Controller {
         if active && max_run > 0 && now_on == Some(true) && !t.max_run_tripped {
             if let Some(since) = t.on_since {
                 if (now - since).num_seconds() >= max_run {
-                    warn!(thermostat = %id, "Longest run reached — turning it off");
+                    warn!(thermostat = %id, "Longest run reached, turning it off");
                     t.max_run_tripped = true;
                     t.tripped_at = Some(now);
                 }
@@ -1219,7 +1219,7 @@ impl Controller {
                     &c.thermostat,
                     "set_actuator",
                     Err(format!(
-                        "{id} didn't report a state in {CANDIDATE_SECS} s — is it a plug or switch?"
+                        "{id} didn't report a state in {CANDIDATE_SECS} s. Is it a plug or switch?"
                     )),
                 );
                 self.resubscribe(&before);
@@ -1245,7 +1245,7 @@ impl Controller {
             }
             let observed = self.seen.get(&t.cfg.actuator_device_id).and_then(|s| s.on);
             if observed == Some(true) || t.commanded == Some(true) {
-                info!(thermostat = %t.cfg.id, "Stopping — turning the heater off");
+                info!(thermostat = %t.cfg.id, "Stopping, turning the heater off");
                 self.fx.push(Effect::Command {
                     actuator: t.cfg.actuator_device_id.clone(),
                     payload: t
@@ -1487,7 +1487,7 @@ impl Controller {
         let kind = t.kind();
         if !kind.modes().contains(&m) {
             return Err(format!(
-                "{} — {m} isn't one of its modes ({})",
+                "{}: {m} isn't one of its modes ({})",
                 kind.only(),
                 kind.modes().join(" or ")
             ));
@@ -1657,7 +1657,7 @@ impl Controller {
             && t.active()
             && (observed == Some(true) || t.commanded == Some(true))
         {
-            info!(thermostat = %id, "Removed — turning its switch off");
+            info!(thermostat = %id, "Removed, turning its switch off");
             self.fx.push(Effect::Command {
                 actuator: t.cfg.actuator_device_id.clone(),
                 payload: t
@@ -1712,7 +1712,7 @@ impl Controller {
         for s in &self.skipped {
             let notice = PluginNotice::warning(
                 s.code(),
-                format!("Not running: “{}” — {}.", s.called(), s.problem),
+                format!("Not running: “{}”, {}.", s.called(), s.problem),
             );
             n.push(match &s.fix {
                 Some(f) => notice.with_remedy(format!(
@@ -1732,7 +1732,7 @@ impl Controller {
         for (id, said) in &self.capped {
             n.push(PluginNotice::info(
                 format!("config_value_capped:{id}"),
-                format!("{id}: {} — the largest is used.", said.join("; ")),
+                format!("{id}: {}. The largest is used.", said.join("; ")),
             ));
         }
         for t in self.therms.values() {
@@ -1954,7 +1954,7 @@ fn alerts_of(t: &Thermo, sw: &Seen) -> Vec<PluginAlert> {
             PluginAlert::new(
                 "manual_override",
                 format!(
-                    "Switched by hand{} — left alone until {}",
+                    "Switched by hand{}, left alone until {}",
                     t.override_at
                         .map(|x| format!(" at {}", clock(x)))
                         .unwrap_or_default(),

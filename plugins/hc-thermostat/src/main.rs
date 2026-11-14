@@ -376,7 +376,7 @@ fn alert_kinds() -> Vec<plugin_sdk_rs::types::PluginAlertKind> {
         kind(
             "config_entry_skipped",
             "A thermostat in Settings isn't running",
-            "One [[thermostat]] can't be used as written — a missing field, a target that looks \
+            "One [[thermostat]] can't be used as written: a missing field, a target that looks \
              like °F, a heater set to cool. The others run; the plugin page says what to fix.",
             AlertSeverity::Warning,
             true,
@@ -434,7 +434,7 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
                 "recalculate_all",
                 "Recalculate all",
                 "Decide every thermostat again now. With `force`, every switch is sent what \
-                 it should be even if it seems so already — for a switch that drifted.",
+                 it should be even if it seems so already, for a switch that drifted.",
                 Some(json!({
                     "type": "object",
                     "properties": { "force": { "type": "boolean", "default": false } }
@@ -472,8 +472,8 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
             action(
                 "fix_entry",
                 "Fix a thermostat's target",
-                "Sets the target of a thermostat in Settings that isn't running — `index` \
-                 (its place in the list, from 0), `id` when it has one, `setpoint` in °C. The \
+                "Sets the target of a thermostat in Settings that isn't running. Give `index` \
+                 (its place in the list, from 0), `id` when it has one, and `setpoint` in °C. The \
                  plugin restarts with it.",
                 Some(json!({
                     "type": "object",

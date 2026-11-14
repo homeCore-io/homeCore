@@ -47,7 +47,7 @@ pub async fn discover_gateways(wait: Duration) -> Result<Vec<Value>> {
 
     let target: SocketAddr = (Ipv4Addr::BROADCAST, ECOWITT_PORT).into();
     if let Err(e) = socket.send_to(&frame, target).await {
-        warn!(error = %e, "broadcast send failed; continuing — maybe other route");
+        warn!(error = %e, "broadcast send failed; continuing, maybe another route works");
     }
 
     let mut found: Vec<Value> = Vec::new();

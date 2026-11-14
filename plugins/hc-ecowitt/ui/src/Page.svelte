@@ -127,7 +127,7 @@
 				<span><span class="hc-label">Address</span> <span class="hc-num">{g.ip ?? '—'}</span></span>
 				{#if uploads}<span
 						><span class="hc-label">Uploads to</span>
-						<span class="hc-num">{uploads}</span> every {g['customserver.interval'] ?? '?'} s{g['customserver.enable'] === false ? ' — turned off' : ''}</span
+						<span class="hc-num">{uploads}</span> every {g['customserver.interval'] ?? '?'} s{g['customserver.enable'] === false ? ', turned off' : ''}</span
 					>{/if}
 			</div>
 			{#if mismatch}
@@ -143,7 +143,7 @@
 			{/if}
 		{:else}
 			<p class="hc-quiet">
-				The gateway itself shows up once the plugin can reach it — set its address below.
+				The gateway itself shows up once the plugin can reach it. Set its address below.
 			</p>
 		{/if}
 	</section>
@@ -186,7 +186,7 @@
 				<h3>What the gateway hears</h3>
 				<button class="hc-pill" disabled={hearing} onclick={ask}>{heard ? 'Ask again' : 'Ask the gateway'}</button>
 			</div>
-			<p class="hc-quiet">Every sensor paired with it, with its signal — the place to look when one goes quiet.</p>
+			<p class="hc-quiet">Every sensor paired with it, with its signal: the place to look when one goes quiet.</p>
 			{#if heard}
 				<table class="hc-table">
 					<thead><tr><th>Sensor</th><th>Signal</th><th>Battery</th><th>Id</th></tr></thead>
@@ -223,7 +223,7 @@
 						</select></label>
 				</div>
 				<label class="hc-field"><span class="hc-label">Accept readings only from</span>
-					<textarea rows="2" bind:value={form.allowed} placeholder="The gateway’s address — Ecowitt uploads have no password"></textarea></label>
+					<textarea rows="2" bind:value={form.allowed} placeholder="The gateway’s address. Ecowitt uploads have no password"></textarea></label>
 				<div class="two">
 					<label class="hc-field"><span class="hc-label">Gateway address</span>
 						<input bind:value={form.gateway_ip} placeholder="10.0.10.21" /></label>

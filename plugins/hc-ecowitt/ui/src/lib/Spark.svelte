@@ -25,7 +25,7 @@
 <div class="spark">
 	<div class="hc-head">
 		<span class="hc-label">{label}</span>
-		{#if vals.length}<span class="hc-num hc-quiet">{fmt(lo, digits)}–{fmt(hi, digits)}{unit}</span>{/if}
+		{#if vals.length}<span class="hc-num hc-quiet">{fmt(lo, digits)} to {fmt(hi, digits)}{unit}</span>{/if}
 	</div>
 	{#if line}
 		<svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true"><path d={line} /></svg>

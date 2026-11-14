@@ -74,7 +74,7 @@ impl DeviceRegistry {
             .as_ref()
             .is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed))
         {
-            info!("Republish requested — describing every device again");
+            info!("Republish requested, describing every device again");
             self.forget_published_schemas();
         }
 

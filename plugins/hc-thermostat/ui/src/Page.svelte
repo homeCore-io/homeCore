@@ -96,7 +96,7 @@
 			hc.action('fix_entry', { index: s.index, id: s.id, setpoint: s.fix.celsius })
 		);
 		if (r?.ok && r.data?.status !== 'error') {
-			said = `“${s.name ?? s.id}” is now ${s.fix.celsius} °C — the plugin restarts with it.`;
+			said = `“${s.name ?? s.id}” is now ${s.fix.celsius} °C. The plugin restarts with it.`;
 			setTimeout(readStatus, 4000);
 		}
 	}
@@ -148,7 +148,7 @@
 		const a = attrs(d);
 		if (kindOf(d) === 'heater')
 			return `${a.max_run_secs ? `longest run ${minutes(a.max_run_secs)} · ` : ''}off when the plugin stops`;
-		if (!a.min_on_secs && !a.min_off_secs) return 'none — it can switch at any time';
+		if (!a.min_on_secs && !a.min_off_secs) return 'none, it can switch at any time';
 		return `on at least ${minutes(a.min_on_secs)}, off at least ${minutes(a.min_off_secs)}`;
 	};
 </script>
@@ -212,7 +212,7 @@
 								<button
 									class="hc-pill"
 									onclick={() => run(hc.command(d.device_id, { hvac_mode: activeMode(d) }))}
-									>Turn on — {MODE_NAMES[activeMode(d)]}</button
+									>Turn on ({MODE_NAMES[activeMode(d)]})</button
 								>
 							{:else}
 								<button

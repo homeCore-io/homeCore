@@ -306,7 +306,7 @@ export function nowOf(d, { units, names = {}, now = Date.now() } = {}) {
 			return {
 				code: a.reason,
 				title: `Stopping in ${countdown(a.lockout_until, now)}`,
-				why: `The room is ${room} — far enough — but once on, ${k.the} stays on at least ${minutes(a.min_on_secs)}.`,
+				why: `The room is ${room}, far enough, but once on, ${k.the} stays on at least ${minutes(a.min_on_secs)}.`,
 				tone: 'quiet',
 				act: { label: 'Stop now anyway', kind: 'start_now' }
 			};
@@ -326,11 +326,11 @@ export function nowOf(d, { units, names = {}, now = Date.now() } = {}) {
 			const offline = readingsOf(d).length > 0 && readingsOf(d).every((r) => !r.online);
 			const hold = a.on_stale === 'hold';
 			const did = hold ? `${k.the} is left as it is` : `${k.the} was turned off`;
-			const lead = hold ? 'No reading' : 'Off — no reading';
+			const lead = hold ? 'No reading' : 'Off: no reading';
 			return {
 				code: a.reason,
 				title: offline
-					? `${hold ? 'Its' : 'Off — its'} sensor is offline`
+					? `${hold ? 'Its' : 'Off: its'} sensor is offline`
 					: last
 						? `${lead} for ${quiet}`
 						: `${lead} yet`,
@@ -355,7 +355,7 @@ export function nowOf(d, { units, names = {}, now = Date.now() } = {}) {
 		case 'max_run_exceeded':
 			return {
 				code: a.reason,
-				title: 'Off — ran its longest run',
+				title: 'Off: ran its longest run',
 				why: `It ran ${minutes(a.max_run_secs)} without a break and was turned off. It starts again once the room reaches its target.`,
 				tone: 'warn',
 				act: { label: 'Start it again', kind: 'resume' }
@@ -379,7 +379,7 @@ export function nowOf(d, { units, names = {}, now = Date.now() } = {}) {
 							: `within ${targetText(b.target, units)} ± ${diffText(b.half, units)}`;
 			const nothing =
 				(cooling && t !== undefined && t < b.low) || (!cooling && t !== undefined && t > b.high)
-					? ` — nothing to ${cooling ? 'cool' : 'heat'}`
+					? `, nothing to ${cooling ? 'cool' : 'heat'}`
 					: '';
 			return {
 				code: 'idle_in_band',
@@ -408,8 +408,8 @@ export function cardLine(d, opts = {}) {
 			const last = newest(d);
 			const s = last ? ((opts.now ?? Date.now()) - ms(last.at)) / 1000 : 0;
 			return last
-				? `Off — sensor quiet ${s >= 3600 ? `${Math.floor(s / 3600)} h` : span(s)}`
-				: 'Off — no reading';
+				? `Off: sensor quiet ${s >= 3600 ? `${Math.floor(s / 3600)} h` : span(s)}`
+				: 'Off: no reading';
 		}
 		case 'override':
 			return n.title;
@@ -420,7 +420,7 @@ export function cardLine(d, opts = {}) {
 	}
 }
 
-/** The plugin page's "doing now" line: "Cooling — 70.7° is above 68.9°". */
+/** The plugin page's "doing now" line: "Cooling: 70.7° is above 68.9°". */
 export function pageLine(d, opts = {}) {
 	const a = attrs(d);
 	const { units } = opts;
@@ -430,19 +430,19 @@ export function pageLine(d, opts = {}) {
 	const t = num(a.temperature);
 	switch (n.code) {
 		case 'cooling':
-			return `Cooling — ${room} is above ${tempText(b.high, units)}`;
+			return `Cooling: ${room} is above ${tempText(b.high, units)}`;
 		case 'heating':
-			return `Heating — ${room} is below ${tempText(b.low, units)}`;
+			return `Heating: ${room} is below ${tempText(b.low, units)}`;
 		case 'idle_in_band':
-			if (t === undefined) return 'Idle — waiting for a reading';
-			if (t < b.low) return `Idle — ${room} is below ${targetText(b.target, units)}`;
-			if (t > b.high) return `Idle — ${room} is above ${targetText(b.target, units)}`;
-			return `Idle — ${room} is within ${targetText(b.target, units)} ± ${diffText(b.half, units)}`;
+			if (t === undefined) return 'Idle, waiting for a reading';
+			if (t < b.low) return `Idle: ${room} is below ${targetText(b.target, units)}`;
+			if (t > b.high) return `Idle: ${room} is above ${targetText(b.target, units)}`;
+			return `Idle: ${room} is within ${targetText(b.target, units)} ± ${diffText(b.half, units)}`;
 		case 'sensors_stale': {
 			const last = newest(d);
 			const lead = a.on_stale === 'hold' ? 'No reading' : 'Off';
 			return last
-				? `${lead} — its sensor has been quiet for ${span(((opts.now ?? Date.now()) - ms(last.at)) / 1000)}`
+				? `${lead}: its sensor has been quiet for ${span(((opts.now ?? Date.now()) - ms(last.at)) / 1000)}`
 				: n.title;
 		}
 		default:
@@ -462,7 +462,7 @@ export function needsLine(d, opts = {}) {
 			: n.why;
 	}
 	if (n.code === 'override')
-		return `Switched by hand — the thermostat takes over at ${clock(a.override_until)}.`;
+		return `Switched by hand. The thermostat takes over at ${clock(a.override_until)}.`;
 	return n.why;
 }
 
@@ -503,7 +503,7 @@ export function holdSaid(d, units) {
 	const a = attrs(d);
 	if (num(a.hold_setpoint) === undefined)
 		return 'For a nap, a hot afternoon, a night. Times of day come from automations.';
-	return `Holding ${targetText(a.hold_setpoint, units)} until ${clock(a.hold_until)} — then back to ${targetText(a.setpoint, units)}.`;
+	return `Holding ${targetText(a.hold_setpoint, units)} until ${clock(a.hold_until)}, then back to ${targetText(a.setpoint, units)}.`;
 }
 
 // ── The house: names, rooms, sensors and plugs ──────────────────────────────

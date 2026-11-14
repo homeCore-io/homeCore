@@ -982,12 +982,16 @@ async fn main() -> Result<()> {
                         installed_version: None,
                     });
             }
-            // Stamp installed_version from the managed store (registry/installed
-            // plugins) so the UI can compute "update available".
-            for rec in managed_plugins.records() {
-                if let Some(pr) = map.get_mut(&rec.id) {
-                    if !rec.version.is_empty() {
-                        pr.installed_version = Some(rec.version.clone());
+            // Stamp installed_version from what core keeps on disk — the
+            // install record, or the version folder the binary was installed
+            // into — for every configured plugin, running or not: a stopped
+            // or disabled one never says its own version, and the UI needs
+            // it to say what's installed and whether an update is available.
+            // A plugin configured by hand outside an install folder stays None.
+            for p in &config.plugins {
+                if let Some(pr) = map.get_mut(&p.id) {
+                    if let Some(v) = managed_plugins.installed_version(&p.id, &p.binary) {
+                        pr.installed_version = Some(v);
                     }
                 }
             }

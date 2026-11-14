@@ -148,7 +148,7 @@ pub async fn watch_for_silence(
                 let mins = at.elapsed().as_secs() / 60;
                 warn!(
                     silent_for_secs = at.elapsed().as_secs(),
-                    "No report from the Ecowitt gateway recently — it reports every 60 s, so this \
+                    "No report from the Ecowitt gateway recently. It reports every 60 s, so this \
                      is many missed uploads. Check the gateway is powered and still has this host \
                      set as its custom-upload server."
                 );
@@ -170,7 +170,7 @@ pub async fn watch_for_silence(
                 warn!(
                     bind_addr = %bind_addr,
                     port,
-                    "No gateway report has EVER arrived, and the receiver is bound to loopback — a \
+                    "No gateway report has EVER arrived, and the receiver is bound to loopback, so a \
                      gateway anywhere else on the network cannot reach it, and its POSTs are being \
                      dropped with no error at either end. Set [ecowitt].bind_addr = \"0.0.0.0\" and \
                      list the gateway in [ecowitt].allowed_source_ips."
@@ -183,13 +183,13 @@ pub async fn watch_for_silence(
                         "no_reports_received",
                         format!(
                             "No gateway upload has ever arrived, and the receiver is bound to \
-                             {bind_addr}:{port} — a gateway elsewhere on the network cannot \
+                             {bind_addr}:{port}, so a gateway elsewhere on the network cannot \
                              reach it."
                         ),
                     )
                     .with_remedy(
                         "Set [ecowitt].gateway_ip to poll the gateway over outbound HTTP \
-                         instead — that works even in a container on a bridge network. To \
+                         instead. That works even in a container on a bridge network. To \
                          keep receiving uploads, set [ecowitt].bind_addr = \"0.0.0.0\", list \
                          the gateway in [ecowitt].allowed_source_ips, and ensure the listen \
                          port is reachable from the gateway.",

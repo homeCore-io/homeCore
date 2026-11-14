@@ -341,7 +341,7 @@ async fn try_start(
             )
             .with_remedy(
                 "Set [ecowitt].gateway_ip to the gateway's address and it will be polled \
-                 over outbound HTTP — the option that also works when homeCore runs in a \
+                 over outbound HTTP, the option that also works when homeCore runs in a \
                  container on a bridge network. To receive uploads instead, set \
                  [ecowitt].bind_addr = \"0.0.0.0\", list the gateway in \
                  [ecowitt].allowed_source_ips, and make sure the listen port is reachable \
@@ -542,7 +542,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 id: "get_gateway_info".into(),
                 label: "Gateway info".into(),
                 description: Some(
-                    "Pull `/get_device_info` from the gateway — model, \
+                    "Pull `/get_device_info` from the gateway: model, \
                      firmware, MAC, network. Diagnostic snapshot."
                         .into(),
                 ),
@@ -563,7 +563,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 id: "get_network".into(),
                 label: "Network info".into(),
                 description: Some(
-                    "Pull `/get_network_info` from the gateway — Wi-Fi \
+                    "Pull `/get_network_info` from the gateway: Wi-Fi \
                      SSID / RSSI / IP / netmask / gateway / DNS."
                         .into(),
                 ),
@@ -583,7 +583,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 id: "get_units".into(),
                 label: "Units / display config".into(),
                 description: Some(
-                    "Pull `/get_units_info` from the gateway — current \
+                    "Pull `/get_units_info` from the gateway: current \
                      unit selections (temp °C/°F, wind m/s vs mph, \
                      pressure hPa vs inHg, rainfall mm vs in)."
                         .into(),
@@ -604,7 +604,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 id: "get_calibration".into(),
                 label: "Calibration offsets".into(),
                 description: Some(
-                    "Pull `/get_calibration` from the gateway — every \
+                    "Pull `/get_calibration` from the gateway: every \
                      sensor's calibration offset (per-channel temperature, \
                      humidity, pressure, rain gain, etc.)."
                         .into(),
@@ -625,7 +625,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 id: "refresh_iot_devices".into(),
                 label: "IoT device list".into(),
                 description: Some(
-                    "Pull `/get_iotdevice_list` from the gateway — \
+                    "Pull `/get_iotdevice_list` from the gateway: \
                      connected Ecowitt IoT outlets / valves / etc."
                         .into(),
                 ),
@@ -646,7 +646,7 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 label: "Custom-server upload settings".into(),
                 description: Some(
                     "Pull the gateway's current custom-server upload \
-                     settings — server, port, path, interval, protocol \
+                     settings: server, port, path, interval, protocol \
                      type. Useful as a 'before' snapshot ahead of a \
                      `set_custom_server`."
                         .into(),
@@ -669,8 +669,8 @@ fn capabilities_manifest(listen_port: u16) -> plugin_sdk_rs::types::Capabilities
                 description: Some(
                     "Point the gateway's data uploads at this hc-ecowitt \
                      plugin's HTTP receiver. Both `server` and `port` \
-                     auto-default to the right values for a typical setup \
-                     — `port` is pre-filled with the plugin's configured \
+                     auto-default to the right values for a typical setup: \
+                     `port` is pre-filled with the plugin's configured \
                      `[ecowitt].listen_port`, and `server` is auto-detected \
                      at submit time by opening a TCP connection to the \
                      gateway and reading the plugin's local socket IP (the \
@@ -856,7 +856,7 @@ async fn run_action(
             if manual_hosts.is_empty() {
                 "No gateways answered the UDP broadcast, and no manual_hosts \
                  are configured. If homeCore runs in a container on a bridge \
-                 network, broadcast cannot reach the LAN — use host networking, \
+                 network, broadcast cannot reach the LAN. Use host networking, \
                  or set [ecowitt].manual_hosts to the gateway's IP so it can be \
                  probed directly."
                     .to_string()
@@ -1060,11 +1060,11 @@ async fn resolve_gateway_ip(
         )
     };
     Err(format!(
-        "no gateway IP available — none of: \
+        "no gateway IP available, none of: \
          (1) `host` action param, \
          (2) cached IP from a prior discover_gateways, \
          (3) {manual_status}, \
-         (4) UDP CMD_BROADCAST on port 45000 (returned 0 consoles in 3s — \
+         (4) UDP CMD_BROADCAST on port 45000 (returned 0 consoles in 3s; \
          likely the console is on a VLAN this plugin's broadcast can't reach). \
          Fix: set `[ecowitt].gateway_ip = \"…\"` or \
          `[ecowitt].manual_hosts = [\"…\"]` in config.toml, or fill in the \

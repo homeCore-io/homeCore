@@ -36,8 +36,8 @@ pub fn config_descriptor() -> serde_json::Value {
                         .default("127.0.0.1")
                         .help(
                             "Loopback by default, on purpose. Ecowitt's upload \
-                             protocol has no real authentication — the PASSKEY is \
-                             just the gateway's MAC, sent in cleartext — so a \
+                             protocol has no real authentication: the PASSKEY is \
+                             just the gateway's MAC, sent in cleartext, so a \
                              LAN-reachable listener would accept forged readings \
                              from any host. Widen this only if the console must \
                              POST across the network, and pair it with an allow-list.",
@@ -92,8 +92,8 @@ pub fn config_descriptor() -> serde_json::Value {
                         .min(1)
                         .visible_when(Cond::truthy("ecowitt.gateway_ip"))
                         .help(
-                            "Ecowitt sensors report on their own cadence — typically \
-                             every 60s — so polling faster mostly re-reads the same \
+                            "Ecowitt sensors report on their own cadence (typically \
+                             every 60s), so polling faster mostly re-reads the same \
                              values.",
                         ),
                 )
@@ -138,7 +138,7 @@ pub fn config_descriptor() -> serde_json::Value {
                         .help(
                             "Leads every device id this plugin creates \
                              (`ecowitt_outdoor_temp`). Changing it renames every \
-                             device, which breaks rules that name the old ids — set \
+                             device, which breaks rules that name the old ids. Set \
                              it once, at install.",
                         ),
                 )

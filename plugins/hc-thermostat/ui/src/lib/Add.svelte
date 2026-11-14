@@ -167,8 +167,8 @@
 			{/each}
 		</div>
 		<span class="hc-quiet small"
-			>Plugs and switches only — not lights, locks or other thermostats. One already run by a
-			thermostat is marked.</span
+			>Plugs and switches only. Lights, locks and other thermostats are left out. One already run by
+			a thermostat is marked.</span
 		>
 	</section>
 
@@ -222,7 +222,7 @@
 	</section>
 
 	<section class="box">
-		<span class="step">5 · Safety — set for {k.a}, change if you need</span>
+		<span class="step">5 · Safety: set for {k.a}, change if you need</span>
 		<div class="safety">
 			<label
 				><span class="hc-quiet">Swing</span>
@@ -241,7 +241,7 @@
 				<select bind:value={safety.off}>
 					{#each GUARDS as g (g)}<option value={g}
 							>{g ? minutes(g) : 'no guard'}{kind === 'ac' && g === 300
-								? ' — protects the compressor'
+								? ' (protects the compressor)'
 								: ''}</option
 						>{/each}
 				</select></label
@@ -285,8 +285,7 @@
 			>{busy ? 'Adding…' : 'Add it'}</button
 		>
 	</footer>
-	<span class="hc-quiet small"
-		>It's called “{name}” — rename it from its panel like any device.</span
+	<span class="hc-quiet small">It's called “{name}”. Rename it from its panel like any device.</span
 	>
 </div>
 

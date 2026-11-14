@@ -152,7 +152,7 @@
 						class="wide"
 						disabled={!canRun}
 						onclick={() => send({ hvac_mode: activeMode(dev) })}
-						>Turn on — {MODE_NAMES[activeMode(dev)]}</button
+						>Turn on ({MODE_NAMES[activeMode(dev)]})</button
 					>
 				{:else}
 					{#if twoHours}

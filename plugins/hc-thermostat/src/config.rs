@@ -100,7 +100,7 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .option("cool", "Cool")
                                 .option("off", "Off")
                                 .help(
-                                    "Off turns the switch off once, then leaves it alone — \
+                                    "Off turns the switch off once, then leaves it alone, so \
                                      it can be used by hand.",
                                 ),
                             Field::number("setpoint")
@@ -554,7 +554,7 @@ impl ThermostatEntry {
         let kind = self.kind();
         if !kind.modes().contains(&self.mode.as_str()) {
             return say(format!(
-                "{} — mode {} isn't one it has ({})",
+                "{}: mode {} isn't one it has ({})",
                 kind.only(),
                 self.mode,
                 kind.modes().join(" or ")
@@ -579,7 +579,7 @@ impl ThermostatEntry {
         }
         if self.mode != "off" && self.sensor_device_ids.is_empty() {
             return say(format!(
-                "it is set to {} but reads no sensor — add one under Sensors",
+                "it is set to {} but reads no sensor; add one under Sensors",
                 self.mode
             ));
         }
@@ -623,7 +623,7 @@ pub fn setpoint_problem(setpoint: f64) -> Option<Problem> {
         let c = f_to_c_half(setpoint);
         return Some(Problem {
             message: format!(
-                "its target is {setpoint}, which looks like °F ({setpoint} °F is {c} °C) — \
+                "its target is {setpoint}, which looks like °F ({setpoint} °F is {c} °C), but \
                  thermostats keep °C, and {setpoint} °C would run without end"
             ),
             fix: Some(SetpointFix {
@@ -634,7 +634,7 @@ pub fn setpoint_problem(setpoint: f64) -> Option<Problem> {
     }
     Some(Problem {
         message: format!(
-            "its target {setpoint} is outside {}–{} °C",
+            "its target {setpoint} is outside {} to {} °C",
             SETPOINT_RANGE.start(),
             SETPOINT_RANGE.end()
         ),
@@ -946,7 +946,7 @@ pub fn set_entry_setpoint(path: &str, index: usize, id: Option<&str>, celsius: f
     if let Some(id) = id {
         if t.get("id").and_then(|v| v.as_str()) != Some(id) {
             return Err(anyhow!(
-                "the file changed — thermostat {} is no longer \"{id}\"",
+                "the file changed: thermostat {} is no longer \"{id}\"",
                 index + 1
             ));
         }
