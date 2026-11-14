@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn refusals_have_codes() {
         assert_eq!(
-            error_code("An AC only cools — heat isn't one of its modes"),
+            error_code("An AC only cools: heat isn't one of its modes"),
             "unsupported"
         );
         assert_eq!(

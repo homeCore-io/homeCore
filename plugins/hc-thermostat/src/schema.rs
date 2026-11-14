@@ -63,10 +63,10 @@ pub const REASONS: &[(&str, &str)] = &[
     ("cooling", "Cooling"),
     ("heating", "Heating"),
     ("idle_in_band", "Idle"),
-    ("waiting_min_off", "Waiting — short-cycle guard"),
-    ("waiting_min_on", "Waiting to stop — short-cycle guard"),
-    ("override", "Left alone — switched by hand"),
-    ("sensors_stale", "No current reading"),
+    ("waiting_min_off", "Waiting (short-cycle guard)"),
+    ("waiting_min_on", "Waiting to stop (short-cycle guard)"),
+    ("override", "Left alone: switched by hand"),
+    ("sensors_stale", "Readings missing"),
     ("actuator_not_responding", "Switch not responding"),
     ("max_run_exceeded", "Longest run reached"),
     ("no_switch", "No switch chosen"),
@@ -115,12 +115,15 @@ fn attributes(kind: Kind) -> HashMap<String, AttributeSchema> {
     put(
         "sensors_stale",
         yes_no(
-            ro(Bool, "No current reading"),
-            ("no current reading", "loses its readings"),
-            ("reading", "has a reading again"),
+            ro(Bool, "Readings"),
+            ("missing", "loses its readings"),
+            ("current", "has a reading again"),
         ),
     );
-    put("sensor_readings", in_cat(ro(Json, "Readings"), Diagnostic));
+    put(
+        "sensor_readings",
+        in_cat(ro(Json, "Sensor readings"), Diagnostic),
+    );
     put(
         "actuator_state",
         yes_no(
@@ -133,9 +136,9 @@ fn attributes(kind: Kind) -> HashMap<String, AttributeSchema> {
         "actuator_confirmed",
         in_cat(
             yes_no(
-                ro(Bool, "Switch confirmed"),
+                ro(Bool, "Switch report"),
                 ("confirmed", "hears its switch confirm"),
-                ("not confirmed", "waits for its switch to confirm"),
+                ("waiting", "waits for its switch to confirm"),
             ),
             Diagnostic,
         ),
@@ -143,9 +146,9 @@ fn attributes(kind: Kind) -> HashMap<String, AttributeSchema> {
     put(
         "actuator_online",
         yes_no(
-            ro(Bool, "Switch online"),
-            ("switch online", "hears its switch again"),
-            ("switch offline", "loses its switch"),
+            ro(Bool, "Switch connection"),
+            ("online", "hears its switch again"),
+            ("offline", "loses its switch"),
         ),
     );
     put(
@@ -185,7 +188,7 @@ fn attributes(kind: Kind) -> HashMap<String, AttributeSchema> {
         "settled",
         in_cat(
             yes_no(
-                ro(Bool, "Settled"),
+                ro(Bool, "Startup"),
                 ("settled", "settles"),
                 ("starting", "starts"),
             ),
@@ -381,7 +384,7 @@ fn actions(kind: Kind) -> Vec<Action> {
         Action::new("set_actuator")
             .label("Choose the switch")
             .description(
-                "A plug or switch — a device with an on/off that isn't a lock or a \
+                "A plug or switch: a device with an on/off that isn't a lock or a \
                  thermostat. The old one is turned off first if it was running.",
             )
             .category("Setup")

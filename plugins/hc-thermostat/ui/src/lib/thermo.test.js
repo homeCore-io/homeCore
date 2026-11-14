@@ -138,24 +138,24 @@ describe('what it is doing', () => {
 			'The room is 70.7°, above 68.9° (the target plus the swing). It stops at 67.1°.'
 		);
 		expect(cardLine(mbr, { units: F })).toBe('Cooling to 68°');
-		expect(pageLine(mbr, { units: F })).toBe('Cooling — 70.7° is above 68.9°');
+		expect(pageLine(mbr, { units: F })).toBe('Cooling: 70.7° is above 68.9°');
 	});
 
 	it('says a quiet sensor, its name, and what was done', () => {
 		const n = nowOf(office, { units: F, names, now: NOW });
-		expect(n.title).toBe('Off — no reading for 2 h 14 m');
+		expect(n.title).toBe('Off: no reading for 2 h 14 m');
 		expect(n.why).toMatch(
 			/^Office Desk Temperature last reported at .+\. With no current reading the AC was turned off/
 		);
 		expect(n.act.kind).toBe('alert');
 		expect(needsYou(office)).toBe(true);
 		expect(needsYou(mbr)).toBe(false);
-		expect(cardLine(office, { units: F, now: NOW })).toBe('Off — sensor quiet 2 h');
+		expect(cardLine(office, { units: F, now: NOW })).toBe('Off: sensor quiet 2 h');
 		expect(needsLine(office, { units: F, names, now: NOW })).toMatch(
 			/^Office Desk Temperature hasn't reported since .+, so the AC was turned off\.$/
 		);
 		expect(pageLine(office, { units: F, now: NOW })).toBe(
-			'Off — its sensor has been quiet for 2 h 14 m'
+			'Off: its sensor has been quiet for 2 h 14 m'
 		);
 	});
 
@@ -211,7 +211,7 @@ describe('holds', () => {
 				{ ...mbr, attributes: { ...mbr.attributes, hold_setpoint: 19, hold_until: iso(-3600) } },
 				F
 			)
-		).toMatch(/^Holding 66° until .+ — then back to 68°\.$/);
+		).toMatch(/^Holding 66° until .+, then back to 68°\.$/);
 	});
 });
 

@@ -154,13 +154,13 @@
 		if (a.reason === 'sensors_stale' && !a.actuator_state)
 			return `Turned off${at ? ` at ${at}` : ''} for safety${a.actuator_confirmed ? '; the plug confirmed it' : ''}.`;
 		if (!a.actuator_confirmed)
-			return `Asked to turn ${did}${at ? ` at ${at}` : ''} — not confirmed yet.`;
+			return `Asked to turn ${did}${at ? ` at ${at}` : ''}, waiting for the plug to confirm.`;
 		return at ? `Turned ${did} at ${at} and the plug confirmed it.` : `It is ${did}.`;
 	});
 	const swing = $derived.by(() => {
 		const b = band(dev);
 		const [on, off] = activeMode(dev) === 'cool' ? [b.high, b.low] : [b.low, b.high];
-		return `± ${diffText(b.half, units)} — on at ${tempText(on, units)}, off at ${tempText(off, units)}`;
+		return `± ${diffText(b.half, units)}: on at ${tempText(on, units)}, off at ${tempText(off, units)}`;
 	});
 
 	// ---- changing what it reads, switches and how ----
@@ -403,7 +403,7 @@
 				<dt>Once off, stays off at least</dt>
 				<dd>
 					{minutes(a.min_off_secs)}{kindOf(dev) === 'ac' && num(a.min_off_secs)
-						? ' — protects the compressor'
+						? ' (protects the compressor)'
 						: ''}
 				</dd>
 				{#if num(a.max_run_secs)}
