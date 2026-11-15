@@ -5,7 +5,9 @@
 //! device sends an `AlarmEventList` (command 33) whenever what a camera sees
 //! changes: motion (`MD`), the doorbell (`visitor`), and the AI types
 //! (`people`, `vehicle`, `dog_cat`, `package`). Where firmware does, it
-//! also sends a `SirenStatus` (command 547) when a siren starts or stops.
+//! also sends a `SirenStatus` (command 547) when a siren starts or stops,
+//! and a `FloodlightStatus` (command 291) when a spotlight turns on or off,
+//! whatever turned it: the camera's own motion or schedule, a timer, or an app.
 //! The connection is kept with a link message (command 93) when nothing has
 //! come for a while.
 //!
@@ -34,6 +36,8 @@ pub const ALARM: u32 = 33;
 pub const LINK: u32 = 93;
 /// A siren started or stopped, on any firmware that says so.
 pub const SIREN_STATUS: u32 = 547;
+/// A spotlight turned on or off, for any reason.
+pub const FLOODLIGHT_STATUS: u32 = 291;
 /// Keep the connection with a link message when nothing has come for this long.
 pub const KEEPALIVE: Duration = Duration::from_secs(30);
 /// No message at all for this long: the connection is gone.
@@ -231,11 +235,23 @@ pub fn parse_alarms(xml: &str) -> Vec<Seen> {
 
 /// Each `<SirenStatus>`: its channel, and whether it's sounding (`status` 1).
 pub fn parse_siren_status(xml: &str) -> Vec<(u32, bool)> {
+    parse_status(xml, "SirenStatus")
+}
+
+/// Each `<FloodlightStatus>`: its channel, and whether it's lit (`status` 1).
+pub fn parse_floodlight_status(xml: &str) -> Vec<(u32, bool)> {
+    parse_status(xml, "FloodlightStatus")
+}
+
+/// Each `<{name}>` element's channel and on (`status` 1) or off.
+fn parse_status(xml: &str, name: &str) -> Vec<(u32, bool)> {
+    let open = format!("<{name}");
+    let close = format!("</{name}>");
     let mut out = Vec::new();
     let mut rest = xml;
-    while let Some(i) = rest.find("<SirenStatus") {
+    while let Some(i) = rest.find(&open) {
         let after = &rest[i..];
-        let end = after.find("</SirenStatus>").map_or(after.len(), |e| e + 14);
+        let end = after.find(&close).map_or(after.len(), |e| e + close.len());
         let item = &after[..end];
         rest = &after[end..];
         let channel = tag(item, "channel")
@@ -256,6 +272,8 @@ pub enum Pushed {
     Seen(Vec<Seen>),
     /// Sirens sounding or quiet, by channel.
     Sirens(Vec<(u32, bool)>),
+    /// Spotlights lit or not, by channel.
+    Lights(Vec<(u32, bool)>),
 }
 
 fn login_xml(user_hash: &str, pass_hash: &str) -> String {
@@ -349,6 +367,15 @@ impl Push {
                             return Ok(Pushed::Sirens(s));
                         }
                     }
+                    if m.cmd == FLOODLIGHT_STATUS {
+                        let l = parse_floodlight_status(&m.text(Some(&self.key)));
+                        if !l.is_empty() {
+                            return Ok(Pushed::Lights(l));
+                        }
+                    }
+                    if ![ALARM, SIREN_STATUS, FLOODLIGHT_STATUS, LINK].contains(&m.cmd) {
+                        tracing::debug!(cmd = m.cmd, body = %m.text(Some(&self.key)), "push message not used");
+                    }
                     quiet = Duration::ZERO;
                 }
                 Err(_) => {
@@ -435,6 +462,30 @@ mod tests {
                 ..Default::default()
             }]
         );
+    }
+
+    #[test]
+    fn reads_a_spotlights_status() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<FloodlightStatusList version="1.1">
+<FloodlightStatus>
+<channel>0</channel>
+<status>1</status>
+</FloodlightStatus>
+<FloodlightStatus>
+<channel>3</channel>
+<status>0</status>
+</FloodlightStatus>
+</FloodlightStatusList>
+</body>"#;
+        assert_eq!(parse_floodlight_status(xml), vec![(0, true), (3, false)]);
+        // A siren's message isn't a light's, nor the other way round.
+        assert!(parse_siren_status(xml).is_empty());
+        assert!(parse_floodlight_status(
+            "<SirenStatus><channel>0</channel><status>1</status></SirenStatus>"
+        )
+        .is_empty());
     }
 
     #[test]
