@@ -314,6 +314,42 @@ impl Broker {
         );
     }
 
+    /// Every address the broker will listen on.
+    fn listen_addrs(&self) -> Vec<SocketAddrV4> {
+        let host: Ipv4Addr = self.config.host.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let mut ports = vec![self.config.port];
+        ports.extend(self.config.v5_port);
+        if self.config.cert_path.is_some() && self.config.key_path.is_some() {
+            ports.extend(self.config.tls_port);
+        }
+        ports
+            .into_iter()
+            .map(|p| SocketAddrV4::new(host, p))
+            .collect()
+    }
+
+    /// Refuse to start when a port is already taken.
+    ///
+    /// rumqttd binds on its own threads and only logs a failure there, so a
+    /// broker that could not bind used to leave homeCore running with no broker:
+    /// its own client retrying forever, plugins never started, the API never
+    /// up. The usual cause is another homeCore on the same ports, often one
+    /// still shutting down. Trying each address here first turns that into an
+    /// error at startup that says so. The ports are released before rumqttd
+    /// binds them a moment later.
+    fn check_ports(&self) -> Result<()> {
+        for addr in self.listen_addrs() {
+            if let Err(e) = std::net::TcpListener::bind(addr) {
+                anyhow::bail!(
+                    "the MQTT broker can't listen on {addr}: {e}. Another program has that \
+                     port, often another homeCore still running or shutting down. Stop it \
+                     and start again, or change the port under [broker] in homecore.toml."
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Start the broker synchronously.  Blocks until the broker exits.
     /// Call [`Broker::spawn`] to run it in a background thread instead.
     pub fn start(self) -> Result<()> {
@@ -332,6 +368,7 @@ impl Broker {
         // aborts startup rather than logging an error in a background thread
         // and letting homeCore continue without a working broker.
         self.validate_safety()?;
+        self.check_ports()?;
         let port = self.config.port;
         std::thread::Builder::new()
             .name("hc-broker".into())
@@ -403,6 +440,22 @@ mod tests {
     async fn a_configured_name_is_never_handed_to_the_live_list() {
         let anything = LiveLogins(Arc::new(|_, _| true));
         assert!(!check_login(&fixed(), &anything, "internal.core".into(), "y".into()).await);
+    }
+
+    #[test]
+    fn a_port_already_in_use_is_refused_at_startup() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut c = cfg("127.0.0.1", false);
+        c.port = taken.local_addr().unwrap().port();
+        let err = Broker::new(c.clone())
+            .check_ports()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&c.port.to_string()), "{err}");
+        assert!(err.contains("another homeCore"), "{err}");
+
+        drop(taken);
+        Broker::new(c).check_ports().expect("free once released");
     }
 
     #[test]

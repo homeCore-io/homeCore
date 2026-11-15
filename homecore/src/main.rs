@@ -899,7 +899,29 @@ async fn main() -> Result<()> {
     // before spawning plugins.  This ensures that registration messages
     // published by plugins on startup are not missed due to a race condition.
     {
-        let _ = ready_rx.await;
+        // Asked to stop before the broker ever answered: stop. This wait used to
+        // be the one place a SIGTERM could not reach, so a homeCore whose broker
+        // was unreachable could only be killed.
+        let mut ready_rx = ready_rx;
+        let waiting = shutdown_rx.clone();
+        let mut said = false;
+        loop {
+            tokio::select! {
+                _ = &mut ready_rx => break,
+                _ = wait_for_shutdown_watch(waiting.clone()) => {
+                    info!("Stopping before the MQTT broker answered");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)), if !said => {
+                    tracing::error!(
+                        broker = %format!("{mqtt_host}:{mqtt_port}"),
+                        "The MQTT broker hasn't answered in 30 seconds. Plugins start once it does; \
+                         until then nothing reaches homeCore."
+                    );
+                    said = true;
+                }
+            }
+        }
 
         // Publish the configured TZ as a retained MQTT message so plugin
         // SDKs can pick it up on connect and apply it to their tracing
