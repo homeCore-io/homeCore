@@ -200,8 +200,16 @@ async fn get_json(http: &reqwest::Client, url: &str, agent: Option<&str>) -> Res
             .header(reqwest::header::USER_AGENT, a)
             .header(reqwest::header::ACCEPT, "application/geo+json");
     }
-    let res = req.send().await.context("no answer")?.error_for_status()?;
-    Ok(res.json().await?)
+    // The address carries the place's latitude and longitude: the cause is
+    // kept, the address left out.
+    let res = req
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("no answer")?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
+    Ok(res.json().await.map_err(reqwest::Error::without_url)?)
 }
 
 /// One read of one source for one place.
@@ -312,8 +320,8 @@ async fn poll(shared: Arc<Shared>, place: Place, source: Source, every: Duration
             }
             Err(e) => {
                 failed += 1;
-                warn!(device_id = %id, source = source.name(), error = %e, "read failed");
-                shared.note(&place.id, source, Err(e.to_string()));
+                warn!(device_id = %id, source = source.name(), error = %format!("{e:#}"), "read failed");
+                shared.note(&place.id, source, Err(format!("{e:#}")));
                 // The weather now unread twice running: say the device is
                 // offline rather than show old weather as current. Warnings
                 // already said stay said until the service answers again.

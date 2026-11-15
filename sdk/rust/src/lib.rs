@@ -32,6 +32,7 @@ pub mod conformance;
 pub mod device_actions;
 pub mod mqtt_log_layer;
 pub mod streaming;
+pub mod supervised;
 pub mod ui;
 pub mod upload;
 
@@ -114,6 +115,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 pub use streaming::{StreamContext, StreamingAction};
+pub use supervised::SUPERVISED_ENV;
 
 /// Shared tracker of MQTT topics this plugin has subscribed to.
 /// On reconnect (ConnAck), all tracked topics are re-subscribed.
@@ -1275,6 +1277,7 @@ impl PluginClient {
 
     /// Connect to the HomeCore broker and return a ready client.
     pub async fn connect(config: PluginConfig) -> Result<Self> {
+        supervised::watch(&config.plugin_id);
         let mut opts = MqttOptions::new(&config.plugin_id, &config.broker_host, config.broker_port);
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(true);

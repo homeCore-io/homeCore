@@ -229,6 +229,10 @@ async fn supervise(
         // a plugin that was "offline" for no stated reason.
         let mut child = match Command::new(&binary)
             .arg(&config)
+            // Core's own id: a plugin started this way stops if core is gone
+            // without stopping it first, rather than running beside the next
+            // core's copy (plugin-sdk-rs `SUPERVISED_ENV`).
+            .env("HOMECORE_SUPERVISED", std::process::id().to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
