@@ -153,7 +153,23 @@ pub struct Host {
     pub pushing: std::sync::atomic::AtomicBool,
     pub cams: tokio::sync::Mutex<Vec<Cam>>,
     pub hub: Mutex<bool>,
+    /// Each spotlight as last published, by channel.
+    pub lights: Mutex<std::collections::HashMap<u32, Light>>,
 }
+
+/// A spotlight as homeCore was last told.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    pub on: bool,
+    pub bright: u8,
+    /// When push last said, which a read then doesn't overrule for a while.
+    pub pushed: Option<Instant>,
+}
+
+/// After a push about a spotlight, a read doesn't contradict it for this
+/// long: some firmware reads only the light's own setting, not a light the
+/// camera turned on itself.
+const PUSH_WINS: Duration = Duration::from_secs(120);
 
 impl Host {
     pub fn new(entry: HostEntry) -> Result<Arc<Self>> {
@@ -169,6 +185,7 @@ impl Host {
             pushing: std::sync::atomic::AtomicBool::new(false),
             cams: tokio::sync::Mutex::new(Vec::new()),
             hub: Mutex::new(false),
+            lights: Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -482,11 +499,15 @@ async fn register(ctx: &Ctx, host: &Arc<Host>, c: &Cam) -> Result<()> {
             .await
             .map(|v| api::parse_white_led(&v))
             .unwrap_or((false, 100));
-        p.publish_state(
-            &id,
-            &json!({ "on": on, "brightness_pct": if on { bright } else { 0 } }),
-        )
-        .await?;
+        p.publish_state(&id, &light_state(on, bright)).await?;
+        host.lights.lock().expect("lights").insert(
+            c.channel,
+            Light {
+                on,
+                bright,
+                pushed: None,
+            },
+        );
         p.set_available(&id, c.online).await?;
         targets.push((id, Kind::Spotlight));
     }
@@ -593,6 +614,7 @@ async fn watch(ctx: &Ctx, host: &Arc<Host>) -> Result<()> {
         for (ch, d) in now {
             seen(ctx, host, ch, d).await;
         }
+        read_lights(ctx, host).await;
         ctx.set_status(
             &host.entry.id,
             json!({ "ok": true, "watching": channels.len() }),
@@ -630,6 +652,11 @@ async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
                     match p.next().await {
                         Ok(crate::push::Pushed::Sirens(list)) => {
                             heard_sirens(&ctx, &host, &list).await;
+                        }
+                        Ok(crate::push::Pushed::Lights(list)) => {
+                            for (channel, on) in list {
+                                light_now(&ctx, &host, channel, on, None, true).await;
+                            }
                         }
                         Ok(crate::push::Pushed::Seen(list)) => {
                             for s in list {
@@ -676,6 +703,83 @@ async fn push_loop(ctx: Arc<Ctx>, host: Arc<Host>) {
 
 /// Sirens sounding or quiet, as the address pushed it: published for the
 /// cameras that have a siren here.
+// A spotlight's state as homeCore holds it: off is brightness 0.
+fn light_state(on: bool, bright: u8) -> Value {
+    json!({ "on": on, "brightness_pct": if on { bright } else { 0 } })
+}
+
+/// A spotlight is on or off now (push, or a read): publish it if that's news.
+/// A read gives its brightness too; push only on or off, which keeps the last.
+async fn light_now(
+    ctx: &Ctx,
+    host: &Arc<Host>,
+    channel: u32,
+    on: bool,
+    bright: Option<u8>,
+    by_push: bool,
+) {
+    let id = {
+        let cams = host.cams.lock().await;
+        match cams
+            .iter()
+            .find(|c| c.channel == channel && c.features.spotlight)
+        {
+            Some(c) => camera::spotlight_id(&c.id),
+            None => return,
+        }
+    };
+    let publish = {
+        let mut lights = host.lights.lock().expect("lights");
+        let l = lights.entry(channel).or_insert(Light {
+            on: !on,
+            bright: 100,
+            pushed: None,
+        });
+        if by_push {
+            l.pushed = Some(Instant::now());
+        } else if l.pushed.is_some_and(|t| t.elapsed() < PUSH_WINS) {
+            return;
+        }
+        let bright = bright.unwrap_or(l.bright);
+        let news = l.on != on || (on && l.bright != bright);
+        l.on = on;
+        l.bright = bright;
+        news.then(|| light_state(on, bright))
+    };
+    if let Some(state) = publish {
+        let _ = ctx.publisher.publish_state_partial(&id, &state).await;
+    }
+}
+
+/// Read every spotlight the cameras have, as a backstop to push: a light the
+/// camera turned on or off itself shows here if push didn't say.
+async fn read_lights(ctx: &Ctx, host: &Arc<Host>) {
+    let channels: Vec<u32> = host
+        .cams
+        .lock()
+        .await
+        .iter()
+        .filter(|c| c.online && c.features.spotlight)
+        .map(|c| c.channel)
+        .collect();
+    if channels.is_empty() {
+        return;
+    }
+    let cmds: Vec<Value> = channels
+        .iter()
+        .map(|ch| api::cmd("GetWhiteLed", json!({ "channel": ch })))
+        .collect();
+    let Ok(answers) = host.api.call(&cmds).await else {
+        return;
+    };
+    for (ch, a) in channels.iter().zip(answers) {
+        if let Ok(v) = a {
+            let (on, bright) = api::parse_white_led(&v);
+            light_now(ctx, host, *ch, on, Some(bright), false).await;
+        }
+    }
+}
+
 async fn heard_sirens(ctx: &Ctx, host: &Arc<Host>, list: &[(u32, bool)]) {
     let cams = host.cams.lock().await;
     for (channel, on) in list {
@@ -835,11 +939,12 @@ pub async fn command(ctx: &Ctx, device_id: &str, payload: &Value) -> Result<()> 
                 .await
             {
                 let (on, bright) = api::parse_white_led(&v);
-                p.publish_state_partial(
-                    device_id,
-                    &json!({ "on": on, "brightness_pct": if on { bright } else { 0 } }),
-                )
-                .await?;
+                p.publish_state_partial(device_id, &light_state(on, bright))
+                    .await?;
+                if let Some(l) = h.lights.lock().expect("lights").get_mut(&t.channel) {
+                    l.on = on;
+                    l.bright = bright;
+                }
             }
         }
         Kind::Siren => {
