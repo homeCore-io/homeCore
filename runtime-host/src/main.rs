@@ -299,6 +299,16 @@ async fn run(
                 s.message = None;
                 s.last_heard = Some(chrono::Utc::now());
             }),
+            // The key was reset or the runtime removed. Its plugins' own logins
+            // may be gone too, and nothing here should keep running for a
+            // homeCore that has let go of it. Stop them and start again, which
+            // also drops this runtime's broker connection; the fresh start
+            // shows why on the page and waits for a new key.
+            Err(e) if e.downcast_ref::<core_client::KeyRefused>().is_some() => {
+                tracing::warn!(error = %e, "homeCore refused this runtime's key; stopping hosted plugins");
+                reconciler.stop_all().await;
+                return Ok(Ended::NewKey);
+            }
             Err(e) => shared.set(|s| {
                 s.state = Phase::Problem;
                 s.message = Some(format!("{e:#}"));

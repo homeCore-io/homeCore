@@ -32,6 +32,21 @@ struct PlacementsBody {
     placements: Vec<Desired>,
 }
 
+/// homeCore no longer knows the key: its login was reset, or the runtime was
+/// removed. Different from homeCore being unreachable, which leaves everything
+/// running: a refused key means this runtime should stop what it hosts and wait
+/// for a new one.
+#[derive(Debug)]
+pub struct KeyRefused(pub String);
+
+impl std::fmt::Display for KeyRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "homeCore refused the key: {}", self.0)
+    }
+}
+
+impl std::error::Error for KeyRefused {}
+
 pub struct CoreClient {
     http: reqwest::Client,
     base_url: String,
@@ -88,6 +103,12 @@ impl CoreClient {
         let said = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(KeyRefused(
+                said.unwrap_or_else(|| "homeCore doesn't know this key".into()),
+            )
+            .into());
+        }
         match (status, said) {
             (_, Some(said)) => bail!("homeCore refused the key: {said}"),
             (reqwest::StatusCode::NOT_FOUND, None) => bail!(

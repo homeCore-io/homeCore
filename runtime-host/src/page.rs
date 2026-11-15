@@ -226,7 +226,7 @@ textarea,input{width:100%;padding:12px;border-radius:11px;border:1px solid var(-
 textarea{resize:vertical;min-height:84px}
 button{height:42px;padding:0 20px;border-radius:21px;border:none;background:var(--accent);color:var(--accent-ink);font:inherit;font-weight:700;cursor:pointer}
 button[disabled]{opacity:.6;cursor:default}
-.plain{background:none;color:var(--ink);padding:0;height:auto;display:flex;align-items:center;gap:8px;font-weight:700;text-align:left}
+.plain{background:none;color:var(--ink);padding:8px 0;height:auto;display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-weight:700;text-align:left}
 .err{padding:10px 14px;border-radius:11px;background:var(--alert-bg);color:var(--alert);font-weight:600;font-size:14px}
 .note{padding:10px 14px;border-radius:11px;background:var(--warm-bg);color:var(--warm);font-weight:600;font-size:14px}
 dl{margin:0;display:grid;grid-template-columns:160px minmax(0,1fr);font-size:14px}
@@ -263,7 +263,7 @@ li .s{min-width:170px;font-size:13px;font-weight:600;color:var(--good)}li.loopin
       <p class="muted small" style="padding:6px 0 10px">Add and remove plugins in homeCore. This page shows what's here.</p>
     </div>
     <div class="card" style="padding:4px 20px;background:var(--sheet);border-style:dashed">
-      <button class="plain" id="newkeybtn" style="height:48px" aria-expanded="false">Use a new key <span class="muted small" style="font-weight:500">After Reset login in homeCore, or after removing this runtime there to move it</span></button>
+      <button class="plain" id="newkeybtn" style="height:48px" aria-expanded="false"><b style="white-space:nowrap">Use a new key</b> <span class="muted small" style="font-weight:500">After Reset login in homeCore, or after removing this runtime there to move it</span></button>
       <div id="newkey" class="hidden" style="padding-bottom:16px;display:flex;flex-direction:column;gap:12px"></div>
     </div>
   </section>

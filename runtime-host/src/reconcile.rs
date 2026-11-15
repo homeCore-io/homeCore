@@ -160,6 +160,22 @@ impl Reconciler {
             pass.stopped.push(id);
         }
 
+        // Installed but not running and not wanted: left from before a restart,
+        // or from another homeCore this runtime was moved from. Core is the
+        // record of what belongs here, so the rest is a cache nobody will ask for.
+        for id in installed_ids(&self.root) {
+            if !wanted.contains(&id.as_str()) && !self.running.contains_key(&id) {
+                match remove_plugin_dir(&self.root, &id) {
+                    Ok(()) => {
+                        tracing::info!(plugin_id = %id, "removed a plugin homeCore no longer places here")
+                    }
+                    Err(e) => {
+                        tracing::warn!(plugin_id = %id, error = %e, "could not remove a leftover plugin")
+                    }
+                }
+            }
+        }
+
         for d in desired {
             match self.converge_one(&d).await {
                 Ok(Outcome::Unchanged) => pass.unchanged.push(d.plugin_id),
@@ -299,6 +315,19 @@ enum Outcome {
 /// rollback mechanism for an *upgrade*, and a removal is not an upgrade. Keeping
 /// environments for plugins core no longer places here would grow the volume
 /// with things nothing will ever ask for again.
+/// Every plugin with a directory under `<root>/plugins`.
+fn installed_ids(root: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(root.join("plugins"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn remove_plugin_dir(root: &std::path::Path, plugin_id: &str) -> Result<()> {
     let dir = install::plugin_dir(root, plugin_id)?;
     if dir.exists() {
@@ -478,6 +507,30 @@ mod tests {
                 .exists(),
             "a removed plugin leaves nothing behind"
         );
+    }
+
+    /// Installed but never started in this run (left from another homeCore, or
+    /// from before a restart) and not wanted now: removed too. A wanted one
+    /// installed the same way is kept and started.
+    #[tokio::test]
+    async fn a_leftover_plugin_nobody_places_here_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        preinstall(root.path(), "plugin.old", "0.1.0").await;
+        preinstall(root.path(), "plugin.kept", "0.1.0").await;
+        let mut r = reconciler(root.path());
+
+        let pass = r
+            .converge(vec![desired("plugin.kept", "0.1.0", "a = 1")])
+            .await;
+
+        assert_eq!(pass.started, vec!["plugin.kept"]);
+        assert!(!install::plugin_dir(root.path(), "plugin.old")
+            .unwrap()
+            .exists());
+        assert!(install::plugin_dir(root.path(), "plugin.kept")
+            .unwrap()
+            .exists());
+        r.stop_all().await;
     }
 
     /// One plugin that cannot be provisioned must not take the others down with
