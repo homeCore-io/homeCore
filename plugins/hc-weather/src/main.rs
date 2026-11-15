@@ -200,8 +200,16 @@ async fn get_json(http: &reqwest::Client, url: &str, agent: Option<&str>) -> Res
             .header(reqwest::header::USER_AGENT, a)
             .header(reqwest::header::ACCEPT, "application/geo+json");
     }
-    let res = req.send().await.context("no answer")?.error_for_status()?;
-    Ok(res.json().await?)
+    // The address carries the place's latitude and longitude: the cause is
+    // kept, the address left out.
+    let res = req
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("no answer")?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)?;
+    Ok(res.json().await.map_err(reqwest::Error::without_url)?)
 }
 
 /// One read of one source for one place.
