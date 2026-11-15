@@ -13,6 +13,7 @@
 //! host pulls it, provisions what is missing and supervises the result.
 
 mod adapter;
+mod broker;
 mod core_client;
 mod enroll;
 mod identity;
@@ -121,7 +122,21 @@ async fn main() -> Result<()> {
         .build()
         .context("building HTTP client")?;
 
-    let creds = enroll::enroll_and_wait(&http, &id, &cfg).await?;
+    let mut creds = enroll::enroll_and_wait(&http, &id, &cfg).await?;
+
+    // Core offers its broker's listen address, which from inside a container
+    // is often not an address at all. See `broker.rs`.
+    let broker =
+        broker::BrokerHost::new(&cfg.base_url, std::env::var("HC_RUNTIME_BROKER_HOST").ok());
+    if broker.loopback_only(&creds.broker_host) {
+        tracing::warn!(
+            broker = %creds.broker_host,
+            "homeCore's broker listens only on its own loopback; unless this container \
+             shares homeCore's network, set [broker].host = \"0.0.0.0\" in homecore.toml, \
+             or HC_RUNTIME_BROKER_HOST here"
+        );
+    }
+    creds.broker_host = broker.resolve(&creds.broker_host);
 
     tracing::info!(
         plugin_id = %creds.plugin_id,
@@ -159,7 +174,8 @@ async fn main() -> Result<()> {
         adapter,
         client,
         move |plugin_id, looping| report_crash_loop(&crash_notices, plugin_id, looping),
-    );
+    )
+    .with_broker(broker);
 
     let interval = std::time::Duration::from_secs(
         env_or("HC_RUNTIME_POLL_SECS", "30")

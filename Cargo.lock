@@ -1919,6 +1919,7 @@ dependencies = [
  "getrandom 0.4.2",
  "hc-api-types",
  "hex",
+ "nix",
  "plugin-sdk-rs",
  "reqwest",
  "serde",

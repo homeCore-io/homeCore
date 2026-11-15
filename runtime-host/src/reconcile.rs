@@ -11,6 +11,7 @@
 //! be", and all of them are fixed by the same code path.
 
 use crate::adapter::{self, Adapter};
+use crate::broker::BrokerHost;
 use crate::core_client::{CoreClient, Desired};
 use crate::install::{self, Installed};
 use crate::supervisor::{self, Supervised};
@@ -60,6 +61,9 @@ pub struct Reconciler {
     client: CoreClient,
     running: HashMap<String, Running>,
     on_crash_loop: CrashLoopReporter,
+    /// Makes the broker address in each hosted plugin's config reachable from
+    /// this container. None in tests, which never connect.
+    broker: Option<BrokerHost>,
 }
 
 impl Reconciler {
@@ -75,7 +79,13 @@ impl Reconciler {
             client,
             running: HashMap::new(),
             on_crash_loop: Arc::new(on_crash_loop),
+            broker: None,
         }
+    }
+
+    pub fn with_broker(mut self, broker: BrokerHost) -> Self {
+        self.broker = Some(broker);
+        self
     }
 
     pub fn hosted(&self) -> usize {
@@ -88,11 +98,18 @@ impl Reconciler {
     /// stopping plugins because the list could not be fetched — would turn a
     /// core restart into an outage in every runtime at once.
     pub async fn pass(&mut self) -> Result<Pass> {
-        let desired = self
+        let mut desired = self
             .client
             .placements()
             .await
             .context("fetching the desired state")?;
+        // Rewritten before the comparison with what is running, so an unchanged
+        // config stays unchanged and does not restart the plugin every pass.
+        if let Some(broker) = &self.broker {
+            for d in &mut desired {
+                d.config = broker.rewrite_config(&d.config);
+            }
+        }
         Ok(self.converge(desired).await)
     }
 

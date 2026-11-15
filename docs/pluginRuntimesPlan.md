@@ -631,6 +631,42 @@ interpreter version by accident.
 
 # Piece 4: The runtime host
 
+> **The Python image was built 2026-11-15:** `docker/Dockerfile.runtime-python`,
+> with `docker/runtime-python/adapter.toml` and `docker/entrypoint-runtime.sh`.
+> It builds the host from this repo (rust 1.99, static musl) and puts it on
+> `python:3.12-slim-bookworm` with tini as PID 1, dropping to the volume's
+> owner. It was tested on a bridge network against a throwaway core, with two
+> plugins placed in one container. Each got its own venv: one pinned idna 3.7,
+> the other 3.10, and each saw its own. Both registered devices, took a
+> command, and upgraded in place. Removing one left the other running. A
+> container stop asked the plugin to exit, and a new container on the same
+> volume kept its identity and re-adopted the plugin without downloading it.
+>
+> Three things the test found, and their state:
+>
+> 1. **Fixed: the broker address.** Core hands out `[broker].host`, which is a
+>    listen address (`0.0.0.0` on any house with containers). The host now
+>    replaces an unspecified address with the host in `HOMECORE_URL`, for
+>    itself and in each hosted plugin's config; `HC_RUNTIME_BROKER_HOST`
+>    overrides both. See `runtime-host/src/broker.rs`.
+> 2. **Fixed: stopping a plugin.** The host waited for a hosted plugin to exit
+>    without asking it to, then killed it. It now sends SIGTERM first, as core
+>    does.
+> 3. **Open, in core: broker credentials.** The embedded broker accepts only the
+>    logins listed in `[[broker.clients]]`. The passwords core mints for a
+>    runtime and for each plugin placed on one are never added to that list. A
+>    broker exposed to containers must have clients (core refuses to start
+>    otherwise), so neither the runtime nor its plugins can log in. The
+>    runtime's own password is minted fresh each time it is handed out and
+>    stored nowhere, so an operator cannot work around it either. The test got
+>    past it by listing the two plugins' passwords by hand; the runtime itself
+>    stayed rejected, while its log still said it had registered.
+>
+> Also found: enrollment's `whitelist_only` uses `[auth].whitelist`, which takes
+> single addresses and makes each one an unauthenticated admin. With the
+> default settings, the only way for a container to enroll is to make it an
+> admin.
+
 Pieces 1–3 define what a runtime does from homeCore's side. This piece is the
 thing inside the container that does it.
 

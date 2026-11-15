@@ -20,7 +20,8 @@ pub struct Desired {
     /// Hex sha256 of the artifact bytes, as core verified them.
     pub sha256: String,
     /// The plugin's config, already rendered by core, including its minted
-    /// broker credential. Written verbatim — the runtime does not interpret it.
+    /// broker credential. Written as is, except that a `[homecore] broker_host`
+    /// unreachable from the container is replaced (see `broker.rs`).
     pub config: String,
 }
 

@@ -1,0 +1,82 @@
+# homeCore plugin runtime for Python: ghcr.io/homecore-io/hc-runtime-python
+#
+# A runtime is a container the operator runs, which hosts any number of
+# homeCore plugins written in Python. homeCore never starts or stops it. On
+# first start it asks homeCore to join; once an admin approves it, homeCore
+# places plugins on it and the host inside installs, runs and supervises them,
+# one process and one virtualenv per plugin. See docs/pluginRuntimesPlan.md.
+#
+# The image is three things:
+#
+#   hc-runtime-host   static Rust binary, built in the first stage from this
+#                     repo. Enrollment, credentials, fetching and checking
+#                     artifacts, supervision. The same binary for every language.
+#   adapter.toml      the only Python-specific part: how to make a venv, install
+#                     an artifact offline, and launch a plugin.
+#   Python 3.12       on Debian (glibc), because manylinux wheels are what
+#                     effectively every package publishes; on musl the long tail
+#                     turns into source builds the artifacts refuse to do.
+#
+# The interpreter is not where plugin code comes from. Each plugin arrives as a
+# signed artifact with its own wheels, including the SDK, and installs into its
+# own venv. Bumping the base image's Python minor would change the ABI, which is
+# why HC_RUNTIME_ABI is pinned here and must be bumped with it.
+#
+# Build from the core repo root:
+#
+#   docker build -f docker/Dockerfile.runtime-python -t hc-runtime-python .
+#
+# Run (bridge networking; homeCore's [broker].host must be 0.0.0.0):
+#
+#   docker run -d --name pyhost-01 \
+#     -e HOMECORE_URL=http://<homecore-host>:8080 \
+#     -v pyhost-01:/var/lib/hc-runtime \
+#     hc-runtime-python
+#
+# then approve it in Settings › Plugins › Runtimes, after checking that the code
+# shown there matches the one in `docker logs pyhost-01`.
+
+# ── Stage 1: the host ────────────────────────────────────────────────────────
+# Same toolchain and target as the released plugins: rust 1.99 on alpine, so
+# the binary is static musl and runs on any base below.
+FROM rust:1.99-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS host
+
+RUN apk add --no-cache musl-dev pkgconfig
+
+WORKDIR /src
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p hc-runtime-host && \
+    cp target/release/hc-runtime-host /hc-runtime-host && \
+    strip /hc-runtime-host
+
+# ── Stage 2: the runtime ─────────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
+
+# tini is PID 1: it forwards `docker stop`'s SIGTERM to the host, which stops
+# its plugins before exiting, and reaps anything a plugin leaves behind.
+# ca-certificates for plugins that call cloud APIs.
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends tini ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=host /hc-runtime-host            /usr/local/bin/hc-runtime-host
+COPY docker/runtime-python/adapter.toml       /etc/hc-runtime/adapter.toml
+COPY docker/entrypoint-runtime.sh             /entrypoint.sh
+
+# What this image can host. The host refuses to start if adapter.toml disagrees.
+# HC_RUNTIME_ARCH is left to the host, which reports the arch it was built for.
+ENV HC_RUNTIME_KIND=python \
+    HC_RUNTIME_ABI=cp312-manylinux_2_28 \
+    HC_RUNTIME_SDK_VERSION=per-plugin \
+    HC_RUNTIME_DATA=/var/lib/hc-runtime \
+    HC_RUNTIME_ADAPTER=/etc/hc-runtime/adapter.toml \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+VOLUME ["/var/lib/hc-runtime"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
