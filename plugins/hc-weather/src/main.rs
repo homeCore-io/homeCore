@@ -312,8 +312,8 @@ async fn poll(shared: Arc<Shared>, place: Place, source: Source, every: Duration
             }
             Err(e) => {
                 failed += 1;
-                warn!(device_id = %id, source = source.name(), error = %e, "read failed");
-                shared.note(&place.id, source, Err(e.to_string()));
+                warn!(device_id = %id, source = source.name(), error = %format!("{e:#}"), "read failed");
+                shared.note(&place.id, source, Err(format!("{e:#}")));
                 // The weather now unread twice running: say the device is
                 // offline rather than show old weather as current. Warnings
                 // already said stay said until the service answers again.
