@@ -35,7 +35,49 @@ file an operator can edit, and state stays on MQTT.
 
 ---
 
-# Piece 1: Enrollment
+# Joining, as built (2026-11-15)
+
+**Piece 1 below is superseded.** It designed for a container that sets
+itself up and asks to join. A runtime is a container the operator runs, so
+the operator is already present at both ends; asking, codes, a pending list,
+rate limits and denial counters guarded a case the operator controls. It also
+depended on the admin whitelist, and the credentials it handed out could not
+log in to a broker with clients. The approved mockups are on the canvas
+"Plugin runtime setup" (https://claude.ai/artifact/XcgDzeHCnoGuF3AoL4WKYi).
+
+What replaced it:
+
+- **The admin adds the runtime in homeCore** (`POST /plugin-runtimes`: name,
+  language, homeCore's address as the runtime reaches it). Core makes its
+  login on the spot and returns a **connection key** once: `hcrt1.` and
+  base64url JSON of the homeCore address, broker host and port, runtime id,
+  username (`plugin.python-rt…`) and secret, plus kind and ABI. The secret is
+  the runtime's one password, for the broker and the API; core keeps only its
+  argon2 hash. **Show details** lists the same fields for a manual setup.
+- **The runtime takes the key** from `HC_RUNTIME_KEY` or from its own page on
+  port 8790, which tests homeCore (`POST /plugin-runtimes/{id}/hello`) and a
+  real broker login before saving it (0600, in the data volume). Hello also
+  records the arch, and refuses an image of the wrong language or ABI.
+- **Reset login** replaces the hash, so the old key stops at once; the runtime
+  stops its plugins, restarts in place and waits for the new key. **Remove**
+  uninstalls what was placed on it and ends the key. A runtime still in use
+  never takes another homeCore's key; to move it, remove it first.
+- **The broker knows every login core makes.** Beside `[[broker.clients]]`,
+  rumqttd's auth handler asks core at CONNECT: a runtime by its hashed secret,
+  a plugin core installed or placed by the `[homecore] password` in its config
+  file. Live, so a login works when made and stops when removed. A broker with
+  no clients still asks for none.
+- **Core says when the broker can't be reached** (`GET /plugin-runtimes/broker`)
+  and can open it (`POST /plugin-runtimes/broker/open`: `[broker].host =
+  "0.0.0.0"` and a login for core when there is none, then a restart).
+- `[plugin_runtimes]` is just `enabled`.
+
+Known limit: the broker checks logins only at CONNECT, so a connection made
+before Reset login or Remove stays up until it drops. The runtime closes its
+own at its next check-in (every 30 seconds by default), when homeCore refuses
+the key.
+
+# Piece 1: Enrollment (superseded, kept for the reasoning)
 
 ## What this is
 
@@ -652,20 +694,15 @@ interpreter version by accident.
 > 2. **Fixed: stopping a plugin.** The host waited for a hosted plugin to exit
 >    without asking it to, then killed it. It now sends SIGTERM first, as core
 >    does.
-> 3. **Open, in core: broker credentials.** The embedded broker accepts only the
->    logins listed in `[[broker.clients]]`. The passwords core mints for a
->    runtime and for each plugin placed on one are never added to that list. A
->    broker exposed to containers must have clients (core refuses to start
->    otherwise), so neither the runtime nor its plugins can log in. The
->    runtime's own password is minted fresh each time it is handed out and
->    stored nowhere, so an operator cannot work around it either. The test got
->    past it by listing the two plugins' passwords by hand; the runtime itself
->    stayed rejected, while its log still said it had registered.
+> 3. **Fixed: broker credentials.** The embedded broker accepted only the
+>    logins listed in `[[broker.clients]]`, and the passwords core minted for a
+>    runtime and its plugins never reached that list, so on a broker exposed to
+>    containers nothing could log in. The broker now also asks core, at
+>    CONNECT, about every login core made. See "Joining, as built" at the top.
 >
-> Also found: enrollment's `whitelist_only` uses `[auth].whitelist`, which takes
-> single addresses and makes each one an unauthenticated admin. With the
-> default settings, the only way for a container to enroll is to make it an
-> admin.
+> Also found: enrollment's `whitelist_only` used `[auth].whitelist`, which
+> makes each address an unauthenticated admin. Enrollment is gone, and with it
+> that coupling.
 
 Pieces 1–3 define what a runtime does from homeCore's side. This piece is the
 thing inside the container that does it.
