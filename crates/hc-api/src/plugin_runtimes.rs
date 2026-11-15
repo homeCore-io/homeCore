@@ -1,178 +1,37 @@
-//! Plugin-runtime enrollment: deciding whether a container may join.
+//! Plugin runtimes: the logic behind adding one and letting it log in.
 //!
-//! A runtime reaches homeCore before it holds any credential, so this is the one
-//! part of the plugin story that is REST rather than MQTT. Everything after
-//! approval is the ordinary management protocol.
+//! An admin adds a runtime in homeCore, which makes its login on the spot and
+//! hands back a connection key once. Nothing asks to join and nothing waits for
+//! approval: the runtime is a container the operator runs themselves, and adding
+//! it here is the approval.
 //!
-//! This module is the decision logic only — no HTTP, no storage. It takes a
-//! request plus the current state of the world and says what should happen, which
-//! is what makes the security-relevant parts testable without a server.
-//!
-//! See `docs/pluginRuntimesPlan.md`, piece 1.
+//! This module is decisions and checks only, with no HTTP. See
+//! `docs/pluginRuntimesPlan.md`.
 
-use anyhow::{anyhow, bail, Result};
-use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
-use hc_api_types::plugin_runtimes::{EnrollRequest, RuntimeCapabilities};
-use hc_state::plugin_runtime_store::{RuntimeRecord, RuntimeStatus};
+use anyhow::{anyhow, bail, Context, Result};
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Length of the human-comparable code, in digits, formatted `NNN-NNN`.
-const CODE_DIGITS: u32 = 6;
-
-/// Verify the ed25519 signature on an enrollment request.
-///
-/// The `runtime_id` appears in logs, so identity cannot rest on it alone: without
-/// proof of possession, anyone who read one could re-enroll as a known-good
-/// runtime and be handed its credentials. The signature is over
-/// [`EnrollRequest::signing_payload`], which covers identity *and* capabilities —
-/// a replayed enrollment must not be able to claim a different ABI and collect
-/// placements meant for another runtime.
-pub fn verify_enrollment_signature(req: &EnrollRequest) -> Result<()> {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let key_bytes = b64
-        .decode(req.public_key.trim())
-        .map_err(|e| anyhow!("public_key is not base64: {e}"))?;
-    let key_arr: [u8; 32] = key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("public_key must be 32 bytes"))?;
-    let vk = VerifyingKey::from_bytes(&key_arr)
-        .map_err(|_| anyhow!("public_key is not a valid ed25519 key"))?;
-
-    let sig_bytes = b64
-        .decode(req.signature.trim())
-        .map_err(|e| anyhow!("signature is not base64: {e}"))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("signature must be 64 bytes"))?;
-
-    vk.verify(
-        req.signing_payload().as_bytes(),
-        &Signature::from_bytes(&sig_arr),
-    )
-    .map_err(|_| anyhow!("signature does not match public_key"))
-}
-
-/// Whether a re-enrolling identity is presenting the same key it first used.
-///
-/// A runtime that re-enrolls after losing its credentials is expected and fine.
-/// A runtime that re-enrolls with a *different* key is not the same runtime, so
-/// its id is being reused — by a fresh container that lost its volume, or by
-/// someone who read the id somewhere. Either way the answer is the same: it does
-/// not inherit the existing record's approval.
-pub fn is_same_identity(existing: &RuntimeRecord, req: &EnrollRequest) -> bool {
-    existing.public_key == req.public_key
-}
-
-/// What the caller should do with an enrollment request.
-#[derive(Debug, PartialEq, Eq)]
-pub enum EnrollDecision {
-    /// Approve immediately and mint credentials — token mode, or a known
-    /// identity that was already approved.
-    Approve,
-    /// Record as pending and show the admin a code.
-    Pending,
-    /// Refuse, with a reason the runtime can log.
-    Reject(String),
-}
-
-/// Inputs the decision depends on, gathered by the caller.
-pub struct EnrollContext<'a> {
-    pub now: DateTime<Utc>,
-    /// True when the deployment requires an admin-issued token.
-    pub token_only: bool,
-    /// Whether the presented token (if any) was valid and unused.
-    pub token_valid: bool,
-    /// Existing record for this `runtime_id`, if it has enrolled before.
-    pub existing: Option<&'a RuntimeRecord>,
-    /// Currently pending, unexpired records.
-    pub pending_count: u32,
-    pub max_pending: u32,
-    pub max_denials: u32,
-}
-
-/// Decide what happens to an enrollment request.
-///
-/// Signature verification is the caller's job and must happen first — this
-/// function assumes the request is authentic and decides only whether an
-/// authentic request is *welcome*.
-pub fn decide(ctx: &EnrollContext) -> EnrollDecision {
-    // A re-enrollment that cannot prove it is the same identity is treated as a
-    // new one. The caller enforces this by refusing to reuse the old record.
-    if let Some(existing) = ctx.existing {
-        if !existing.may_retry(ctx.now) {
-            return EnrollDecision::Reject(
-                "this runtime has been denied too many times; try again later".into(),
-            );
-        }
-        if existing.denial_count >= ctx.max_denials {
-            return EnrollDecision::Reject(
-                "this runtime has been denied too many times; try again later".into(),
-            );
-        }
-        // Already approved and still holding the same key: hand the credentials
-        // back rather than making an operator approve a runtime they already
-        // trust because its container restarted.
-        if existing.status == RuntimeStatus::Approved {
-            return EnrollDecision::Approve;
-        }
-    }
-
-    if ctx.token_only {
-        return if ctx.token_valid {
-            EnrollDecision::Approve
-        } else {
-            EnrollDecision::Reject(
-                "this homeCore requires an enrollment token; set HOMECORE_ENROLL_TOKEN".into(),
-            )
-        };
-    }
-
-    // Open mode. A valid token still short-circuits the wait — an operator who
-    // went to the trouble of issuing one has already expressed the intent that
-    // approving a code would express.
-    if ctx.token_valid {
-        return EnrollDecision::Approve;
-    }
-
-    if ctx.pending_count >= ctx.max_pending {
-        return EnrollDecision::Reject("too many runtimes are already waiting for approval".into());
-    }
-
-    EnrollDecision::Pending
-}
-
-/// A short, human-comparable confirmation code, formatted `NNN-NNN`.
-///
-/// Not a credential and never checked by the server: it exists so the admin can
-/// confirm *this* container against the code in its logs, rather than approving
-/// whichever request happened to arrive while they were looking. Digits only,
-/// grouped, because it is going to be read off one screen and compared with
-/// another.
-pub fn generate_code() -> Result<String> {
+/// A new runtime id: `rt-` and eight hex digits.
+pub fn new_runtime_id() -> Result<String> {
     let mut raw = [0u8; 4];
     getrandom::fill(&mut raw).map_err(|e| anyhow!("OS RNG unavailable: {e}"))?;
-    let n = u32::from_be_bytes(raw) % 10u32.pow(CODE_DIGITS);
-    let s = format!("{n:0width$}", width = CODE_DIGITS as usize);
-    Ok(format!("{}-{}", &s[..3], &s[3..]))
+    Ok(format!("rt-{}", hex::encode(raw)))
 }
 
-/// The plugin id a runtime registers under once approved.
+/// The plugin id a runtime registers under, which is also its broker username.
 ///
-/// Derived from the kind and the identity so it is stable across restarts and
-/// legible in a plugin list: `plugin.python-a1b2c3d4`.
-pub fn plugin_id_for(capabilities: &RuntimeCapabilities, runtime_id: &str) -> Result<String> {
-    let kind = capabilities.kind.trim().to_lowercase();
+/// Derived from the kind and the id so it is stable and legible in a plugin
+/// list: `plugin.python-rt4f2a9c17`.
+pub fn plugin_id_for(kind: &str, runtime_id: &str) -> Result<String> {
+    let kind = kind.trim().to_lowercase();
     if kind.is_empty() || !kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         bail!("runtime kind must be alphanumeric");
     }
     let short: String = runtime_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
-        .take(8)
         .collect();
     if short.is_empty() {
         bail!("runtime_id has no usable characters");
@@ -180,239 +39,301 @@ pub fn plugin_id_for(capabilities: &RuntimeCapabilities, runtime_id: &str) -> Re
     Ok(format!("plugin.{kind}-{short}"))
 }
 
-/// When a pending record stops being answerable.
-pub fn pending_expiry(now: DateTime<Utc>, ttl_mins: u32) -> DateTime<Utc> {
-    now + Duration::minutes(ttl_mins.max(1) as i64)
-}
-
-/// Cooldown applied once an identity has been denied too often.
-pub fn cooldown_until(now: DateTime<Utc>, mins: u32) -> DateTime<Utc> {
-    now + Duration::minutes(mins.max(1) as i64)
-}
-
-/// Mint the MQTT password a runtime connects with.
+/// Mint the MQTT password a plugin placed on a runtime connects with.
 ///
-/// Same shape as the credential `plugin_install` mints for a binary plugin, for
-/// the same reason: the runtime is a plugin, and there is no argument for it
-/// holding a different kind of secret from every other plugin.
+/// Same shape as the credential `plugin_install` mints for a binary plugin.
 pub fn mint_mqtt_password() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// The address the admin gave for reaching homeCore, checked and tidied.
+///
+/// It goes into the key verbatim, so a typo here is a runtime that cannot
+/// connect. Better to refuse it while the admin is still looking at the form.
+pub fn check_homecore_url(url: &str) -> Result<String> {
+    let url = url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(url).with_context(|| {
+        format!("{url} is not an address; write it like http://homecore.local:8080")
+    })?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        bail!("the address must start with http:// or https://");
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        bail!("the address needs a host name or IP");
+    }
+    Ok(url.to_string())
+}
+
+fn bare(host: &str) -> &str {
+    host.trim().trim_start_matches('[').trim_end_matches(']')
+}
+
+fn is_unspecified(host: &str) -> bool {
+    let h = bare(host);
+    h.is_empty() || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified())
+}
+
+/// True when the broker answers only on homeCore's own machine.
+pub fn is_loopback(host: &str) -> bool {
+    let h = bare(host);
+    h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The broker host a runtime should dial, for the key.
+///
+/// `broker_host` is what core knows: the embedded broker's listen address, or
+/// an external broker's address. A listen address like `0.0.0.0` names no
+/// machine, and loopback only works from homeCore's own network, so in both
+/// cases the runtime dials the host it reaches homeCore at. Any other address
+/// is a real one and is used as it is.
+pub fn broker_host_for_key(broker_host: &str, homecore_url: &str) -> String {
+    if is_unspecified(broker_host) || is_loopback(broker_host) {
+        reqwest::Url::parse(homecore_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| bare(h).to_string()))
+            .unwrap_or_else(|| bare(broker_host).to_string())
+    } else {
+        bare(broker_host).to_string()
+    }
+}
+
+/// Open the embedded broker to the network, in the text of `homecore.toml`.
+///
+/// Sets `[broker].host = "0.0.0.0"` and, when no `[[broker.clients]]` exist,
+/// adds one for core itself with a new password: core refuses to start a
+/// network broker with no logins, and once there are logins core's own client
+/// needs one. Comments and everything else in the file are kept. Returns the
+/// new text; the caller writes it and the change takes a restart.
+pub fn open_broker_in_config(text: &str) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("homecore.toml does not parse")?;
+    if doc.get("broker").is_none() {
+        doc["broker"] = toml_edit::table();
+    }
+    let broker = doc["broker"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[broker] in homecore.toml is not a table"))?;
+    broker["host"] = toml_edit::value("0.0.0.0");
+
+    let has_clients = broker
+        .get("clients")
+        .and_then(|c| c.as_array_of_tables())
+        .is_some_and(|a| !a.is_empty());
+    if !has_clients {
+        let mut client = toml_edit::Table::new();
+        client["id"] = toml_edit::value("internal.core");
+        client["password"] = toml_edit::value(mint_mqtt_password());
+        client["allow_pub"] = toml_edit::value(toml_edit::Array::from_iter(["homecore/#"]));
+        client["allow_sub"] = toml_edit::value(toml_edit::Array::from_iter(["homecore/#"]));
+        let mut clients = toml_edit::ArrayOfTables::new();
+        clients.push(client);
+        broker.insert("clients", toml_edit::Item::ArrayOfTables(clients));
+    }
+    Ok(doc.to_string())
+}
+
+/// Every login core makes, checked when someone connects to the broker.
+///
+/// Two kinds, both answered from what is true now, so a login works the moment
+/// it is made and stops when it is removed:
+///
+/// - a runtime, by its plugin id and its one secret (hashed in the store);
+/// - a plugin core installed or placed on a runtime, by the `[homecore]`
+///   `password` in its config file. That file is where core wrote the password
+///   when it made it, and deleting the plugin deletes the file.
+#[derive(Clone)]
+pub struct BrokerLogins {
+    pub runtimes: Arc<hc_state::PluginRuntimeStore>,
+    /// `config/plugins`, where core keeps the config of plugins it installs or
+    /// places.
+    pub config_plugins_dir: PathBuf,
+    /// Plugins listed in `homecore.toml` with their own config path.
+    pub listed: Vec<(String, PathBuf)>,
+}
+
+impl BrokerLogins {
+    pub fn accepts(&self, user: &str, pass: &str) -> bool {
+        if pass.is_empty() {
+            return false;
+        }
+        if let Ok(Some(rt)) = self.runtimes.by_plugin_id(user) {
+            return hc_auth::api_key::verify_token(pass, &rt.key_hash);
+        }
+        match self.config_for(user) {
+            Some(path) => {
+                password_in(&path).is_some_and(|p| same_bytes(p.as_bytes(), pass.as_bytes()))
+            }
+            None => false,
+        }
+    }
+
+    fn config_for(&self, plugin_id: &str) -> Option<PathBuf> {
+        if let Some((_, path)) = self.listed.iter().find(|(id, _)| id == plugin_id) {
+            return Some(path.clone());
+        }
+        // The username arrives from the network: it may name a file in
+        // config/plugins and nothing else.
+        let safe = !plugin_id.is_empty()
+            && plugin_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && !plugin_id.starts_with('.');
+        safe.then(|| self.config_plugins_dir.join(format!("{plugin_id}.toml")))
+    }
+}
+
+/// Constant-time equality, so a refused login says nothing about how close it was.
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The `[homecore] password` in a plugin's config, if it has one.
+fn password_in(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    doc.get("homecore")?
+        .get("password")?
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-    use hc_api_types::plugin_runtimes::RuntimeCapabilities;
-
-    fn caps() -> RuntimeCapabilities {
-        RuntimeCapabilities {
-            kind: "python".into(),
-            abi: "cp312-manylinux_2_28".into(),
-            arch: "x86_64".into(),
-        }
-    }
-
-    fn signed_request(seed: u8) -> (EnrollRequest, SigningKey) {
-        let sk = SigningKey::from_bytes(&[seed; 32]);
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let mut req = EnrollRequest {
-            runtime_id: "rt-abcdef123456".into(),
-            public_key: b64.encode(sk.verifying_key().to_bytes()),
-            signature: String::new(),
-            capabilities: caps(),
-            host_version: "0.1.0".into(),
-            sdk_version: "0.2.0".into(),
-            hostname: "pyhost".into(),
-            network_mode: "host".into(),
-            token: None,
-        };
-        req.signature = b64.encode(sk.sign(req.signing_payload().as_bytes()).to_bytes());
-        (req, sk)
-    }
-
-    fn record(status: RuntimeStatus) -> RuntimeRecord {
-        RuntimeRecord {
-            runtime_id: "rt-abcdef123456".into(),
-            public_key: "PUB".into(),
-            kind: "python".into(),
-            abi: "cp312-manylinux_2_28".into(),
-            arch: "x86_64".into(),
-            host_version: "0.1.0".into(),
-            sdk_version: "0.2.0".into(),
-            hostname: "pyhost".into(),
-            network_mode: "host".into(),
-            status,
-            code: None,
-            secret_hash: None,
-            api_key_hash: None,
-            source_ip: None,
-            plugin_id: None,
-            denial_count: 0,
-            cooldown_until: None,
-            created_at: Utc::now(),
-            expires_at: None,
-            last_seen_at: None,
-        }
-    }
-
-    fn ctx<'a>(existing: Option<&'a RuntimeRecord>) -> EnrollContext<'a> {
-        EnrollContext {
-            now: Utc::now(),
-            token_only: false,
-            token_valid: false,
-            existing,
-            pending_count: 0,
-            max_pending: 5,
-            max_denials: 3,
-        }
-    }
 
     #[test]
-    fn a_genuine_signature_verifies() {
-        let (req, _) = signed_request(7);
-        assert!(verify_enrollment_signature(&req).is_ok());
-    }
-
-    /// The point of signing capabilities: a captured enrollment replayed with a
-    /// different ABI would otherwise be handed placements built for another
-    /// runtime, which would then fail to install on the operator's machine.
-    #[test]
-    fn tampering_with_capabilities_breaks_the_signature() {
-        let (mut req, _) = signed_request(7);
-        req.capabilities.abi = "cp311-manylinux_2_28".into();
-        assert!(verify_enrollment_signature(&req).is_err());
-    }
-
-    #[test]
-    fn a_signature_from_another_key_is_rejected() {
-        let (mut req, _) = signed_request(7);
-        let (other, _) = signed_request(9);
-        req.signature = other.signature;
-        assert!(verify_enrollment_signature(&req).is_err());
-    }
-
-    /// Cosmetic fields are outside the signed payload on purpose, so renaming a
-    /// container or updating the host does not invalidate its identity.
-    #[test]
-    fn renaming_the_host_does_not_break_the_signature() {
-        let (mut req, _) = signed_request(7);
-        req.hostname = "renamed".into();
-        req.host_version = "9.9.9".into();
-        assert!(verify_enrollment_signature(&req).is_ok());
-    }
-
-    #[test]
-    fn malformed_key_and_signature_are_errors_not_panics() {
-        let (mut req, _) = signed_request(7);
-        req.public_key = "not base64!!".into();
-        assert!(verify_enrollment_signature(&req).is_err());
-
-        let (mut req, _) = signed_request(7);
-        req.signature = base64::engine::general_purpose::STANDARD.encode([0u8; 8]);
-        assert!(verify_enrollment_signature(&req).is_err());
-    }
-
-    #[test]
-    fn token_mode_requires_a_valid_token() {
-        let mut c = ctx(None);
-        c.token_only = true;
-        assert!(matches!(decide(&c), EnrollDecision::Reject(_)));
-
-        c.token_valid = true;
-        assert_eq!(decide(&c), EnrollDecision::Approve);
-    }
-
-    #[test]
-    fn open_mode_leaves_a_tokenless_request_pending() {
-        assert_eq!(decide(&ctx(None)), EnrollDecision::Pending);
-    }
-
-    /// An operator who issued a token has already expressed the intent that
-    /// approving a code expresses, so they should not have to do both.
-    #[test]
-    fn a_token_short_circuits_the_wait_in_open_mode() {
-        let mut c = ctx(None);
-        c.token_valid = true;
-        assert_eq!(decide(&c), EnrollDecision::Approve);
-    }
-
-    /// A restarted container that lost its credentials but kept its identity
-    /// should not need re-approving; the operator already decided.
-    #[test]
-    fn an_approved_runtime_re_enrolling_is_approved_again() {
-        let rec = record(RuntimeStatus::Approved);
-        assert_eq!(decide(&ctx(Some(&rec))), EnrollDecision::Approve);
-    }
-
-    #[test]
-    fn the_pending_cap_is_enforced() {
-        let mut c = ctx(None);
-        c.pending_count = 5;
-        assert!(matches!(decide(&c), EnrollDecision::Reject(_)));
-    }
-
-    #[test]
-    fn a_cooling_down_identity_is_refused() {
-        let mut rec = record(RuntimeStatus::Denied);
-        rec.cooldown_until = Some(Utc::now() + Duration::minutes(30));
-        assert!(matches!(
-            decide(&ctx(Some(&rec))),
-            EnrollDecision::Reject(_)
-        ));
-    }
-
-    /// Once the cooldown elapses the identity is welcome to ask again — the
-    /// limits bound noise, they are not a permanent ban.
-    #[test]
-    fn an_elapsed_cooldown_lets_it_ask_again() {
-        let mut rec = record(RuntimeStatus::Denied);
-        rec.cooldown_until = Some(Utc::now() - Duration::minutes(1));
-        rec.denial_count = 1;
-        assert_eq!(decide(&ctx(Some(&rec))), EnrollDecision::Pending);
-    }
-
-    /// A re-enrollment carrying a different key is a different runtime wearing a
-    /// known id, and must not inherit its approval.
-    #[test]
-    fn a_different_key_is_a_different_identity() {
-        let (req, _) = signed_request(7);
-        let mut rec = record(RuntimeStatus::Approved);
-        rec.public_key = req.public_key.clone();
-        assert!(is_same_identity(&rec, &req));
-
-        rec.public_key = "SOMETHING-ELSE".into();
-        assert!(!is_same_identity(&rec, &req));
-    }
-
-    #[test]
-    fn codes_are_grouped_digits() {
-        for _ in 0..50 {
-            let c = generate_code().unwrap();
-            assert_eq!(c.len(), 7, "{c}");
-            assert_eq!(&c[3..4], "-", "{c}");
-            assert!(
-                c.chars().filter(|c| *c != '-').all(|c| c.is_ascii_digit()),
-                "{c}"
-            );
-        }
-    }
-
-    #[test]
-    fn plugin_ids_are_stable_and_legible() {
-        let id = plugin_id_for(&caps(), "rt-abcdef123456").unwrap();
-        assert_eq!(id, "plugin.python-rtabcdef");
+    fn a_runtime_id_and_its_plugin_id() {
+        let id = new_runtime_id().unwrap();
+        assert!(id.starts_with("rt-") && id.len() == 11, "{id}");
         assert_eq!(
-            id,
-            plugin_id_for(&caps(), "rt-abcdef123456").unwrap(),
-            "same inputs, same id — it is what rules and history key on"
+            plugin_id_for("python", "rt-4f2a9c17").unwrap(),
+            "plugin.python-rt4f2a9c17"
         );
     }
 
     #[test]
     fn a_hostile_kind_cannot_forge_a_plugin_id() {
-        let mut c = caps();
-        c.kind = "python/../hue".into();
-        assert!(plugin_id_for(&c, "rt-abc").is_err());
+        assert!(plugin_id_for("python/../hue", "rt-abc").is_err());
+        assert!(plugin_id_for("", "rt-abc").is_err());
+    }
+
+    #[test]
+    fn the_homecore_address_is_checked_before_it_goes_in_a_key() {
+        assert_eq!(
+            check_homecore_url(" http://homecore.local:8080/ ").unwrap(),
+            "http://homecore.local:8080"
+        );
+        assert!(check_homecore_url("homecore.local:8080").is_err());
+        assert!(check_homecore_url("ftp://homecore.local").is_err());
+    }
+
+    #[test]
+    fn the_key_names_a_broker_the_runtime_can_dial() {
+        let url = "http://homecore.local:8080";
+        assert_eq!(broker_host_for_key("0.0.0.0", url), "homecore.local");
+        assert_eq!(broker_host_for_key("127.0.0.1", url), "homecore.local");
+        // An external broker, or a broker bound to one address, is a real place.
+        assert_eq!(broker_host_for_key("10.0.0.9", url), "10.0.0.9");
+        assert_eq!(broker_host_for_key("mqtt.lan", url), "mqtt.lan");
+        assert_eq!(
+            broker_host_for_key("0.0.0.0", "http://[fd00::5]:8080"),
+            "fd00::5"
+        );
+    }
+
+    #[test]
+    fn opening_the_broker_adds_a_login_for_core_when_there_is_none() {
+        let before =
+            "# my house\n[server]\nport = 8080\n\n[broker]\nhost = \"127.0.0.1\"\nport = 1883\n";
+        let after = open_broker_in_config(before).unwrap();
+        assert!(after.starts_with("# my house"), "{after}");
+        let doc: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(doc["broker"]["host"].as_str(), Some("0.0.0.0"));
+        assert_eq!(doc["broker"]["port"].as_integer(), Some(1883));
+        let clients = doc["broker"]["clients"].as_array().unwrap();
+        assert_eq!(clients[0]["id"].as_str(), Some("internal.core"));
+        assert_eq!(clients[0]["password"].as_str().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn opening_the_broker_keeps_the_clients_already_there() {
+        let before = "[broker]\nhost = \"127.0.0.1\"\n\n[[broker.clients]]\nid = \"internal.core\"\npassword = \"mine\"\n";
+        let doc: toml::Value = toml::from_str(&open_broker_in_config(before).unwrap()).unwrap();
+        let clients = doc["broker"]["clients"].as_array().unwrap();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0]["password"].as_str(), Some("mine"));
+    }
+
+    fn logins(dir: &Path) -> BrokerLogins {
+        let db = Arc::new(redb::Database::create(dir.join("t.redb")).unwrap());
+        BrokerLogins {
+            runtimes: Arc::new(hc_state::PluginRuntimeStore::new(db).unwrap()),
+            config_plugins_dir: dir.join("plugins"),
+            listed: vec![("plugin.listed".into(), dir.join("listed.toml"))],
+        }
+    }
+
+    #[test]
+    fn a_runtime_logs_in_with_its_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = logins(dir.path());
+        let key = hc_auth::api_key::generate().unwrap();
+        l.runtimes
+            .upsert(&hc_state::RuntimeRecord {
+                runtime_id: "rt-1".into(),
+                name: "R".into(),
+                kind: "python".into(),
+                abi: "cp312-manylinux_2_28".into(),
+                plugin_id: "plugin.python-rt1".into(),
+                key_hash: key.hash.clone(),
+                homecore_url: "http://h:8080".into(),
+                created_at: chrono::Utc::now(),
+                arch: None,
+                host_version: None,
+                hostname: None,
+                network_mode: None,
+                source_ip: None,
+                last_seen_at: None,
+            })
+            .unwrap();
+        assert!(l.accepts("plugin.python-rt1", &key.full_token));
+        assert!(!l.accepts("plugin.python-rt1", "wrong"));
+    }
+
+    #[test]
+    fn a_plugin_logs_in_with_the_password_in_its_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = logins(dir.path());
+        std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
+        std::fs::write(
+            dir.path().join("plugins/plugin.demo.toml"),
+            "[homecore]\nplugin_id = \"plugin.demo\"\npassword = \"p1\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("listed.toml"),
+            "[homecore]\npassword = \"p2\"\n",
+        )
+        .unwrap();
+        assert!(l.accepts("plugin.demo", "p1"));
+        assert!(!l.accepts("plugin.demo", "p2"));
+        assert!(l.accepts("plugin.listed", "p2"));
+        // Removed means its file is gone, and so is the login.
+        std::fs::remove_file(dir.path().join("plugins/plugin.demo.toml")).unwrap();
+        assert!(!l.accepts("plugin.demo", "p1"));
+    }
+
+    #[test]
+    fn a_username_cannot_reach_outside_config_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = logins(dir.path());
+        std::fs::write(
+            dir.path().join("listed.toml"),
+            "[homecore]\npassword = \"p\"\n",
+        )
+        .unwrap();
+        assert!(!l.accepts("../listed", "p"));
+        assert!(!l.accepts("..", "p"));
+        assert!(!l.accepts("plugin.none", ""));
     }
 }

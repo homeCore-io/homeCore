@@ -64,3 +64,4 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 tower        = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+redb         = { workspace = true }

@@ -5143,13 +5143,15 @@ pub async fn install_plugin(
                     )
                         .into_response();
                 };
-                let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, &rec.arch) else {
+                // Candidates are only runtimes that reported their arch.
+                let arch = rec.arch.as_deref().unwrap_or_default();
+                let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, arch) else {
                     return (
                         StatusCode::CONFLICT,
                         Json(json!({
                             "error": format!(
                                 "{id} {} publishes nothing for {} {} on {}",
-                                pv.version, rec.kind, rec.abi, rec.arch
+                                pv.version, rec.kind, rec.abi, arch
                             )
                         })),
                     )

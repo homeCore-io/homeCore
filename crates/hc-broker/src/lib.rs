@@ -31,7 +31,36 @@ use rumqttd::{
 };
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::Arc;
 use tracing::{info, warn};
+
+/// A configured client first, then core's live list.
+///
+/// The live check runs on a blocking thread: it may hash a password, and the
+/// broker's own threads carry every connected client's traffic.
+async fn check_login(
+    fixed: &HashMap<String, String>,
+    live: &LiveLogins,
+    user: String,
+    pass: String,
+) -> bool {
+    if let Some(expected) = fixed.get(&user) {
+        return same_bytes(expected.as_bytes(), pass.as_bytes());
+    }
+    let live = live.0.clone();
+    let accepted = tokio::task::spawn_blocking(move || live(&user, &pass))
+        .await
+        .unwrap_or(false);
+    if !accepted {
+        tracing::debug!("broker login refused: not a configured client or a login core made");
+    }
+    accepted
+}
+
+/// Constant-time equality, so a refused login says nothing about how close it was.
+pub fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 
 /// Per-client credential and ACL entry.
 ///
@@ -46,6 +75,26 @@ pub struct ClientAcl {
     pub allow_pub: Vec<String>,
     /// Topic patterns this client may subscribe to (metadata, not enforced by embedded broker).
     pub allow_sub: Vec<String>,
+}
+
+/// Logins core creates as it goes: plugin runtimes, and every plugin core
+/// installs or places, each with its own password.
+///
+/// Asked only when a username is not one of `[[broker.clients]]`, with the
+/// username and password from the CONNECT packet, and answered from core's
+/// current state, so a login works the moment it is made and stops the moment
+/// it is removed. It may be slow (a password hash, a small file read): the
+/// broker runs it on a blocking thread.
+#[derive(Clone)]
+pub struct LiveLogins(pub Arc<LoginCheck>);
+
+/// `(username, password) -> accepted`.
+pub type LoginCheck = dyn Fn(&str, &str) -> bool + Send + Sync;
+
+impl std::fmt::Debug for LiveLogins {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveLogins")
+    }
 }
 
 /// Configuration for the embedded broker.
@@ -65,6 +114,10 @@ pub struct BrokerConfig {
     pub key_path: Option<String>,
     /// Registered clients.  If non-empty, the broker requires credentials.
     pub clients: Vec<ClientAcl>,
+    /// Logins core makes, accepted beside `clients` whenever credentials are
+    /// required. Ignored while `clients` is empty: a broker with no clients
+    /// asks for no login at all, as it always has.
+    pub live_logins: Option<LiveLogins>,
 }
 
 impl Default for BrokerConfig {
@@ -77,6 +130,7 @@ impl Default for BrokerConfig {
             cert_path: None,
             key_path: None,
             clients: vec![],
+            live_logins: None,
         }
     }
 }
@@ -119,7 +173,7 @@ impl Broker {
             Some(map)
         };
 
-        let connection_settings = ConnectionSettings {
+        let mut connection_settings = ConnectionSettings {
             connection_timeout_ms: 5000,
             max_payload_size: 262_144,
             max_inflight_count: 200,
@@ -127,6 +181,16 @@ impl Broker {
             external_auth: None,
             dynamic_filters: false,
         };
+        // With a live list, every login goes through one check: rumqttd asks
+        // the handler instead of its own map whenever one is set.
+        if let (Some(fixed), Some(live)) = (auth, self.config.live_logins.clone()) {
+            let fixed = Arc::new(fixed);
+            connection_settings.set_auth_handler(move |_client_id, user: String, pass: String| {
+                let fixed = fixed.clone();
+                let live = live.clone();
+                async move { check_login(&fixed, &live, user, pass).await }
+            });
+        }
 
         // Plain-text MQTT v3.1.1 listener (Gen1 devices + internal core client).
         let tcp = ServerSettings {
@@ -306,7 +370,46 @@ mod tests {
             } else {
                 vec![]
             },
+            live_logins: None,
         }
+    }
+
+    fn live(user: &'static str, pass: &'static str) -> LiveLogins {
+        LiveLogins(Arc::new(move |u, p| u == user && p == pass))
+    }
+
+    fn fixed() -> HashMap<String, String> {
+        HashMap::from([("internal.core".to_string(), "x".to_string())])
+    }
+
+    #[tokio::test]
+    async fn a_configured_client_logs_in_by_its_password() {
+        let l = live("plugin.a", "secret");
+        assert!(check_login(&fixed(), &l, "internal.core".into(), "x".into()).await);
+        assert!(!check_login(&fixed(), &l, "internal.core".into(), "y".into()).await);
+    }
+
+    #[tokio::test]
+    async fn a_login_core_made_is_accepted_beside_the_configured_ones() {
+        let l = live("plugin.a", "secret");
+        assert!(check_login(&fixed(), &l, "plugin.a".into(), "secret".into()).await);
+        assert!(!check_login(&fixed(), &l, "plugin.a".into(), "wrong".into()).await);
+        assert!(!check_login(&fixed(), &l, "plugin.b".into(), "secret".into()).await);
+    }
+
+    /// A live check that would accept anything must not widen a configured
+    /// client: the configured password decides for that name.
+    #[tokio::test]
+    async fn a_configured_name_is_never_handed_to_the_live_list() {
+        let anything = LiveLogins(Arc::new(|_, _| true));
+        assert!(!check_login(&fixed(), &anything, "internal.core".into(), "y".into()).await);
+    }
+
+    #[test]
+    fn same_bytes_compares_whole_values() {
+        assert!(same_bytes(b"abc", b"abc"));
+        assert!(!same_bytes(b"abc", b"abd"));
+        assert!(!same_bytes(b"abc", b"ab"));
     }
 
     #[test]

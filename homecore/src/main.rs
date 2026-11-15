@@ -492,12 +492,22 @@ async fn main() -> Result<()> {
 
     // ── 6. MQTT broker: the embedded one, or `[broker] external_url` ───────
     let external_broker = config.broker.external().map_err(anyhow::Error::msg)?;
+    // Logins core makes (runtimes, and plugins it installs or places) are
+    // checked against core's own state, which is not open yet: the broker starts
+    // first so core's client can connect. Until the list is filled in below,
+    // only `[[broker.clients]]` can log in, which is all that connects that early.
+    let live_logins: Arc<std::sync::OnceLock<hc_api::plugin_runtimes::BrokerLogins>> =
+        Arc::new(std::sync::OnceLock::new());
     let broker_cfg = BrokerConfig {
         host: config.broker.host.clone(),
         port: config.broker.port,
         // 0 turns the v5 listener off — the form can't say "nothing" for a
         // field whose default is a port.
         v5_port: config.broker.v5_port.filter(|p| *p != 0),
+        live_logins: Some(hc_broker::LiveLogins({
+            let live = live_logins.clone();
+            Arc::new(move |user, pass| live.get().is_some_and(|l| l.accepts(user, pass)))
+        })),
         tls_port: config.broker.tls_port,
         cert_path: config.broker.cert_path.clone(),
         key_path: config.broker.key_path.clone(),
@@ -861,6 +871,23 @@ async fn main() -> Result<()> {
     // Absolute install root, so an installed plugin's recorded binary/config
     // paths work regardless of the process CWD (dynamic spawn + next boot).
     let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
+    let _ = live_logins.set(hc_api::plugin_runtimes::BrokerLogins {
+        runtimes: store.plugin_runtimes(),
+        config_plugins_dir: install_base.join("config").join("plugins"),
+        listed: config
+            .plugins
+            .iter()
+            .map(|p| {
+                let path = std::path::PathBuf::from(&p.config);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    base_dir.join(path)
+                };
+                (p.id.clone(), path)
+            })
+            .collect(),
+    });
     // Channel: the install handler pushes a freshly-installed plugin here and a
     // listener (below) spawns it into the running supervisor — no restart.
     let (plugin_spawn_tx, mut plugin_spawn_rx) =

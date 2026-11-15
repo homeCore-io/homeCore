@@ -11,8 +11,6 @@ hc-auth = { path = "../hc-auth" }
 serde   = { workspace = true }
 uuid    = { workspace = true }
 chrono  = { workspace = true }
-
-[dev-dependencies]
-# For asserting the wire form — a pending enrollment must omit `credentials`
-# rather than send a null a client could misread.
+# The runtime connection key: base64url JSON, written by core, read by the host.
+base64     = "0.23"
 serde_json = { workspace = true }

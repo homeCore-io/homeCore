@@ -2993,7 +2993,7 @@ paths:
         "422":
           description: |
             Nowhere to run it — no artifact for this machine, or the plugin needs
-            a runtime kind that is not enrolled. The message names the next
+            a runtime kind that is not connected. The message names the next
             action.
         "202":
           description: Placed on a plugin runtime — `{placed_on, plugin_id, version, note}`
@@ -5816,103 +5816,76 @@ paths:
                   deleted_so_far:
                     type: integer
 
-  /plugin-runtimes/enroll:
-    post:
-      operationId: enrollPluginRuntime
-      summary: Ask to join as a plugin runtime
-      description: |
-        A **plugin runtime** is a container the operator runs themselves, hosting
-        plugins written in something other than Rust. homeCore never manages the
-        container; this is how one is admitted.
-
-        The only unauthenticated endpoint in the plugin story, because a runtime
-        holds no credential until it has been through here. It is gated three
-        ways: the `[plugin_runtimes]` feature switch, the `[auth].whitelist`
-        (when `whitelist_only`), and a rate budget separate from login's.
-
-        The request is signed with the runtime's ed25519 key. In open mode the
-        response is `202` with a short `code` that the container also prints to
-        its logs — an administrator approves by confirming the two match. In
-        token mode a valid `token` is approved immediately and nothing is left
-        pending.
+  /plugin-runtimes:
+    get:
+      operationId: listPluginRuntimes
+      summary: List plugin runtimes
       tags: [plugins]
-      security: []
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every runtime that has been added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtimes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RuntimeSummary"
+    post:
+      operationId: addPluginRuntime
+      summary: Add a runtime and make its login
+      description: |
+        A runtime is a container the operator runs. Adding it here makes its
+        login on the spot and returns its connection key, **once**. The
+        operator pastes the key into the runtime's page, or sets it as
+        `HC_RUNTIME_KEY`. Nothing asks to join and nothing waits for approval.
+
+        `homecore_url` is homeCore's address as the runtime reaches it; it goes
+        into the key. The key's broker host is that address's host when the
+        broker listens on `0.0.0.0` or loopback.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [runtime_id, public_key, signature, capabilities]
+              required: [name, homecore_url]
               properties:
-                runtime_id:
+                name: { type: string, example: Python runtime 1 }
+                kind:
                   type: string
-                  description: Stable identity, persisted to the container's volume.
-                public_key:
+                  default: python
+                  description: The language it hosts. Only `python` today.
+                homecore_url:
                   type: string
-                  description: base64 ed25519 public key.
-                signature:
-                  type: string
-                  description: |
-                    base64 ed25519 signature over the canonical payload
-                    `hc-runtime-enroll:v1\n<runtime_id>\n<public_key>\n<kind>\n<abi>\n<arch>`.
-                capabilities:
-                  type: object
-                  required: [kind, abi, arch]
-                  properties:
-                    kind:
-                      type: string
-                      example: python
-                    abi:
-                      type: string
-                      example: cp312-manylinux_2_28
-                    arch:
-                      type: string
-                      example: x86_64
-                host_version: { type: string }
-                sdk_version: { type: string }
-                hostname: { type: string }
-                network_mode:
-                  type: string
-                  description: host | bridge | macvlan
-                token:
-                  type: string
-                  description: One-time enrollment token, when in token mode.
+                  example: http://homecore.local:8080
       responses:
-        "200":
-          description: Approved — credentials returned
+        "201":
+          description: Added; the key is shown once
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/EnrollResponse"
-        "202":
-          description: Pending — an administrator must approve the code
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EnrollResponse"
-        "401":
-          description: Signature does not verify
-        "403":
-          description: Source not whitelisted, denied too often, or too many pending
+                $ref: "#/components/schemas/IssuedRuntimeKey"
         "404":
-          description: Plugin runtimes are disabled on this server
-        "409":
-          description: runtime_id is already registered to a different key
-        "429":
-          description: Too many enrollment attempts from this address
+          description: Plugin runtimes are turned off in homecore.toml
+        "422":
+          description: No name, an address that isn't one, or a language homeCore can't host
 
   /plugin-runtimes/{id}:
-    get:
-      operationId: getPluginRuntimeStatus
-      summary: Poll an enrollment
+    delete:
+      operationId: removePluginRuntime
+      summary: Remove a runtime and everything placed on it
       description: |
-        Authenticated by the single-use enrollment secret as a bearer token, not
-        by a JWT. Deliberately not rate-limited: a runtime polls this every few
-        seconds while it waits.
-
-        Returns `410` once a pending enrollment has expired, so a waiting
-        container stops rather than spinning until it is restarted.
+        Uninstalls each plugin placed on it (devices, config and login), then
+        removes the runtime, which ends its key. The container is the
+        operator's to stop.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -5923,15 +5896,137 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: Current status, with credentials once approved
+          description: Removed
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/EnrollResponse"
+                type: object
+                properties:
+                  removed: { type: string }
+                  plugins_removed:
+                    type: array
+                    items: { type: string }
         "404":
-          description: Unknown runtime, or the secret does not match
-        "410":
-          description: The enrollment expired; enroll again
+          description: Unknown runtime
+
+  /plugin-runtimes/{id}/reset:
+    post:
+      operationId: resetPluginRuntimeLogin
+      summary: Make a new key; the old one stops working now
+      description: |
+        The runtime is refused at its next broker login or API call until the
+        new key is pasted in. Its plugins keep their own logins.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The new key, shown once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedRuntimeKey"
+        "404":
+          description: Unknown runtime
+
+  /plugin-runtimes/broker:
+    get:
+      operationId: getPluginRuntimeBroker
+      summary: Can a runtime reach the broker?
+      description: |
+        A broker that listens only on homeCore's own machine cannot be reached
+        from a container or another computer.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Where the broker listens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string }
+                  port: { type: integer }
+                  reachable_from_network: { type: boolean }
+                  can_open:
+                    type: boolean
+                    description: Whether homeCore can change its own config to open it.
+
+  /plugin-runtimes/broker/open:
+    post:
+      operationId: openPluginRuntimeBroker
+      summary: Let the broker listen on the network
+      description: |
+        Sets `[broker].host = "0.0.0.0"` in homecore.toml, keeping its comments,
+        and adds a `[[broker.clients]]` login for core itself when there is
+        none. Takes effect at the next restart (`POST /system/restart`).
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Written; restart to apply
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  restart_required: { type: boolean }
+        "503":
+          description: homeCore was started without --config
+
+  /plugin-runtimes/{id}/hello:
+    post:
+      operationId: pluginRuntimeHello
+      summary: A runtime checking in
+      description: |
+        Authenticated by the runtime's own secret as a bearer token, not by a
+        JWT. Records what it runs on and when it was last seen. Its page also
+        calls this to test a key before saving it. A runtime whose image hosts a
+        different language or ABI from what it was added for is refused with
+        `409`.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                capabilities:
+                  $ref: "#/components/schemas/RuntimeCapabilities"
+                host_version: { type: string }
+                hostname: { type: string }
+                network_mode: { type: string }
+      responses:
+        "200":
+          description: The key is good
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtime_id: { type: string }
+                  name: { type: string }
+                  plugin_id: { type: string }
+        "401":
+          description: The key was reset, or the runtime was removed
+        "409":
+          description: The image hosts a different language or ABI
 
   /plugin-runtimes/{id}/placements:
     get:
@@ -5939,13 +6034,12 @@ paths:
       summary: What this runtime should be running
       description: |
         The desired state, in core's words. The runtime diffs it against what it
-        actually has and re-provisions the difference — which is why losing a
-        runtime's volume costs nothing but a re-enrollment.
+        actually has and re-provisions the difference, which is why losing a
+        runtime's volume costs nothing but a reinstall.
 
-        Authenticated by the runtime's **own API key**, issued when it was
-        approved and rotated every time credentials are handed out. The key
-        identifies exactly one runtime, so this cannot return another's
-        placements. Unknown, unapproved and wrong-key all answer `404` alike.
+        Authenticated by the runtime's own secret. It identifies exactly one
+        runtime, so this cannot return another's placements. Unknown and
+        wrong-key both answer `404`.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -5975,12 +6069,12 @@ paths:
                         config:
                           type: string
                           description: |
-                            The operator config, including the minted MQTT
-                            credential. Core owns it, exactly as for a binary
+                            The operator config, including the plugin's own
+                            broker login. Core owns it, exactly as for a binary
                             plugin.
                         placed_at: { type: string, format: date-time }
         "404":
-          description: Unknown runtime, not approved, or the key does not match
+          description: Unknown runtime, or the key does not match
 
   /plugin-runtimes/{id}/artifacts/{plugin_id}:
     get:
@@ -5989,13 +6083,11 @@ paths:
       description: |
         **Core verifies, the runtime executes.** The index signature and the
         artifact sha256 are checked here, in one implementation, rather than in
-        every runtime — Python, Node and .NET each reimplementing ed25519
-        verification is how one ends up skipping it.
+        every runtime.
 
         The runtime re-checks only the `x-hc-sha256` it is handed, which catches
         transport corruption. A compromised core is already past the point where
-        a plugin's credentials matter, so that is the stated boundary rather than
-        an oversight.
+        a plugin's credentials matter, so that is the stated boundary.
 
         Core re-resolves through the registry rather than trusting the URL stored
         at placement time, so a stored row cannot become a way to fetch something
@@ -6026,36 +6118,17 @@ paths:
                 format: binary
         "404":
           description: |
-            Unknown runtime, wrong key, or no such placement on this runtime —
+            Unknown runtime, wrong key, or no such placement on this runtime,
             all answered alike.
         "409":
           description: |
-            The registry no longer publishes an artifact matching this runtime's
-            kind, ABI and architecture.
+            The runtime has not reported its architecture yet, or the registry
+            no longer publishes an artifact matching its kind, ABI and
+            architecture.
         "502":
           description: Registry unreachable, or the artifact failed verification
         "503":
           description: No plugin registry is configured
-
-  /plugin-runtimes:
-    get:
-      operationId: listPluginRuntimes
-      summary: List plugin runtimes, including those awaiting approval
-      tags: [plugins]
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: All known runtimes
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  runtimes:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/RuntimeSummary"
 
   /plugin-runtimes/placements:
     get:
@@ -6063,12 +6136,12 @@ paths:
       summary: Every plugin placed on a runtime
       description: |
         The admin view. Distinct from `/plugin-runtimes/{id}/placements`, which
-        a runtime calls with its own key to learn what it should be running;
-        this one answers both halves of the operator's question — what a
-        runtime hosts, and where a plugin runs — from one read.
+        a runtime calls with its own secret to learn what it should be running;
+        this one answers both halves of the operator's question (what a runtime
+        hosts, and where a plugin runs) from one read.
 
-        Carries no config: that holds a minted broker credential, and the
-        operator already edits the same file through the plugin config surface.
+        Carries no config: that holds a broker login, and the operator already
+        edits the same file through the plugin config surface.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -6091,81 +6164,6 @@ paths:
                         placed_at: { type: string, format: date-time }
         "404":
           description: Plugin runtimes are disabled
-
-  /plugin-runtimes/tokens:
-    post:
-      operationId: issuePluginRuntimeToken
-      summary: Issue a one-time enrollment token
-      description: |
-        For token mode, or to admit a runtime without waiting for a code. The
-        plaintext is returned once and only its hash is stored.
-      tags: [plugins]
-      security:
-        - bearerAuth: []
-      responses:
-        "201":
-          description: Token issued — shown once
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  token: { type: string }
-                  expires_at: { type: string, format: date-time }
-                  note: { type: string }
-
-  /plugin-runtimes/{id}/approve:
-    post:
-      operationId: approvePluginRuntime
-      summary: Approve a waiting runtime
-      description: |
-        Confirm the `code` shown here against the one in the container's logs
-        before approving. That comparison is what distinguishes this container
-        from whichever one happened to ask.
-      tags: [plugins]
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: Approved
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RuntimeSummary"
-        "404":
-          description: Unknown runtime
-        "410":
-          description: The enrollment expired; ask it to retry
-
-  /plugin-runtimes/{id}/deny:
-    post:
-      operationId: denyPluginRuntime
-      summary: Deny a runtime
-      description: |
-        The safe answer to a request you do not recognise. The runtime may retry;
-        repeated denials put its identity into a cooldown.
-      tags: [plugins]
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: Denied
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RuntimeSummary"
-        "404":
-          description: Unknown runtime
 
   /plugins/{id}/restart:
     post:
@@ -8845,75 +8843,55 @@ components:
         abi: { type: string, example: cp312-manylinux_2_28 }
         arch: { type: string, example: x86_64 }
 
-    RuntimeCredentials:
+    RuntimeConnectionKey:
       type: object
       description: |
-        Returned once, on approval. This is the runtime's own credential and
-        covers its management channel only — plugins it hosts get their own,
-        minted at placement time.
+        What is inside a connection key, for Show details and for setting a
+        runtime up by hand. `secret` is the runtime's one password, for the
+        broker (as `username`) and for homeCore's API.
       properties:
-        broker_host: { type: string }
-        broker_port: { type: integer }
-        plugin_id:
-          type: string
-          description: The id the runtime registers under, e.g. plugin.python-a1b2c3d4.
-        mqtt_password: { type: string }
-        api_key: { type: string }
+        url: { type: string, example: http://homecore.local:8080 }
+        broker_host: { type: string, example: homecore.local }
+        broker_port: { type: integer, example: 1883 }
+        runtime_id: { type: string, example: rt-4f2a9c17 }
+        username: { type: string, example: plugin.python-rt4f2a9c17 }
+        secret: { type: string }
+        kind: { type: string, example: python }
+        abi: { type: string, example: cp312-manylinux_2_28 }
 
-    EnrollResponse:
+    IssuedRuntimeKey:
       type: object
+      description: Returned once, when a runtime is added or its login is reset.
       properties:
-        runtime_id: { type: string }
-        status:
+        runtime:
+          $ref: "#/components/schemas/RuntimeSummary"
+        key:
           type: string
-          enum: [pending, approved, denied]
-        enrollment_secret:
-          type: string
-          description: |
-            Bearer for the status poll. Returned once, at enrollment. Absent from
-            every later response.
-        code:
-          type: string
-          description: |
-            Short, human-comparable, and **not** a credential. It exists so an
-            administrator can confirm this container against the code in its
-            logs.
-          example: "482-193"
-        credentials:
-          $ref: "#/components/schemas/RuntimeCredentials"
-        reason:
-          type: string
-          description: Why a denial or refusal happened, when there is something useful to say.
-        expires_at:
-          type: string
-          format: date-time
-          description: When a pending record stops being answerable.
+          description: "`hcrt1.` and the details as base64url JSON."
+        details:
+          $ref: "#/components/schemas/RuntimeConnectionKey"
 
     RuntimeSummary:
       type: object
-      description: Admin-facing view. Never carries the secret or the credentials.
+      description: Admin-facing view. Never carries the secret.
       properties:
         runtime_id: { type: string }
-        status:
-          type: string
-          enum: [pending, approved, denied]
-        capabilities:
-          $ref: "#/components/schemas/RuntimeCapabilities"
-        host_version: { type: string }
-        sdk_version: { type: string }
-        hostname: { type: string }
-        network_mode: { type: string }
-        code:
-          type: string
-          description: Present only while pending.
-        source_ip:
-          type: string
-          description: Where the enrollment came from — part of the same judgement as the code.
-        created_at: { type: string, format: date-time }
-        last_seen_at: { type: string, format: date-time }
+        name: { type: string }
+        kind: { type: string }
+        abi: { type: string }
         plugin_id:
           type: string
-          description: Set once approved.
+          description: The id it registers under and its broker username.
+        homecore_url: { type: string }
+        created_at: { type: string, format: date-time }
+        arch:
+          type: string
+          description: Reported when it first connects.
+        host_version: { type: string }
+        hostname: { type: string }
+        network_mode: { type: string }
+        source_ip: { type: string }
+        last_seen_at: { type: string, format: date-time }
 
 
     # ---- Auth ----

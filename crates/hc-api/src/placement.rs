@@ -7,7 +7,7 @@
 //! Decision logic only — no HTTP, no downloads. See
 //! `docs/pluginRuntimesPlan.md`, piece 2.
 
-use hc_state::plugin_runtime_store::{RuntimeRecord, RuntimeStatus};
+use hc_state::plugin_runtime_store::RuntimeRecord;
 
 /// A runtime that could host something, reduced to what matching needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,24 +18,20 @@ pub struct Candidate {
     pub arch: String,
 }
 
-impl From<&RuntimeRecord> for Candidate {
-    fn from(r: &RuntimeRecord) -> Self {
-        Self {
-            runtime_id: r.runtime_id.clone(),
-            kind: r.kind.clone(),
-            abi: r.abi.clone(),
-            arch: r.arch.clone(),
-        }
-    }
-}
-
-/// Only approved runtimes can host anything. A pending one is a request, not a
-/// deployment target.
+/// A runtime can host something once it has connected and said what it runs
+/// on. Until then its architecture is unknown, and an artifact chosen for a
+/// guess could arrive unable to import.
 pub fn candidates(records: &[RuntimeRecord]) -> Vec<Candidate> {
     records
         .iter()
-        .filter(|r| r.status == RuntimeStatus::Approved)
-        .map(Candidate::from)
+        .filter_map(|r| {
+            Some(Candidate {
+                runtime_id: r.runtime_id.clone(),
+                kind: r.kind.clone(),
+                abi: r.abi.clone(),
+                arch: r.arch.clone()?,
+            })
+        })
         .collect()
 }
 
@@ -117,7 +113,7 @@ fn matches(offered: &Offered, c: &Candidate) -> bool {
 /// Say what is missing in terms of the next action, not in terms of matching.
 ///
 /// "No artifact matched" tells an operator nothing they can act on. Whether they
-/// need to enroll a runtime at all, or already have one of the right kind that is
+/// need to add a runtime at all, or already have one of the right kind that is
 /// simply the wrong ABI or architecture, are different problems with different
 /// fixes.
 fn explain_no_fit(offered: &Offered, runtimes: &[Candidate]) -> String {
@@ -129,7 +125,7 @@ fn explain_no_fit(offered: &Offered, runtimes: &[Candidate]) -> String {
 
     if same_kind.is_empty() {
         return format!(
-            "this plugin needs a {kinds} runtime, and none is enrolled — start one and approve it in Settings"
+            "this plugin needs a {kinds} runtime, and none is connected. Add one in Settings, Plugins, Runtimes, and paste its key into the runtime"
         );
     }
     let have = same_kind
@@ -143,7 +139,7 @@ fn explain_no_fit(offered: &Offered, runtimes: &[Candidate]) -> String {
         .map(|(k, abi, arch)| format!("{k} {abi} on {arch}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("this plugin publishes {want}; the enrolled {kinds} runtime does not match — {have}")
+    format!("this plugin publishes {want}; the connected {kinds} runtime does not match: {have}")
 }
 
 #[cfg(test)]
@@ -203,49 +199,43 @@ mod tests {
         }
     }
 
-    /// Only approved runtimes are targets. A pending one is a request someone
-    /// has not answered yet.
+    /// A runtime that has never connected has not said what it runs on, so it
+    /// hosts nothing yet.
     #[test]
-    fn pending_runtimes_are_not_candidates() {
+    fn a_runtime_is_a_candidate_once_it_has_said_its_arch() {
         use chrono::Utc;
         let mut rec = RuntimeRecord {
-            runtime_id: "rt-waiting".into(),
-            public_key: "K".into(),
+            runtime_id: "rt-new".into(),
+            name: "Python runtime 1".into(),
             kind: "python".into(),
             abi: "cp312-manylinux_2_28".into(),
-            arch: "x86_64".into(),
-            host_version: "0.1.0".into(),
-            sdk_version: "0.2.0".into(),
-            hostname: "h".into(),
-            network_mode: "host".into(),
-            status: RuntimeStatus::Pending,
-            code: None,
-            secret_hash: None,
-            api_key_hash: None,
-            source_ip: None,
-            plugin_id: None,
-            denial_count: 0,
-            cooldown_until: None,
+            plugin_id: "plugin.python-rtnew".into(),
+            key_hash: "h".into(),
+            homecore_url: "http://homecore.local:8080".into(),
             created_at: Utc::now(),
-            expires_at: None,
+            arch: None,
+            host_version: None,
+            hostname: None,
+            network_mode: None,
+            source_ip: None,
             last_seen_at: None,
         };
         assert!(candidates(std::slice::from_ref(&rec)).is_empty());
 
-        rec.status = RuntimeStatus::Approved;
+        rec.arch = Some("x86_64".into());
         assert_eq!(candidates(&[rec]).len(), 1);
     }
 
     /// The error has to name the next action. "No artifact matched" is true and
     /// useless.
     #[test]
-    fn no_runtime_at_all_says_to_enrol_one() {
+    fn no_runtime_at_all_says_to_add_one() {
         let msg = match decide(&python_only(), &[], None) {
             Placement::Impossible(m) => m,
             other => panic!("expected impossible, got {other:?}"),
         };
         assert!(msg.contains("python"), "{msg}");
-        assert!(msg.contains("none is enrolled"), "{msg}");
+        assert!(msg.contains("none is connected"), "{msg}");
     }
 
     /// Having a python runtime of the wrong ABI is a different problem from
