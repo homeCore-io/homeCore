@@ -2,13 +2,14 @@
 //!
 //! Core holds the desired state; the runtime pulls it. Pull rather than push
 //! because the container is the side that may vanish and come back on a
-//! different address — a runtime that lost its volume re-enrolls and asks again,
-//! and core does not need to have noticed anything.
+//! different address: a runtime that lost its volume asks again, and core does
+//! not need to have noticed anything.
 //!
-//! Both calls authenticate with the runtime's own API key, which identifies
+//! Every call authenticates with the runtime's secret from its key, which identifies
 //! exactly one runtime. There is no request here that could name someone else's.
 
 use anyhow::{bail, Context, Result};
+use hc_api_types::plugin_runtimes::{HelloRequest, HelloResponse};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -35,7 +36,7 @@ pub struct CoreClient {
     http: reqwest::Client,
     base_url: String,
     runtime_id: String,
-    api_key: String,
+    secret: String,
 }
 
 impl CoreClient {
@@ -43,17 +44,60 @@ impl CoreClient {
         http: reqwest::Client,
         base_url: impl Into<String>,
         runtime_id: impl Into<String>,
-        api_key: impl Into<String>,
+        secret: impl Into<String>,
     ) -> Self {
         Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             runtime_id: runtime_id.into(),
-            api_key: api_key.into(),
+            secret: secret.into(),
         }
     }
 
     /// What core says should be running here.
+    /// Check in: prove the key works and say what this runtime runs on.
+    ///
+    /// The error names what to do about it, because the runtime's page shows
+    /// it to the operator as it is.
+    pub async fn hello(&self, req: &HelloRequest) -> Result<HelloResponse> {
+        let url = format!(
+            "{}/api/v1/plugin-runtimes/{}/hello",
+            self.base_url, self.runtime_id
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.secret)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "couldn't reach homeCore at {}: {}",
+                    self.base_url,
+                    e.without_url()
+                )
+            })?;
+        let status = resp.status();
+        if status.is_success() {
+            return resp.json().await.context("reading homeCore's answer");
+        }
+        // Core's own words where it has them: they say which of the key, the
+        // language or the feature switch is the problem.
+        let body = resp.text().await.unwrap_or_default();
+        let said = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+        match (status, said) {
+            (_, Some(said)) => bail!("homeCore refused the key: {said}"),
+            (reqwest::StatusCode::NOT_FOUND, None) => bail!(
+                "{} answered, but has no plugin runtimes there; check the address in the key",
+                self.base_url
+            ),
+            (status, None) => bail!("homeCore answered {status}"),
+        }
+    }
+
     pub async fn placements(&self) -> Result<Vec<Desired>> {
         let url = format!(
             "{}/api/v1/plugin-runtimes/{}/placements",
@@ -62,19 +106,18 @@ impl CoreClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&self.secret)
             .send()
             .await
             .context("asking core for placements")?;
 
-        // A 404 here is core saying it does not know this runtime — the record
-        // was denied or removed while the container kept running. Worth its own
-        // message: the generic "unexpected status" reads like a bug in the
-        // endpoint rather than a decision an administrator made.
+        // A 404 here is core saying it does not know this key: the login was
+        // reset or the runtime removed while the container kept running. Worth
+        // its own message, since it is a decision an admin made.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             bail!(
-                "homeCore does not recognise this runtime — it may have been removed. \
-                 Delete the identity file and restart to enroll again."
+                "homeCore no longer knows this key: its login was reset, or the runtime \
+                 was removed. Paste a new key on this runtime's page."
             );
         }
         let status = resp.status();
@@ -104,7 +147,7 @@ impl CoreClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&self.secret)
             .send()
             .await
             .with_context(|| format!("fetching the artifact for {plugin_id}"))?;

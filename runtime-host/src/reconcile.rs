@@ -27,8 +27,18 @@ struct Running {
     /// The config it was launched with. A plugin reads its config once, at
     /// startup, so a change here is a restart rather than a no-op.
     config: String,
+    /// When this version was started, for the runtime's page.
+    since: chrono::DateTime<chrono::Utc>,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// One hosted plugin, as the runtime's page shows it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hosted {
+    pub plugin_id: String,
+    pub version: String,
+    pub since: chrono::DateTime<chrono::Utc>,
 }
 
 /// What one pass did, for the log line and for the tests.
@@ -90,6 +100,21 @@ impl Reconciler {
 
     pub fn hosted(&self) -> usize {
         self.running.len()
+    }
+
+    /// What is running now, sorted by plugin id.
+    pub fn hosted_list(&self) -> Vec<Hosted> {
+        let mut out: Vec<Hosted> = self
+            .running
+            .iter()
+            .map(|(id, r)| Hosted {
+                plugin_id: id.clone(),
+                version: r.version.clone(),
+                since: r.since,
+            })
+            .collect();
+        out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        out
     }
 
     /// Ask core what should be here, and make it so.
@@ -222,6 +247,7 @@ impl Reconciler {
             Running {
                 version: d.version.clone(),
                 config: d.config.clone(),
+                since: chrono::Utc::now(),
                 shutdown: tx,
                 task,
             },

@@ -10,9 +10,10 @@ name = "hc-runtime-host"
 path = "src/main.rs"
 
 [dependencies]
-# The enrollment wire types, shared with core so the two cannot drift.
+# The runtime wire types and the connection key, shared with core so the two
+# cannot drift.
 hc-api-types = { path = "../crates/hc-api-types" }
-# The runtime registers as an ordinary plugin once approved, so it uses the same
+# The runtime registers as an ordinary plugin once connected, so it uses the same
 # SDK every Rust plugin does rather than a private protocol.
 plugin-sdk-rs = { path = "../sdk/rust" }
 tokio        = { workspace = true }
@@ -24,9 +25,8 @@ tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono       = { workspace = true }
 toml         = { workspace = true }
-ed25519-dalek = "2"
-base64       = "0.23"
-getrandom    = "0.4"
+# The runtime's own page, where the key is pasted.
+axum         = { workspace = true }
 # Unpacking artifacts, and checking the digest core verified them under.
 tar          = "0.4"
 zstd         = "0.13"

@@ -47,13 +47,6 @@ impl BrokerHost {
         offered.to_string()
     }
 
-    /// True when core's broker answers only on its own loopback, and this
-    /// runtime reached core some other way. Worth a warning: unless the
-    /// container shares core's network, the broker cannot be reached from here.
-    pub fn loopback_only(&self, offered: &str) -> bool {
-        self.pinned.is_none() && is_loopback(offered) && !is_loopback(&self.core_host)
-    }
-
     /// A hosted plugin's config with its `[homecore] broker_host` made
     /// reachable from here. Everything else, comments included, is left as
     /// core wrote it: the operator edits this file in the app, and the copy on
@@ -102,11 +95,6 @@ fn is_unspecified(host: &str) -> bool {
     h.is_empty() || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified())
 }
 
-fn is_loopback(host: &str) -> bool {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
-    h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,13 +121,6 @@ mod tests {
         let b = BrokerHost::new("http://10.0.0.5:8080", Some("mqtt.lan".into()));
         assert_eq!(b.resolve("0.0.0.0"), "mqtt.lan");
         assert_eq!(b.resolve("10.0.0.9"), "mqtt.lan");
-    }
-
-    #[test]
-    fn a_loopback_broker_is_flagged_only_when_core_was_reached_elsewhere() {
-        assert!(BrokerHost::new("http://10.0.0.5:8080", None).loopback_only("127.0.0.1"));
-        assert!(!BrokerHost::new("http://127.0.0.1:8080", None).loopback_only("127.0.0.1"));
-        assert!(!BrokerHost::new("http://10.0.0.5:8080", None).loopback_only("0.0.0.0"));
     }
 
     #[test]

@@ -1,16 +1,16 @@
 //! The runtime, as a plugin.
 //!
-//! Once approved, the host connects to the broker with the credentials it was
-//! given and registers like any other plugin. That is the whole reason it was
+//! With a key, the host connects to the broker with the login inside it and
+//! registers like any other plugin. That is the whole reason it was
 //! designed this way: heartbeat, notices, log forwarding, remote config and
 //! capability actions all arrive for free, and homeCore needs no concept of a
-//! "runtime" beyond the enrollment record.
+//! "runtime" beyond the record of it being added.
 //!
 //! It owns no devices. What it hosts are other plugins, each of which registers
 //! separately with its own id and its own credentials.
 
 use anyhow::{Context, Result};
-use hc_api_types::plugin_runtimes::{RuntimeCapabilities, RuntimeCredentials};
+use hc_api_types::plugin_runtimes::{ConnectionKey, RuntimeCapabilities};
 use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, PluginNotice, RequiresRole};
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::json;
@@ -25,21 +25,22 @@ const HEARTBEAT_SECS: u64 = 30;
 /// every shipped plugin follows, because `run_managed` is what drives the MQTT
 /// connection and publishes only queue until it runs.
 pub async fn connect_and_register(
-    creds: &RuntimeCredentials,
+    key: &ConnectionKey,
+    broker_host: &str,
     caps: &RuntimeCapabilities,
     host_version: &str,
 ) -> Result<plugin_sdk_rs::PluginNotices> {
     let client = PluginClient::connect(PluginConfig {
-        broker_host: creds.broker_host.clone(),
-        broker_port: creds.broker_port,
-        plugin_id: creds.plugin_id.clone(),
-        password: creds.mqtt_password.clone(),
+        broker_host: broker_host.to_string(),
+        broker_port: key.broker_port,
+        plugin_id: key.username.clone(),
+        password: key.secret.clone(),
     })
     .await
     .with_context(|| {
         format!(
             "connecting to the broker at {}:{}",
-            creds.broker_host, creds.broker_port
+            broker_host, key.broker_port
         )
     })?;
 

@@ -1,15 +1,17 @@
 # homeCore plugin runtime for Python: ghcr.io/homecore-io/hc-runtime-python
 #
 # A runtime is a container the operator runs, which hosts any number of
-# homeCore plugins written in Python. homeCore never starts or stops it. On
-# first start it asks homeCore to join; once an admin approves it, homeCore
-# places plugins on it and the host inside installs, runs and supervises them,
-# one process and one virtualenv per plugin. See docs/pluginRuntimesPlan.md.
+# homeCore plugins written in Python. homeCore never starts or stops it. An
+# admin adds it in homeCore (Settings, Plugins, Runtimes), which shows a
+# connection key once; paste it into the runtime's page on port 8790, or set it
+# as HC_RUNTIME_KEY. homeCore then places plugins on it and the host inside
+# installs, runs and supervises them, one process and one virtualenv per
+# plugin. See docs/pluginRuntimesPlan.md.
 #
 # The image is three things:
 #
 #   hc-runtime-host   static Rust binary, built in the first stage from this
-#                     repo. Enrollment, credentials, fetching and checking
+#                     repo. The key, its page, fetching and checking
 #                     artifacts, supervision. The same binary for every language.
 #   adapter.toml      the only Python-specific part: how to make a venv, install
 #                     an artifact offline, and launch a plugin.
@@ -26,15 +28,15 @@
 #
 #   docker build -f docker/Dockerfile.runtime-python -t hc-runtime-python .
 #
-# Run (bridge networking; homeCore's [broker].host must be 0.0.0.0):
+# Run, then open http://<this host>:8790 and paste the key:
 #
-#   docker run -d --name pyhost-01 \
-#     -e HOMECORE_URL=http://<homecore-host>:8080 \
+#   docker run -d --name pyhost-01 -p 8790:8790 \
 #     -v pyhost-01:/var/lib/hc-runtime \
 #     hc-runtime-python
 #
-# then approve it in Settings › Plugins › Runtimes, after checking that the code
-# shown there matches the one in `docker logs pyhost-01`.
+# or skip the page with -e HC_RUNTIME_KEY=hcrt1.… . homeCore's broker has to
+# listen on the network; the Runtimes page in homeCore says so and offers to
+# change it.
 
 # ── Stage 1: the host ────────────────────────────────────────────────────────
 # Same toolchain and target as the released plugins: rust 1.99 on alpine, so
@@ -71,11 +73,13 @@ COPY docker/entrypoint-runtime.sh             /entrypoint.sh
 # HC_RUNTIME_ARCH is left to the host, which reports the arch it was built for.
 ENV HC_RUNTIME_KIND=python \
     HC_RUNTIME_ABI=cp312-manylinux_2_28 \
-    HC_RUNTIME_SDK_VERSION=per-plugin \
     HC_RUNTIME_DATA=/var/lib/hc-runtime \
     HC_RUNTIME_ADAPTER=/etc/hc-runtime/adapter.toml \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1
+
+# The runtime's own page: paste the key, see what it hosts.
+EXPOSE 8790
 
 VOLUME ["/var/lib/hc-runtime"]
 

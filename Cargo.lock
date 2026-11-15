@@ -1915,10 +1915,8 @@ name = "hc-runtime-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.23.0",
+ "axum 0.8.9",
  "chrono",
- "ed25519-dalek",
- "getrandom 0.4.2",
  "hc-api-types",
  "hex",
  "nix",
