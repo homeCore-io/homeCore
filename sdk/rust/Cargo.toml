@@ -1,6 +1,6 @@
 [package]
 name    = "plugin-sdk-rs"
-version    = "0.6.3"
+version    = "0.6.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -35,3 +35,7 @@ base64     = "0.23"
 default = []
 # Enabled by plugins via `plugin-sdk-rs/schema` from their own `schema` feature.
 schema = ["dep:schemars"]
+
+[dev-dependencies]
+# A client whose requests a test can read back: rumqttc's AsyncClient::from_senders.
+flume = "0.11"

@@ -31,6 +31,7 @@ pub use hc_types::config_descriptor;
 pub mod conformance;
 pub mod device_actions;
 pub mod mqtt_log_layer;
+mod stopping;
 pub mod streaming;
 pub mod supervised;
 pub mod ui;
@@ -114,6 +115,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+pub use stopping::{StopFuture, StopHandler};
 pub use streaming::{StreamContext, StreamingAction};
 pub use supervised::SUPERVISED_ENV;
 
@@ -940,6 +942,9 @@ pub struct ManagementHandle {
     /// Live streams, keyed by `request_id`. Entries are added on
     /// dispatch and removed after the action closure exits.
     active_streams: streaming::ActiveStreams,
+    /// Run when the plugin is asked to stop, before its devices go offline.
+    /// Set via [`ManagementHandle::with_stop_handler`].
+    stop_handler: Option<StopHandler>,
 }
 
 impl ManagementHandle {
@@ -1149,6 +1154,24 @@ impl ManagementHandle {
         let mut map: HashMap<String, StreamingAction> = (*self.streaming_actions).clone();
         map.insert(action.id.clone(), action);
         self.streaming_actions = Arc::new(map);
+        self
+    }
+
+    /// Something to do when the plugin is asked to stop (SIGTERM, which is how
+    /// homeCore and a plugin runtime stop a plugin, or Ctrl-C): leave what it
+    /// controls safe, sign out of a session. It may still publish and send
+    /// commands; those go out before the goodbye.
+    ///
+    /// Then, with or without one, the SDK marks every registered device
+    /// offline, reports the plugin offline, disconnects and exits the
+    /// process. homeCore kills a plugin 2 seconds after asking, so the handler
+    /// gets 1 second.
+    pub fn with_stop_handler<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.stop_handler = Some(Arc::new(move || Box::pin(f())));
         self
     }
 }
@@ -1797,6 +1820,7 @@ impl PluginClient {
             schema_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
+            stop_handler: None,
         })
     }
 
@@ -1930,8 +1954,42 @@ impl PluginClient {
         let subs = Arc::clone(&self.subscriptions);
         let held_alerts = Arc::clone(&self.alerts);
         info!(plugin_id = %plugin_id, "Plugin event loop starting");
+        // Asked to stop: say goodbye on a task of its own (it goes through the
+        // request queue only this loop drains), keep the loop running until
+        // the DISCONNECT is out, then exit.
+        let stop_signal = stopping::signal();
+        tokio::pin!(stop_signal);
+        let mut stop_by: Option<tokio::time::Instant> = None;
         loop {
-            match self.eventloop.poll().await {
+            let event = tokio::select! {
+                event = self.eventloop.poll() => event,
+                _ = &mut stop_signal, if stop_by.is_none() => {
+                    stop_by = Some(tokio::time::Instant::now() + stopping::DEADLINE);
+                    tokio::spawn(stopping::goodbye(
+                        self.client.clone(),
+                        plugin_id.clone(),
+                        Arc::clone(&self.devices),
+                        mgmt.as_ref().and_then(|m| m.stop_handler.clone()),
+                    ));
+                    continue;
+                }
+                _ = tokio::time::sleep_until(stop_by.unwrap_or_else(tokio::time::Instant::now)),
+                    if stop_by.is_some() =>
+                {
+                    warn!(plugin_id = %plugin_id, "Couldn't finish saying goodbye in time; stopping");
+                    std::process::exit(0);
+                }
+            };
+            if stop_by.is_some() {
+                if let Ok(rumqttc::Event::Outgoing(rumqttc::Outgoing::Disconnect)) = event {
+                    // One more turn so the write is flushed, then go.
+                    let _ = tokio::time::timeout(Duration::from_millis(100), self.eventloop.poll())
+                        .await;
+                    info!(plugin_id = %plugin_id, "Plugin stopped");
+                    std::process::exit(0);
+                }
+            }
+            match event {
                 Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => {
                     info!("Plugin connected to broker");
                     // On a task of its own, not here: everything below goes
@@ -2844,6 +2902,7 @@ mod async_and_files_tests {
             schema_handler: None,
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
+            stop_handler: None,
         }
     }
 

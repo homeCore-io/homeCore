@@ -205,7 +205,22 @@ async fn run(
                 let _ = tx.send(Event::Schema(id, schema));
             }
         })
-        .with_config_descriptor(config::config_descriptor());
+        .with_config_descriptor(config::config_descriptor())
+        // SIGTERM (homeCore stopping or restarting it) or Ctrl-C: leave every
+        // zone safe. The SDK runs this, sends what it queued, marks the zones
+        // offline and exits; homeCore kills a plugin 2 s after asking.
+        .with_stop_handler({
+            let tx = tx.clone();
+            move || {
+                let tx = tx.clone();
+                async move {
+                    info!("Stopping");
+                    let (rtx, rrx) = oneshot::channel();
+                    let _ = tx.send(Event::Shutdown(rtx));
+                    let _ = rrx.await;
+                }
+            }
+        });
     let mgmt = match config::config_schema() {
         Some(schema) => mgmt.with_config_schema(schema),
         None => mgmt,
@@ -281,41 +296,10 @@ async fn run(
     );
     let _ = tx.send(Event::Start);
 
-    stopping().await;
-    info!("Stopping");
-    let (rtx, rrx) = oneshot::channel();
-    let _ = tx.send(Event::Shutdown(rtx));
-    // Within homeCore's grace (2 s) before it kills a plugin that was asked.
-    let _ = tokio::time::timeout(Duration::from_secs(1), rrx).await;
-    // Give the event loop a moment to put the last commands on the wire.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Until the SDK stops the plugin (see the stop handler above).
+    let _ = run_handle.await;
     actor.abort();
-    run_handle.abort();
     Ok(())
-}
-
-/// SIGTERM (homeCore stopping or restarting it) or Ctrl-C.
-async fn stopping() {
-    #[cfg(unix)]
-    {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = %e, "No SIGTERM handler; Ctrl-C only");
-                    let _ = tokio::signal::ctrl_c().await;
-                    return;
-                }
-            };
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }
 
 /// A file beside the config.

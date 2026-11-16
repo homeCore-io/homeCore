@@ -156,6 +156,14 @@ async fn run(config_path: &str, mqtt_logs: MqttLogHandle) -> Result<()> {
     };
     let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
 
+    // Asked to stop (SIGTERM from homeCore, or Ctrl-C), the SDK runs this, then
+    // marks every device offline, reports the plugin offline and exits. Leave
+    // what the plugin controls safe here; it gets 1 second. Don't install a
+    // SIGTERM handler of your own.
+    let mgmt = mgmt.with_stop_handler(|| async {
+        info!("Stopping");
+    });
+
     // Its own screens — a page and its lights' card (`ui/`, built to
     // `ui/dist`). The plugin carries and serves them; the web app loads them,
     // and falls back to its generic screens without them. Delete `ui/` and

@@ -82,6 +82,14 @@ Plugins retry their first connection a few times (`MAX_ATTEMPTS`,
 `RETRY_DELAY_SECS`) and then exit; homeCore's supervisor takes over with
 backoff.
 
+**Stopping is the SDK's job.** homeCore (or a plugin runtime) stops a plugin
+with SIGTERM and kills it 2 seconds later. The event loop answers SIGTERM and
+Ctrl-C itself: it runs the plugin's `with_stop_handler` if there is one, marks
+every registered device offline, reports the plugin offline, disconnects and
+exits. Put what has to happen on the way out (leave a heater off, sign out of a
+device's session) in that handler, which gets 1 second. Don't install a SIGTERM
+handler of your own; it races the SDK's.
+
 ## 4. Devices
 
 - **Register** with `register_device_full(id, name, device_type, area,
@@ -485,6 +493,7 @@ point — not the SDKs, which pass slots through.
 | Actions answered asynchronously (`with_async_handler`) | ✓ | — | — | — |
 | Other devices' availability (`subscribe_availability`) | ✓ | — | — | — |
 | Other devices' schemas (`subscribe_schema`) | ✓ | — | — | — |
+| Devices offline on SIGTERM, with a stop hook | ✓ | ✓ | ✓ | ✓ |
 
 The non-Rust SDKs are their own repos (`../sdks/`), released by tag with a
 GitHub Release; none is on a package registry yet (see
