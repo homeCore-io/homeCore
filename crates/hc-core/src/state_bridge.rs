@@ -366,6 +366,26 @@ impl StateBridge {
             return Ok(());
         }
 
+        // homecore/plugins/{id}/status: "offline" is a plugin saying goodbye as
+        // it stops. Taken at its word rather than waiting out the heartbeat
+        // timeout, so a stopped plugin stops reading as active at once. The
+        // registry ignores it for a plugin it does not count as active, which
+        // keeps a retained goodbye from an earlier run from overriding one
+        // that is starting or was stopped on purpose.
+        if parts.len() == 4
+            && parts[0] == "homecore"
+            && parts[1] == "plugins"
+            && parts[3] == "status"
+        {
+            if payload == b"offline" {
+                let _ = self.pub_bus.publish(Event::PluginOffline {
+                    timestamp: Utc::now(),
+                    plugin_id: parts[2].to_string(),
+                });
+            }
+            return Ok(());
+        }
+
         // homecore/plugins/{id}/heartbeat
         if parts.len() >= 4
             && parts[0] == "homecore"
@@ -1655,6 +1675,35 @@ mod alert_tests {
             rx.try_recv().unwrap(),
             Event::PluginAlerts { alerts, .. } if alerts.is_empty()
         ));
+    }
+
+    /// A plugin that says "offline" as it stops is taken at its word; any other
+    /// status it publishes is left to its heartbeat.
+    #[tokio::test]
+    async fn a_plugin_saying_offline_is_marked_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(
+            &dir.path().join("s.redb").to_string_lossy(),
+            &dir.path().join("h.db").to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let pub_bus = EventBus::new(16);
+        let mut rx = pub_bus.subscribe();
+        let bridge = StateBridge::new(EventBus::new(16), pub_bus, store);
+        bridge
+            .handle_mqtt("homecore/plugins/plugin.demo/status", b"offline")
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::PluginOffline { plugin_id, .. } if plugin_id == "plugin.demo"
+        ));
+        bridge
+            .handle_mqtt("homecore/plugins/plugin.demo/status", b"active")
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     /// The security choice is a person's, like a name override: a plugin
