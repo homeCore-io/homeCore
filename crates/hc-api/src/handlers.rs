@@ -5579,7 +5579,7 @@ pub struct PluginStreamQuery {
 /// `?token=<jwt>` (query) or `Authorization: Bearer <jwt>` (header) or
 /// falls back to the IP whitelist. Requires `plugins:read` scope, except
 /// for the stream of an action the manifest opens to everyone
-/// (`requires_role` user or read only): that one only its starter and
+/// (`requires_role: signed_in`): that one only its starter and
 /// callers with `plugins:write` may read, whatever else they hold.
 pub async fn get_plugin_stream_sse(
     State(s): State<AppState>,
@@ -6500,11 +6500,11 @@ pub async fn post_plugin_query(
 /// `set_config`/`set_log_level` set (e.g. yolink's `rescan_devices`).
 ///
 /// Who may call it comes from the manifest ([`crate::plugin_access::may_run`]):
-/// an action declared `requires_role: user` or `read_only` is open to every
-/// signed-in caller; one declared `admin` needs the admin role; one the
-/// manifest does not declare needs `plugins:write`, failing closed when core
-/// does not know what an action does. `respond` and `cancel` aimed at a
-/// stream of an open action are allowed to whoever started that stream (and
+/// an action declared `requires_role: signed_in` is open to every signed-in
+/// caller; everything else, declared or not, needs `plugins:write`, and one
+/// declared `admin` the admin role too, failing closed when core does not
+/// know what an action does. `respond` and `cancel` aimed at a stream of a
+/// `signed_in` action are allowed to whoever started that stream (and
 /// admins); anyone else's are refused.
 pub async fn post_plugin_command(
     State(s): State<AppState>,

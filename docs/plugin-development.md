@@ -162,7 +162,7 @@ attribute.
 
 Declared on the **capability manifest** (`with_capabilities`), each with a
 label, a description, a params schema (a JSON-schema subset), a
-`requires_role` (`ReadOnly`, `User`, `Admin`), optional `timeout_ms`, `stream`
+`requires_role` (`ReadOnly`, `User`, `Admin`, `SignedIn`), optional `timeout_ms`, `stream`
 (live stages over SSE), `concurrency`, and `danger` (a screen asks first).
 Answer an action that talks to a device with `with_async_handler` (a future),
 not `with_custom_handler`, which must not block.
@@ -186,12 +186,13 @@ not `with_custom_handler`, which must not block.
   transports and for a plugin's own key. Core drops any `caller` the client
   sent, so trust it. For a key, judge by `scopes`, not `role`. Do for a
   caller only what their scopes allow.
-- **Who may call.** `requires_role: user` or `read_only` opens an action to
-  every signed-in person, a household member included. Use it only for an
-  action that is safe for anyone in the house, or that limits itself by
-  `caller`. `admin` keeps it for admins, as does leaving it off the manifest.
-  The stream of an open action, and its `respond` and `cancel`, belong to
-  whoever started it (and admins).
+- **Who may call.** `requires_role: signed_in` opens an action to every
+  signed-in person or key, a household member included. It is opt-in: use it
+  only for an action that is safe for anyone in the house, or that limits
+  itself by `caller`. Everything else needs `plugins:write` on `command`:
+  `user` (the default), `read_only`, and an action left off the manifest;
+  `admin` needs the admin role too. The stream of a `signed_in` action, and
+  its `respond` and `cancel`, belong to whoever started it (and admins).
 - **`api_scopes` and `api_access`.** A manifest listing `api_scopes` gets the
   plugin an API key, made by core each time the manifest is published (every
   start) and sent as the management action `api_access` with params `{url,

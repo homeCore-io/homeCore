@@ -852,9 +852,9 @@ async fn open_stream(h: &HttpHarness, token: &str, request_id: &str) -> Result<u
     Ok(resp.status().as_u16())
 }
 
-/// An action the manifest declares `requires_role: user` is open to every
-/// signed-in person, a household member included; its stream and its prompts
-/// are its starter's (and admins'), nobody else's.
+/// An action the manifest declares `requires_role: signed_in` is open to
+/// every signed-in person, a household member included; its stream and its
+/// prompts are its starter's (and admins'), nobody else's.
 #[tokio::test]
 async fn open_actions_are_for_everyone_and_their_streams_for_their_starter() -> Result<()> {
     let h = boot_http_harness().await?;
@@ -862,7 +862,7 @@ async fn open_actions_are_for_everyone_and_their_streams_for_their_starter() -> 
     let resp = command(
         &h,
         &h.member_token,
-        json!({ "action": "demo_awaiting_user" }),
+        json!({ "action": "demo_signed_in_prompt" }),
     )
     .await?;
     assert_eq!(resp.status(), 200);
@@ -884,12 +884,14 @@ async fn open_actions_are_for_everyone_and_their_streams_for_their_starter() -> 
     Ok(())
 }
 
-/// What the manifest keeps for admins, and anything it does not declare,
-/// stays with plugins:write.
+/// The default `user`, `admin`, and anything the manifest does not declare
+/// stay with plugins:write: declaring `user` opens nothing.
 #[tokio::test]
 async fn admin_and_undeclared_actions_stay_with_admins() -> Result<()> {
     let h = boot_http_harness().await?;
     for token in [&h.member_token, &h.user_token] {
+        let resp = command(&h, token, json!({ "action": "demo_cancelable" })).await?;
+        assert_eq!(resp.status(), 403, "requires_role user is not open");
         let resp = command(&h, token, json!({ "action": "demo_admin_only" })).await?;
         assert_eq!(resp.status(), 403);
         let resp = command(&h, token, json!({ "action": "not_in_the_manifest" })).await?;

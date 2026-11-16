@@ -2919,8 +2919,9 @@ paths:
         Other query parameters are passed as params (as strings), with the
         verified `caller` as `command` adds it. The same role checks as
         `command`: open to every signed-in caller for an action declared
-        `requires_role` user or read_only, admins only for `admin`; the action
-        must be on the plugin's manifest.
+        `requires_role: signed_in`, `plugins:write` for anything else and the
+        admin role too for `admin`; the action must be on the plugin's
+        manifest.
 
         Added in core 0.1.87.
       tags: [plugins]
@@ -5307,12 +5308,15 @@ paths:
                             enum: [add, update, remove]
                         requires_role:
                           type: string
-                          enum: [admin, user, read_only]
+                          enum: [admin, user, read_only, signed_in]
                           default: user
                           description: |
                             Who may run it through `POST /plugins/{id}/command`:
-                            `user` and `read_only` are open to every signed-in
-                            caller, `admin` to admins only.
+                            `signed_in` is open to every signed-in caller of
+                            any role (opt-in); `user` (the default) and
+                            `read_only` need `plugins:write`; `admin` needs
+                            the admin role too. `read_only` actions also
+                            answer on `POST /plugins/{id}/query`.
                         timeout_ms:
                           type: integer
                           format: int64
@@ -5376,13 +5380,13 @@ paths:
         …, "response": {…}}` after an `awaiting_user` event. The plugin
         replies `{request_id, status: "ok" | "error", error?}`.
 
-        **Who may call it:** an action the manifest
-        declares `requires_role: user` or `read_only` is open to every
-        signed-in caller, whatever their role; the plugin is told who asked
-        (`caller`) and keeps within their scopes. An action declared
-        `requires_role: admin` needs the `admin` role and `plugins:write`; an
-        action the manifest does not declare needs `plugins:write`. `cancel`
-        and `respond` aimed at a stream of an open action are allowed to
+        **Who may call it:** an action the manifest declares
+        `requires_role: signed_in` is open to every signed-in caller, whatever
+        their role; the plugin is told who asked (`caller`) and keeps within
+        their scopes. Every other action needs `plugins:write`: one declared
+        `user` (the default) or `read_only`, and one the manifest does not
+        declare. One declared `admin` needs the `admin` role as well. `cancel`
+        and `respond` aimed at a stream of a `signed_in` action are allowed to
         whoever started that stream and to callers with `plugins:write`, and
         refused to everyone else.
       tags: [plugins]
@@ -5522,7 +5526,7 @@ paths:
         accepted; otherwise a JWT is read from `Authorization: Bearer <jwt>` or,
         failing that, from the `token` query parameter. The token must carry the
         `plugins:read` scope, except for the stream of an action the manifest
-        opens to everyone (`requires_role` user or read_only): that stream may
+        opens to everyone (`requires_role: signed_in`): that stream may
         be someone's conversation, so only the caller who started it and
         callers with `plugins:write` may read it, whatever else they hold.
       tags: [plugins]

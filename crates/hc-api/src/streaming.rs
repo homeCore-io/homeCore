@@ -188,7 +188,7 @@ pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
 
 /// Who started a streaming request, kept past its end so its SSE replay and
 /// its `respond`/`cancel` stay theirs. An action the manifest opens to every
-/// signed-in person (`requires_role` user or read only) may be a private
+/// signed-in person (`requires_role: signed_in`) may be a private
 /// conversation; only its starter, or an admin, may read or answer it.
 #[derive(Clone, Debug)]
 pub struct StreamOwner {

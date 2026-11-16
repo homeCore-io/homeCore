@@ -4,9 +4,9 @@
 //! Three things, all about the boundary between a person and a plugin:
 //!
 //! - **Who may run an action.** An action the manifest declares
-//!   `requires_role: user` or `read_only` is open to every signed-in caller;
-//!   one declared `admin`, and any action the manifest does not declare at
-//!   all, needs `plugins:write` (admins). [`may_run`].
+//!   `requires_role: signed_in` is open to every signed-in caller; every other
+//!   action, declared or not, needs `plugins:write` (admins), and one declared
+//!   `admin` the admin role too. [`may_run`].
 //! - **Who asked.** Every action core forwards carries the verified caller
 //!   (`caller`: uid, username, role, scopes, kind), and any `caller` the
 //!   client put in the body is dropped first, so a plugin can trust it.
@@ -40,28 +40,27 @@ pub const NEVER_FOR_PLUGINS: &[&str] = &["users:write", "api_keys:admin"];
 
 /// Whether an action declared this way is open to every signed-in caller.
 pub fn is_open(requires_role: Option<RequiresRole>) -> bool {
-    matches!(
-        requires_role,
-        Some(RequiresRole::User) | Some(RequiresRole::ReadOnly)
-    )
+    matches!(requires_role, Some(RequiresRole::SignedIn))
 }
 
 /// May `claims` run an action declared with `requires_role` (`None`: the
 /// manifest does not declare it)? `Err` is the 403 to send.
 ///
-/// Every role satisfies `user` and `read_only`: a household member chats with
-/// the assistant as much as an admin does, and what the plugin then does for
-/// them is bounded by the scopes it is told they hold. `admin` needs the
-/// admin role and `plugins:write`; an undeclared action needs `plugins:write`,
-/// as every action did before manifests said who they are for. An API key's
-/// role is a decorative admin, so for a key `plugins:write` is what decides.
+/// `signed_in` is the one level open to callers without `plugins:write`, and
+/// it is opt-in: a household member chats with the assistant as much as an
+/// admin does, and what the plugin then does for them is bounded by the
+/// scopes it is told they hold. `user` (the default), `read_only` and an
+/// undeclared action need `plugins:write`, as every action did before; plugins
+/// declared `user` long before it meant anything, so it cannot open them.
+/// `admin` needs the admin role too. An API key's role is a decorative admin,
+/// so for a key `plugins:write` is what decides.
 #[allow(clippy::result_large_err)]
 pub fn may_run(
     claims: &Claims,
     requires_role: Option<RequiresRole>,
 ) -> Result<(), axum::response::Response> {
     match requires_role {
-        Some(RequiresRole::User) | Some(RequiresRole::ReadOnly) => Ok(()),
+        Some(RequiresRole::SignedIn) => Ok(()),
         Some(RequiresRole::Admin) => {
             if claims.has_scope("plugins:write") && claims.role == Role::Admin {
                 Ok(())
@@ -76,7 +75,7 @@ pub fn may_run(
                     .into_response())
             }
         }
-        None => {
+        Some(RequiresRole::User) | Some(RequiresRole::ReadOnly) | None => {
             if claims.has_scope("plugins:write") {
                 Ok(())
             } else {
@@ -551,32 +550,51 @@ mod tests {
     }
 
     #[test]
-    fn everyone_signed_in_runs_open_actions_and_only_admins_the_rest() {
+    fn only_signed_in_opens_an_action_to_everyone() {
         let household = person(Role::HouseholdMember);
         let read_only = person(Role::ReadOnly);
+        let observer = person(Role::Observer);
         let user = person(Role::User);
         let admin = person(Role::Admin);
-        for c in [&household, &read_only, &user, &admin] {
-            assert!(may_run(c, Some(RequiresRole::User)).is_ok());
-            assert!(may_run(c, Some(RequiresRole::ReadOnly)).is_ok());
+        for c in [&household, &read_only, &observer, &user, &admin] {
+            assert!(may_run(c, Some(RequiresRole::SignedIn)).is_ok());
         }
-        for c in [&household, &read_only, &user] {
-            let no = may_run(c, Some(RequiresRole::Admin)).unwrap_err();
-            assert_eq!(no.status(), StatusCode::FORBIDDEN);
-            let no = may_run(c, None).unwrap_err();
-            assert_eq!(no.status(), StatusCode::FORBIDDEN);
+        // The default `user`, `read_only`, `admin` and undeclared actions
+        // stay with plugins:write, as before roles were declared.
+        let closed = [
+            Some(RequiresRole::User),
+            Some(RequiresRole::ReadOnly),
+            Some(RequiresRole::Admin),
+            None,
+        ];
+        for c in [&household, &read_only, &observer, &user] {
+            for r in closed {
+                let no = may_run(c, r).unwrap_err();
+                assert_eq!(no.status(), StatusCode::FORBIDDEN);
+            }
         }
-        assert!(may_run(&admin, Some(RequiresRole::Admin)).is_ok());
-        assert!(may_run(&admin, None).is_ok());
+        for r in closed {
+            assert!(may_run(&admin, r).is_ok());
+        }
 
         // A key is judged by its scopes: its role is a decorative admin.
         let narrow = key(&["devices:read"], Uuid::new_v4(), "panel");
-        assert!(may_run(&narrow, Some(RequiresRole::User)).is_ok());
+        assert!(may_run(&narrow, Some(RequiresRole::SignedIn)).is_ok());
+        assert!(may_run(&narrow, Some(RequiresRole::User)).is_err());
         assert!(may_run(&narrow, Some(RequiresRole::Admin)).is_err());
         assert!(may_run(&narrow, None).is_err());
         let wide = key(&["plugins:write"], Uuid::new_v4(), "ops");
         assert!(may_run(&wide, Some(RequiresRole::Admin)).is_ok());
         assert!(may_run(&wide, None).is_ok());
+    }
+
+    #[test]
+    fn only_a_signed_in_actions_stream_is_its_starters() {
+        assert!(is_open(Some(RequiresRole::SignedIn)));
+        assert!(!is_open(Some(RequiresRole::User)));
+        assert!(!is_open(Some(RequiresRole::ReadOnly)));
+        assert!(!is_open(Some(RequiresRole::Admin)));
+        assert!(!is_open(None));
     }
 
     #[test]

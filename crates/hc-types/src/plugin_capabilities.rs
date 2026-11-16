@@ -87,10 +87,20 @@ pub enum ItemOp {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RequiresRole {
+    /// Admins only (`plugins:write` and the admin role).
     Admin,
+    /// The default: like every action before roles were declared, it needs
+    /// `plugins:write`.
     #[default]
     User,
+    /// Reads only. Also answers on `POST /plugins/{id}/query` for anyone who
+    /// can read devices; on `command` it needs `plugins:write`.
     ReadOnly,
+    /// Open to every signed-in person or key, whatever their role, through
+    /// `command` and `upload`. The plugin is told who asked (`caller`) and
+    /// keeps within their scopes; the stream, `respond` and `cancel` belong
+    /// to whoever started it (and admins). Opt-in, never a default.
+    SignedIn,
 }
 
 #[cfg(test)]
@@ -193,5 +203,12 @@ mod tests {
             ..Default::default()
         };
         assert!(!serde_json::to_string(&none).unwrap().contains("api_scopes"));
+    }
+
+    #[test]
+    fn signed_in_is_its_own_wire_name() {
+        let r: RequiresRole = serde_json::from_value(json!("signed_in")).unwrap();
+        assert_eq!(r, RequiresRole::SignedIn);
+        assert_eq!(serde_json::to_value(r).unwrap(), json!("signed_in"));
     }
 }
