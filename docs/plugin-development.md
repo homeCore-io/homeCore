@@ -176,6 +176,33 @@ not `with_custom_handler`, which must not block.
   streaming action keeps working). From a screen: `host.upload(action, file,
   params)`. Example: hc-wled's `install_firmware_file`.
 
+### Who asked, who may ask, and the plugin's own REST access
+
+- **`caller`.** Every action core forwards (`command`, `query`, `upload`)
+  carries the verified caller in its params: `{"uid", "username", "role",
+  "scopes", "kind"}`. `kind` is `user`, `api_key`, `local_admin` or
+  `whitelist`; `role` is the role's wire name (`admin`, `user`,
+  `household_member`, `read_only`, ...); `uid` is null for the local
+  transports and for a plugin's own key. Core drops any `caller` the client
+  sent, so trust it. For a key, judge by `scopes`, not `role`. Do for a
+  caller only what their scopes allow.
+- **Who may call.** `requires_role: user` or `read_only` opens an action to
+  every signed-in person, a household member included. Use it only for an
+  action that is safe for anyone in the house, or that limits itself by
+  `caller`. `admin` keeps it for admins, as does leaving it off the manifest.
+  The stream of an open action, and its `respond` and `cancel`, belong to
+  whoever started it (and admins).
+- **`api_scopes` and `api_access`.** A manifest listing `api_scopes` gets the
+  plugin an API key, made by core each time the manifest is published (every
+  start) and sent as the management action `api_access` with params `{url,
+  key, scopes}`. `url` is homeCore's REST base as the plugin reaches it: the
+  address its runtime was added with, or loopback for a plugin core runs.
+  `users:write` and `api_keys:admin` are never granted. Keep the key in
+  memory only: the previous one stops working when a new one is made, and the
+  key is deleted when the plugin is uninstalled. A plugin that does not
+  answer `api_access` has its key deleted. The key shows in the API keys list
+  as `plugin <id>`, and in the audit log as `api_key:plugin <id>`.
+
 ## 6. Settings
 
 A plugin's settings are its TOML file, which homeCore owns. Declare a

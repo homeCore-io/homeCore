@@ -29,7 +29,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth_middleware::{
-    AutomationsRead, AutomationsWrite, DevicesCommand, DevicesRead, PluginsWrite,
+    AuthUser, AutomationsRead, AutomationsWrite, DevicesCommand, DevicesRead,
 };
 use crate::AppState;
 
@@ -565,7 +565,7 @@ pub async fn press_alert(
             };
             crate::handlers::post_plugin_command(
                 State(s),
-                PluginsWrite(claims),
+                AuthUser(claims),
                 Path(plugin_id),
                 Json(body),
             )
