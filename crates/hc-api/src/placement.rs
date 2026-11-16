@@ -13,6 +13,8 @@ use hc_state::plugin_runtime_store::{PlacementRecord, RuntimeRecord};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub runtime_id: String,
+    /// What the admin called it, for messages.
+    pub name: String,
     pub kind: String,
     pub abi: String,
     pub arch: String,
@@ -44,6 +46,7 @@ pub fn candidates(
             };
             Some(Candidate {
                 runtime_id: r.runtime_id.clone(),
+                name: r.name.clone(),
                 kind: r.kind.clone(),
                 abi: r.abi.clone(),
                 arch: r.arch.clone()?,
@@ -91,7 +94,8 @@ pub fn decide(offered: &Offered, runtimes: &[Candidate], requested: Option<&str>
         };
         if let Some((holds, max)) = rt.full {
             return Placement::Impossible(format!(
-                "`{want}` is full: it holds {holds} of the {max} plugins it may. Raise its limit in Plugin runtimes, or choose another"
+                "{} is full: it holds {holds} of the {max} plugins it may. Raise its limit in Plugin runtimes, or choose another",
+                rt.name
             ));
         }
         return if matches(offered, rt) {
@@ -121,7 +125,7 @@ pub fn decide(offered: &Offered, runtimes: &[Candidate], requested: Option<&str>
             .filter(|c| matches(offered, c))
             .filter_map(|c| {
                 c.full
-                    .map(|(holds, max)| format!("{} ({holds} of {max})", c.runtime_id))
+                    .map(|(holds, max)| format!("{} ({holds} of {max})", c.name))
             })
             .collect();
         if !full.is_empty() {
@@ -188,6 +192,7 @@ mod tests {
     fn rt(id: &str, kind: &str, abi: &str, arch: &str) -> Candidate {
         Candidate {
             runtime_id: id.into(),
+            name: id.into(),
             kind: kind.into(),
             abi: abi.into(),
             arch: arch.into(),
@@ -311,7 +316,7 @@ mod tests {
             Placement::Impossible(m) => m,
             other => panic!("expected impossible, got {other:?}"),
         };
-        assert!(msg.contains("full") && msg.contains("2 of 2"), "{msg}");
+        assert!(msg.contains("Pi (2 of 2)"), "{msg}");
         assert!(matches!(
             decide(&python_only(), &new, Some("rt-pi")),
             Placement::Impossible(_)
