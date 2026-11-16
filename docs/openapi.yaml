@@ -8997,6 +8997,12 @@ components:
         hostname: { type: string }
         network_mode: { type: string }
         source_ip: { type: string }
+        page_port:
+          type: integer
+          description: The port of the runtime's own page inside its container. Absent when the page is off, or from runtimes older than host 0.2.1.
+        page_url:
+          type: string
+          description: The page's address as the operator set it (HC_RUNTIME_PAGE_URL), when the address homeCore sees isn't one a browser can open.
         last_seen_at: { type: string, format: date-time }
         outdated:
           type: boolean

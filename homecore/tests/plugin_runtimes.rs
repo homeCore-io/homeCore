@@ -27,6 +27,8 @@ fn hello_body(kind: &str) -> HelloRequest {
         host_version: "0.2.0".into(),
         hostname: "pyhost".into(),
         network_mode: "bridge".into(),
+        page_port: Some(8790),
+        page_url: None,
     }
 }
 
@@ -118,6 +120,7 @@ async fn a_runtime_is_added_connects_and_is_reset_and_removed() {
         .unwrap();
     assert_eq!(list["runtimes"][0]["arch"], "x86_64");
     assert_eq!(list["runtimes"][0]["source_ip"], "127.0.0.1");
+    assert_eq!(list["runtimes"][0]["page_port"], 8790);
 
     let placements = |secret: String| {
         let http = http.clone();

@@ -315,6 +315,8 @@ mod tests {
                 hostname: None,
                 network_mode: None,
                 source_ip: None,
+                page_port: None,
+                page_url: None,
                 last_seen_at: None,
             })
             .unwrap();

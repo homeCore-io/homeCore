@@ -151,6 +151,10 @@ async fn main() -> Result<()> {
         Err(e) => (Some(format!("{e:#}")), None),
     };
 
+    let port: u16 = env_or("HC_RUNTIME_PAGE_PORT", "8790")
+        .parse()
+        .unwrap_or(8790);
+
     let (new_key_tx, mut new_key_rx) = tokio::sync::watch::channel::<Option<ConnectionKey>>(None);
     let shared = Arc::new(Shared {
         status: Default::default(),
@@ -163,6 +167,11 @@ async fn main() -> Result<()> {
             host_version: env!("CARGO_PKG_VERSION").to_string(),
             hostname: hostname(),
             network_mode: env_or("HC_RUNTIME_NETWORK_MODE", "unknown"),
+            page_port: (port != 0).then_some(port),
+            page_url: std::env::var("HC_RUNTIME_PAGE_URL")
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| !u.is_empty()),
         },
         broker_pin: std::env::var("HC_RUNTIME_BROKER_HOST")
             .ok()
@@ -177,9 +186,6 @@ async fn main() -> Result<()> {
         s.message = problem;
     });
 
-    let port: u16 = env_or("HC_RUNTIME_PAGE_PORT", "8790")
-        .parse()
-        .unwrap_or(8790);
     if port != 0 {
         tokio::spawn(page::serve(shared.clone(), port));
     }

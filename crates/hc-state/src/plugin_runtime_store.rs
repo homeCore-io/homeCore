@@ -68,6 +68,10 @@ pub struct RuntimeRecord {
     #[serde(default)]
     pub source_ip: Option<String>,
     #[serde(default)]
+    pub page_port: Option<u16>,
+    #[serde(default)]
+    pub page_url: Option<String>,
+    #[serde(default)]
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
@@ -278,6 +282,8 @@ mod tests {
             hostname: None,
             network_mode: None,
             source_ip: None,
+            page_port: None,
+            page_url: None,
             last_seen_at: None,
         }
     }

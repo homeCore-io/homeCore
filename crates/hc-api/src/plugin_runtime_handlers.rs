@@ -87,6 +87,8 @@ fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
         hostname: rec.hostname.clone(),
         network_mode: rec.network_mode.clone(),
         source_ip: rec.source_ip.clone(),
+        page_port: rec.page_port,
+        page_url: rec.page_url.clone(),
         last_seen_at: rec.last_seen_at,
         outdated: svc::is_outdated(rec.host_version.as_deref()),
         min_host_version: svc::MIN_HOST_VERSION.to_string(),
@@ -219,6 +221,8 @@ pub async fn add_runtime(
         hostname: None,
         network_mode: None,
         source_ip: None,
+        page_port: None,
+        page_url: None,
         last_seen_at: None,
     };
     match issue_key(&state, rec) {
@@ -459,6 +463,10 @@ pub async fn hello(
     rec.hostname = Some(req.hostname);
     rec.network_mode = Some(req.network_mode);
     rec.source_ip = Some(addr.ip().to_string());
+    rec.page_port = req.page_port;
+    rec.page_url = req
+        .page_url
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
     rec.last_seen_at = Some(Utc::now());
     if let Err(e) = store(&state).upsert(&rec) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
