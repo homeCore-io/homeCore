@@ -53,6 +53,8 @@ fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
         network_mode: rec.network_mode.clone(),
         source_ip: rec.source_ip.clone(),
         last_seen_at: rec.last_seen_at,
+        outdated: svc::is_outdated(rec.host_version.as_deref()),
+        min_host_version: svc::MIN_HOST_VERSION.to_string(),
     }
 }
 
@@ -402,6 +404,7 @@ pub async fn hello(
             runtime_id: rec.runtime_id,
             name: rec.name,
             plugin_id: rec.plugin_id,
+            min_host_version: Some(svc::MIN_HOST_VERSION.to_string()),
         }),
     )
         .into_response()

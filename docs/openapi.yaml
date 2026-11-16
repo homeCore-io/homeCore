@@ -6026,6 +6026,7 @@ paths:
                   runtime_id: { type: string }
                   name: { type: string }
                   plugin_id: { type: string }
+                  min_host_version: { type: string }
         "401":
           description: The key was reset, or the runtime was removed
         "409":
@@ -8895,6 +8896,12 @@ components:
         network_mode: { type: string }
         source_ip: { type: string }
         last_seen_at: { type: string, format: date-time }
+        outdated:
+          type: boolean
+          description: The runtime's host is older than this homeCore expects; pull the newer image.
+        min_host_version:
+          type: string
+          description: The oldest runtime host this homeCore works with.
 
 
     # ---- Auth ----

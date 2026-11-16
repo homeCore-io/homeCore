@@ -121,6 +121,10 @@ pub struct HelloResponse {
     pub runtime_id: String,
     pub name: String,
     pub plugin_id: String,
+    /// The oldest runtime host this homeCore works with. A runtime older than
+    /// this says so on its own page.
+    #[serde(default)]
+    pub min_host_version: Option<String>,
 }
 
 /// A runtime as the admin list shows it. Never carries the secret.
@@ -145,6 +149,13 @@ pub struct RuntimeSummary {
     pub source_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// True when the runtime's host is older than this homeCore expects. Updating
+    /// it is pulling the newer image and restarting the container.
+    #[serde(default)]
+    pub outdated: bool,
+    /// The oldest runtime host this homeCore works with.
+    #[serde(default)]
+    pub min_host_version: String,
 }
 
 #[cfg(test)]

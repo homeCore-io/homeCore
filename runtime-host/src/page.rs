@@ -50,6 +50,8 @@ pub struct Status {
     pub arch: String,
     pub key_from_env: bool,
     pub last_heard: Option<chrono::DateTime<chrono::Utc>>,
+    /// Set when homeCore expects a newer runtime than this one.
+    pub outdated: Option<String>,
     pub plugins: Vec<PluginRow>,
 }
 
@@ -82,6 +84,26 @@ impl Shared {
             f(&mut s);
         }
     }
+}
+
+/// True when version `a` is older than `b`, comparing dotted numbers.
+pub fn older(a: &str, b: &str) -> bool {
+    let parts = |s: &str| -> Vec<u64> {
+        s.split(['.', '-', '+'])
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (x, y) = (parts(a), parts(b));
+    for i in 0..x.len().max(y.len()) {
+        let (l, r) = (
+            x.get(i).copied().unwrap_or(0),
+            y.get(i).copied().unwrap_or(0),
+        );
+        if l != r {
+            return l < r;
+        }
+    }
+    false
 }
 
 /// The broker host to dial for a key: the operator's pin, else the key's.
@@ -247,6 +269,7 @@ li .s{min-width:170px;font-size:13px;font-weight:600;color:var(--good)}li.loopin
 <main>
   <div class="row"><h1 id="title">Connect to homeCore</h1><span id="pill" class="pill"><i></i><span id="pilltext">Not connected</span></span></div>
   <p id="problem" class="err hidden"></p>
+  <p id="outdated" class="note hidden"></p>
 
   <section id="setup" class="hidden" style="display:flex;flex-direction:column;gap:18px">
     <p class="muted" style="font-size:15px">In homeCore, open Settings, Plugins, Runtimes and choose Add runtime. Copy the key it shows and paste it here.</p>
@@ -300,6 +323,7 @@ async function refresh(){
   const labels = {not_connected:'Not connected',connecting:'Connecting',connected:'Connected',problem:'Not connected'};
   $('pill').className = 'pill '+s.state; text($('pilltext'), labels[s.state]||s.state);
   const p = $('problem'); if(s.message){ text(p, s.message); p.classList.remove('hidden'); } else p.classList.add('hidden');
+  const o = $('outdated'); if(s.outdated){ text(o, s.outdated); o.classList.remove('hidden'); } else o.classList.add('hidden');
   const haveKey = !!s.url;
   text($('title'), haveKey && s.name ? s.name : 'Connect to homeCore');
   $('setup').classList.toggle('hidden', haveKey);
@@ -329,3 +353,17 @@ refresh(); setInterval(refresh, 3000);
 </body>
 </html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::older;
+
+    #[test]
+    fn versions_compare_by_number() {
+        assert!(older("0.1.0", "0.2.0"));
+        assert!(older("0.2.0", "0.10.0"));
+        assert!(!older("0.2.0", "0.2.0"));
+        assert!(!older("0.3.0", "0.2.9"));
+        assert!(older("0.2", "0.2.1"));
+    }
+}

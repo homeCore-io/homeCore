@@ -294,10 +294,20 @@ async fn run(
     let mut announced_empty = false;
     loop {
         match checkin.hello(&shared.hello).await {
-            Ok(_) => shared.set(|s| {
+            Ok(answer) => shared.set(|s| {
                 s.state = Phase::Connected;
                 s.message = None;
                 s.last_heard = Some(chrono::Utc::now());
+                s.outdated = answer
+                    .min_host_version
+                    .filter(|min| page::older(env!("CARGO_PKG_VERSION"), min))
+                    .map(|min| {
+                        format!(
+                            "This runtime is version {}, and homeCore expects {min} or later. \
+                             Pull the newer image and restart the container.",
+                            env!("CARGO_PKG_VERSION")
+                        )
+                    });
             }),
             // The key was reset or the runtime removed. Its plugins' own logins
             // may be gone too, and nothing here should keep running for a
