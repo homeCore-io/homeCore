@@ -168,6 +168,12 @@ async fn run(
     });
 
     let ctx_for_status = ctx.clone();
+    // Stopped or restarted by homeCore: give each session back. A device
+    // allows only a few, and one left behind holds its place for an hour. The
+    // SDK runs this, then marks the cameras offline and exits.
+    let signed_in: Arc<Mutex<Vec<Arc<host::Host>>>> = Arc::new(Mutex::new(Vec::new()));
+    let ctx_for_stop = ctx.clone();
+    let hosts_for_stop = signed_in.clone();
     let mgmt = client
         .enable_management(
             60,
@@ -179,6 +185,20 @@ async fn run(
         .with_capabilities(capabilities())
         .with_alert_kinds(alert_kinds())
         .with_files_dir(files_dir)
+        .with_stop_handler(move || {
+            let ctx = ctx_for_stop.clone();
+            let hosts = hosts_for_stop.lock().map(|h| h.clone()).unwrap_or_default();
+            async move {
+                // No siren this plugin started outlives it.
+                ctx.sirens.stop_all().await;
+                let mut out = tokio::task::JoinSet::new();
+                for h in hosts {
+                    out.spawn(async move { h.api.logout().await });
+                }
+                out.join_all().await;
+                info!("signed out");
+            }
+        })
         .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
             "status" => Some(json!({
                 "status": "ok",
@@ -249,31 +269,18 @@ async fn run(
         }
     }
 
-    let mut hosts = Vec::new();
     for entry in &cfg.reolink.hosts {
         match host::Host::new(entry.clone()) {
             Ok(h) => {
-                hosts.push(h.clone());
+                if let Ok(mut list) = signed_in.lock() {
+                    list.push(h.clone());
+                }
                 tokio::spawn(host::run(ctx.clone(), h));
             }
             Err(e) => warn!(host = %entry.id, error = %e, "can't set up"),
         }
     }
     info!(hosts = cfg.reolink.hosts.len(), "watching");
-
-    // Stopped or restarted by homeCore: give each session back. A device
-    // allows only a few, and one left behind holds its place for an hour.
-    let ctx_for_stop = ctx.clone();
-    tokio::spawn(async move {
-        stopping().await;
-        // No siren this plugin started outlives it.
-        ctx_for_stop.sirens.stop_all().await;
-        for h in &hosts {
-            h.api.logout().await;
-        }
-        info!("signed out; stopping");
-        std::process::exit(0);
-    });
 
     // Commands, each on its own task: a slow camera doesn't hold the rest.
     while let Some((device_id, payload)) = rx.recv().await {
@@ -285,22 +292,6 @@ async fn run(
         });
     }
     Ok(())
-}
-
-/// homeCore stopping the plugin (SIGTERM), or Ctrl-C by hand.
-async fn stopping() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        if let Ok(mut term) = signal(SignalKind::terminate()) {
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
-            }
-            return;
-        }
-    }
-    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// The alerts this plugin can raise, about its addresses and go2rtc.
