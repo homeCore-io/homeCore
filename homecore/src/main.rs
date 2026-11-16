@@ -550,7 +550,7 @@ async fn main() -> Result<()> {
         username: internal_cred.as_ref().map(|c| c.id.clone()),
         password: internal_cred.as_ref().map(|c| c.password.clone()),
     };
-    let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
+    let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg.clone());
     let publish_handle = mqtt_client.publish_handle();
 
     // Set up a ready signal so plugins are launched only after the internal
@@ -1336,6 +1336,7 @@ async fn main() -> Result<()> {
         broker_port: mqtt_port,
     }))
     .with_plugin_runtimes(config.plugin_runtimes.clone())
+    .with_mqtt_takeover(mqtt_cfg.clone())
     .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc({
         let rpc = hc_api::management_rpc::ManagementRpc::new(publish_handle_rpc, &pub_bus_rpc);

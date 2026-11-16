@@ -5914,8 +5914,11 @@ paths:
       operationId: resetPluginRuntimeLogin
       summary: Make a new key; the old one stops working now
       description: |
-        The runtime is refused at its next broker login or API call until the
-        new key is pasted in. Its plugins keep their own logins.
+        The runtime is pushed off the broker at once and refused until the new
+        key is pasted in. Its plugins keep their own logins.
+
+        Remove (`DELETE /plugin-runtimes/{id}`) pushes off the runtime and
+        every plugin placed on it the same way.
       tags: [plugins]
       security:
         - bearerAuth: []

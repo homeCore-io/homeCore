@@ -402,6 +402,9 @@ pub struct AppState {
     /// than read per-request so the gate cannot drift from what the
     /// Configuration screen shows. The records themselves live in `store`.
     pub plugin_runtimes_config: hc_config::PluginRuntimesSection,
+    /// How core reaches the broker as itself, to push a removed runtime and its
+    /// plugins off at once. `None` in tests, where nothing is connected.
+    pub mqtt_takeover: Option<Arc<hc_mqtt_client::MqttClientConfig>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -904,6 +907,7 @@ impl AppState {
             managed_plugins: None,
             plugin_install: None,
             plugin_runtimes_config: hc_config::PluginRuntimesSection::default(),
+            mqtt_takeover: None,
             plugin_spawn: None,
             registry: None,
             management_rpc: None,
@@ -1118,6 +1122,11 @@ impl AppState {
     /// store, so only the policy needs threading here.
     pub fn with_plugin_runtimes(mut self, config: hc_config::PluginRuntimesSection) -> Self {
         self.plugin_runtimes_config = config;
+        self
+    }
+
+    pub fn with_mqtt_takeover(mut self, cfg: hc_mqtt_client::MqttClientConfig) -> Self {
+        self.mqtt_takeover = Some(Arc::new(cfg));
         self
     }
 

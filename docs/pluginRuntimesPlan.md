@@ -72,10 +72,13 @@ What replaced it:
   "0.0.0.0"` and a login for core when there is none, then a restart).
 - `[plugin_runtimes]` is just `enabled`.
 
-Known limit: the broker checks logins only at CONNECT, so a connection made
-before Reset login or Remove stays up until it drops. The runtime closes its
-own at its next check-in (every 30 seconds by default), when homeCore refuses
-the key.
+The broker checks logins only at CONNECT, so a connection made before Reset
+login or Remove would stay up until it dropped. Core closes it at once: it
+connects briefly as each client id with its own login, which MQTT answers by
+dropping the older connection (`hc_mqtt_client::take_over`), and the
+reconnect is refused. Reset login does this for the runtime only, whose
+plugins keep their logins; Remove does it for the runtime and every plugin
+placed on it.
 
 # Piece 1: Enrollment (superseded, kept for the reasoning)
 

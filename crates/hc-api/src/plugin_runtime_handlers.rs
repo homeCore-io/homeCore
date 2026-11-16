@@ -85,6 +85,13 @@ fn issue_key(state: &AppState, mut rec: RuntimeRecord) -> anyhow::Result<IssuedK
     })
 }
 
+/// Push these clients off the broker now. See `hc_mqtt_client::take_over`.
+async fn take_over(state: &AppState, client_ids: &[String]) {
+    if let Some(cfg) = state.mqtt_takeover.as_ref() {
+        hc_mqtt_client::take_over(cfg, client_ids).await;
+    }
+}
+
 /// Authenticate a runtime by its secret.
 ///
 /// Returns the record only when the secret belongs to *that* runtime, so an
@@ -190,8 +197,8 @@ pub async fn add_runtime(
 
 /// `POST /plugin-runtimes/{id}/reset`: a new key; the old one stops working now.
 ///
-/// The runtime is disconnected at its next broker login or API call. Its
-/// plugins keep their own logins and come back when it does.
+/// The runtime is pushed off the broker at once and refused until the new key
+/// is pasted in. Its plugins keep their own logins and come back when it does.
 pub async fn reset_runtime(
     State(state): State<AppState>,
     PluginsWrite(claims): PluginsWrite,
@@ -200,8 +207,12 @@ pub async fn reset_runtime(
     let Ok(Some(rec)) = store(&state).get(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown runtime");
     };
+    let username = rec.plugin_id.clone();
     match issue_key(&state, rec) {
         Ok(issued) => {
+            // The old login is gone; its connection would last until it dropped.
+            // Its plugins keep theirs and stay connected.
+            take_over(&state, &[username]).await;
             let e = crate::audit::entry_from_claims(&claims, "plugin_runtime.login_reset")
                 .with_target("plugin_runtime", id.clone());
             crate::audit::emit(&state, e).await;
@@ -227,6 +238,11 @@ pub async fn remove_runtime(
         return err(StatusCode::NOT_FOUND, "unknown runtime");
     };
     let placed = store.placements_for(&id).unwrap_or_default();
+    // The runtime's login goes first, so that when it is pushed off below its
+    // reconnect is refused.
+    if let Err(e) = store.delete(&id) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+    }
     let mut removed_plugins = Vec::new();
     for p in &placed {
         let _ = crate::handlers::deregister_plugin(
@@ -247,8 +263,17 @@ pub async fn remove_runtime(
         Query(crate::handlers::UninstallQuery::default()),
     )
     .await;
-    if let Err(e) = store.delete(&id) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+    // Every login is gone now, but connections made before stay up until they
+    // drop: push them off, then forget anything a last heartbeat re-registered
+    // in between.
+    let mut ids = removed_plugins.clone();
+    ids.push(rec.plugin_id.clone());
+    take_over(&state, &ids).await;
+    {
+        let mut map = state.plugins.write().await;
+        for id in &ids {
+            map.remove(id);
+        }
     }
     let mut e = crate::audit::entry_from_claims(&claims, "plugin_runtime.removed")
         .with_target("plugin_runtime", id.clone());
