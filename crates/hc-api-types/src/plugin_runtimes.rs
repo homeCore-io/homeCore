@@ -140,6 +140,14 @@ pub struct HelloRequest {
     pub host_version: String,
     pub hostname: String,
     pub network_mode: String,
+    /// The port of the runtime's own page, inside its container. None: the page
+    /// is off. Older runtimes don't send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_port: Option<u16>,
+    /// The page's address as the operator gave it (HC_RUNTIME_PAGE_URL), for
+    /// when the address homeCore sees isn't one a browser can open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +183,12 @@ pub struct RuntimeSummary {
     pub network_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ip: Option<String>,
+    /// The runtime's own page: its port, and the address the operator set for
+    /// it if any. A client builds the link from these and `source_ip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<DateTime<Utc>>,
     /// True when the runtime's host is older than this homeCore expects. Updating
