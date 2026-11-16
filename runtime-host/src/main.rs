@@ -18,6 +18,7 @@ mod check;
 mod core_client;
 mod install;
 mod key_store;
+mod logs;
 mod page;
 mod plugin;
 mod reconcile;
@@ -47,15 +48,32 @@ fn report_crash_loop(notices: &plugin_sdk_rs::PluginNotices, plugin_id: &str, lo
     let code = format!("crash_loop.{plugin_id}");
     if looping {
         notices.raise(
-            PluginNotice::error(
-                code,
-                format!("{plugin_id} keeps exiting and is being restarted."),
-            )
-            .with_remedy("Check this plugin's logs and its configuration."),
+            PluginNotice::error(code, crash_message(plugin_id)).with_remedy(
+                "Check its settings. Its full output is on the runtime's page, under Logs.",
+            ),
         );
     } else {
         notices.clear(&code);
     }
+}
+
+/// "keeps exiting", with what it last printed: usually the reason.
+fn crash_message(plugin_id: &str) -> String {
+    let last: Vec<String> = logs::book()
+        .tail(plugin_id, 3)
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    if last.is_empty() {
+        return format!(
+            "{plugin_id} keeps exiting and is being restarted. It printed nothing first."
+        );
+    }
+    let mut said = last.join(" / ");
+    if said.chars().count() > 300 {
+        said = said.chars().take(300).collect::<String>() + "…";
+    }
+    format!("{plugin_id} keeps exiting and is being restarted. Last output: {said}")
 }
 
 /// Best-effort hostname, for the admin's list in homeCore.
@@ -88,6 +106,10 @@ fn capabilities() -> RuntimeCapabilities {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        // Also kept for the runtime's page; plain text reads there and in a
+        // container log alike.
+        .with_writer(logs::Tee)
+        .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "hc_runtime_host=info".into()),
@@ -294,10 +316,20 @@ async fn run(
     let mut announced_empty = false;
     loop {
         match checkin.hello(&shared.hello).await {
-            Ok(_) => shared.set(|s| {
+            Ok(answer) => shared.set(|s| {
                 s.state = Phase::Connected;
                 s.message = None;
                 s.last_heard = Some(chrono::Utc::now());
+                s.outdated = answer
+                    .min_host_version
+                    .filter(|min| page::older(env!("CARGO_PKG_VERSION"), min))
+                    .map(|min| {
+                        format!(
+                            "This runtime is version {}, and homeCore expects {min} or later. \
+                             Pull the newer image and restart the container.",
+                            env!("CARGO_PKG_VERSION")
+                        )
+                    });
             }),
             // The key was reset or the runtime removed. Its plugins' own logins
             // may be gone too, and nothing here should keep running for a

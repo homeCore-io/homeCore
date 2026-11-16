@@ -13,6 +13,19 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The oldest runtime host this homeCore works with. 0.2.0 is the first that
+/// connects with a key; an older one cannot reach this homeCore at all.
+/// Raise it when core needs something a runtime only does from a later version.
+pub const MIN_HOST_VERSION: &str = "0.2.0";
+
+/// True when a runtime reported a host older than [`MIN_HOST_VERSION`]. A
+/// runtime that has not reported one yet is not called outdated.
+pub fn is_outdated(host_version: Option<&str>) -> bool {
+    host_version.is_some_and(|v| {
+        crate::registry::compare_versions(v, MIN_HOST_VERSION) == std::cmp::Ordering::Less
+    })
+}
+
 /// A new runtime id: `rt-` and eight hex digits.
 pub fn new_runtime_id() -> Result<String> {
     let mut raw = [0u8; 4];
@@ -202,6 +215,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_older_host_is_outdated_and_an_unknown_one_is_not() {
+        assert!(is_outdated(Some("0.1.0")));
+        assert!(!is_outdated(Some("0.2.0")));
+        assert!(!is_outdated(Some("0.10.0")));
+        assert!(!is_outdated(None));
+    }
+
+    #[test]
     fn a_runtime_id_and_its_plugin_id() {
         let id = new_runtime_id().unwrap();
         assert!(id.starts_with("rt-") && id.len() == 11, "{id}");
@@ -287,6 +308,7 @@ mod tests {
                 plugin_id: "plugin.python-rt1".into(),
                 key_hash: key.hash.clone(),
                 homecore_url: "http://h:8080".into(),
+                max_plugins: None,
                 created_at: chrono::Utc::now(),
                 arch: None,
                 host_version: None,

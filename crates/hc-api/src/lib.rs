@@ -549,10 +549,25 @@ pub fn spawn_plugin_registry_listener(
                         }
                     }
                 }
-                Ok(hc_types::event::Event::PluginOffline { plugin_id, .. }) => {
+                Ok(hc_types::event::Event::PluginOffline {
+                    plugin_id,
+                    timestamp,
+                }) => {
                     let mut map = plugins.write().await;
                     if let Some(rec) = map.get_mut(&plugin_id) {
-                        rec.status = "offline".into();
+                        // Only a running plugin goes offline. One starting, or
+                        // stopped on purpose, keeps saying so, whatever a
+                        // retained goodbye from an earlier run says.
+                        if matches!(rec.status.as_str(), "active" | "not_responding") {
+                            let prev = std::mem::replace(&mut rec.status, "offline".into());
+                            let _ =
+                                event_bus.publish(hc_types::event::Event::PluginStatusChanged {
+                                    timestamp,
+                                    plugin_id: plugin_id.clone(),
+                                    status: "offline".into(),
+                                    previous_status: prev,
+                                });
+                        }
                     }
                 }
                 Ok(hc_types::event::Event::PluginHeartbeat {
@@ -1479,7 +1494,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route(
             "/plugin-runtimes/{id}",
-            delete(plugin_runtime_handlers::remove_runtime),
+            delete(plugin_runtime_handlers::remove_runtime)
+                .patch(plugin_runtime_handlers::update_runtime),
         )
         .route(
             "/plugin-runtimes/{id}/reset",

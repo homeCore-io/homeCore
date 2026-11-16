@@ -16,7 +16,7 @@ use axum::{
 use chrono::Utc;
 use hc_api_types::plugin_runtimes::{
     abi_for, AddRuntimeRequest, ConnectionKey, HelloRequest, HelloResponse, IssuedKey,
-    RuntimeSummary,
+    RuntimeSummary, UpdateRuntimeRequest,
 };
 use hc_state::plugin_runtime_store::RuntimeRecord;
 use serde_json::{json, Value};
@@ -46,6 +46,7 @@ fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
         abi: rec.abi.clone(),
         plugin_id: rec.plugin_id.clone(),
         homecore_url: rec.homecore_url.clone(),
+        max_plugins: rec.max_plugins,
         created_at: rec.created_at,
         arch: rec.arch.clone(),
         host_version: rec.host_version.clone(),
@@ -53,6 +54,8 @@ fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
         network_mode: rec.network_mode.clone(),
         source_ip: rec.source_ip.clone(),
         last_seen_at: rec.last_seen_at,
+        outdated: svc::is_outdated(rec.host_version.as_deref()),
+        min_host_version: svc::MIN_HOST_VERSION.to_string(),
     }
 }
 
@@ -175,6 +178,7 @@ pub async fn add_runtime(
         plugin_id,
         key_hash: String::new(),
         homecore_url,
+        max_plugins: req.max_plugins.filter(|n| *n > 0),
         created_at: Utc::now(),
         arch: None,
         host_version: None,
@@ -193,6 +197,35 @@ pub async fn add_runtime(
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+/// `PATCH /plugin-runtimes/{id}`: rename it, or set or clear its plugin limit.
+///
+/// Lowering the limit below what it already holds removes nothing; it only
+/// stops new plugins from going there.
+pub async fn update_runtime(
+    State(state): State<AppState>,
+    _: PluginsWrite,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateRuntimeRequest>,
+) -> impl IntoResponse {
+    let Ok(Some(mut rec)) = store(&state).get(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+    if let Some(name) = req.name {
+        let name = name.trim();
+        if name.is_empty() {
+            return err(StatusCode::UNPROCESSABLE_ENTITY, "give the runtime a name");
+        }
+        rec.name = name.to_string();
+    }
+    if let Some(max) = req.max_plugins {
+        rec.max_plugins = max.filter(|n| *n > 0);
+    }
+    if let Err(e) = store(&state).upsert(&rec) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+    }
+    (StatusCode::OK, Json(summary(&rec))).into_response()
 }
 
 /// `POST /plugin-runtimes/{id}/reset`: a new key; the old one stops working now.
@@ -402,6 +435,7 @@ pub async fn hello(
             runtime_id: rec.runtime_id,
             name: rec.name,
             plugin_id: rec.plugin_id,
+            min_host_version: Some(svc::MIN_HOST_VERSION.to_string()),
         }),
     )
         .into_response()

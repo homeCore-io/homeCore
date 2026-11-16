@@ -52,6 +52,10 @@ pub struct RuntimeRecord {
     /// the key. Kept so Show details can say it again.
     pub homecore_url: String,
     pub created_at: DateTime<Utc>,
+    /// The most plugins it may hold, set by the admin for the machine it runs on.
+    /// None means no limit.
+    #[serde(default)]
+    pub max_plugins: Option<u32>,
     /// What the runtime said about itself the last time it checked in.
     #[serde(default)]
     pub arch: Option<String>,
@@ -267,6 +271,7 @@ mod tests {
             plugin_id: plugin_id.into(),
             key_hash: "hash".into(),
             homecore_url: "http://homecore.local:8080".into(),
+            max_plugins: None,
             created_at: Utc::now() - chrono::Duration::minutes(minutes_ago),
             arch: None,
             host_version: None,

@@ -145,7 +145,7 @@ impl RegistryPlugin {
 /// - a *numeric* extra segment means more version (`0.2` < `0.2.1`), while a
 ///   non-numeric one is a pre-release and sorts before its release
 ///   (`0.2.0-rc1` < `0.2.0`).
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     let split = |s: &str| -> Vec<String> {

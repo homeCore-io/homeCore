@@ -7,29 +7,50 @@
 //! Decision logic only — no HTTP, no downloads. See
 //! `docs/pluginRuntimesPlan.md`, piece 2.
 
-use hc_state::plugin_runtime_store::RuntimeRecord;
+use hc_state::plugin_runtime_store::{PlacementRecord, RuntimeRecord};
 
 /// A runtime that could host something, reduced to what matching needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub runtime_id: String,
+    /// What the admin called it, for messages.
+    pub name: String,
     pub kind: String,
     pub abi: String,
     pub arch: String,
+    /// `(holds, limit)` when it already holds as many plugins as it may, and
+    /// the plugin being placed is not one of them. An update to a plugin
+    /// already there never counts against the limit.
+    pub full: Option<(usize, u32)>,
 }
 
 /// A runtime can host something once it has connected and said what it runs
 /// on. Until then its architecture is unknown, and an artifact chosen for a
 /// guess could arrive unable to import.
-pub fn candidates(records: &[RuntimeRecord]) -> Vec<Candidate> {
+pub fn candidates(
+    records: &[RuntimeRecord],
+    placements: &[PlacementRecord],
+    plugin_id: &str,
+) -> Vec<Candidate> {
     records
         .iter()
         .filter_map(|r| {
+            let here: Vec<&PlacementRecord> = placements
+                .iter()
+                .filter(|p| p.runtime_id == r.runtime_id)
+                .collect();
+            let already = here.iter().any(|p| p.plugin_id == plugin_id);
+            let full = match r.max_plugins {
+                Some(max) if !already && here.len() >= max as usize => Some((here.len(), max)),
+                _ => None,
+            };
             Some(Candidate {
                 runtime_id: r.runtime_id.clone(),
+                name: r.name.clone(),
                 kind: r.kind.clone(),
                 abi: r.abi.clone(),
                 arch: r.arch.clone()?,
+                full,
             })
         })
         .collect()
@@ -68,9 +89,15 @@ pub fn decide(offered: &Offered, runtimes: &[Candidate], requested: Option<&str>
     if let Some(want) = requested {
         let Some(rt) = runtimes.iter().find(|c| c.runtime_id == want) else {
             return Placement::Impossible(format!(
-                "no approved runtime called `{want}` — check Settings for one waiting to be approved"
+                "no connected runtime called `{want}`; Plugin runtimes in Settings shows each one"
             ));
         };
+        if let Some((holds, max)) = rt.full {
+            return Placement::Impossible(format!(
+                "{} is full: it holds {holds} of the {max} plugins it may. Raise its limit in Plugin runtimes, or choose another",
+                rt.name
+            ));
+        }
         return if matches(offered, rt) {
             Placement::Runtime(rt.runtime_id.clone())
         } else {
@@ -89,9 +116,25 @@ pub fn decide(offered: &Offered, runtimes: &[Candidate], requested: Option<&str>
 
     let fits: Vec<String> = runtimes
         .iter()
-        .filter(|c| matches(offered, c))
+        .filter(|c| matches(offered, c) && c.full.is_none())
         .map(|c| c.runtime_id.clone())
         .collect();
+    if fits.is_empty() {
+        let full: Vec<String> = runtimes
+            .iter()
+            .filter(|c| matches(offered, c))
+            .filter_map(|c| {
+                c.full
+                    .map(|(holds, max)| format!("{} ({holds} of {max})", c.name))
+            })
+            .collect();
+        if !full.is_empty() {
+            return Placement::Impossible(format!(
+                "every runtime that can run it is full: {}. Raise a limit in Plugin runtimes, or add another runtime",
+                full.join(", ")
+            ));
+        }
+    }
 
     match fits.len() {
         1 => Placement::Runtime(fits.into_iter().next().expect("len == 1")),
@@ -149,9 +192,11 @@ mod tests {
     fn rt(id: &str, kind: &str, abi: &str, arch: &str) -> Candidate {
         Candidate {
             runtime_id: id.into(),
+            name: id.into(),
             kind: kind.into(),
             abi: abi.into(),
             arch: arch.into(),
+            full: None,
         }
     }
 
@@ -212,6 +257,7 @@ mod tests {
             plugin_id: "plugin.python-rtnew".into(),
             key_hash: "h".into(),
             homecore_url: "http://homecore.local:8080".into(),
+            max_plugins: None,
             created_at: Utc::now(),
             arch: None,
             host_version: None,
@@ -220,10 +266,74 @@ mod tests {
             source_ip: None,
             last_seen_at: None,
         };
-        assert!(candidates(std::slice::from_ref(&rec)).is_empty());
+        assert!(candidates(std::slice::from_ref(&rec), &[], "plugin.x").is_empty());
 
         rec.arch = Some("x86_64".into());
-        assert_eq!(candidates(&[rec]).len(), 1);
+        assert_eq!(candidates(&[rec], &[], "plugin.x").len(), 1);
+    }
+
+    fn placed(rt: &str, plugin: &str) -> PlacementRecord {
+        PlacementRecord {
+            runtime_id: rt.into(),
+            plugin_id: plugin.into(),
+            version: "0.1.0".into(),
+            artifact_url: String::new(),
+            sha256: String::new(),
+            config: String::new(),
+            placed_at: chrono::Utc::now(),
+        }
+    }
+
+    fn limited(max: Option<u32>) -> RuntimeRecord {
+        RuntimeRecord {
+            runtime_id: "rt-pi".into(),
+            name: "Pi".into(),
+            kind: "python".into(),
+            abi: "cp312-manylinux_2_28".into(),
+            plugin_id: "plugin.python-rtpi".into(),
+            key_hash: "h".into(),
+            homecore_url: "http://h:8080".into(),
+            max_plugins: max,
+            created_at: chrono::Utc::now(),
+            arch: Some("x86_64".into()),
+            host_version: None,
+            hostname: None,
+            network_mode: None,
+            source_ip: None,
+            last_seen_at: None,
+        }
+    }
+
+    /// A runtime at its limit takes no new plugin, says so, and still takes an
+    /// update to one it already holds.
+    #[test]
+    fn a_full_runtime_takes_updates_but_no_new_plugins() {
+        let held = vec![placed("rt-pi", "plugin.a"), placed("rt-pi", "plugin.b")];
+        let rts = vec![limited(Some(2))];
+
+        let new = candidates(&rts, &held, "plugin.c");
+        let msg = match decide(&python_only(), &new, None) {
+            Placement::Impossible(m) => m,
+            other => panic!("expected impossible, got {other:?}"),
+        };
+        assert!(msg.contains("Pi (2 of 2)"), "{msg}");
+        assert!(matches!(
+            decide(&python_only(), &new, Some("rt-pi")),
+            Placement::Impossible(_)
+        ));
+
+        let update = candidates(&rts, &held, "plugin.a");
+        assert_eq!(
+            decide(&python_only(), &update, None),
+            Placement::Runtime("rt-pi".into())
+        );
+
+        // No limit, no ceiling.
+        let open = candidates(&[limited(None)], &held, "plugin.c");
+        assert_eq!(
+            decide(&python_only(), &open, None),
+            Placement::Runtime("rt-pi".into())
+        );
     }
 
     /// The error has to name the next action. "No artifact matched" is true and

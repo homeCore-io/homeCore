@@ -76,11 +76,21 @@ pub async fn supervise<F>(
         let mut child = match Command::new(program)
             .args(args)
             .envs(entry.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
         {
-            Ok(c) => c,
+            Ok(mut c) => {
+                // Its output goes to the container log, prefixed with its id so
+                // two plugins can be told apart, and to the runtime's page.
+                if let Some(out) = c.stdout.take() {
+                    tokio::spawn(relay(entry.plugin_id.clone(), out, false));
+                }
+                if let Some(err) = c.stderr.take() {
+                    tokio::spawn(relay(entry.plugin_id.clone(), err, true));
+                }
+                c
+            }
             Err(e) => {
                 tracing::error!(
                     plugin_id = %entry.plugin_id, %program, error = %e,
@@ -147,6 +157,21 @@ pub async fn supervise<F>(
         if sleep_or_shutdown(backoff, &mut shutdown).await {
             break;
         }
+    }
+}
+
+/// Copy one of a plugin's output streams, line by line, to the container log
+/// and the runtime's log book. Ends when the plugin closes the stream.
+async fn relay(plugin_id: String, stream: impl tokio::io::AsyncRead + Unpin, stderr: bool) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if stderr {
+            eprintln!("{plugin_id} | {line}");
+        } else {
+            println!("{plugin_id} | {line}");
+        }
+        crate::logs::book().push(&plugin_id, &line);
     }
 }
 

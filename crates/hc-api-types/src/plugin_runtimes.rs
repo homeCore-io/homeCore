@@ -95,6 +95,32 @@ pub struct AddRuntimeRequest {
     /// homeCore's address as the runtime will reach it. The app fills it in from
     /// the address it is using; the admin can change it.
     pub homecore_url: String,
+    /// The most plugins it may hold, for the machine it runs on. None or 0: no limit.
+    #[serde(default)]
+    pub max_plugins: Option<u32>,
+}
+
+/// `PATCH /plugin-runtimes/{id}`: rename it or change its limit. A field left
+/// out stays as it is; `max_plugins: null` (or 0) removes the limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateRuntimeRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, with = "double_option")]
+    pub max_plugins: Option<Option<u32>>,
+}
+
+/// Tells a field left out (`None`) from one set to null (`Some(None)`).
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<Option<u32>>, s: S) -> Result<S::Ok, S::Error> {
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<u32>>, D::Error> {
+        Option::<u32>::deserialize(d).map(Some)
+    }
 }
 
 /// The answer to adding a runtime or resetting its login: the key, once, and
@@ -121,6 +147,10 @@ pub struct HelloResponse {
     pub runtime_id: String,
     pub name: String,
     pub plugin_id: String,
+    /// The oldest runtime host this homeCore works with. A runtime older than
+    /// this says so on its own page.
+    #[serde(default)]
+    pub min_host_version: Option<String>,
 }
 
 /// A runtime as the admin list shows it. Never carries the secret.
@@ -134,6 +164,8 @@ pub struct RuntimeSummary {
     pub homecore_url: String,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_plugins: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_version: Option<String>,
@@ -145,6 +177,13 @@ pub struct RuntimeSummary {
     pub source_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// True when the runtime's host is older than this homeCore expects. Updating
+    /// it is pulling the newer image and restarting the container.
+    #[serde(default)]
+    pub outdated: bool,
+    /// The oldest runtime host this homeCore works with.
+    #[serde(default)]
+    pub min_host_version: String,
 }
 
 #[cfg(test)]
