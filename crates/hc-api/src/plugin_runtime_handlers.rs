@@ -38,6 +38,40 @@ fn store(state: &AppState) -> std::sync::Arc<hc_state::PluginRuntimeStore> {
     state.store.plugin_runtimes()
 }
 
+/// Plugins a runtime runs: everything placed on one, and each runtime's own
+/// connection. A runtime runs what is placed on it, so these are on for as long
+/// as they are placed; none of them is in homecore.toml, where `enabled` comes
+/// from for everything else.
+pub fn hosted_plugin_ids(state: &AppState) -> std::collections::HashSet<String> {
+    let runtimes = store(state);
+    let mut ids: std::collections::HashSet<String> = runtimes
+        .all_placements()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.plugin_id)
+        .collect();
+    ids.extend(
+        runtimes
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.plugin_id),
+    );
+    ids
+}
+
+/// `rec` as a client should see it: a hosted plugin reads as turned on.
+pub fn as_seen(
+    rec: &crate::PluginRecord,
+    hosted: &std::collections::HashSet<String>,
+) -> crate::PluginRecord {
+    let mut rec = rec.clone();
+    if hosted.contains(&rec.plugin_id) {
+        rec.enabled = true;
+    }
+    rec
+}
+
 fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
     RuntimeSummary {
         runtime_id: rec.runtime_id.clone(),
@@ -711,4 +745,26 @@ pub async fn get_placement_artifact(
         bytes,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod hosted_tests {
+    use super::as_seen;
+
+    fn rec(id: &str) -> crate::PluginRecord {
+        serde_json::from_value(serde_json::json!({
+            "plugin_id": id,
+            "registered_at": "2026-11-16T00:00:00Z",
+            "status": "active",
+            "enabled": false,
+        }))
+        .expect("a minimal plugin record")
+    }
+
+    #[test]
+    fn a_hosted_plugin_reads_as_turned_on_and_others_are_left_alone() {
+        let hosted = ["plugin.mcp".to_string()].into_iter().collect();
+        assert!(as_seen(&rec("plugin.mcp"), &hosted).enabled);
+        assert!(!as_seen(&rec("plugin.hue"), &hosted).enabled);
+    }
 }

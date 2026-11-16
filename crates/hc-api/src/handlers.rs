@@ -4559,8 +4559,12 @@ pub async fn import_automations(
 // ---------- Plugins ----------
 
 pub async fn list_plugins(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
+    let hosted = crate::plugin_runtime_handlers::hosted_plugin_ids(&s);
     let map = s.plugins.read().await;
-    let list: Vec<_> = map.values().cloned().collect();
+    let list: Vec<_> = map
+        .values()
+        .map(|r| crate::plugin_runtime_handlers::as_seen(r, &hosted))
+        .collect();
     (StatusCode::OK, Json(json!(list)))
 }
 
@@ -4780,8 +4784,12 @@ pub async fn get_plugin_file(
 /// For clients that poll to keep a view current. See [`crate::PluginStatus`]
 /// for why this exists rather than everyone re-reading `GET /plugins`.
 pub async fn list_plugin_status(State(s): State<AppState>, _: PluginsRead) -> impl IntoResponse {
+    let hosted = crate::plugin_runtime_handlers::hosted_plugin_ids(&s);
     let map = s.plugins.read().await;
-    let list: Vec<crate::PluginStatus> = map.values().map(crate::PluginStatus::from).collect();
+    let list: Vec<crate::PluginStatus> = map
+        .values()
+        .map(|r| crate::PluginStatus::from(&crate::plugin_runtime_handlers::as_seen(r, &hosted)))
+        .collect();
     (StatusCode::OK, Json(json!(list)))
 }
 
@@ -5484,9 +5492,14 @@ pub async fn get_plugin(
     _: PluginsRead,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let hosted = crate::plugin_runtime_handlers::hosted_plugin_ids(&s);
     let map = s.plugins.read().await;
     match map.get(&id) {
-        Some(rec) => (StatusCode::OK, Json(json!(rec))).into_response(),
+        Some(rec) => (
+            StatusCode::OK,
+            Json(json!(crate::plugin_runtime_handlers::as_seen(rec, &hosted))),
+        )
+            .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "plugin not found" })),
@@ -5821,6 +5834,18 @@ pub async fn patch_plugin(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    // A runtime runs what is placed on it; there is no off switch to flip.
+    if body.get("enabled").is_some()
+        && crate::plugin_runtime_handlers::hosted_plugin_ids(&s).contains(&id)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "it runs in a plugin runtime, which runs it for as long as it is installed there; uninstall it to stop it",
+            })),
+        )
+            .into_response();
+    }
     // Snapshot the previous enabled state + apply updates.
     // We hold the write lock only briefly so we can release it before
     // doing potentially-blocking I/O (config write) and channel sends.
