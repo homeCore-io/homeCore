@@ -197,6 +197,22 @@ async fn put_key(
     )
 }
 
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+/// The last lines from the runtime or one plugin, and which sources there are.
+async fn logs(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> impl IntoResponse {
+    let book = crate::logs::book();
+    let source = q.source.unwrap_or_else(|| crate::logs::RUNTIME.to_string());
+    let lines = book.tail(&source, q.lines.unwrap_or(300).min(500));
+    Json(serde_json::json!({ "sources": book.sources(), "source": source, "lines": lines }))
+}
+
 async fn index() -> impl IntoResponse {
     Html(PAGE)
 }
@@ -206,6 +222,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/", get(index))
         .route("/api/status", get(status))
         .route("/api/key", post(put_key))
+        .route("/api/logs", get(logs))
         .with_state(shared)
 }
 
@@ -261,6 +278,8 @@ li .dot{width:8px;height:8px;border-radius:4px;background:var(--good)}li.looping
 li b{flex:1;min-width:160px}li .v{font-family:ui-monospace,monospace;color:var(--muted);font-size:13px}
 li .s{min-width:170px;font-size:13px;font-weight:600;color:var(--good)}li.looping .s{color:var(--alert)}
 .hidden{display:none !important}
+.log{max-height:360px;overflow:auto;margin:0;padding:12px;border-radius:11px;background:var(--sheet);border:1px solid var(--line);font:12px/1.55 ui-monospace,"IBM Plex Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+select{height:32px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:inherit;padding:0 8px}
 @media (max-width:560px){dl{grid-template-columns:1fr}dt{padding-bottom:0}dd{border-top:none;padding-top:4px}}
 </style>
 </head>
@@ -289,6 +308,12 @@ li .s{min-width:170px;font-size:13px;font-weight:600;color:var(--good)}li.loopin
       <button class="plain" id="newkeybtn" style="height:48px" aria-expanded="false"><b style="white-space:nowrap">Use a new key</b> <span class="muted small" style="font-weight:500">After Reset login in homeCore, or after removing this runtime there to move it</span></button>
       <div id="newkey" class="hidden" style="padding-bottom:16px;display:flex;flex-direction:column;gap:12px"></div>
     </div>
+  </section>
+
+  <section class="card" aria-label="Logs" style="padding:14px 20px;gap:10px">
+    <div class="row"><b style="flex:1">Logs</b><label class="muted small" style="flex-direction:row;align-items:center;gap:8px;font-weight:600">Show <select id="logsrc"></select></label><button type="button" class="plain small" id="logcopy" style="padding:0 4px">Copy</button></div>
+    <pre id="logtext" class="log" tabindex="0" aria-live="off">Nothing yet.</pre>
+    <p class="muted small">The last 500 lines from the runtime and from each plugin, including what a plugin prints before it reaches homeCore. Passwords and keys are masked.</p>
   </section>
 </main>
 <template id="keyform">
@@ -348,6 +373,28 @@ async function refresh(){
   $('noplugins').classList.toggle('hidden', s.plugins.length>0);
   $('newkeybtn').parentElement.classList.toggle('hidden', s.key_from_env);
 }
+async function loadLogs(){
+  const sel = $('logsrc'), pre = $('logtext');
+  let j; try { j = await (await fetch('api/logs?source='+encodeURIComponent(sel.value || 'runtime'))).json(); } catch(e){ return; }
+  const want = sel.value || j.source;
+  if ([...sel.options].map(o=>o.value).join() !== j.sources.join()) {
+    sel.replaceChildren(...j.sources.map(s => Object.assign(document.createElement('option'), {value:s, textContent: s==='runtime' ? 'This runtime' : s})));
+    sel.value = j.sources.includes(want) ? want : 'runtime';
+  }
+  const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+  const t = (iso) => new Date(iso).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  pre.textContent = j.lines.length ? j.lines.map(l => t(l.at)+'  '+l.text).join('\n') : 'Nothing yet.';
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+$('logsrc').onchange = () => { $('logtext').textContent = ''; loadLogs(); };
+$('logcopy').onclick = async () => {
+  const text = $('logtext').textContent, b = $('logcopy');
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; } } catch(e) {}
+  if (!ok) { const a = document.createElement('textarea'); a.value = text; a.style.position='fixed'; a.style.opacity='0'; document.body.append(a); a.select(); try { ok = document.execCommand('copy'); } catch(e) {} a.remove(); }
+  b.textContent = ok ? 'Copied' : 'Select and copy'; setTimeout(() => b.textContent = 'Copy', 2000);
+};
+loadLogs(); setInterval(loadLogs, 3000);
 refresh(); setInterval(refresh, 3000);
 </script>
 </body>
