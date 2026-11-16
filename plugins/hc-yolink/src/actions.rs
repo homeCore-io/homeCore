@@ -54,6 +54,7 @@ pub fn manifest() -> Capabilities {
                 RequiresRole::User,
             ),
         ],
+        api_scopes: Vec::new(),
     }
 }
 

@@ -137,6 +137,7 @@ fn capabilities(caps: &RuntimeCapabilities) -> Capabilities {
                 danger: false,
             },
         ],
+        api_scopes: Vec::new(),
     }
 }
 

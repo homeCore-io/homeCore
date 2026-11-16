@@ -424,11 +424,10 @@ async fn awaiting_user_with_schema_roundtrip() -> Result<()> {
 
 struct HttpHarness {
     base_url: String,
-    // Kept so a future role-restructure can add a requires_role:"user" test.
-    // Admin has plugins:write today; User doesn't, so this token gets
-    // blocked by the base gate before the manifest check can fire.
-    #[allow(dead_code)]
+    /// A `User`, and a household member: neither holds plugins:write, so
+    /// they reach only the actions the manifest opens to everyone.
     user_token: String,
+    member_token: String,
     admin_token: String,
     _shutdown_tx: tokio::sync::watch::Sender<bool>,
     _keepalive: Vec<tokio::task::JoinHandle<()>>,
@@ -555,8 +554,10 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     // even a UUID) — is now correctly refused.
     let user_uid = Uuid::new_v4();
     let admin_uid = Uuid::new_v4();
+    let member_uid = Uuid::new_v4();
     for (id, username, role) in [
         (user_uid, "alice", Role::User),
+        (member_uid, "bob", Role::HouseholdMember),
         (admin_uid, "root", Role::Admin),
     ] {
         store
@@ -575,6 +576,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     }
     let user_token = jwt.issue(&user_uid.to_string(), "alice", Role::User, 0)?;
     let admin_token = jwt.issue(&admin_uid.to_string(), "root", Role::Admin, 0)?;
+    let member_token = jwt.issue(&member_uid.to_string(), "bob", Role::HouseholdMember, 0)?;
 
     // AppState.
     let state = AppState::new(AppStateParams {
@@ -652,6 +654,7 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     Ok(HttpHarness {
         base_url: format!("http://127.0.0.1:{tcp_port}"),
         user_token,
+        member_token,
         admin_token,
         _shutdown_tx: shutdown_tx,
         _keepalive: vec![plugin_task, mqtt_task, fwd_task, serve_task],
@@ -818,5 +821,83 @@ async fn error_is_terminal_after_warnings() -> Result<()> {
     assert_eq!(stages.iter().filter(|s| **s == "warning").count(), 2);
     assert_eq!(stages.last(), Some(&"error"));
 
+    Ok(())
+}
+
+async fn command(h: &HttpHarness, token: &str, body: Value) -> Result<reqwest::Response> {
+    Ok(reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/plugins/{}/command",
+            h.base_url,
+            hc_captest::PLUGIN_ID
+        ))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?)
+}
+
+async fn open_stream(h: &HttpHarness, token: &str, request_id: &str) -> Result<u16> {
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/api/v1/plugins/{}/command/{}/stream",
+            h.base_url,
+            hc_captest::PLUGIN_ID,
+            request_id
+        ))
+        .bearer_auth(token)
+        .header("accept", "text/event-stream")
+        .send()
+        .await?;
+    Ok(resp.status().as_u16())
+}
+
+/// An action the manifest declares `requires_role: signed_in` is open to
+/// every signed-in person, a household member included; its stream and its
+/// prompts are its starter's (and admins'), nobody else's.
+#[tokio::test]
+async fn open_actions_are_for_everyone_and_their_streams_for_their_starter() -> Result<()> {
+    let h = boot_http_harness().await?;
+
+    let resp = command(
+        &h,
+        &h.member_token,
+        json!({ "action": "demo_signed_in_prompt" }),
+    )
+    .await?;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await?;
+    assert_eq!(body["status"], "accepted");
+    let rid = body["request_id"].as_str().unwrap().to_string();
+
+    assert_eq!(open_stream(&h, &h.user_token, &rid).await?, 403);
+    assert_eq!(open_stream(&h, &h.member_token, &rid).await?, 200);
+    assert_eq!(open_stream(&h, &h.admin_token, &rid).await?, 200);
+
+    let answer = json!({ "action": "respond", "target_request_id": rid, "response": {} });
+    let resp = command(&h, &h.user_token, answer.clone()).await?;
+    assert_eq!(resp.status(), 403, "someone else may not answer the prompt");
+    let resp = command(&h, &h.member_token, answer).await?;
+    assert_eq!(resp.status(), 200, "its starter may");
+    let stop = json!({ "action": "cancel", "target_request_id": rid });
+    assert_eq!(command(&h, &h.user_token, stop).await?.status(), 403);
+    Ok(())
+}
+
+/// The default `user`, `admin`, and anything the manifest does not declare
+/// stay with plugins:write: declaring `user` opens nothing.
+#[tokio::test]
+async fn admin_and_undeclared_actions_stay_with_admins() -> Result<()> {
+    let h = boot_http_harness().await?;
+    for token in [&h.member_token, &h.user_token] {
+        let resp = command(&h, token, json!({ "action": "demo_cancelable" })).await?;
+        assert_eq!(resp.status(), 403, "requires_role user is not open");
+        let resp = command(&h, token, json!({ "action": "demo_admin_only" })).await?;
+        assert_eq!(resp.status(), 403);
+        let resp = command(&h, token, json!({ "action": "not_in_the_manifest" })).await?;
+        assert_eq!(resp.status(), 403);
+    }
+    let resp = command(&h, &h.admin_token, json!({ "action": "demo_admin_only" })).await?;
+    assert_eq!(resp.status(), 200);
     Ok(())
 }

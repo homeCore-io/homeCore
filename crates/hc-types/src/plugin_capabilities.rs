@@ -22,6 +22,12 @@ pub struct Capabilities {
     /// May be empty.
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// REST scopes the plugin wants for calling homeCore's own API. When this
+    /// is not empty, core mints the plugin an API key with these scopes (less
+    /// any a plugin may never hold) each time the manifest is published, and
+    /// hands it over with the `api_access` management action. Nothing to paste.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_scopes: Vec<String>,
 }
 
 /// One plugin-declared action, non-streaming or streaming.
@@ -81,10 +87,20 @@ pub enum ItemOp {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RequiresRole {
+    /// Admins only (`plugins:write` and the admin role).
     Admin,
+    /// The default: like every action before roles were declared, it needs
+    /// `plugins:write`.
     #[default]
     User,
+    /// Reads only. Also answers on `POST /plugins/{id}/query` for anyone who
+    /// can read devices; on `command` it needs `plugins:write`.
     ReadOnly,
+    /// Open to every signed-in person or key, whatever their role, through
+    /// `command` and `upload`. The plugin is told who asked (`caller`) and
+    /// keeps within their scopes; the stream, `respond` and `cancel` belong
+    /// to whoever started it (and admins). Opt-in, never a default.
+    SignedIn,
 }
 
 #[cfg(test)]
@@ -112,6 +128,7 @@ mod tests {
                 timeout_ms: None,
                 danger: false,
             }],
+            api_scopes: Vec::new(),
         };
         let s = serde_json::to_string(&m).unwrap();
         let back: Capabilities = serde_json::from_str(&s).unwrap();
@@ -168,5 +185,30 @@ mod tests {
         assert!(!a.cancelable);
         assert_eq!(a.concurrency, Concurrency::Multi);
         assert_eq!(a.requires_role, RequiresRole::User);
+        assert!(m.api_scopes.is_empty());
+    }
+
+    #[test]
+    fn api_scopes_ride_only_when_asked_for() {
+        let m: Capabilities = serde_json::from_value(json!({
+            "spec": "1",
+            "plugin_id": "plugin.mcp",
+            "api_scopes": ["devices:read", "scenes:run"],
+        }))
+        .unwrap();
+        assert_eq!(m.api_scopes, vec!["devices:read", "scenes:run"]);
+        let none = Capabilities {
+            spec: "1".into(),
+            plugin_id: "x".into(),
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&none).unwrap().contains("api_scopes"));
+    }
+
+    #[test]
+    fn signed_in_is_its_own_wire_name() {
+        let r: RequiresRole = serde_json::from_value(json!("signed_in")).unwrap();
+        assert_eq!(r, RequiresRole::SignedIn);
+        assert_eq!(serde_json::to_value(r).unwrap(), json!("signed_in"));
     }
 }

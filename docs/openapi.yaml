@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: HomeCore API
-  version: "0.1.109"
+  version: "0.1.110"
   description: |
     HomeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
@@ -2916,8 +2916,12 @@ paths:
         `POST /plugins/{id}/command` would run it, with
         `upload: {id, size, name}` among its params — the SDK hands the action
         a local `file_path` instead and removes the file once it has replied.
-        Other query parameters are passed as params (as strings). The same
-        role checks as `command`; the action must be on the plugin's manifest.
+        Other query parameters are passed as params (as strings), with the
+        verified `caller` as `command` adds it. The same role checks as
+        `command`: open to every signed-in caller for an action declared
+        `requires_role: signed_in`, `plugins:write` for anything else and the
+        admin role too for `admin`; the action must be on the plugin's
+        manifest.
 
         Added in core 0.1.87.
       tags: [plugins]
@@ -3705,6 +3709,12 @@ paths:
                       description: |
                         A display's key (a wall tablet, managed under
                         `/displays`), not one made for a program
+                    plugin:
+                      type: string
+                      description: |
+                        The plugin core made this key for (its manifest's
+                        `api_scopes`). Absent on other keys. Core replaces it
+                        on every plugin start and deletes it on uninstall.
         "400":
           description: Caller identity could not be resolved to a uid
           content:
@@ -3962,6 +3972,9 @@ paths:
                     format: date-time
                   display:
                     type: boolean
+                  plugin:
+                    type: string
+                    description: The plugin core made this key for, if any
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -5168,7 +5181,8 @@ paths:
         as a WLED controller's effect catalogue. Needs only `devices:read`,
         so any screen that shows a device may ask. An action the manifest
         doesn't declare read-only (or doesn't declare at all) is refused:
-        this path never runs anything else.
+        this path never runs anything else. The plugin gets the verified
+        `caller`, as from `command`.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -5236,6 +5250,19 @@ paths:
                   plugin_id:
                     type: string
                     description: Must match the plugin's MQTT client id.
+                  api_scopes:
+                    type: array
+                    items:
+                      type: string
+                    description: |
+                      REST scopes the plugin wants for homeCore's own API.
+                      When present, core mints the plugin an API key (label
+                      `plugin <id>`, no owner) each time the manifest is
+                      published, deletes the previous one, and sends it to the
+                      plugin with the management action `api_access`
+                      (`{url, key, scopes}`). `users:write` and
+                      `api_keys:admin` are never granted. The key is deleted
+                      when the plugin is uninstalled. Omitted when empty.
                   actions:
                     type: array
                     description: Declared actions. May be empty; omitted field defaults to `[]`.
@@ -5281,8 +5308,15 @@ paths:
                             enum: [add, update, remove]
                         requires_role:
                           type: string
-                          enum: [admin, user, read_only]
+                          enum: [admin, user, read_only, signed_in]
                           default: user
+                          description: |
+                            Who may run it through `POST /plugins/{id}/command`:
+                            `signed_in` is open to every signed-in caller of
+                            any role (opt-in); `user` (the default) and
+                            `read_only` need `plugins:write`; `admin` needs
+                            the admin role too. `read_only` actions also
+                            answer on `POST /plugins/{id}/query`.
                         timeout_ms:
                           type: integer
                           format: int64
@@ -5312,9 +5346,19 @@ paths:
         an `action` field and a core-minted `request_id` (UUID v4).
 
         The action is looked up in the plugin's capability manifest (see
-        `GET /plugins/{id}/capabilities`). Unknown actions are still dispatched,
-        using the pre-capabilities defaults (role `user`, `concurrency: multi`,
-        non-streaming, no timeout).
+        `GET /plugins/{id}/capabilities`). Unknown actions are still dispatched
+        to callers with `plugins:write`, using the pre-capabilities defaults
+        (`concurrency: multi`, non-streaming, no timeout).
+
+        **The caller.** Core removes any `caller` field the client sent and
+        adds the verified one to the params: `{"uid": "<uuid or null>",
+        "username", "role", "scopes": [...], "kind": "user" | "api_key" |
+        "local_admin" | "whitelist"}`. `role` is the role's wire form
+        (`admin`, `user`, `household_member`, `read_only`, ...); for an API key
+        it is advisory and `scopes` is what the key may do. `uid` is null for
+        the trusted local transports and for a plugin's own key. The same
+        `caller` rides on `POST /plugins/{id}/query` and
+        `POST /plugins/{id}/upload/{action}`.
 
         **Non-streaming actions** (`stream: false`, the default): the handler
         waits up to the manifest `timeout_ms` (5 s without one) for the
@@ -5336,9 +5380,15 @@ paths:
         …, "response": {…}}` after an `awaiting_user` event. The plugin
         replies `{request_id, status: "ok" | "error", error?}`.
 
-        Requires the `plugins:write` scope (`PluginsWrite` guard). Actions whose
-        manifest entry declares `requires_role: admin` additionally require the
-        caller's role to be `admin`.
+        **Who may call it:** an action the manifest declares
+        `requires_role: signed_in` is open to every signed-in caller, whatever
+        their role; the plugin is told who asked (`caller`) and keeps within
+        their scopes. Every other action needs `plugins:write`: one declared
+        `user` (the default) or `read_only`, and one the manifest does not
+        declare. One declared `admin` needs the `admin` role as well. `cancel`
+        and `respond` aimed at a stream of a `signed_in` action are allowed to
+        whoever started that stream and to callers with `plugins:write`, and
+        refused to everyone else.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -5392,9 +5442,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: |
-            Missing the `plugins:write` scope, or the action's manifest entry
-            declares `requires_role: admin` and the caller is not an admin
-            (body then also carries `"requires_role": "admin"`).
+            The action is not in the manifest (or is `cancel`/`respond` for a
+            stream of a plain admin action) and the caller lacks
+            `plugins:write`; or the manifest declares `requires_role: admin`
+            and the caller is not an admin (body then also carries
+            `"requires_role": "admin"`); or the caller is answering or stopping
+            a stream somebody else started.
           content:
             application/json:
               schema:
@@ -5456,7 +5509,9 @@ paths:
 
         On connect, core first replays the cached events for this `request_id`
         (so late subscribers see the history up to the cache limit), then
-        switches to live bus events, deduplicating by the payload's `ts` field.
+        switches to live bus events, skipping only the events the replay
+        already sent (matched by whole payload, in order), so events that
+        share a `ts` all arrive.
         The connection is closed by the server as soon as a terminal stage is
         seen: `complete`, `error`, `canceled`, or `timeout`. If the cache
         already ends in a terminal stage, the stream closes immediately after
@@ -5470,7 +5525,10 @@ paths:
         `EventSource` cannot set request headers. A whitelisted source IP is
         accepted; otherwise a JWT is read from `Authorization: Bearer <jwt>` or,
         failing that, from the `token` query parameter. The token must carry the
-        `plugins:read` scope.
+        `plugins:read` scope, except for the stream of an action the manifest
+        opens to everyone (`requires_role: signed_in`): that stream may
+        be someone's conversation, so only the caller who started it and
+        callers with `plugins:write` may read it, whatever else they hold.
       tags: [plugins]
       security:
         - bearerAuth: []
@@ -5497,7 +5555,7 @@ paths:
             SSE stream. Each event has the name `stream`; `data` is the plugin's
             JSON event payload. Payload fields are plugin-defined; core relies
             on `stage` (terminal values `complete` / `error` / `canceled` /
-            `timeout`) and `ts` (used for replay deduplication). Core-injected
+            `timeout`); `ts` is passed through. Core-injected
             terminal events carry `stage`, `request_id`, `ts`, `message`, and —
             for plugin-offline — `data.reason`.
           content:
@@ -5517,7 +5575,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Token lacks the `plugins:read` scope
+          description: |
+            Token lacks the `plugins:read` scope, or the stream belongs to an
+            open action somebody else started
           content:
             application/json:
               schema:

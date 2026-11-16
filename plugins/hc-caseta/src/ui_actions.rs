@@ -247,6 +247,7 @@ pub fn capabilities() -> plugin_sdk_rs::types::Capabilities {
                 RequiresRole::Admin,
             ),
         ],
+        api_scopes: Vec::new(),
     }
 }
 

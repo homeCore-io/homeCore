@@ -158,6 +158,7 @@ pub fn manifest() -> Capabilities {
         spec: "1".into(),
         plugin_id: String::new(),
         actions,
+        api_scopes: Vec::new(),
     }
 }
 

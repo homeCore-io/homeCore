@@ -75,7 +75,9 @@ impl StreamCache {
             events: Vec::new(),
             terminal_at: None,
         });
-        if entry.events.len() < MAX_EVENTS_PER_REQUEST {
+        // The terminal always goes in, even past the cap: a replay that ends
+        // without one leaves a late reader waiting on a stream already over.
+        if entry.events.len() < MAX_EVENTS_PER_REQUEST || is_terminal {
             entry.events.push(event);
         }
         if is_terminal {
@@ -90,6 +92,54 @@ impl StreamCache {
             Some(t) => now.duration_since(t) < std::time::Duration::from_secs(ENTRY_TTL_SECS),
             None => true,
         });
+    }
+}
+
+/// Which live events an SSE reader has already had from the replay.
+///
+/// The reader subscribes to the bus before it snapshots the cache, so the
+/// live channel can begin with the snapshot's last few events again, in the
+/// same order. Those, and only those, are skipped: the first live event that
+/// is not the next of them ends the overlap. Matching whole payloads rather
+/// than `ts` keeps distinct events that share a timestamp, which fast text
+/// deltas do.
+pub struct ReplayOverlap {
+    snapshot: Vec<Value>,
+    /// Where the overlap is in the snapshot, once found.
+    next: Option<usize>,
+    done: bool,
+}
+
+impl ReplayOverlap {
+    pub fn new(snapshot: Vec<Value>) -> Self {
+        let done = snapshot.is_empty();
+        Self {
+            snapshot,
+            next: None,
+            done,
+        }
+    }
+
+    /// True when `event` repeats one the replay sent, so it is skipped.
+    pub fn already_sent(&mut self, event: &Value) -> bool {
+        if self.done {
+            return false;
+        }
+        let hit = match self.next {
+            None => self.snapshot.iter().position(|e| e == event),
+            Some(i) => (self.snapshot.get(i) == Some(event)).then_some(i),
+        };
+        match hit {
+            Some(i) => {
+                self.next = Some(i + 1);
+                self.done = i + 1 >= self.snapshot.len();
+                true
+            }
+            None => {
+                self.done = true;
+                false
+            }
+        }
     }
 }
 
@@ -136,11 +186,44 @@ pub fn spawn_stream_cache_populator(raw_bus: &EventBus, cache: StreamCache) {
     });
 }
 
+/// Who started a streaming request, kept past its end so its SSE replay and
+/// its `respond`/`cancel` stay theirs. An action the manifest opens to every
+/// signed-in person (`requires_role: signed_in`) may be a private
+/// conversation; only its starter, or an admin, may read or answer it.
+#[derive(Clone, Debug)]
+pub struct StreamOwner {
+    pub plugin_id: String,
+    pub action_id: String,
+    /// [`crate::plugin_access::starter_key`] of whoever started it.
+    pub starter: String,
+    /// The action is open to every signed-in person, so the stream is its
+    /// starter's alone.
+    pub open: bool,
+    at: std::time::Instant,
+}
+
+impl StreamOwner {
+    pub fn new(plugin_id: String, action_id: String, starter: String, open: bool) -> Self {
+        Self {
+            plugin_id,
+            action_id,
+            starter,
+            open,
+            at: std::time::Instant::now(),
+        }
+    }
+}
+
+/// How long a stream's starter is remembered. Long past any stream's end:
+/// a conversation waiting on a person's answer can sit for a while.
+const OWNER_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
 /// Cloneable registry of active streaming requests.
 #[derive(Clone, Default)]
 pub struct StreamingRegistry {
     inner: Arc<Mutex<HashMap<String, StreamingEntry>>>,
     timeout_cancel: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    owners: Arc<Mutex<HashMap<String, StreamOwner>>>,
 }
 
 impl StreamingRegistry {
@@ -178,6 +261,19 @@ impl StreamingRegistry {
             let _ = tx.send(());
         }
         self.inner.lock().await.remove(request_id)
+    }
+
+    /// Remember who started `request_id`. Not released with the slot: the
+    /// replay cache outlives it, and so must the check on who reads it.
+    pub async fn record_owner(&self, request_id: String, owner: StreamOwner) {
+        let mut map = self.owners.lock().await;
+        map.retain(|_, o| o.at.elapsed() < OWNER_TTL);
+        map.insert(request_id, owner);
+    }
+
+    /// Who started `request_id`, if core still remembers.
+    pub async fn owner(&self, request_id: &str) -> Option<StreamOwner> {
+        self.owners.lock().await.get(request_id).cloned()
     }
 
     pub async fn entries_for_plugin(&self, plugin_id: &str) -> Vec<(String, StreamingEntry)> {
@@ -377,5 +473,47 @@ mod tests {
         )
         .await;
         assert!(reg.active_single("p", "a").await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod replay_overlap_tests {
+    use super::*;
+
+    fn ev(n: u32, ts: &str) -> Value {
+        json!({ "stage": "progress", "ts": ts, "data": { "text": format!("part {n}") } })
+    }
+
+    #[test]
+    fn events_sharing_a_timestamp_all_get_through() {
+        let mut o = ReplayOverlap::new(Vec::new());
+        let ts = "2026-11-16T10:00:00Z";
+        assert!(!o.already_sent(&ev(1, ts)));
+        assert!(!o.already_sent(&ev(2, ts)));
+        assert!(!o.already_sent(&ev(3, ts)));
+    }
+
+    #[test]
+    fn the_snapshots_tail_is_skipped_once_and_nothing_after() {
+        let ts = "2026-11-16T10:00:00Z";
+        let snap = vec![ev(1, ts), ev(2, ts), ev(3, ts)];
+        let mut o = ReplayOverlap::new(snap);
+        // The live channel opens with the last two again.
+        assert!(o.already_sent(&ev(2, ts)));
+        assert!(o.already_sent(&ev(3, ts)));
+        // Then new events, even ones equal to something replayed earlier.
+        assert!(!o.already_sent(&ev(4, ts)));
+        assert!(!o.already_sent(&ev(1, ts)));
+    }
+
+    #[test]
+    fn a_live_event_that_is_new_ends_the_overlap() {
+        let snap = vec![ev(1, "a"), ev(2, "b")];
+        let mut o = ReplayOverlap::new(snap);
+        assert!(!o.already_sent(&ev(9, "z")));
+        assert!(
+            !o.already_sent(&ev(2, "b")),
+            "past the overlap, nothing is skipped"
+        );
     }
 }

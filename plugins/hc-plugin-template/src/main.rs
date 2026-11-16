@@ -544,6 +544,7 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
             // house (a reboot, forgetting devices): screens ask first.
             danger: false,
         }],
+        api_scopes: Vec::new(),
     }
 }
 

@@ -2078,6 +2078,7 @@ impl PluginClient {
                                             spec: "1".into(),
                                             plugin_id: mgmt.plugin_id.clone(),
                                             actions: Vec::new(),
+                                            api_scopes: Vec::new(),
                                         };
                                         &synthesized
                                     }
@@ -2771,6 +2772,7 @@ mod config_schema_tests {
             spec: "1".into(),
             plugin_id: "plugin.hue".into(),
             actions: vec![],
+            api_scopes: Vec::new(),
         }
     }
 

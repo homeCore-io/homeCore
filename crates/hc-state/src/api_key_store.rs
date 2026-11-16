@@ -42,6 +42,12 @@ pub struct ApiKeyRecord {
     /// the display rather than as the admin who made it.
     #[serde(default)]
     pub display: bool,
+    /// The plugin this key was minted for, when core made it to give a plugin
+    /// REST access (its manifest's `api_scopes`). Core replaces it each time
+    /// the plugin starts and deletes it when the plugin is uninstalled; no
+    /// person owns it, so `owner_uid` is the nil UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
 }
 
 impl ApiKeyRecord {
@@ -169,6 +175,38 @@ impl ApiKeyStore {
         Ok(true)
     }
 
+    /// Remove a key outright, both rows. For keys core made itself and
+    /// replaces (a plugin's), where a revoked record kept forever would only
+    /// pile up: one per plugin start. `false` when there was no such key.
+    pub fn delete(&self, id: Uuid) -> Result<bool> {
+        let write_txn = self.db.begin_write()?;
+        let found = {
+            let mut by_id = write_txn.open_table(API_KEYS_BY_ID)?;
+            let prefix = by_id
+                .remove(id.to_string().as_str())?
+                .map(|v| v.value().to_string());
+            match prefix {
+                Some(prefix) => {
+                    let mut by_prefix = write_txn.open_table(API_KEYS_BY_PREFIX)?;
+                    by_prefix.remove(prefix.as_str())?;
+                    true
+                }
+                None => false,
+            }
+        };
+        write_txn.commit()?;
+        Ok(found)
+    }
+
+    /// The keys core minted for `plugin_id`.
+    pub fn list_by_plugin(&self, plugin_id: &str) -> Result<Vec<ApiKeyRecord>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|r| r.plugin.as_deref() == Some(plugin_id))
+            .collect())
+    }
+
     pub fn touch_last_used(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
         let Some(mut rec) = self.get_by_id(id)? else {
             return Ok(());
@@ -241,7 +279,36 @@ mod tests {
             allowed_cidrs: vec![],
             revoked_at: None,
             display: false,
+            plugin: None,
         }
+    }
+
+    #[test]
+    fn delete_removes_both_rows_and_list_by_plugin_finds_a_plugins_keys() {
+        let (_d, s) = fresh_store();
+        let mut a = sample("aaaaaaaaaaaa", "plugin plugin.mcp");
+        a.plugin = Some("plugin.mcp".into());
+        let b = sample("bbbbbbbbbbbb", "bot");
+        s.create(&a).unwrap();
+        s.create(&b).unwrap();
+        let mine = s.list_by_plugin("plugin.mcp").unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, a.id);
+        assert!(s.delete(a.id).unwrap());
+        assert!(s.get_by_id(a.id).unwrap().is_none());
+        assert!(s.get_by_prefix("aaaaaaaaaaaa").unwrap().is_none());
+        assert!(!s.delete(a.id).unwrap());
+        assert!(s.get_by_id(b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_record_from_before_plugin_keys_reads_as_nobodys() {
+        let rec = sample("cccccccccccc", "old");
+        let mut v = serde_json::to_value(&rec).unwrap();
+        assert!(v.get("plugin").is_none());
+        v.as_object_mut().unwrap().remove("plugin");
+        let back: ApiKeyRecord = serde_json::from_value(v).unwrap();
+        assert!(back.plugin.is_none());
     }
 
     #[test]

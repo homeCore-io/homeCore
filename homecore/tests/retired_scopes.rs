@@ -60,6 +60,7 @@ async fn a_key_stored_with_retired_scopes_still_works() -> Result<()> {
                 allowed_cidrs: vec![],
                 revoked_at: None,
                 display: false,
+                plugin: None,
             })
             .await?;
     }

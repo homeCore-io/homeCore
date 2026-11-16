@@ -485,6 +485,17 @@ impl StateStore {
         tokio::task::spawn_blocking(move || store.revoke(id, now)).await?
     }
 
+    pub async fn delete_api_key(&self, id: Uuid) -> Result<bool> {
+        let store = Arc::clone(&self.api_keys);
+        tokio::task::spawn_blocking(move || store.delete(id)).await?
+    }
+
+    pub async fn list_api_keys_by_plugin(&self, plugin_id: &str) -> Result<Vec<ApiKeyRecord>> {
+        let store = Arc::clone(&self.api_keys);
+        let p = plugin_id.to_string();
+        tokio::task::spawn_blocking(move || store.list_by_plugin(&p)).await?
+    }
+
     pub async fn touch_api_key_last_used(&self, id: Uuid) -> Result<()> {
         let store = Arc::clone(&self.api_keys);
         let now = chrono::Utc::now();

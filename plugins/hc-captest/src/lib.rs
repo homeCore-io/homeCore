@@ -43,6 +43,10 @@ pub fn register_actions(mgmt: ManagementHandle) -> ManagementHandle {
             |ctx, params| async move { demo_awaiting_user(ctx, params).await },
         ))
         .with_streaming_action(StreamingAction::new(
+            "demo_signed_in_prompt",
+            |ctx, params| async move { demo_awaiting_user(ctx, params).await },
+        ))
+        .with_streaming_action(StreamingAction::new(
             "demo_cancelable",
             |ctx, params| async move { demo_cancelable(ctx, params).await },
         ))
@@ -165,6 +169,25 @@ pub fn capabilities_manifest() -> Capabilities {
                 danger: false,
             },
             Action {
+                id: "demo_signed_in_prompt".into(),
+                label: "Demo: a prompt anyone signed in may start".into(),
+                description: Some(
+                    "demo_awaiting_user, declared requires_role:\"signed_in\": used to \
+                     validate that it is open to every role and its stream is its starter's."
+                        .into(),
+                ),
+                params: None,
+                result: None,
+                stream: true,
+                cancelable: true,
+                concurrency: Concurrency::Multi,
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::SignedIn,
+                timeout_ms: Some(30_000),
+                danger: false,
+            },
+            Action {
                 id: "demo_admin_only".into(),
                 label: "Demo: admin-only action".into(),
                 description: Some(
@@ -184,6 +207,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 danger: false,
             },
         ],
+        api_scopes: Vec::new(),
     }
 }
 

@@ -642,6 +642,22 @@ async fn main() -> Result<()> {
     // because broadcast channels don't replay history on late subscribe.
     hc_api::spawn_plugin_registry_listener(pub_bus.clone(), plugin_registry.clone());
 
+    // The management channel, made here rather than with AppState so the
+    // listener below can use it for the manifests plugins publish at startup.
+    let management_rpc =
+        hc_api::management_rpc::ManagementRpc::new(publish_handle.clone(), &pub_bus);
+
+    // A plugin whose manifest asks for `api_scopes` gets an API key from core,
+    // sent to it over the management channel. Same timing as the registry
+    // listener: before plugins spawn.
+    hc_api::plugin_access::spawn_plugin_api_access(
+        pub_bus.clone(),
+        store.clone(),
+        plugin_registry.clone(),
+        hc_api::plugin_access::local_api_base(&config.server.host, config.server.port),
+        hc_api::plugin_access::deliver_over(management_rpc.clone()),
+    );
+
     // Persist plugin learned-state writes (homecore/plugins/<id>/state/set) to
     // redb and re-publish the merged doc as the retained authoritative state.
     // Subscribes to the raw MQTT bus (internal_bus carries Event::MqttMessage).
@@ -1268,8 +1284,6 @@ async fn main() -> Result<()> {
             keep: config.backup.keep,
         }),
     };
-    let publish_handle_rpc = publish_handle.clone();
-    let pub_bus_rpc = pub_bus.clone();
 
     // InfluxDB v2 metrics exporter (opt-in). Subscribes to pub_bus so it
     // sees the same DeviceStateChanged events the rule engine + WebSocket
@@ -1339,7 +1353,7 @@ async fn main() -> Result<()> {
     .with_mqtt_takeover(mqtt_cfg.clone())
     .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc({
-        let rpc = hc_api::management_rpc::ManagementRpc::new(publish_handle_rpc, &pub_bus_rpc);
+        let rpc = management_rpc;
         let _ = plugin_files.set(std::sync::Arc::new(hc_api::PluginFilesRpc {
             rpc: rpc.clone(),
             store: store_for_pictures,

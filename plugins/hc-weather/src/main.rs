@@ -659,6 +659,7 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
                 RequiresRole::User,
             ),
         ],
+        api_scopes: Vec::new(),
     }
 }
 

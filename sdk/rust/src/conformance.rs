@@ -455,6 +455,7 @@ mod tests {
             actions: vec![manifest_action(serde_json::json!({
                 "id": "rescan", "label": "Rescan"
             }))],
+            api_scopes: Vec::new(),
         };
         let f = check_manifest(&caps);
         assert!(f.iter().next().unwrap().contains("5000ms"));
@@ -470,6 +471,7 @@ mod tests {
             actions: vec![manifest_action(serde_json::json!({
                 "id": "rescan", "label": "Rescan", "timeout_ms": 10000
             }))],
+            api_scopes: Vec::new(),
         };
         check_actions_routed(&caps, &["rescan"]).assert_ok();
         assert!(check_actions_routed(&caps, &[])

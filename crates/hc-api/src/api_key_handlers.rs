@@ -48,6 +48,7 @@ fn record_to_summary(r: &ApiKeyRecord) -> ApiKeySummary {
         allowed_cidrs: r.allowed_cidrs.clone(),
         revoked_at: r.revoked_at,
         display: r.display,
+        plugin: r.plugin.clone(),
     }
 }
 
@@ -203,6 +204,7 @@ pub async fn create_api_key(
                 allowed_cidrs: tidy_cidrs(&body.allowed_cidrs),
                 revoked_at: None,
                 display: false,
+                plugin: None,
             };
             break (candidate, rec);
         }

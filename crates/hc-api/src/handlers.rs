@@ -4904,6 +4904,15 @@ pub async fn deregister_plugin(
         }
     }
 
+    // 3a. Its own REST key goes with it, and its retained manifest, which
+    //     would otherwise mint it a new one on the next core start.
+    let keys_removed = crate::plugin_access::remove_plugin_keys(&s.store, &id).await;
+    if let Some(ref publish) = s.publish {
+        let _ = publish
+            .publish_retained(&format!("homecore/plugins/{id}/capabilities"), Vec::new())
+            .await;
+    }
+
     // 3b. If it lives on a runtime, withdrawing the placement *is* the uninstall
     //     instruction: the runtime stops it and deletes its environment on the
     //     next reconcile. Nothing below this applies to it — core has no child to
@@ -4929,7 +4938,7 @@ pub async fn deregister_plugin(
         }
     };
 
-    if !removed && !stopped && !unplaced && devices_removed == 0 {
+    if !removed && !stopped && !unplaced && devices_removed == 0 && keys_removed == 0 {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "plugin not found" })),
@@ -4981,6 +4990,7 @@ pub async fn deregister_plugin(
         "config_removed": config_removed,
         "binaries_removed": binaries_removed,
         "kept_config": q.keep_config,
+        "api_keys_removed": keys_removed,
     });
     audit::emit(&s, e).await;
 
@@ -5567,7 +5577,10 @@ pub struct PluginStreamQuery {
 /// Public route: auth is enforced here rather than via the Bearer
 /// middleware, because `EventSource` can't send custom headers. Accepts
 /// `?token=<jwt>` (query) or `Authorization: Bearer <jwt>` (header) or
-/// falls back to the IP whitelist. Requires `plugins:read` scope.
+/// falls back to the IP whitelist. Requires `plugins:read` scope, except
+/// for the stream of an action the manifest opens to everyone
+/// (`requires_role: signed_in`): that one only its starter and
+/// callers with `plugins:write` may read, whatever else they hold.
 pub async fn get_plugin_stream_sse(
     State(s): State<AppState>,
     Path((plugin_id, request_id)): Path<(String, String)>,
@@ -5614,12 +5627,33 @@ pub async fn get_plugin_stream_sse(
             }
         }
     };
-    if !claims.has_scope("plugins:read") {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "scope 'plugins:read' required" })),
-        )
-            .into_response();
+    // A stream of an action open to everyone may be someone's conversation:
+    // its starter's and admins' alone. Any other stream reads with
+    // plugins:read, as it always has.
+    let private = match s.streaming_registry.owner(&request_id).await {
+        Some(o) if o.plugin_id == plugin_id && o.open => Some(o.starter),
+        _ => None,
+    };
+    match private {
+        Some(starter) => {
+            if starter != crate::plugin_access::starter_key(&claims)
+                && !claims.has_scope("plugins:write")
+            {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "only whoever started this may read it" })),
+                )
+                    .into_response();
+            }
+        }
+        None if !claims.has_scope("plugins:read") => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "scope 'plugins:read' required" })),
+            )
+                .into_response();
+        }
+        None => {}
     }
 
     let target_topic = format!("homecore/plugins/{plugin_id}/commands/{request_id}/events");
@@ -5635,11 +5669,7 @@ pub async fn get_plugin_stream_sse(
         // than by MQTT retained) so late subscribers see the full history
         // up to the cache limit.
         let mut last_terminal = false;
-        let mut seen_ts: std::collections::HashSet<String> = std::collections::HashSet::new();
         for val in &cache_snapshot {
-            if let Some(ts) = val.get("ts").and_then(|v| v.as_str()) {
-                seen_ts.insert(ts.to_string());
-            }
             let stage = val.get("stage").and_then(|s| s.as_str()).unwrap_or("");
             let data = serde_json::to_string(val).unwrap_or_default();
             let sse_event = SseEvent::default().event("stream").data(data);
@@ -5654,9 +5684,12 @@ pub async fn get_plugin_stream_sse(
             return;
         }
 
-        // Step 2: forward live events. Dedup by `ts` against the cache —
-        // bus_rx was subscribed before the snapshot, so any event that
-        // appears in both channels shares a timestamp and is skipped.
+        // Step 2: forward live events, skipping the ones the replay already
+        // sent. bus_rx was subscribed before the snapshot, so the live
+        // channel can open with the snapshot's tail, in order; nothing else
+        // is skipped, so events that share a `ts` (fast text deltas) all
+        // arrive.
+        let mut replayed = crate::streaming::ReplayOverlap::new(cache_snapshot);
         loop {
             match bus_rx.recv().await {
                 Ok(hc_types::event::Event::MqttMessage { topic, payload, .. })
@@ -5668,10 +5701,8 @@ pub async fn get_plugin_stream_sse(
                     let Ok(val) = serde_json::from_slice::<Value>(&payload) else {
                         continue;
                     };
-                    if let Some(ts) = val.get("ts").and_then(|v| v.as_str()) {
-                        if !seen_ts.insert(ts.to_string()) {
-                            continue;
-                        }
+                    if replayed.already_sent(&val) {
+                        continue;
                     }
                     let stage = val
                         .get("stage")
@@ -6463,38 +6494,21 @@ pub async fn post_plugin_query(
 
 /// `POST /plugins/{id}/command` — send a plugin-specific management command.
 ///
-/// Body: `{ "action": "...", ...extra fields }`.  Forwarded verbatim (plus a
-/// generated `request_id`) to the plugin via the management RPC.  Used for
-/// plugin-defined actions beyond the built-in `get_config`/`set_config`/
-/// `set_log_level` set (e.g. yolink's `rescan_devices`).
-//
-// SAFETY (W2-tail): authorization here is defense-in-depth across two
-// layers, but only Layer 1 covers actions whose capability manifest
-// is unknown:
-//
-//   Layer 1 — `PluginsWrite(claims)` extractor rejects with 403 before
-//             this body runs, for any caller missing the `plugins:write`
-//             scope.
-//   Layer 2 — `requires_admin` check below rejects when the *manifest*
-//             declares `requires_role: Admin` and the caller's role
-//             isn't Admin. Skipped (`requires_admin == false`) for any
-//             action `action_meta == None`.
-//
-// Layer 2 is a refinement of Layer 1 today — it's harmless that it skips
-// for unknown actions, because Layer 1 already restricts to admins (the
-// only role currently granted `plugins:write` is `Role::Admin`, asserted
-// by the `user_can_command_but_not_manage` test in `hc_auth::user`).
-//
-// If a future role is granted `plugins:write` (e.g. a hypothetical
-// `PluginOperator`), unknown manifest actions would silently bypass the
-// role check entirely. When that change lands, either:
-//   (a) require all plugin actions to be in the manifest before they're
-//       dispatched (close the unknown-action path), or
-//   (b) default `requires_admin = true` for `action_meta.is_none()`
-//       (fail closed when we don't know what an action does).
+/// Body: `{ "action": "...", ...extra fields }`.  Forwarded (plus a generated
+/// `request_id` and the verified `caller`) to the plugin via the management
+/// RPC.  Used for plugin-defined actions beyond the built-in `get_config`/
+/// `set_config`/`set_log_level` set (e.g. yolink's `rescan_devices`).
+///
+/// Who may call it comes from the manifest ([`crate::plugin_access::may_run`]):
+/// an action declared `requires_role: signed_in` is open to every signed-in
+/// caller; everything else, declared or not, needs `plugins:write`, and one
+/// declared `admin` the admin role too, failing closed when core does not
+/// know what an action does. `respond` and `cancel` aimed at a stream of a
+/// `signed_in` action are allowed to whoever started that stream (and
+/// admins); anyone else's are refused.
 pub async fn post_plugin_command(
     State(s): State<AppState>,
-    PluginsWrite(claims): PluginsWrite,
+    AuthUser(claims): AuthUser,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -6508,7 +6522,8 @@ pub async fn post_plugin_command(
 
     // Resolve the manifest action (if any) to pick up requires_role,
     // concurrency, stream, and timeout_ms. Unknown actions keep the
-    // pre-capabilities default (user / multi / non-streaming / no timeout).
+    // pre-capabilities default (multi / non-streaming / no timeout) and need
+    // plugins:write.
     let action_meta = {
         let map = s.plugins.read().await;
         match map.get(&id) {
@@ -6527,19 +6542,31 @@ pub async fn post_plugin_command(
         }
     };
 
-    let requires_admin = matches!(
-        action_meta.as_ref().map(|a| a.requires_role),
-        Some(hc_types::RequiresRole::Admin)
-    );
-    if requires_admin && !matches!(claims.role, hc_auth::user::Role::Admin) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "action requires admin role",
-                "requires_role": "admin",
-            })),
-        )
-            .into_response();
+    // An answer to, or a stop of, a stream someone started from an open
+    // action is theirs to give.
+    if action_meta.is_none() && matches!(action.as_str(), "respond" | "cancel") {
+        if let Some(target) = body["target_request_id"].as_str() {
+            if let Some(owner) = s.streaming_registry.owner(target).await {
+                if owner.plugin_id == id && owner.open {
+                    if owner.starter == crate::plugin_access::starter_key(&claims)
+                        || claims.has_scope("plugins:write")
+                    {
+                        return run_plugin_action(s, claims, id, action, body).await;
+                    }
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({ "error": "only whoever started this may answer or stop it" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    if let Err(no) =
+        crate::plugin_access::may_run(&claims, action_meta.as_ref().map(|a| a.requires_role))
+    {
+        return no;
     }
     run_plugin_action(s, claims, id, action, body).await
 }
@@ -6556,7 +6583,7 @@ pub const PLUGIN_UPLOAD_MAX: usize = 32 * 1024 * 1024;
 /// same role checks as `command`; the action must be on the manifest.
 pub async fn post_plugin_upload(
     State(s): State<AppState>,
-    PluginsWrite(claims): PluginsWrite,
+    AuthUser(claims): AuthUser,
     Path((id, action)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
     body: axum::body::Bytes,
@@ -6576,14 +6603,8 @@ pub async fn post_plugin_upload(
         )
             .into_response();
     };
-    if matches!(meta.requires_role, hc_types::RequiresRole::Admin)
-        && !matches!(claims.role, hc_auth::user::Role::Admin)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "action requires admin role", "requires_role": "admin" })),
-        )
-            .into_response();
+    if let Err(no) = crate::plugin_access::may_run(&claims, Some(meta.requires_role)) {
+        return no;
     }
     if body.is_empty() || body.len() > PLUGIN_UPLOAD_MAX {
         return (
@@ -6641,7 +6662,7 @@ pub async fn post_plugin_upload(
 /// Send a plugin action, once whoever asked has been allowed it.
 async fn run_plugin_action(
     s: AppState,
-    _claims: hc_auth::Claims,
+    claims: hc_auth::Claims,
     id: String,
     action: String,
     body: Value,
@@ -6662,11 +6683,16 @@ async fn run_plugin_action(
             .into_response();
     };
 
-    // Forward all fields except `action` as params.
+    // Forward all fields except `action` as params, with who asked: the
+    // verified caller, never one the client wrote into the body.
     let mut params = body.clone();
     if let Some(obj) = params.as_object_mut() {
         obj.remove("action");
     }
+    crate::plugin_access::with_caller(
+        &mut params,
+        crate::plugin_access::caller_json(&s.store, &claims).await,
+    );
 
     let is_streaming = action_meta.as_ref().map(|a| a.stream).unwrap_or(false);
     let concurrency = action_meta
@@ -6694,6 +6720,17 @@ async fn run_plugin_action(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     if is_streaming {
+        s.streaming_registry
+            .record_owner(
+                request_id.clone(),
+                crate::streaming::StreamOwner::new(
+                    id.clone(),
+                    action.clone(),
+                    crate::plugin_access::starter_key(&claims),
+                    crate::plugin_access::is_open(action_meta.as_ref().map(|a| a.requires_role)),
+                ),
+            )
+            .await;
         s.streaming_registry
             .reserve(
                 request_id.clone(),
