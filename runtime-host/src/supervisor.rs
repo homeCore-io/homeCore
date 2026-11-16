@@ -168,16 +168,39 @@ async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
     std::future::pending::<()>().await;
 }
 
+/// Ask first (SIGTERM), so a plugin can leave what it controls safe, and kill it
+/// only if it has not gone within [`SHUTDOWN_GRACE`]. The same as core's
+/// `kill_child`. This used to only wait, so every stop was a SIGKILL after a
+/// pause: a plugin was never told to stop, and never ran its handler.
 async fn stop_child(plugin_id: &str, child: &mut tokio::process::Child) {
-    tracing::info!(%plugin_id, "shutdown requested — waiting for hosted plugin to exit");
-    match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-        Ok(_) => {}
-        Err(_) => {
-            tracing::warn!(%plugin_id, "hosted plugin did not exit in time — killing");
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await;
-        }
+    tracing::info!(%plugin_id, "shutdown requested — asking hosted plugin to exit");
+    if ask_to_stop(child)
+        && tokio::time::timeout(SHUTDOWN_GRACE, child.wait())
+            .await
+            .is_ok()
+    {
+        return;
     }
+    tracing::warn!(%plugin_id, "hosted plugin did not exit when asked — killing");
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await;
+}
+
+/// SIGTERM to a running child. False when there is no way to ask (not unix,
+/// or it has already gone).
+#[cfg(unix)]
+fn ask_to_stop(child: &tokio::process::Child) -> bool {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    match child.id() {
+        Some(pid) => kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_ok(),
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn ask_to_stop(_child: &tokio::process::Child) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -290,5 +313,25 @@ mod tests {
             .await
             .expect("supervisor should stop promptly on shutdown")
             .unwrap();
+    }
+
+    /// A plugin is asked to stop, not just killed after a wait. `sh` running a
+    /// trap exits with 42 on SIGTERM; a SIGKILL would leave no exit code at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopping_plugin_is_asked_first() {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "trap 'exit 42' TERM; while :; do sleep 0.1; done"])
+            .spawn()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        stop_child("plugin.test", &mut child).await;
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(42), "{status:?}");
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "it waited out the grace period"
+        );
     }
 }

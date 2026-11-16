@@ -62,6 +62,9 @@ async fn light_fires_rule(trigger: Trigger, triggers: Vec<Trigger>) -> Result<()
     Broker::new(BrokerConfig {
         host: "127.0.0.1".into(),
         port,
+        // No v5 listener: the default port is shared with any homeCore on this
+        // machine, and these tests speak v4.
+        v5_port: None,
         ..Default::default()
     })
     .spawn()?;
@@ -230,6 +233,9 @@ async fn plugin_capabilities_manifest_surfaces_on_bus() -> Result<()> {
     Broker::new(BrokerConfig {
         host: "127.0.0.1".into(),
         port,
+        // No v5 listener: the default port is shared with any homeCore on this
+        // machine, and these tests speak v4.
+        v5_port: None,
         ..Default::default()
     })
     .spawn()?;

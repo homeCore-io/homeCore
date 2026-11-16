@@ -402,6 +402,9 @@ pub struct AppState {
     /// than read per-request so the gate cannot drift from what the
     /// Configuration screen shows. The records themselves live in `store`.
     pub plugin_runtimes_config: hc_config::PluginRuntimesSection,
+    /// How core reaches the broker as itself, to push a removed runtime and its
+    /// plugins off at once. `None` in tests, where nothing is connected.
+    pub mqtt_takeover: Option<Arc<hc_mqtt_client::MqttClientConfig>>,
     /// MQTT management RPC for remote plugin config/commands.
     pub management_rpc: Option<management_rpc::ManagementRpc>,
     /// Handle for runtime log level changes.
@@ -904,6 +907,7 @@ impl AppState {
             managed_plugins: None,
             plugin_install: None,
             plugin_runtimes_config: hc_config::PluginRuntimesSection::default(),
+            mqtt_takeover: None,
             plugin_spawn: None,
             registry: None,
             management_rpc: None,
@@ -1121,6 +1125,11 @@ impl AppState {
         self
     }
 
+    pub fn with_mqtt_takeover(mut self, cfg: hc_mqtt_client::MqttClientConfig) -> Self {
+        self.mqtt_takeover = Some(Arc::new(cfg));
+        self
+    }
+
     pub fn with_plugin_install(mut self, ctx: Arc<InstallContext>) -> Self {
         self.plugin_install = Some(ctx);
         self
@@ -1192,23 +1201,13 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             "/plugins/{id}/command/{request_id}/stream",
             get(handlers::get_plugin_stream_sse),
         )
-        // Plugin-runtime enrollment is the one unauthenticated endpoint in the
-        // plugin story: a container has no credential until it has been through
-        // here. Gated by the feature switch, the whitelist and its own rate
-        // budget — see plugin_runtime_handlers.
+        // A runtime checking in, and its desired state, authenticated by the
+        // runtime's own secret rather than a JWT, so they cannot sit behind the
+        // Bearer middleware.
         .route(
-            "/plugin-runtimes/enroll",
-            post(plugin_runtime_handlers::enroll)
-                .layer(middleware::from_fn(rate_limit::enroll_rate_limit)),
+            "/plugin-runtimes/{id}/hello",
+            post(plugin_runtime_handlers::hello),
         )
-        // Status poll, authenticated by the single-use enrollment secret rather
-        // than a JWT, so it cannot live behind the Bearer middleware.
-        .route(
-            "/plugin-runtimes/{id}",
-            get(plugin_runtime_handlers::get_status),
-        )
-        // Desired state, authenticated by the runtime's own key rather than a
-        // JWT, so it cannot sit behind the Bearer middleware either.
         .route(
             "/plugin-runtimes/{id}/placements",
             get(plugin_runtime_handlers::list_placements),
@@ -1462,11 +1461,15 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         .route("/plugins/install", post(handlers::install_plugin))
         .route(
             "/plugin-runtimes",
-            get(plugin_runtime_handlers::list_runtimes),
+            get(plugin_runtime_handlers::list_runtimes).post(plugin_runtime_handlers::add_runtime),
         )
         .route(
-            "/plugin-runtimes/tokens",
-            post(plugin_runtime_handlers::issue_token),
+            "/plugin-runtimes/broker",
+            get(plugin_runtime_handlers::broker_status),
+        )
+        .route(
+            "/plugin-runtimes/broker/open",
+            post(plugin_runtime_handlers::open_broker),
         )
         // Before `/plugin-runtimes/{id}/...`: axum matches literals ahead of
         // captures, but keeping them adjacent makes the pair obvious to read.
@@ -1475,12 +1478,12 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
             get(plugin_runtime_handlers::list_all_placements),
         )
         .route(
-            "/plugin-runtimes/{id}/approve",
-            post(plugin_runtime_handlers::approve_runtime),
+            "/plugin-runtimes/{id}",
+            delete(plugin_runtime_handlers::remove_runtime),
         )
         .route(
-            "/plugin-runtimes/{id}/deny",
-            post(plugin_runtime_handlers::deny_runtime),
+            "/plugin-runtimes/{id}/reset",
+            post(plugin_runtime_handlers::reset_runtime),
         )
         .route("/registry/plugins", get(handlers::browse_registry))
         .route("/registry/plugins/{id}", get(handlers::get_registry_plugin))

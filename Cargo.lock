@@ -1489,6 +1489,7 @@ dependencies = [
  "nix",
  "notify",
  "prometheus",
+ "redb",
  "reqwest",
  "ron 0.12.2",
  "serde",
@@ -1512,6 +1513,7 @@ dependencies = [
 name = "hc-api-types"
 version = "0.1.4"
 dependencies = [
+ "base64 0.23.0",
  "chrono",
  "hc-auth",
  "serde",
@@ -1913,12 +1915,11 @@ name = "hc-runtime-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.23.0",
+ "axum 0.8.9",
  "chrono",
- "ed25519-dalek",
- "getrandom 0.4.2",
  "hc-api-types",
  "hex",
+ "nix",
  "plugin-sdk-rs",
  "reqwest",
  "serde",
@@ -2180,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "homecore"
-version = "0.1.107"
+version = "0.1.108"
 dependencies = [
  "anyhow",
  "base64 0.23.0",

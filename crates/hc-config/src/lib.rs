@@ -106,74 +106,24 @@ pub struct RegistrySection {
 
 /// `[plugin_runtimes]` — container-hosted plugins written in other languages.
 ///
-/// A runtime is a container the operator runs; homeCore never manages it. These
-/// settings govern only how one is allowed to *join*. See
-/// `docs/pluginRuntimesPlan.md`.
+/// A runtime is a container the operator runs; homeCore never manages it. An
+/// admin adds one in Settings, which makes its login and shows the key to paste
+/// into it. See `docs/pluginRuntimesPlan.md`.
+///
+/// Older files may still carry `mode`, `whitelist_only` and the pending and
+/// denial limits from when runtimes asked to join. They are ignored.
 #[derive(Deserialize, Clone, Debug)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PluginRuntimesSection {
-    /// Master switch. Off means the enrollment endpoints 404 — a deployment
-    /// that will never host a runtime should not carry the surface.
+    /// Master switch. Off means the runtime endpoints 404: a deployment that
+    /// will never host a runtime should not carry the surface.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// `open` — anyone reachable may ask, and an admin approves a matching code.
-    /// `token` — only an admin-issued token enrolls, and nothing is ever pending.
-    #[serde(default = "default_enroll_mode")]
-    pub mode: String,
-    /// Restrict enrollment to `[auth].whitelist` sources. On by default: a
-    /// runtime is a machine on your network, and an enrollment request from
-    /// outside it is not a thing that should reach an approval screen.
-    #[serde(default = "default_true")]
-    pub whitelist_only: bool,
-    /// How long a pending record stays answerable.
-    #[serde(default = "default_pending_ttl_mins")]
-    pub pending_ttl_mins: u32,
-    /// Cap on simultaneous pending records. Bounds the "fill the screen with
-    /// plausible requests until one is approved by fatigue" attack.
-    #[serde(default = "default_max_pending")]
-    pub max_pending: u32,
-    /// Denials an identity may accumulate before it has to wait.
-    #[serde(default = "default_max_denials")]
-    pub max_denials: u32,
-    /// How long that wait is.
-    #[serde(default = "default_denial_cooldown_mins")]
-    pub denial_cooldown_mins: u32,
-}
-
-fn default_enroll_mode() -> String {
-    "open".into()
-}
-fn default_pending_ttl_mins() -> u32 {
-    15
-}
-fn default_max_pending() -> u32 {
-    5
-}
-fn default_max_denials() -> u32 {
-    3
-}
-fn default_denial_cooldown_mins() -> u32 {
-    60
 }
 
 impl Default for PluginRuntimesSection {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: default_enroll_mode(),
-            whitelist_only: true,
-            pending_ttl_mins: default_pending_ttl_mins(),
-            max_pending: default_max_pending(),
-            max_denials: default_max_denials(),
-            denial_cooldown_mins: default_denial_cooldown_mins(),
-        }
-    }
-}
-
-impl PluginRuntimesSection {
-    /// True when only an admin-issued token may enroll.
-    pub fn is_token_only(&self) -> bool {
-        self.mode.eq_ignore_ascii_case("token")
+        Self { enabled: true }
     }
 }
 

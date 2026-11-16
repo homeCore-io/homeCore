@@ -38,6 +38,9 @@ async fn boot_captest() -> Result<(
     Broker::new(BrokerConfig {
         host: "127.0.0.1".into(),
         port,
+        // No v5 listener: the default port is shared with any homeCore on this
+        // machine, and these tests speak v4.
+        v5_port: None,
         ..Default::default()
     })
     .spawn()?;
@@ -446,6 +449,9 @@ async fn boot_http_harness() -> Result<HttpHarness> {
     Broker::new(BrokerConfig {
         host: "127.0.0.1".into(),
         port,
+        // No v5 listener: the default port is shared with any homeCore on this
+        // machine, and these tests speak v4.
+        v5_port: None,
         ..Default::default()
     })
     .spawn()?;

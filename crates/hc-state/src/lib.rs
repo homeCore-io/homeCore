@@ -46,9 +46,7 @@ use user_store::UserStore;
 pub use api_key_store::ApiKeyRecord;
 pub use audit_store::{AuditActorType, AuditEntry, AuditQuery, AuditResult};
 pub use battery_store::{BatteryEdge, BatteryRecord};
-pub use plugin_runtime_store::{
-    EnrollTokenRecord, PlacementRecord, PluginRuntimeStore, RuntimeRecord, RuntimeStatus,
-};
+pub use plugin_runtime_store::{PlacementRecord, PluginRuntimeStore, RuntimeRecord};
 pub use refresh_token_store::RefreshTokenRecord;
 
 /// Combined handle to both storage back-ends.

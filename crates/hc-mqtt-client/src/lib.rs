@@ -192,3 +192,55 @@ impl MqttClient {
         }
     }
 }
+
+/// Push connections off the broker by client id, now.
+///
+/// The broker checks a login only when a connection opens, so a client whose
+/// login was just removed (a plugin runtime removed or reset in homeCore, and
+/// the plugins placed on it) would otherwise stay connected until it next
+/// reconnected. MQTT replaces a connection when another arrives with the same
+/// client id, so core connects briefly as each one, with its own login, and
+/// leaves at once. The client's reconnect then meets the login check and is
+/// refused.
+///
+/// Best effort: an id that is not connected costs one short connection, and a
+/// broker that does not answer is logged rather than failing the caller.
+pub async fn take_over(cfg: &MqttClientConfig, client_ids: &[String]) {
+    for id in client_ids {
+        match take_over_one(cfg, id).await {
+            Ok(()) => info!(client_id = %id, "disconnected from the broker"),
+            Err(e) => {
+                warn!(client_id = %id, error = %format!("{e:#}"), "could not disconnect a client from the broker")
+            }
+        }
+    }
+}
+
+async fn take_over_one(cfg: &MqttClientConfig, client_id: &str) -> Result<()> {
+    let mut opts = MqttOptions::new(client_id, cfg.broker_host.clone(), cfg.broker_port);
+    opts.set_keep_alive(std::time::Duration::from_secs(5));
+    opts.set_clean_session(true);
+    if let (Some(u), Some(p)) = (&cfg.username, &cfg.password) {
+        opts.set_credentials(u.clone(), p.clone());
+    }
+    let (client, mut events) = AsyncClient::new(opts, 4);
+    let connected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match events.poll().await {
+                Ok(rumqttc::Event::Incoming(Packet::ConnAck(_))) => return Ok(()),
+                Ok(_) => {}
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
+            }
+        }
+    })
+    .await
+    .context("the broker did not answer")?;
+    connected?;
+    let _ = client.disconnect().await;
+    // Let the DISCONNECT go out before the connection is dropped.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while events.poll().await.is_ok() {}
+    })
+    .await;
+    Ok(())
+}

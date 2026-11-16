@@ -1,28 +1,24 @@
-//! HTTP for plugin-runtime enrollment.
+//! HTTP handlers for plugin runtimes.
 //!
-//! Five routes: a runtime asks to join, polls for an answer, and an admin lists,
-//! resolves and issues tokens. The decision logic lives in
-//! [`crate::plugin_runtimes`]; this module is transport, storage and policy
-//! gating only.
+//! Admin: add a runtime (which makes its login and returns the connection key
+//! once), reset its login, remove it, list them, and open the broker to the
+//! network. Runtime: say hello, fetch its placements and their artifacts, each
+//! authenticated by the runtime's one secret.
 //!
-//! `POST /enroll` is the one unauthenticated endpoint in the plugin story, and
-//! it is gated three ways before it reaches any logic: the feature switch, the
-//! whitelist, and a rate budget of its own. See `docs/pluginRuntimesPlan.md`.
+//! See `docs/pluginRuntimesPlan.md`.
 
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use chrono::Utc;
 use hc_api_types::plugin_runtimes::{
-    EnrollRequest, EnrollResponse, RuntimeCapabilities, RuntimeCredentials, RuntimeStatus,
+    abi_for, AddRuntimeRequest, ConnectionKey, HelloRequest, HelloResponse, IssuedKey,
     RuntimeSummary,
 };
-use hc_state::plugin_runtime_store::{
-    EnrollTokenRecord, RuntimeRecord, RuntimeStatus as StoreStatus,
-};
+use hc_state::plugin_runtime_store::RuntimeRecord;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 
@@ -30,15 +26,10 @@ use crate::auth_middleware::PluginsWrite;
 use crate::plugin_runtimes as svc;
 use crate::AppState;
 
-/// How long an issued enrollment token stays usable.
-const TOKEN_TTL_HOURS: i64 = 24;
-
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
 
-/// Runtimes are opt-out per deployment, and "off" means the surface is absent
-/// rather than forbidden — there is nothing here to probe for.
 fn feature_enabled(state: &AppState) -> bool {
     state.plugin_runtimes_config.enabled
 }
@@ -47,85 +38,63 @@ fn store(state: &AppState) -> std::sync::Arc<hc_state::PluginRuntimeStore> {
     state.store.plugin_runtimes()
 }
 
-fn to_status(s: StoreStatus) -> RuntimeStatus {
-    match s {
-        StoreStatus::Pending => RuntimeStatus::Pending,
-        StoreStatus::Approved => RuntimeStatus::Approved,
-        StoreStatus::Denied => RuntimeStatus::Denied,
-    }
-}
-
 fn summary(rec: &RuntimeRecord) -> RuntimeSummary {
     RuntimeSummary {
         runtime_id: rec.runtime_id.clone(),
-        status: to_status(rec.status),
-        capabilities: RuntimeCapabilities {
-            kind: rec.kind.clone(),
-            abi: rec.abi.clone(),
-            arch: rec.arch.clone(),
-        },
+        name: rec.name.clone(),
+        kind: rec.kind.clone(),
+        abi: rec.abi.clone(),
+        plugin_id: rec.plugin_id.clone(),
+        homecore_url: rec.homecore_url.clone(),
+        created_at: rec.created_at,
+        arch: rec.arch.clone(),
         host_version: rec.host_version.clone(),
-        sdk_version: rec.sdk_version.clone(),
         hostname: rec.hostname.clone(),
         network_mode: rec.network_mode.clone(),
-        // Only meaningful while a decision is outstanding.
-        code: match rec.status {
-            StoreStatus::Pending => rec.code.clone(),
-            _ => None,
-        },
         source_ip: rec.source_ip.clone(),
-        created_at: rec.created_at,
         last_seen_at: rec.last_seen_at,
-        plugin_id: rec.plugin_id.clone(),
     }
 }
 
-/// Everything an approved runtime needs, plus the hash the caller must persist.
+/// Make a new secret for `rec`, store its hash, and build the key around it.
 ///
-/// Both secrets are minted fresh every time credentials are handed out rather
-/// than stored: the broker holds the MQTT credential, this store holds only the
-/// fact of approval and a hash, and a value nobody can read back cannot leak
-/// from here. Handing them out again is what makes a restarted container work
-/// without re-approval, and rotating on each hand-out means a leaked key stops
-/// working the next time the container comes up.
-fn credentials_for(
-    state: &AppState,
-    rec: &RuntimeRecord,
-) -> anyhow::Result<(RuntimeCredentials, String)> {
-    let plugin_id = match &rec.plugin_id {
-        Some(id) => id.clone(),
-        None => svc::plugin_id_for(
-            &RuntimeCapabilities {
-                kind: rec.kind.clone(),
-                abi: rec.abi.clone(),
-                arch: rec.arch.clone(),
-            },
-            &rec.runtime_id,
-        )?,
-    };
-    // Broker coordinates come from the same place a binary plugin's seeded
-    // config gets them, so a runtime and a plugin can never be told to connect
-    // to different brokers.
+/// The one place a secret is made, for adding and for Reset login alike, so the
+/// two cannot drift. Storing the new hash is what cuts an old key off.
+fn issue_key(state: &AppState, mut rec: RuntimeRecord) -> anyhow::Result<IssuedKey> {
     let install = state
         .plugin_install
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("plugin install is not configured on this server"))?;
-    let key = hc_auth::api_key::generate()?;
-    Ok((
-        RuntimeCredentials {
-            broker_host: install.broker_host.clone(),
-            broker_port: install.broker_port,
-            plugin_id,
-            mqtt_password: svc::mint_mqtt_password(),
-            api_key: key.full_token,
-        },
-        key.hash,
-    ))
+    let secret = hc_auth::api_key::generate()?;
+    rec.key_hash = secret.hash;
+    store(state).upsert(&rec)?;
+    let details = ConnectionKey {
+        url: rec.homecore_url.clone(),
+        broker_host: svc::broker_host_for_key(&install.broker_host, &rec.homecore_url),
+        broker_port: install.broker_port,
+        runtime_id: rec.runtime_id.clone(),
+        username: rec.plugin_id.clone(),
+        secret: secret.full_token,
+        kind: rec.kind.clone(),
+        abi: rec.abi.clone(),
+    };
+    Ok(IssuedKey {
+        runtime: summary(&rec),
+        key: details.encode(),
+        details,
+    })
 }
 
-/// Authenticate a runtime by its own API key.
+/// Push these clients off the broker now. See `hc_mqtt_client::take_over`.
+async fn take_over(state: &AppState, client_ids: &[String]) {
+    if let Some(cfg) = state.mqtt_takeover.as_ref() {
+        hc_mqtt_client::take_over(cfg, client_ids).await;
+    }
+}
+
+/// Authenticate a runtime by its secret.
 ///
-/// Returns the record only when the key belongs to *that* runtime, so an
+/// Returns the record only when the secret belongs to *that* runtime, so an
 /// endpoint written with this cannot serve one runtime's placements to another
 /// however carelessly it is written afterwards.
 pub fn authenticate_runtime(
@@ -138,322 +107,15 @@ pub fn authenticate_runtime(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))?
         .trim();
-
     let rec = store(state).get(runtime_id).ok().flatten()?;
-    if rec.status != StoreStatus::Approved {
-        return None;
-    }
-    let hash = rec.api_key_hash.as_deref()?;
-    hc_auth::api_key::verify_token(presented, hash).then_some(rec)
-}
-
-// ── POST /plugin-runtimes/enroll ─────────────────────────────────────────────
-
-pub async fn enroll(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(req): Json<EnrollRequest>,
-) -> impl IntoResponse {
-    if !feature_enabled(&state) {
-        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
-    }
-    let store = store(&state);
-
-    let cfg = &state.plugin_runtimes_config;
-    let ip = addr.ip();
-
-    // Whitelist gate. A runtime is a machine on your network; a request from
-    // outside it should not reach an approval screen at all.
-    if cfg.whitelist_only && !state.whitelist.iter().any(|net| net.contains(&ip)) {
-        tracing::warn!(%ip, "plugin-runtime enrollment refused: source not whitelisted");
-        return err(
-            StatusCode::FORBIDDEN,
-            "enrollment is restricted to the local network",
-        );
-    }
-
-    // Authenticity before welcome. A request that is not what it claims to be
-    // never reaches the policy decision.
-    if let Err(e) = svc::verify_enrollment_signature(&req) {
-        tracing::warn!(%ip, runtime_id = %req.runtime_id, error = %e, "enrollment signature rejected");
-        return err(StatusCode::UNAUTHORIZED, format!("invalid signature: {e}"));
-    }
-
-    let now = Utc::now();
-    let existing = match store.get(&req.runtime_id) {
-        Ok(r) => r,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}")),
-    };
-
-    // A known id presenting a different key is a different runtime wearing a
-    // familiar name. It does not inherit the record, and it does not get to
-    // overwrite it either — that would let anyone who read an id in a log
-    // dislodge a working runtime.
-    if let Some(prev) = &existing {
-        if !svc::is_same_identity(prev, &req) {
-            tracing::warn!(
-                %ip, runtime_id = %req.runtime_id,
-                "enrollment refused: runtime_id already registered to a different key"
-            );
-            return err(
-                StatusCode::CONFLICT,
-                "this runtime_id is already registered to a different key",
-            );
-        }
-    }
-
-    // Token, if one was presented. An invalid token is not fatal in open mode —
-    // it simply fails to short-circuit the wait.
-    let token_valid = match &req.token {
-        Some(tok) if !tok.trim().is_empty() => {
-            redeem(&store, tok, &req.runtime_id, now).unwrap_or(false)
-        }
-        _ => false,
-    };
-
-    let pending_count = store.pending_count(now).unwrap_or(0) as u32;
-    let decision = svc::decide(&svc::EnrollContext {
-        now,
-        token_only: cfg.is_token_only(),
-        token_valid,
-        existing: existing.as_ref(),
-        pending_count,
-        max_pending: cfg.max_pending,
-        max_denials: cfg.max_denials,
-    });
-
-    match decision {
-        svc::EnrollDecision::Reject(reason) => {
-            tracing::info!(%ip, runtime_id = %req.runtime_id, %reason, "enrollment refused");
-            err(StatusCode::FORBIDDEN, reason)
-        }
-        svc::EnrollDecision::Approve => {
-            let mut rec = existing.unwrap_or_else(|| new_record(&req, ip.to_string(), now));
-            rec.status = StoreStatus::Approved;
-            rec.code = None;
-            rec.expires_at = None;
-            rec.last_seen_at = Some(now);
-            let (creds, api_key_hash) = match credentials_for(&state, &rec) {
-                Ok(c) => c,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            rec.plugin_id = Some(creds.plugin_id.clone());
-            rec.api_key_hash = Some(api_key_hash);
-            if let Err(e) = store.upsert(&rec) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
-            }
-            tracing::info!(runtime_id = %rec.runtime_id, plugin_id = %creds.plugin_id, "plugin runtime approved");
-            (
-                StatusCode::OK,
-                Json(EnrollResponse {
-                    runtime_id: rec.runtime_id,
-                    status: RuntimeStatus::Approved,
-                    enrollment_secret: None,
-                    code: None,
-                    credentials: Some(creds),
-                    reason: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response()
-        }
-        svc::EnrollDecision::Pending => {
-            let secret = match hc_auth::api_key::generate() {
-                Ok(k) => k,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            let code = match svc::generate_code() {
-                Ok(c) => c,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            let expires = svc::pending_expiry(now, cfg.pending_ttl_mins);
-
-            let mut rec = existing.unwrap_or_else(|| new_record(&req, ip.to_string(), now));
-            rec.status = StoreStatus::Pending;
-            rec.code = Some(code.clone());
-            rec.secret_hash = Some(secret.hash.clone());
-            rec.expires_at = Some(expires);
-            rec.last_seen_at = Some(now);
-            if let Err(e) = store.upsert(&rec) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
-            }
-            tracing::info!(
-                runtime_id = %rec.runtime_id, %code,
-                "plugin runtime is waiting for approval"
-            );
-            (
-                StatusCode::ACCEPTED,
-                Json(EnrollResponse {
-                    runtime_id: rec.runtime_id,
-                    status: RuntimeStatus::Pending,
-                    enrollment_secret: Some(secret.full_token),
-                    code: Some(code),
-                    credentials: None,
-                    reason: None,
-                    expires_at: Some(expires),
-                }),
-            )
-                .into_response()
-        }
-    }
-}
-
-fn new_record(req: &EnrollRequest, source_ip: String, now: chrono::DateTime<Utc>) -> RuntimeRecord {
-    RuntimeRecord {
-        runtime_id: req.runtime_id.clone(),
-        public_key: req.public_key.clone(),
-        kind: req.capabilities.kind.clone(),
-        abi: req.capabilities.abi.clone(),
-        arch: req.capabilities.arch.clone(),
-        host_version: req.host_version.clone(),
-        sdk_version: req.sdk_version.clone(),
-        hostname: req.hostname.clone(),
-        network_mode: req.network_mode.clone(),
-        status: StoreStatus::Pending,
-        code: None,
-        secret_hash: None,
-        api_key_hash: None,
-        source_ip: Some(source_ip),
-        plugin_id: None,
-        denial_count: 0,
-        cooldown_until: None,
-        created_at: now,
-        expires_at: None,
-        last_seen_at: Some(now),
-    }
-}
-
-fn redeem(
-    store: &hc_state::PluginRuntimeStore,
-    token: &str,
-    runtime_id: &str,
-    now: chrono::DateTime<Utc>,
-) -> anyhow::Result<bool> {
-    let body = token
-        .strip_prefix(hc_auth::api_key::API_KEY_PREFIX)
-        .unwrap_or(token);
-    let Some(prefix) = hc_auth::api_key::lookup_prefix_from_body(body) else {
-        return Ok(false);
-    };
-    let Some(rec) = store.get_token(prefix)? else {
-        return Ok(false);
-    };
-    if !hc_auth::api_key::verify_token(token, &rec.hash) {
-        return Ok(false);
-    }
-    store.redeem_token(prefix, runtime_id, now)
-}
-
-// ── GET /plugin-runtimes/{id} ────────────────────────────────────────────────
-
-/// Status poll, authenticated by the enrollment secret.
-///
-/// Deliberately not rate-limited: a runtime polls this every couple of seconds
-/// for up to the pending TTL, and the secret is full-strength and single-purpose.
-pub async fn get_status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    if !feature_enabled(&state) {
-        return err(StatusCode::NOT_FOUND, "plugin runtimes are disabled");
-    }
-    let store = store(&state);
-
-    let presented = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let Ok(Some(rec)) = store.get(&id) else {
-        return err(StatusCode::NOT_FOUND, "unknown runtime");
-    };
-
-    // Same 404 for "no such runtime" and "wrong secret": the poll endpoint must
-    // not become a way to discover which runtime ids exist.
-    let ok = rec
-        .secret_hash
-        .as_deref()
-        .is_some_and(|h| hc_auth::api_key::verify_token(&presented, h));
-    if !ok {
-        return err(StatusCode::NOT_FOUND, "unknown runtime");
-    }
-
-    let now = Utc::now();
-    match rec.status {
-        StoreStatus::Approved => {
-            let (creds, api_key_hash) = match credentials_for(&state, &rec) {
-                Ok(c) => c,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            // The poll is where an approved-by-admin runtime first receives its
-            // key, so the hash has to be recorded here too, not only on the
-            // enroll path.
-            let mut updated = rec.clone();
-            updated.api_key_hash = Some(api_key_hash);
-            updated.last_seen_at = Some(now);
-            if let Err(e) = store.upsert(&updated) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
-            }
-            let rec = updated;
-            (
-                StatusCode::OK,
-                Json(EnrollResponse {
-                    runtime_id: rec.runtime_id,
-                    status: RuntimeStatus::Approved,
-                    enrollment_secret: None,
-                    code: None,
-                    credentials: Some(creds),
-                    reason: None,
-                    expires_at: None,
-                }),
-            )
-                .into_response()
-        }
-        StoreStatus::Denied => (
-            StatusCode::OK,
-            Json(EnrollResponse {
-                runtime_id: rec.runtime_id,
-                status: RuntimeStatus::Denied,
-                enrollment_secret: None,
-                code: None,
-                credentials: None,
-                reason: Some("an administrator denied this runtime".into()),
-                expires_at: None,
-            }),
-        )
-            .into_response(),
-        StoreStatus::Pending => {
-            // Tell an expired poller to stop rather than letting it spin until
-            // its container is restarted.
-            if !rec.is_pending_open(now) {
-                return err(StatusCode::GONE, "this enrollment expired; enroll again");
-            }
-            (
-                StatusCode::OK,
-                Json(EnrollResponse {
-                    runtime_id: rec.runtime_id,
-                    status: RuntimeStatus::Pending,
-                    enrollment_secret: None,
-                    code: rec.code,
-                    credentials: None,
-                    reason: None,
-                    expires_at: rec.expires_at,
-                }),
-            )
-                .into_response()
-        }
-    }
+    hc_auth::api_key::verify_token(presented, &rec.key_hash).then_some(rec)
 }
 
 // ── Admin ────────────────────────────────────────────────────────────────────
 
+/// `GET /plugin-runtimes`
 pub async fn list_runtimes(State(state): State<AppState>, _: PluginsWrite) -> impl IntoResponse {
-    let store = store(&state);
-    match store.list() {
+    match store(&state).list() {
         Ok(list) => {
             let out: Vec<RuntimeSummary> = list.iter().map(summary).collect();
             (StatusCode::OK, Json(json!({ "runtimes": out }))).into_response()
@@ -462,102 +124,285 @@ pub async fn list_runtimes(State(state): State<AppState>, _: PluginsWrite) -> im
     }
 }
 
-pub async fn approve_runtime(
+/// `POST /plugin-runtimes`: add a runtime and make its login.
+///
+/// The key in the answer is shown once. Losing it costs a Reset login, which is
+/// cheaper than keeping a recoverable copy of a password anywhere.
+pub async fn add_runtime(
     State(state): State<AppState>,
-    _: PluginsWrite,
-    Path(id): Path<String>,
+    PluginsWrite(claims): PluginsWrite,
+    Json(req): Json<AddRuntimeRequest>,
 ) -> impl IntoResponse {
-    let store = store(&state);
-    let now = Utc::now();
-    let Ok(Some(mut rec)) = store.get(&id) else {
-        return err(StatusCode::NOT_FOUND, "unknown runtime");
-    };
-    // Approving something that already timed out would resurrect a request the
-    // operator never actually saw in time.
-    if rec.status == StoreStatus::Pending && !rec.is_pending_open(now) {
-        return err(StatusCode::GONE, "this enrollment expired; ask it to retry");
+    if !feature_enabled(&state) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "plugin runtimes are turned off in homecore.toml",
+        );
     }
-
-    let plugin_id = match svc::plugin_id_for(
-        &RuntimeCapabilities {
-            kind: rec.kind.clone(),
-            abi: rec.abi.clone(),
-            arch: rec.arch.clone(),
-        },
-        &rec.runtime_id,
-    ) {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "give the runtime a name");
+    }
+    let kind = req
+        .kind
+        .as_deref()
+        .unwrap_or("python")
+        .trim()
+        .to_lowercase();
+    let Some(abi) = abi_for(&kind) else {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("homeCore can't host {kind} plugins yet; python is the one it can"),
+        );
+    };
+    let homecore_url = match svc::check_homecore_url(&req.homecore_url) {
+        Ok(u) => u,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
+    };
+    let runtime_id = match svc::new_runtime_id() {
+        Ok(id) => id,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let plugin_id = match svc::plugin_id_for(&kind, &runtime_id) {
         Ok(p) => p,
         Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
     };
-
-    rec.status = StoreStatus::Approved;
-    rec.code = None;
-    rec.expires_at = None;
-    rec.plugin_id = Some(plugin_id.clone());
-    if let Err(e) = store.upsert(&rec) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
+    let rec = RuntimeRecord {
+        runtime_id: runtime_id.clone(),
+        name: name.to_string(),
+        kind,
+        abi: abi.to_string(),
+        plugin_id,
+        key_hash: String::new(),
+        homecore_url,
+        created_at: Utc::now(),
+        arch: None,
+        host_version: None,
+        hostname: None,
+        network_mode: None,
+        source_ip: None,
+        last_seen_at: None,
+    };
+    match issue_key(&state, rec) {
+        Ok(issued) => {
+            let e = crate::audit::entry_from_claims(&claims, "plugin_runtime.added")
+                .with_target("plugin_runtime", runtime_id.clone());
+            crate::audit::emit(&state, e).await;
+            tracing::info!(%runtime_id, "plugin runtime added");
+            (StatusCode::CREATED, Json(issued)).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
-    tracing::info!(runtime_id = %id, %plugin_id, "plugin runtime approved by admin");
-    (StatusCode::OK, Json(summary(&rec))).into_response()
 }
 
-pub async fn deny_runtime(
+/// `POST /plugin-runtimes/{id}/reset`: a new key; the old one stops working now.
+///
+/// The runtime is pushed off the broker at once and refused until the new key
+/// is pasted in. Its plugins keep their own logins and come back when it does.
+pub async fn reset_runtime(
     State(state): State<AppState>,
-    _: PluginsWrite,
+    PluginsWrite(claims): PluginsWrite,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Ok(Some(rec)) = store(&state).get(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown runtime");
+    };
+    let username = rec.plugin_id.clone();
+    match issue_key(&state, rec) {
+        Ok(issued) => {
+            // The old login is gone; its connection would last until it dropped.
+            // Its plugins keep theirs and stay connected.
+            take_over(&state, &[username]).await;
+            let e = crate::audit::entry_from_claims(&claims, "plugin_runtime.login_reset")
+                .with_target("plugin_runtime", id.clone());
+            crate::audit::emit(&state, e).await;
+            tracing::info!(runtime_id = %id, "plugin runtime login reset");
+            (StatusCode::OK, Json(issued)).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+/// `DELETE /plugin-runtimes/{id}`: remove a runtime and everything placed on it.
+///
+/// Each plugin goes the way an uninstall takes it (devices, config and its
+/// login with it), then the runtime's own record, which ends its key. The
+/// container is the operator's to stop.
+pub async fn remove_runtime(
+    State(state): State<AppState>,
+    PluginsWrite(claims): PluginsWrite,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let store = store(&state);
-    let cfg = &state.plugin_runtimes_config;
-    let now = Utc::now();
-    let Ok(Some(mut rec)) = store.get(&id) else {
+    let Ok(Some(rec)) = store.get(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown runtime");
     };
-
-    rec.status = StoreStatus::Denied;
-    rec.code = None;
-    rec.secret_hash = None;
-    rec.expires_at = None;
-    rec.denial_count = rec.denial_count.saturating_add(1);
-    // The cooldown starts once the limit is reached, so an accidental deny costs
-    // nothing and a pattern of them costs an hour.
-    if rec.denial_count >= cfg.max_denials {
-        rec.cooldown_until = Some(svc::cooldown_until(now, cfg.denial_cooldown_mins));
-    }
-    if let Err(e) = store.upsert(&rec) {
+    let placed = store.placements_for(&id).unwrap_or_default();
+    // The runtime's login goes first, so that when it is pushed off below its
+    // reconnect is refused.
+    if let Err(e) = store.delete(&id) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
     }
-    tracing::info!(runtime_id = %id, denials = rec.denial_count, "plugin runtime denied");
-    (StatusCode::OK, Json(summary(&rec))).into_response()
+    let mut removed_plugins = Vec::new();
+    for p in &placed {
+        let _ = crate::handlers::deregister_plugin(
+            State(state.clone()),
+            PluginsWrite(claims.clone()),
+            Path(p.plugin_id.clone()),
+            Query(crate::handlers::UninstallQuery::default()),
+        )
+        .await;
+        removed_plugins.push(p.plugin_id.clone());
+    }
+    // The runtime registered as a plugin too; forget it the same way, so it does
+    // not linger in the plugin list as offline.
+    let _ = crate::handlers::deregister_plugin(
+        State(state.clone()),
+        PluginsWrite(claims.clone()),
+        Path(rec.plugin_id.clone()),
+        Query(crate::handlers::UninstallQuery::default()),
+    )
+    .await;
+    // Every login is gone now, but connections made before stay up until they
+    // drop: push them off, then forget anything a last heartbeat re-registered
+    // in between.
+    let mut ids = removed_plugins.clone();
+    ids.push(rec.plugin_id.clone());
+    take_over(&state, &ids).await;
+    {
+        let mut map = state.plugins.write().await;
+        for id in &ids {
+            map.remove(id);
+        }
+    }
+    let mut e = crate::audit::entry_from_claims(&claims, "plugin_runtime.removed")
+        .with_target("plugin_runtime", id.clone());
+    e.detail = json!({ "plugins_removed": removed_plugins });
+    crate::audit::emit(&state, e).await;
+    tracing::info!(runtime_id = %id, plugins = removed_plugins.len(), "plugin runtime removed");
+    (
+        StatusCode::OK,
+        Json(json!({ "removed": id, "plugins_removed": removed_plugins })),
+    )
+        .into_response()
 }
 
-/// `POST /plugin-runtimes/tokens` — issue a one-time enrollment token.
+/// `GET /plugin-runtimes/broker`: can a runtime reach the broker at all?
 ///
-/// The plaintext is returned once and never again; only its hash is stored.
-pub async fn issue_token(State(state): State<AppState>, _: PluginsWrite) -> impl IntoResponse {
-    let store = store(&state);
-    let key = match hc_auth::api_key::generate() {
-        Ok(k) => k,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+/// A broker that listens only on homeCore's own machine cannot be reached from
+/// a container or another computer. The app says so before anyone adds a
+/// runtime that would never connect.
+pub async fn broker_status(State(state): State<AppState>, _: PluginsWrite) -> impl IntoResponse {
+    let Some(install) = state.plugin_install.as_ref() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "plugin install is not configured on this server",
+        );
     };
-    let now = Utc::now();
-    let rec = EnrollTokenRecord {
-        prefix: key.lookup_prefix.clone(),
-        hash: key.hash.clone(),
-        created_at: now,
-        expires_at: now + chrono::Duration::hours(TOKEN_TTL_HOURS),
-        used_at: None,
-        used_by: None,
+    (
+        StatusCode::OK,
+        Json(json!({
+            "host": install.broker_host,
+            "port": install.broker_port,
+            "reachable_from_network": !svc::is_loopback(&install.broker_host),
+            "can_open": state.homecore_config_path.is_some(),
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /plugin-runtimes/broker/open`: let the broker listen on the network.
+///
+/// Edits `homecore.toml` (keeping its comments) and asks for a restart, which
+/// the app offers next. Adds a login for core itself when the file has none,
+/// because core will not start a network broker without one.
+pub async fn open_broker(
+    State(state): State<AppState>,
+    PluginsWrite(claims): PluginsWrite,
+) -> impl IntoResponse {
+    let Some(path) = state.homecore_config_path.as_ref() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "homeCore was started without --config, so it can't change its own settings",
+        );
     };
-    if let Err(e) = store.create_token(&rec) {
+    let text = match std::fs::read_to_string(path.as_path()) {
+        Ok(t) => t,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading homecore.toml: {e}"),
+            )
+        }
+    };
+    let updated = match svc::open_broker_in_config(&text) {
+        Ok(t) => t,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
+    };
+    if let Err(e) = std::fs::write(path.as_path(), &updated) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("writing homecore.toml: {e}"),
+        );
+    }
+    let e = crate::audit::entry_from_claims(&claims, "broker.opened_to_network");
+    crate::audit::emit(&state, e).await;
+    tracing::info!("broker set to listen on the network; takes effect at restart");
+    (StatusCode::OK, Json(json!({ "restart_required": true }))).into_response()
+}
+
+// ── POST /plugin-runtimes/{id}/hello ─────────────────────────────────────────
+
+/// A runtime checking in: what it runs on, and proof its key works.
+///
+/// Called when it connects and on every pass after, and by its page to test a
+/// key before saving it. A runtime whose image is a different language or ABI
+/// from what it was added for is refused with that reason, since every
+/// artifact placed on it would arrive unusable.
+pub async fn hello(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HelloRequest>,
+) -> impl IntoResponse {
+    if !feature_enabled(&state) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "plugin runtimes are turned off in homecore.toml",
+        );
+    }
+    let Some(mut rec) = authenticate_runtime(&state, &id, &headers) else {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "homeCore doesn't know this key: it was reset, or the runtime was removed",
+        );
+    };
+    if req.capabilities.kind != rec.kind || req.capabilities.abi != rec.abi {
+        return err(
+            StatusCode::CONFLICT,
+            format!(
+                "this runtime was added for {} {}, and this image hosts {} {}",
+                rec.kind, rec.abi, req.capabilities.kind, req.capabilities.abi
+            ),
+        );
+    }
+    rec.arch = Some(req.capabilities.arch);
+    rec.host_version = Some(req.host_version);
+    rec.hostname = Some(req.hostname);
+    rec.network_mode = Some(req.network_mode);
+    rec.source_ip = Some(addr.ip().to_string());
+    rec.last_seen_at = Some(Utc::now());
+    if let Err(e) = store(&state).upsert(&rec) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("store: {e}"));
     }
     (
-        StatusCode::CREATED,
-        Json(json!({
-            "token": key.full_token,
-            "expires_at": rec.expires_at,
-            "note": "Shown once. Set it as HOMECORE_ENROLL_TOKEN on the runtime container.",
-        })),
+        StatusCode::OK,
+        Json(HelloResponse {
+            runtime_id: rec.runtime_id,
+            name: rec.name,
+            plugin_id: rec.plugin_id,
+        }),
     )
         .into_response()
 }
@@ -657,7 +502,7 @@ pub async fn list_all_placements(
 ///
 /// The desired state, in core's words. The runtime diffs it against what it
 /// actually has and re-provisions the difference, which is why a lost container
-/// volume costs nothing but a re-enrollment.
+/// volume costs nothing but a reinstall.
 ///
 /// Authenticated by the runtime's own key, which identifies exactly one runtime
 /// — so this cannot serve another's placements even by mistake.
@@ -775,12 +620,18 @@ pub async fn get_placement_artifact(
             )
         }
     };
-    let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, &rec.arch) else {
+    let Some(arch) = rec.arch.as_deref() else {
+        return err(
+            StatusCode::CONFLICT,
+            "this runtime has not said what it runs on yet; it does when it connects",
+        );
+    };
+    let Some(art) = pv.artifact_for_runtime(&rec.kind, &rec.abi, arch) else {
         return err(
             StatusCode::CONFLICT,
             format!(
-                "{plugin_id} {} no longer publishes a {} {} artifact for {}",
-                placement.version, rec.kind, rec.abi, rec.arch
+                "{plugin_id} {} no longer publishes a {} {} artifact for {arch}",
+                placement.version, rec.kind, rec.abi
             ),
         );
     };

@@ -35,16 +35,6 @@ fn login_buckets() -> &'static Buckets {
     B.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Separate budget from login, deliberately.
-///
-/// A shared map would let a container retrying its enrollment lock the operator
-/// out of the login form from the same address — and the reverse. Two
-/// unauthenticated endpoints, two budgets.
-fn enroll_buckets() -> &'static Buckets {
-    static B: OnceLock<Buckets> = OnceLock::new();
-    B.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Record an attempt from `ip`. Returns `Ok(())` if accepted, or
 /// `Err(retry_after_seconds)` if the IP has hit the limit.
 fn record_in(buckets: &'static Buckets, ip: IpAddr, now: Instant) -> Result<(), u64> {
@@ -92,39 +82,6 @@ pub async fn login_rate_limit(
                 [("Retry-After", retry_after.to_string())],
                 Json(json!({
                     "error": "too many login attempts",
-                    "retry_after_seconds": retry_after,
-                })),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// Rate limit for `POST /plugin-runtimes/enroll`.
-///
-/// Applied to enrollment but **not** to the status poll: a runtime polls that
-/// endpoint every couple of seconds for up to the pending TTL, and the poll is
-/// already gated by a full-strength single-use secret, so limiting it would
-/// break the legitimate case to defend against a brute force that is not
-/// feasible anyway.
-pub async fn enroll_rate_limit(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    request: Request,
-    next: Next,
-) -> Response {
-    match record_in(enroll_buckets(), addr.ip(), Instant::now()) {
-        Ok(()) => next.run(request).await,
-        Err(retry_after) => {
-            tracing::warn!(
-                ip = %addr.ip(),
-                retry_after_seconds = retry_after,
-                "plugin-runtime enrollment rate limit exceeded"
-            );
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("Retry-After", retry_after.to_string())],
-                Json(json!({
-                    "error": "too many enrollment attempts",
                     "retry_after_seconds": retry_after,
                 })),
             )
@@ -186,26 +143,5 @@ mod tests {
         }
         // After the window, the bucket should be empty again.
         assert!(record(ip(5), Instant::now()).is_ok());
-    }
-
-    /// The reason the buckets were split. Exhausting one endpoint's budget must
-    /// not lock the same address out of the other — a container retrying its
-    /// enrollment should never cost the operator their login.
-    #[test]
-    fn login_and_enroll_budgets_are_independent() {
-        let now = Instant::now();
-        let addr = ip(9);
-
-        for _ in 0..MAX_ATTEMPTS {
-            assert!(record_in(login_buckets(), addr, now).is_ok());
-        }
-        assert!(
-            record_in(login_buckets(), addr, now).is_err(),
-            "login budget should now be spent"
-        );
-        assert!(
-            record_in(enroll_buckets(), addr, now).is_ok(),
-            "enrollment must be unaffected by login attempts from the same IP"
-        );
     }
 }

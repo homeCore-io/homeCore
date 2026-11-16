@@ -492,12 +492,22 @@ async fn main() -> Result<()> {
 
     // ── 6. MQTT broker: the embedded one, or `[broker] external_url` ───────
     let external_broker = config.broker.external().map_err(anyhow::Error::msg)?;
+    // Logins core makes (runtimes, and plugins it installs or places) are
+    // checked against core's own state, which is not open yet: the broker starts
+    // first so core's client can connect. Until the list is filled in below,
+    // only `[[broker.clients]]` can log in, which is all that connects that early.
+    let live_logins: Arc<std::sync::OnceLock<hc_api::plugin_runtimes::BrokerLogins>> =
+        Arc::new(std::sync::OnceLock::new());
     let broker_cfg = BrokerConfig {
         host: config.broker.host.clone(),
         port: config.broker.port,
         // 0 turns the v5 listener off — the form can't say "nothing" for a
         // field whose default is a port.
         v5_port: config.broker.v5_port.filter(|p| *p != 0),
+        live_logins: Some(hc_broker::LiveLogins({
+            let live = live_logins.clone();
+            Arc::new(move |user, pass| live.get().is_some_and(|l| l.accepts(user, pass)))
+        })),
         tls_port: config.broker.tls_port,
         cert_path: config.broker.cert_path.clone(),
         key_path: config.broker.key_path.clone(),
@@ -540,7 +550,7 @@ async fn main() -> Result<()> {
         username: internal_cred.as_ref().map(|c| c.id.clone()),
         password: internal_cred.as_ref().map(|c| c.password.clone()),
     };
-    let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg);
+    let (mut mqtt_client, mut mqtt_rx) = MqttClient::new(mqtt_cfg.clone());
     let publish_handle = mqtt_client.publish_handle();
 
     // Set up a ready signal so plugins are launched only after the internal
@@ -861,6 +871,23 @@ async fn main() -> Result<()> {
     // Absolute install root, so an installed plugin's recorded binary/config
     // paths work regardless of the process CWD (dynamic spawn + next boot).
     let install_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
+    let _ = live_logins.set(hc_api::plugin_runtimes::BrokerLogins {
+        runtimes: store.plugin_runtimes(),
+        config_plugins_dir: install_base.join("config").join("plugins"),
+        listed: config
+            .plugins
+            .iter()
+            .map(|p| {
+                let path = std::path::PathBuf::from(&p.config);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    base_dir.join(path)
+                };
+                (p.id.clone(), path)
+            })
+            .collect(),
+    });
     // Channel: the install handler pushes a freshly-installed plugin here and a
     // listener (below) spawns it into the running supervisor — no restart.
     let (plugin_spawn_tx, mut plugin_spawn_rx) =
@@ -872,7 +899,29 @@ async fn main() -> Result<()> {
     // before spawning plugins.  This ensures that registration messages
     // published by plugins on startup are not missed due to a race condition.
     {
-        let _ = ready_rx.await;
+        // Asked to stop before the broker ever answered: stop. This wait used to
+        // be the one place a SIGTERM could not reach, so a homeCore whose broker
+        // was unreachable could only be killed.
+        let mut ready_rx = ready_rx;
+        let waiting = shutdown_rx.clone();
+        let mut said = false;
+        loop {
+            tokio::select! {
+                _ = &mut ready_rx => break,
+                _ = wait_for_shutdown_watch(waiting.clone()) => {
+                    info!("Stopping before the MQTT broker answered");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)), if !said => {
+                    tracing::error!(
+                        broker = %format!("{mqtt_host}:{mqtt_port}"),
+                        "The MQTT broker hasn't answered in 30 seconds. Plugins start once it does; \
+                         until then nothing reaches homeCore."
+                    );
+                    said = true;
+                }
+            }
+        }
 
         // Publish the configured TZ as a retained MQTT message so plugin
         // SDKs can pick it up on connect and apply it to their tracing
@@ -1287,6 +1336,7 @@ async fn main() -> Result<()> {
         broker_port: mqtt_port,
     }))
     .with_plugin_runtimes(config.plugin_runtimes.clone())
+    .with_mqtt_takeover(mqtt_cfg.clone())
     .with_plugin_spawn(plugin_spawn_tx)
     .with_management_rpc({
         let rpc = hc_api::management_rpc::ManagementRpc::new(publish_handle_rpc, &pub_bus_rpc);
