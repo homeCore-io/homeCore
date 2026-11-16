@@ -129,6 +129,7 @@ pub async fn create_display(
                     allowed_cidrs: Vec::new(),
                     revoked_at: None,
                     display: true,
+                    plugin: None,
                 };
                 break (candidate, record);
             }

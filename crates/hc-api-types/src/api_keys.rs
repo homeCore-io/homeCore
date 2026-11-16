@@ -57,6 +57,11 @@ pub struct ApiKeySummary {
     /// one a person made for a program.
     #[serde(default)]
     pub display: bool,
+    /// The plugin core made this key for (its manifest's `api_scopes`), if
+    /// any. Core replaces such a key on every plugin start and deletes it on
+    /// uninstall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
 }
 
 /// Request body for `PATCH /api/v1/auth/api-keys/{id}`. Any field may be
