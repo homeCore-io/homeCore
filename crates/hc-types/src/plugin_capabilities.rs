@@ -22,6 +22,12 @@ pub struct Capabilities {
     /// May be empty.
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// REST scopes the plugin wants for calling homeCore's own API. When this
+    /// is not empty, core mints the plugin an API key with these scopes (less
+    /// any a plugin may never hold) each time the manifest is published, and
+    /// hands it over with the `api_access` management action. Nothing to paste.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_scopes: Vec<String>,
 }
 
 /// One plugin-declared action, non-streaming or streaming.
@@ -112,6 +118,7 @@ mod tests {
                 timeout_ms: None,
                 danger: false,
             }],
+            api_scopes: Vec::new(),
         };
         let s = serde_json::to_string(&m).unwrap();
         let back: Capabilities = serde_json::from_str(&s).unwrap();
@@ -168,5 +175,23 @@ mod tests {
         assert!(!a.cancelable);
         assert_eq!(a.concurrency, Concurrency::Multi);
         assert_eq!(a.requires_role, RequiresRole::User);
+        assert!(m.api_scopes.is_empty());
+    }
+
+    #[test]
+    fn api_scopes_ride_only_when_asked_for() {
+        let m: Capabilities = serde_json::from_value(json!({
+            "spec": "1",
+            "plugin_id": "plugin.mcp",
+            "api_scopes": ["devices:read", "scenes:run"],
+        }))
+        .unwrap();
+        assert_eq!(m.api_scopes, vec!["devices:read", "scenes:run"]);
+        let none = Capabilities {
+            spec: "1".into(),
+            plugin_id: "x".into(),
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&none).unwrap().contains("api_scopes"));
     }
 }

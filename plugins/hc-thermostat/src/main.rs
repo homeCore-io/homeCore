@@ -472,6 +472,7 @@ fn capabilities() -> plugin_sdk_rs::types::Capabilities {
                 false,
             ),
         ],
+        api_scopes: Vec::new(),
     }
 }
 

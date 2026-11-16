@@ -184,6 +184,7 @@ pub fn capabilities_manifest() -> Capabilities {
                 danger: false,
             },
         ],
+        api_scopes: Vec::new(),
     }
 }
 

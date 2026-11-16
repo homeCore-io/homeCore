@@ -485,6 +485,7 @@ fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
                 danger: true,
             },
         ],
+        api_scopes: Vec::new(),
     }
 }
 

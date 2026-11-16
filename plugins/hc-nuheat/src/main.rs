@@ -401,6 +401,7 @@ fn capabilities() -> Capabilities {
                 RequiresRole::ReadOnly,
             ),
         ],
+        api_scopes: Vec::new(),
     }
 }
 

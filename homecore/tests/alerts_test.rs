@@ -190,6 +190,7 @@ async fn a_plugin_alert_is_raised_and_cleared_from_what_the_plugin_says() -> Res
             spec: "1".into(),
             plugin_id: "plugin.wled".into(),
             actions: vec![],
+            api_scopes: Vec::new(),
         },
         config_schema: None,
         config_descriptor: None,
