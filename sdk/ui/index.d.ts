@@ -50,6 +50,18 @@
  * If one of these fails to load, or throws, the app draws the thing as
  * Classic does.
  *
+ * `app.assistant`: a helper anyone signed in can open from any page
+ * (`{ "slot": "app.assistant", "element": "…", "label": "Ask" }`). The app
+ * puts a button with the slot's `label` in its top bar; it opens the
+ * element in a panel at the right, beside the page on a wide screen (440
+ * px), and as a page of its own (`/ask`) on a phone. The element draws all
+ * of the inside, its header and its way to close included; the app gives it
+ * `host` and `mode` (`panel` | `page`) and closes it when it sends a
+ * `close` event (on a page, that goes back), or when Escape is pressed
+ * inside it and the element did not `preventDefault` the key. The app
+ * remembers in each browser whether the panel was open. One plugin's at a
+ * time: the first running plugin that offers the slot.
+ *
  * A `device.card` element's class may have a static `accepts(device)` —
  * whether it draws this one of the slot's devices; when it says no, the app's
  * own card is shown instead (a plugin's card for its temperature probes, say,
@@ -74,6 +86,8 @@
  * (a low battery from `battery_low` and the level).
  * Later (the app after 0.1.45): the looks' slots and `Thing` — an older app
  * offers none of them.
+ * Later (the app after 0.1.73): `stream`, `respond`, `user` and the
+ * `app.assistant` slot; check for `typeof host.stream === 'function'`.
  *
  * A component runs inside the app, as the person using it: what it can do is
  * what they can. Everything here is scoped to the plugin's own devices and
@@ -140,6 +154,16 @@ export interface Host {
 	/** The app's version, for a component that wants to say so. */
 	readonly appVersion: string;
 
+	/**
+	 * Who is using it, as homeCore names them: `username` and `role`
+	 * (`admin`, `user`, …). The same person as `me`. Absent before the
+	 * app after 0.1.73.
+	 */
+	readonly user?: {
+		readonly username: string;
+		readonly role: string;
+	};
+
 	/** Who is using it. Decide what to offer with `can`, never the role. */
 	readonly me: {
 		readonly name: string;
@@ -182,6 +206,33 @@ export interface Host {
 	action(id: string, params?: Record<string, unknown>): Promise<Result<Record<string, unknown>>>;
 	/** A read-only manifest action — for anyone who can see devices. */
 	query(id: string, params?: Record<string, unknown>): Promise<Result<Record<string, unknown>>>;
+
+	/**
+	 * One of the plugin's streaming actions (its declared role applies),
+	 * followed as it runs. `onEvent` is called for every event: first
+	 * `started` with the run's `request_id`, then the plugin's own
+	 * (`progress`, `item`, `warning`, `awaiting_user`, …, each as the
+	 * plugin sent it, with `request_id` added), and last the one that ends
+	 * it, which `done` resolves with: `complete` (`data`), `error`
+	 * (`message`), `canceled`, `timeout`, or `busy` when the action is
+	 * already running and allows one run at a time (`request_id`: that run).
+	 * An action that answers at once ends with `complete` and the answer as
+	 * `data`. `done` never rejects; a dropped connection is opened again a
+	 * few times, then ends with `error`. `cancel` asks the plugin to stop;
+	 * the run ends when it says it has (`canceled`), or after 10 seconds.
+	 * Absent before the app after 0.1.73.
+	 */
+	stream?(
+		action: string,
+		params: Record<string, unknown>,
+		onEvent: (e: StreamEvent) => void
+	): StreamHandle;
+	/**
+	 * Answers a streaming run's `awaiting_user` question: `requestId` from
+	 * its events, `response` in the shape its `response_schema` asks for.
+	 * Absent before the app after 0.1.73.
+	 */
+	respond?(requestId: string, response: Record<string, unknown>): Promise<Result<void>>;
 
 	/**
 	 * homeCore's API as the person using it: `path` is under `/api/v1`
@@ -289,6 +340,57 @@ export type ExtensionHost = Pick<Host, 'api' | 'appVersion' | 'me' | 'units' | '
 	fileUrl(path: string): string;
 };
 
+/**
+ * One event of a streaming run (`host.stream`). The fields named here are
+ * the ones homeCore's runs use; a plugin may send others of its own.
+ */
+export interface StreamEvent {
+	stage:
+		| 'started'
+		| 'progress'
+		| 'item'
+		| 'warning'
+		| 'awaiting_user'
+		| 'complete'
+		| 'error'
+		| 'canceled'
+		| 'timeout'
+		| 'busy'
+		| (string & {});
+	/** The run's id; on `busy`, the run already going, if homeCore said. */
+	request_id?: string;
+	/** When the plugin sent it. */
+	ts?: string;
+	/** `progress`, `warning`, `error`, `busy`: in words. */
+	message?: string;
+	/** `progress`: how far, 0 to 100. */
+	percent?: number;
+	label?: string;
+	/** `item`: what changed; `complete`: the result; anything the plugin attaches. */
+	data?: unknown;
+	/** `item`. */
+	op?: 'add' | 'update' | 'remove';
+	/** `awaiting_user`: the question, and the answer's shape (`host.respond`). */
+	prompt?: string;
+	response_schema?: Record<string, unknown>;
+	[field: string]: unknown;
+}
+
+/** The event that ends a streaming run. */
+export type StreamEnd = StreamEvent & {
+	stage: 'complete' | 'error' | 'canceled' | 'timeout' | 'busy';
+};
+
+/** A streaming run (`host.stream`). */
+export interface StreamHandle {
+	/** Its id, once homeCore has started it. */
+	readonly requestId: string | undefined;
+	/** Asks the plugin to stop; nothing once it has ended. */
+	cancel(): void;
+	/** The event that ended it. Never rejects. */
+	readonly done: Promise<StreamEnd>;
+}
+
 /** How a look moves: `still`, `gentle` or `lively`. */
 export type Motion = 'still' | 'gentle' | 'lively';
 
@@ -389,6 +491,8 @@ export interface PluginElement extends HTMLElement {
 	things?: Thing[];
 	/** On a `look.symbol` element: the symbol to draw. */
 	name?: string;
+	/** On an `app.assistant` element: a panel beside the page, or a page of its own. */
+	mode?: 'panel' | 'page';
 }
 
 /** What a `device.card` element's class may say about a device. */
