@@ -1479,7 +1479,8 @@ pub fn router(state: AppState, web_admin_dist: Option<std::path::PathBuf>) -> Ro
         )
         .route(
             "/plugin-runtimes/{id}",
-            delete(plugin_runtime_handlers::remove_runtime),
+            delete(plugin_runtime_handlers::remove_runtime)
+                .patch(plugin_runtime_handlers::update_runtime),
         )
         .route(
             "/plugin-runtimes/{id}/reset",

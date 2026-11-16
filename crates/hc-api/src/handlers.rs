@@ -5113,7 +5113,12 @@ pub async fn install_plugin(
                 .into_response();
         }
         let runtime_records = s.store.plugin_runtimes().list().unwrap_or_default();
-        let candidates = crate::placement::candidates(&runtime_records);
+        let placements = s
+            .store
+            .plugin_runtimes()
+            .all_placements()
+            .unwrap_or_default();
+        let candidates = crate::placement::candidates(&runtime_records, &placements, id);
         let runtime_artifacts: Vec<(&str, &str, &str)> = pv
             .artifacts
             .iter()
@@ -5127,7 +5132,17 @@ pub async fn install_plugin(
             runtime_artifacts,
             kinds: pv.runtime_kinds(),
         };
-        let requested = body.get("runtime_id").and_then(Value::as_str);
+        // An update goes where the plugin already runs, unless asked otherwise:
+        // moving it would be a surprise, and with several runtimes the answer
+        // would otherwise be "choose one" for a plugin that has a home.
+        let current = placements
+            .iter()
+            .find(|p| p.plugin_id == id)
+            .map(|p| p.runtime_id.clone());
+        let requested = body
+            .get("runtime_id")
+            .and_then(Value::as_str)
+            .or(current.as_deref());
 
         match crate::placement::decide(&offered, &candidates, requested) {
             crate::placement::Placement::Core => {}

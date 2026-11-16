@@ -242,3 +242,50 @@ async fn the_broker_check_says_a_loopback_broker_is_unreachable() {
     assert_eq!(v["port"], 1883);
     h.stop().await;
 }
+
+#[tokio::test]
+async fn a_runtime_can_be_renamed_and_given_a_limit() {
+    let tmp = TempDir::new().unwrap();
+    let h = Harness::start_with(&tmp, local_only(), Default::default())
+        .await
+        .unwrap();
+    let base = h.tcp_base();
+    let http = reqwest::Client::new();
+    let issued: IssuedKey = add(
+        &base,
+        serde_json::json!({"name": "Pi", "homecore_url": "http://h:8080", "max_plugins": 3}),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(issued.runtime.max_plugins, Some(3));
+
+    let url = format!(
+        "{base}/api/v1/plugin-runtimes/{}",
+        issued.runtime.runtime_id
+    );
+    let set = |body: serde_json::Value| {
+        let http = http.clone();
+        let url = url.clone();
+        async move {
+            http.patch(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    // Renaming leaves the limit alone.
+    let v = set(serde_json::json!({"name": "Garage Pi"})).await;
+    assert_eq!(v["name"], "Garage Pi");
+    assert_eq!(v["max_plugins"], 3);
+    // null clears it.
+    let v = set(serde_json::json!({"max_plugins": null})).await;
+    assert!(v.get("max_plugins").is_none(), "{v}");
+
+    h.stop().await;
+}

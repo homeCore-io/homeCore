@@ -5866,6 +5866,9 @@ paths:
                 homecore_url:
                   type: string
                   example: http://homecore.local:8080
+                max_plugins:
+                  type: integer
+                  description: The most plugins it may hold. Left out or 0, no limit.
       responses:
         "201":
           description: Added; the key is shown once
@@ -5879,6 +5882,42 @@ paths:
           description: No name, an address that isn't one, or a language homeCore can't host
 
   /plugin-runtimes/{id}:
+    patch:
+      operationId: updatePluginRuntime
+      summary: Rename a runtime, or set or clear its plugin limit
+      description: |
+        A field left out stays as it is. `max_plugins: null` (or 0) removes the
+        limit. Lowering it below what the runtime holds removes nothing; it
+        only stops new plugins from going there. An update to a plugin
+        already there never counts against it.
+      tags: [plugins]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                max_plugins:
+                  type: integer
+                  nullable: true
+      responses:
+        "200":
+          description: The runtime as it is now
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSummary"
+        "404":
+          description: Unknown runtime
     delete:
       operationId: removePluginRuntime
       summary: Remove a runtime and everything placed on it
@@ -8888,6 +8927,9 @@ components:
           description: The id it registers under and its broker username.
         homecore_url: { type: string }
         created_at: { type: string, format: date-time }
+        max_plugins:
+          type: integer
+          description: The most plugins it may hold; absent means no limit.
         arch:
           type: string
           description: Reported when it first connects.

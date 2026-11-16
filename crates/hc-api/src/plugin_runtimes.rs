@@ -308,6 +308,7 @@ mod tests {
                 plugin_id: "plugin.python-rt1".into(),
                 key_hash: key.hash.clone(),
                 homecore_url: "http://h:8080".into(),
+                max_plugins: None,
                 created_at: chrono::Utc::now(),
                 arch: None,
                 host_version: None,
