@@ -283,9 +283,10 @@ async fn try_start(
         let api_state = app_state.clone();
         let api_host = cfg.api.host.clone();
         let api_port = cfg.api.port;
+        let allow_remote = cfg.api.allow_remote_control;
         let api_tx = event_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = api::serve(&api_host, api_port, api_state, api_tx).await {
+            if let Err(e) = api::serve(&api_host, api_port, allow_remote, api_state, api_tx).await {
                 error!(error = %e, "HTTP API server failed");
             }
         });
