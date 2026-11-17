@@ -126,6 +126,7 @@ async fn try_start(
     // Conditions the operator needs on the plugin page, not only in the log.
     // Taken before run() consumes the client.
     let notices = client.notices();
+    report_skipped_devices(&cfg.skipped_devices, &notices);
     // Where the household's button names are kept: the learned state,
     // which homeCore stores and hands back on every start.
     let state_writer = client.state_writer();
@@ -404,6 +405,43 @@ async fn try_start(
     Ok(())
 }
 
+/// Say which `[[devices]]` rows were skipped for a blank or unknown kind, in
+/// the log and on the plugin page, so a missing device is never a mystery.
+fn report_skipped_devices(
+    skipped: &[config::SkippedDevice],
+    notices: &plugin_sdk_rs::PluginNotices,
+) {
+    if skipped.is_empty() {
+        notices.clear("devices_skipped");
+        return;
+    }
+    for s in skipped {
+        warn!(device = %s, "Skipped a device row without a usable kind");
+    }
+    notices.raise(skipped_devices_notice(skipped));
+}
+
+fn skipped_devices_notice(skipped: &[config::SkippedDevice]) -> PluginNotice {
+    let rows = skipped
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let (count, verb) = if skipped.len() == 1 {
+        ("One device row was".to_string(), "it is")
+    } else {
+        (format!("{} device rows were", skipped.len()), "they are")
+    };
+    PluginNotice::warning(
+        "devices_skipped",
+        format!(
+            "{count} skipped because the Kind is blank or not one this plugin knows, so \
+             {verb} not published: {rows}. Every other device loaded."
+        ),
+    )
+    .with_remedy("Open Configuration, Devices and choose a Kind for each row listed, then save.")
+}
+
 /// Path of the cross-restart device-id snapshot, sibling to
 /// config.toml. Owned by the SDK device tracker.
 fn published_ids_cache_path(config_path: &str) -> PathBuf {
@@ -411,4 +449,44 @@ fn published_ids_cache_path(config_path: &str) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".published-device-ids.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_skipped_rows_notice_names_each_row() {
+        let cfg = Config::parse(
+            r#"
+            [[devices]]
+            integration_id = 11
+            name = "Hall"
+            kind = ""
+
+            [[devices]]
+            integration_id = 12
+            name = "Porch"
+            kind = "switch"
+            "#,
+        )
+        .unwrap();
+        let notices = plugin_sdk_rs::PluginNotices::test_instance();
+        report_skipped_devices(&cfg.skipped_devices, &notices);
+        let raised = notices.current();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].code, "devices_skipped");
+        assert!(
+            raised[0]
+                .message
+                .contains("row 1 (\"Hall\", integration ID 11): no kind"),
+            "{}",
+            raised[0].message
+        );
+        assert!(raised[0].message.starts_with("One device row was skipped"));
+
+        // A config with nothing skipped clears it.
+        report_skipped_devices(&[], &notices);
+        assert!(notices.current().is_empty());
+    }
 }
