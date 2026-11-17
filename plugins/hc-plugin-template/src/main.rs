@@ -34,9 +34,9 @@
 //! own scale where you talk to it — see [`pct_from_level`] — and nothing
 //! downstream ever converts again.
 //!
-//! Read <https://github.com/homeCore-io/hc-wled> next — it is the smallest
-//! complete plugin — then <https://github.com/homeCore-io/hc-roku> for
-//! discovery and streaming actions.
+//! Read `plugins/hc-wled` in <https://github.com/homeCore-io/homeCore> next,
+//! the smallest complete plugin, then `plugins/hc-roku` there for discovery
+//! and streaming actions.
 
 mod config;
 

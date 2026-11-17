@@ -4,7 +4,7 @@ version     = "0.1.1"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Starting point for a homeCore plugin"
-repository  = "https://github.com/homeCore-io/hc-plugin-template"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [[bin]]
 name = "hc-plugin-template"
