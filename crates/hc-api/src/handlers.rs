@@ -5957,6 +5957,8 @@ pub async fn patch_plugin(
     // A plugin reads `[logging] level` from its own config when it starts;
     // the change above reached the running plugin, and this one outlives it.
     // A plugin running elsewhere (on a runtime) keeps its file there.
+    // The config watcher leaves a change to `[logging] level` alone, so this
+    // write does not restart the plugin.
     if let Some(level) = body["log_level"].as_str() {
         if let Some(path) = new_rec.config_path.as_ref() {
             let patch = json!({ "logging": { "level": level } });
