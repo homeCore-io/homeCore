@@ -4015,6 +4015,7 @@ paths:
 
         The key's owner may rotate it. Rotating someone else's key requires the
         `api_keys:admin` scope (the `Admin` role) or the local admin UDS.
+        A revoked key can't be rotated (409): rotating would make it work again.
       tags: [auth]
       security:
         - bearerAuth: []
@@ -4067,6 +4068,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The key is revoked; make a new one instead
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Key generation failed or store unavailable
           content:

@@ -424,6 +424,14 @@ pub async fn rotate_api_key(
     if !is_admin && !is_self {
         return err(StatusCode::FORBIDDEN, "not authorised to rotate this key");
     }
+    // A revoked key stays revoked. Rotating it would hand its owner a working
+    // key that an admin took away; they can make a new one instead.
+    if rec.is_revoked() {
+        return err(
+            StatusCode::CONFLICT,
+            "this key is revoked; make a new key instead of rotating it",
+        );
+    }
 
     // Mint a fresh secret (with prefix-collision retry) and swap it in.
     let mut attempt = 0u32;

@@ -152,27 +152,78 @@ impl ApiKeyStore {
     }
 
     /// Persist a mutation to an existing record (identified by its id).
+    /// Write back a record a caller read earlier and changed.
+    ///
+    /// Read and written in one transaction, against what is stored *now*: a
+    /// key revoked or deleted since the caller read it stays revoked or
+    /// deleted. Revocation only ever goes one way, so an edit (or a
+    /// `last_used_at` stamp) that started before it cannot undo it, and a
+    /// deleted key is never written back into existence.
     pub fn update(&self, record: &ApiKeyRecord) -> Result<()> {
-        let json = serde_json::to_string(record)?;
         let write_txn = self.db.begin_write()?;
         {
             let mut by_prefix = write_txn.open_table(API_KEYS_BY_PREFIX)?;
-            by_prefix.insert(record.prefix.as_str(), json.as_str())?;
+            let stored: Option<ApiKeyRecord> = match by_prefix.get(record.prefix.as_str())? {
+                Some(v) => {
+                    Some(serde_json::from_str(v.value()).context("ApiKeyRecord deserialize")?)
+                }
+                None => None,
+            };
+            if let Some(stored) = stored {
+                let mut record = record.clone();
+                if record.revoked_at.is_none() {
+                    record.revoked_at = stored.revoked_at;
+                }
+                let json = serde_json::to_string(&record)?;
+                by_prefix.insert(record.prefix.as_str(), json.as_str())?;
+            }
         }
         write_txn.commit()?;
         Ok(())
     }
 
-    pub fn revoke(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool> {
-        let Some(mut rec) = self.get_by_id(id)? else {
-            return Ok(false);
+    /// Change one key in place: read, `change`, write, in one transaction, so
+    /// no other write can land in between. `false` when there is no such key.
+    fn modify(&self, id: Uuid, change: impl FnOnce(&mut ApiKeyRecord)) -> Result<bool> {
+        let write_txn = self.db.begin_write()?;
+        let found = {
+            let by_id = write_txn.open_table(API_KEYS_BY_ID)?;
+            let prefix = by_id
+                .get(id.to_string().as_str())?
+                .map(|v| v.value().to_string());
+            drop(by_id);
+            match prefix {
+                None => false,
+                Some(prefix) => {
+                    let mut by_prefix = write_txn.open_table(API_KEYS_BY_PREFIX)?;
+                    let stored: Option<ApiKeyRecord> = match by_prefix.get(prefix.as_str())? {
+                        Some(v) => Some(
+                            serde_json::from_str(v.value()).context("ApiKeyRecord deserialize")?,
+                        ),
+                        None => None,
+                    };
+                    match stored {
+                        None => false,
+                        Some(mut rec) => {
+                            change(&mut rec);
+                            let json = serde_json::to_string(&rec)?;
+                            by_prefix.insert(prefix.as_str(), json.as_str())?;
+                            true
+                        }
+                    }
+                }
+            }
         };
-        if rec.revoked_at.is_some() {
-            return Ok(true);
-        }
-        rec.revoked_at = Some(now);
-        self.update(&rec)?;
-        Ok(true)
+        write_txn.commit()?;
+        Ok(found)
+    }
+
+    pub fn revoke(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool> {
+        self.modify(id, |rec| {
+            if rec.revoked_at.is_none() {
+                rec.revoked_at = Some(now);
+            }
+        })
     }
 
     /// Remove a key outright, both rows. For keys core made itself and
@@ -208,20 +259,18 @@ impl ApiKeyStore {
     }
 
     pub fn touch_last_used(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
-        let Some(mut rec) = self.get_by_id(id)? else {
-            return Ok(());
-        };
-        rec.last_used_at = Some(now);
-        self.update(&rec)?;
+        self.modify(id, |rec| rec.last_used_at = Some(now))?;
         Ok(())
     }
 
     /// Replace the secret material on an existing key while keeping its id,
     /// owner, scopes, label, CIDRs, and expiry. Used by the `rotate` flow.
     ///
-    /// The prefix moves, so this is not a simple in-place update — the old
-    /// prefix row is deleted and a new one inserted. The `by_id` index is
-    /// updated to point at the new prefix.
+    /// The prefix moves, so this is not a simple in-place update: the old
+    /// prefix row is deleted and a new one inserted, and the `by_id` index
+    /// points at the new prefix. All of it in one transaction, against the key
+    /// as stored now, so a key deleted meanwhile is not brought back and a
+    /// revocation is kept: rotating never makes a revoked key work again.
     pub fn replace_secret(
         &self,
         id: Uuid,
@@ -229,26 +278,37 @@ impl ApiKeyStore {
         new_hash: String,
         now: DateTime<Utc>,
     ) -> Result<Option<ApiKeyRecord>> {
-        let Some(mut rec) = self.get_by_id(id)? else {
-            return Ok(None);
-        };
-        let old_prefix = std::mem::replace(&mut rec.prefix, new_prefix.clone());
-        rec.hash = new_hash;
-        rec.last_used_at = None;
-        rec.revoked_at = None;
-        rec.created_at = now;
-
-        let json = serde_json::to_string(&rec)?;
         let write_txn = self.db.begin_write()?;
-        {
+        let rotated = {
+            let mut by_id = write_txn.open_table(API_KEYS_BY_ID)?;
+            let old_prefix = by_id
+                .get(id.to_string().as_str())?
+                .map(|v| v.value().to_string());
+            let Some(old_prefix) = old_prefix else {
+                return Ok(None);
+            };
             let mut by_prefix = write_txn.open_table(API_KEYS_BY_PREFIX)?;
+            let stored: Option<ApiKeyRecord> = match by_prefix.get(old_prefix.as_str())? {
+                Some(v) => {
+                    Some(serde_json::from_str(v.value()).context("ApiKeyRecord deserialize")?)
+                }
+                None => None,
+            };
+            let Some(mut rec) = stored else {
+                return Ok(None);
+            };
+            rec.prefix = new_prefix.clone();
+            rec.hash = new_hash;
+            rec.last_used_at = None;
+            rec.created_at = now;
+            let json = serde_json::to_string(&rec)?;
             by_prefix.remove(old_prefix.as_str())?;
             by_prefix.insert(new_prefix.as_str(), json.as_str())?;
-            let mut by_id = write_txn.open_table(API_KEYS_BY_ID)?;
             by_id.insert(id.to_string().as_str(), new_prefix.as_str())?;
-        }
+            rec
+        };
         write_txn.commit()?;
-        Ok(Some(rec))
+        Ok(Some(rotated))
     }
 }
 
@@ -366,6 +426,67 @@ mod tests {
         s.create(&b).unwrap();
         assert_eq!(s.list_by_owner(owner1).unwrap().len(), 1);
         assert_eq!(s.list_by_owner(owner2).unwrap().len(), 1);
+    }
+
+    /// A stamp or an edit that read the key before it was revoked must not
+    /// write it back unrevoked: the race CI caught as a deleted display's key
+    /// still signing in.
+    #[test]
+    fn a_stale_write_never_undoes_a_revocation() {
+        let (_d, s) = fresh_store();
+        let rec = sample("abcdefghijkl", "x");
+        s.create(&rec).unwrap();
+        let read_before = s.get_by_id(rec.id).unwrap().unwrap();
+        assert!(s.revoke(rec.id, Utc::now()).unwrap());
+
+        let mut edited = read_before.clone();
+        edited.last_used_at = Some(Utc::now());
+        s.update(&edited).unwrap();
+        assert!(s.get_by_id(rec.id).unwrap().unwrap().is_revoked());
+
+        s.touch_last_used(rec.id, Utc::now()).unwrap();
+        let got = s.get_by_id(rec.id).unwrap().unwrap();
+        assert!(got.is_revoked());
+        assert!(got.last_used_at.is_some());
+    }
+
+    #[test]
+    fn a_deleted_key_is_never_written_back() {
+        let (_d, s) = fresh_store();
+        let rec = sample("abcdefghijkl", "x");
+        s.create(&rec).unwrap();
+        let read_before = s.get_by_id(rec.id).unwrap().unwrap();
+        assert!(s.delete(rec.id).unwrap());
+        s.update(&read_before).unwrap();
+        s.touch_last_used(rec.id, Utc::now()).unwrap();
+        assert!(s.get_by_id(rec.id).unwrap().is_none());
+        assert!(s.get_by_prefix("abcdefghijkl").unwrap().is_none());
+    }
+
+    #[test]
+    fn rotating_keeps_a_revocation_and_never_revives_a_deleted_key() {
+        let (_d, s) = fresh_store();
+        let rec = sample("abcdefghijkl", "x");
+        s.create(&rec).unwrap();
+        assert!(s.revoke(rec.id, Utc::now()).unwrap());
+        let got = s
+            .replace_secret(rec.id, "mnopqrstuvwx".into(), "h2".into(), Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(got.is_revoked());
+        assert!(s
+            .get_by_prefix("mnopqrstuvwx")
+            .unwrap()
+            .unwrap()
+            .is_revoked());
+        assert!(s.get_by_prefix("abcdefghijkl").unwrap().is_none());
+
+        assert!(s.delete(rec.id).unwrap());
+        assert!(s
+            .replace_secret(rec.id, "yzabcdefghij".into(), "h3".into(), Utc::now())
+            .unwrap()
+            .is_none());
+        assert!(s.get_by_id(rec.id).unwrap().is_none());
     }
 
     #[test]
