@@ -22,7 +22,7 @@ const apps = [
 	{ id: '13535', name: 'Plex - Free Movies & TV', icon: null, launches: 2 }
 ];
 const bar = {
-	device_id: 'roku_yl0001073725',
+	device_id: 'roku_yn00ab123456',
 	available: true,
 	device_type: 'media_player',
 	attributes: {

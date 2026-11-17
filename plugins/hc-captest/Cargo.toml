@@ -4,7 +4,7 @@ version     = "0.1.0"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Conformance test plugin for the capability-streaming contract (Phase 2a)"
-repository  = "https://github.com/homeCore-io/hc-captest"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [lib]
 name = "hc_captest"

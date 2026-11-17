@@ -43,8 +43,8 @@ alerts_interval_secs      = 120
 # [[weather.locations]]
 # id        = "cabin"
 # name      = "Cabin"
-# latitude  = 35.611
-# longitude = -83.489
+# latitude  = 38.9072
+# longitude = -77.0369
 #
 # Or by postal code, looked up once:
 # [[weather.locations]]

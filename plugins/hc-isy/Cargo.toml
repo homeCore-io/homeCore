@@ -4,7 +4,7 @@ version     = "0.1.14"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Insteon, Z-Wave and Zigbee devices behind a Universal Devices ISY/IoX hub"
-repository  = "https://github.com/homeCore-io/hc-isy"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
 # The name people see in the Catalog (the registry index).

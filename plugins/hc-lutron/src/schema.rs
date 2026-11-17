@@ -49,7 +49,7 @@ fn rw(kind: AttributeKind, display: &str, unit: Option<&str>) -> AttributeSchema
 /// always has. What was missing was the *declaration*, and a client that will
 /// not offer a control the plugin has not promised is left with nothing to
 /// draw: every Lutron dimmer in the house showed a brightness it could read
-/// and a slider it could not move. John, on the Office's Overhead: *"The
+/// and a slider it could not move. The owner, on the Office's Overhead: *"The
 /// brightness shows 25% but there's no visible bar."*
 ///
 /// Only the kinds that really take one. A Switch is on or off, a Pico accepts

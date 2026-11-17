@@ -309,7 +309,7 @@ point; `sdk/ui` holds the `host` types a plugin's screens are given.
 
 ## Repository layout
 
-The workspace root (`/home/john/Github/homeCore/`) is **not** a git repo.
+The workspace root (the folder `workspace-clone.sh` creates) is **not** a git repo.
 Each sub-directory is its own independent git repository. `workspace.toml` at the root is
 the authoritative repo list (used by `hc-scripts/workspace-clone.sh`).
 

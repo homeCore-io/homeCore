@@ -6538,7 +6538,7 @@ Read off the live house, 184 devices:
 | --- | --- | --- |
 | plugin.zwave | ~~`zwave`×9~~ | **Was the protocol, not the device.** Fixed — see below |
 | core.mode | ~~none×2~~ | **Registered with no type at all.** Now `mode` |
-| plugin.lutron | `light`, `switch`, `fan`, `scene`, `occupancy_sensor`, `keypad`, `pico_remote`, `vcrx` | `vcrx` is a product name; it is a keypad with contact inputs. Left alone — renaming it moves devices in every client that filters by type, and that is John's call |
+| plugin.lutron | `light`, `switch`, `fan`, `scene`, `occupancy_sensor`, `keypad`, `pico_remote`, `vcrx` | `vcrx` is a product name; it is a keypad with contact inputs. Left alone — renaming it moves devices in every client that filters by type, and that is the maintainer's call |
 | plugin.ecowitt | `temperature_sensor`, `weather_station`, `rain_sensor`, `lightning_sensor`, `gateway` | Descriptive and honest, but three of them are known to no table — they rank alphabetically |
 | plugin.caseta | `switch`, `scene`, `pico_remote` | Correct |
 | plugin.hue | `light`, `scene`, `motion_sensor`, `bridge` | Correct |
@@ -7024,12 +7024,12 @@ a state row that never fills in.
 ## hc-web Notes
 
 Tech stack: Flutter 3.41.5 · Dart 3.11.3 · Riverpod 2.x · go_router 13.x
-Binary at `/home/john/flutter/bin/flutter` (not in PATH).
+Binary at `~/flutter/bin/flutter` (not in PATH).
 
 Build & deploy:
 ```sh
-cd /home/john/RustroverProjects/homeCore/clients/hc-web
-/home/john/flutter/bin/flutter build web --release
+cd <workspace>/clients/hc-web
+~/flutter/bin/flutter build web --release
 ```
 Caddy serves `build/web` directly — no restart needed. Hard-refresh browser
 (Ctrl+Shift+R) to bypass cache.

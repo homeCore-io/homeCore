@@ -140,7 +140,7 @@ of the eight, assert:
   during the port fails loudly instead of silently orphaning everyone's saved
   preferences
 
-That last one matters more than it looks. These keys are live on John's
+That last one matters more than it looks. These keys are live on the owner's
 browsers; changing one is indistinguishable from a factory reset of that
 preference, and nothing would report an error.
 

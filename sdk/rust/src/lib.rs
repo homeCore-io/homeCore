@@ -3274,8 +3274,8 @@ mod house_location_tests {
     #[tokio::test]
     async fn the_house_is_known_once_core_has_said() {
         let here = HouseLocation {
-            latitude: 35.96,
-            longitude: -83.92,
+            latitude: 38.9072,
+            longitude: -77.0369,
         };
         set_house_location(here);
         assert_eq!(house_location(), Some(here));

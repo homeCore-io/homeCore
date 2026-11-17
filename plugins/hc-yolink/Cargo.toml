@@ -4,7 +4,7 @@ version     = "0.1.22"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "YoLink sensors, locks and plugs, through a YS1606 local hub or the YoLink cloud"
-repository  = "https://github.com/homeCore-io/hc-yolink"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
 # The name people see in the Catalog (the registry index).
