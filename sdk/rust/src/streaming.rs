@@ -15,7 +15,7 @@
 //! directly to the corresponding [`StreamContext`].
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, SubsecRound as _, Utc};
 use rumqttc::{AsyncClient, QoS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -103,7 +103,9 @@ pub(crate) type StreamClock = Arc<Mutex<Option<DateTime<Utc>>>>;
 /// last, written to the microsecond.
 pub(crate) fn next_ts(clock: &StreamClock) -> String {
     let mut last = clock.lock().unwrap();
-    let mut now = Utc::now();
+    // Compared at the precision it is written in: two times in the same
+    // microsecond would otherwise both pass and print the same.
+    let mut now = Utc::now().trunc_subsecs(6);
     if let Some(prev) = *last {
         if now <= prev {
             now = prev + chrono::Duration::microseconds(1);
