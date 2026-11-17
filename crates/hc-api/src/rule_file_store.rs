@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result};
 use hc_types::device::DeviceState;
-use hc_types::rule::{Action, Condition, IfCheck, Rule, Trigger};
+use hc_types::rule::Rule;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -361,126 +361,14 @@ pub fn repoint_device_refs(
     Ok(changed)
 }
 
-/// Returns `true` if any trigger, condition, or action in `rule` directly
+/// Returns `true` if any trigger, check, or step in `rule` directly
 /// references `device_id` (does not search inside Rhai script strings).
+/// The fields searched are the resolver's own list,
+/// [`hc_core::rule_resolver::visit_device_refs_mut`].
 fn rule_references_device(rule: &Rule, device_id: &str, devices: &[DeviceState]) -> bool {
-    rule.all_triggers()
-        .any(|t| trigger_references_device(t, device_id, devices))
-        || rule
-            .conditions
-            .iter()
-            .any(|c| condition_references_device(c, device_id, devices))
-        || rule
-            .actions
-            .iter()
-            .any(|ra| action_references_device(&ra.action, device_id, devices))
-}
-
-fn trigger_references_device(trigger: &Trigger, device_id: &str, devices: &[DeviceState]) -> bool {
-    match trigger {
-        Trigger::DeviceStateChanged {
-            device_id: id,
-            device_ids,
-            ..
-        } => {
-            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
-                || device_ids.iter().any(|id| {
-                    hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
-                })
-        }
-        Trigger::DeviceAvailabilityChanged { device_id: id, .. }
-        | Trigger::ButtonEvent { device_id: id, .. }
-        | Trigger::NumericThreshold { device_id: id, .. } => {
-            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
-        }
-        _ => false,
-    }
-}
-
-fn if_check_references_device(check: &IfCheck, device_id: &str, devices: &[DeviceState]) -> bool {
-    matches!(check, IfCheck::Check(c) if condition_references_device(c, device_id, devices))
-}
-
-fn condition_references_device(cond: &Condition, device_id: &str, devices: &[DeviceState]) -> bool {
-    match cond {
-        Condition::DeviceState { device_id: id, .. }
-        | Condition::TimeElapsed { device_id: id, .. }
-        | Condition::DeviceLastChange { device_id: id, .. } => {
-            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
-        }
-        Condition::Not { condition } => condition_references_device(condition, device_id, devices),
-        Condition::And { conditions }
-        | Condition::Or { conditions }
-        | Condition::Xor { conditions } => conditions
-            .iter()
-            .any(|cond| condition_references_device(cond, device_id, devices)),
-        _ => false,
-    }
-}
-
-fn action_references_device(action: &Action, device_id: &str, devices: &[DeviceState]) -> bool {
-    match action {
-        Action::SetDeviceState { device_id: id, .. }
-        | Action::SetDeviceStatePerMode { device_id: id, .. }
-        | Action::FadeDevice { device_id: id, .. } => {
-            hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)
-        }
-        Action::WaitForEvent {
-            device_id: Some(id),
-            ..
-        } => hc_core::rule_resolver::reference_points_to_device(id, device_id, devices),
-        Action::CaptureDeviceState { device_ids, .. } => device_ids
-            .iter()
-            .any(|id| hc_core::rule_resolver::reference_points_to_device(id, device_id, devices)),
-        Action::Parallel { actions } => actions
-            .iter()
-            .any(|a| action_references_device(a, device_id, devices)),
-        Action::RepeatUntil { actions, .. } => actions
-            .iter()
-            .any(|a| action_references_device(a, device_id, devices)),
-        Action::RepeatWhile { actions, .. } => actions
-            .iter()
-            .any(|a| action_references_device(a, device_id, devices)),
-        Action::RepeatCount { actions, .. } => actions
-            .iter()
-            .any(|a| action_references_device(a, device_id, devices)),
-        Action::Conditional {
-            condition,
-            then_actions,
-            else_if,
-            else_actions,
-        } => {
-            if_check_references_device(condition, device_id, devices)
-                || else_if
-                    .iter()
-                    .any(|b| if_check_references_device(&b.condition, device_id, devices))
-                || then_actions
-                    .iter()
-                    .any(|a| action_references_device(a, device_id, devices))
-                || else_if.iter().any(|branch| {
-                    branch
-                        .actions
-                        .iter()
-                        .any(|a| action_references_device(a, device_id, devices))
-                })
-                || else_actions
-                    .iter()
-                    .any(|a| action_references_device(a, device_id, devices))
-        }
-        Action::PingHost {
-            then_actions,
-            else_actions,
-            ..
-        } => {
-            then_actions
-                .iter()
-                .any(|a| action_references_device(a, device_id, devices))
-                || else_actions
-                    .iter()
-                    .any(|a| action_references_device(a, device_id, devices))
-        }
-        _ => false,
-    }
+    hc_core::rule_resolver::device_refs(rule)
+        .iter()
+        .any(|id| hc_core::rule_resolver::reference_points_to_device(id, device_id, devices))
 }
 
 /// Mutably replace all occurrences of `device_id` with `placeholder` in a rule.
@@ -490,153 +378,12 @@ fn replace_device_refs(
     placeholder: &str,
     devices: &[DeviceState],
 ) {
-    for trigger in rule.all_triggers_mut() {
-        replace_in_trigger(trigger, device_id, placeholder, devices);
-    }
-    for cond in &mut rule.conditions {
-        replace_in_condition(cond, device_id, placeholder, devices);
-    }
-    for ra in &mut rule.actions {
-        replace_in_action(&mut ra.action, device_id, placeholder, devices);
-    }
-}
-
-fn replace_in_trigger(
-    trigger: &mut Trigger,
-    device_id: &str,
-    placeholder: &str,
-    devices: &[DeviceState],
-) {
-    match trigger {
-        Trigger::DeviceStateChanged {
-            device_id: id,
-            device_ids,
-            ..
-        } => {
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
-                *id = placeholder.to_string();
-            }
-            for ref_id in device_ids {
-                if hc_core::rule_resolver::reference_points_to_device(ref_id, device_id, devices) {
-                    *ref_id = placeholder.to_string();
-                }
-            }
-        }
-        Trigger::DeviceAvailabilityChanged { device_id: id, .. }
-        | Trigger::ButtonEvent { device_id: id, .. }
-        | Trigger::NumericThreshold { device_id: id, .. }
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
-        {
+    let _ = hc_core::rule_resolver::visit_device_refs_mut(rule, &mut |id| {
+        if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) {
             *id = placeholder.to_string();
         }
-        _ => {}
-    }
-}
-
-fn replace_in_condition(
-    cond: &mut Condition,
-    device_id: &str,
-    placeholder: &str,
-    devices: &[DeviceState],
-) {
-    match cond {
-        Condition::DeviceState { device_id: id, .. }
-        | Condition::TimeElapsed { device_id: id, .. }
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
-        {
-            *id = placeholder.to_string();
-        }
-        Condition::Not { condition } => {
-            replace_in_condition(condition, device_id, placeholder, devices)
-        }
-        Condition::And { conditions }
-        | Condition::Or { conditions }
-        | Condition::Xor { conditions } => {
-            for cond in conditions {
-                replace_in_condition(cond, device_id, placeholder, devices);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn replace_in_action(
-    action: &mut Action,
-    device_id: &str,
-    placeholder: &str,
-    devices: &[DeviceState],
-) {
-    match action {
-        Action::SetDeviceState { device_id: id, .. }
-        | Action::SetDeviceStatePerMode { device_id: id, .. }
-        | Action::FadeDevice { device_id: id, .. }
-            if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) =>
-        {
-            *id = placeholder.to_string();
-        }
-        Action::WaitForEvent {
-            device_id: Some(id),
-            ..
-        } if hc_core::rule_resolver::reference_points_to_device(id, device_id, devices) => {
-            *id = placeholder.to_string();
-        }
-        Action::CaptureDeviceState { device_ids, .. } => {
-            for ref_id in device_ids {
-                if hc_core::rule_resolver::reference_points_to_device(ref_id, device_id, devices) {
-                    *ref_id = placeholder.to_string();
-                }
-            }
-        }
-        Action::Parallel { actions } => {
-            for a in actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-        }
-        Action::RepeatUntil { actions, .. }
-        | Action::RepeatWhile { actions, .. }
-        | Action::RepeatCount { actions, .. } => {
-            for a in actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-        }
-        Action::Conditional {
-            condition,
-            then_actions,
-            else_if,
-            else_actions,
-        } => {
-            if let IfCheck::Check(check) = condition {
-                replace_in_condition(check, device_id, placeholder, devices);
-            }
-            for a in then_actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-            for branch in else_if {
-                if let IfCheck::Check(check) = &mut branch.condition {
-                    replace_in_condition(check, device_id, placeholder, devices);
-                }
-                for a in &mut branch.actions {
-                    replace_in_action(a, device_id, placeholder, devices);
-                }
-            }
-            for a in else_actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-        }
-        Action::PingHost {
-            then_actions,
-            else_actions,
-            ..
-        } => {
-            for a in then_actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-            for a in else_actions {
-                replace_in_action(a, device_id, placeholder, devices);
-            }
-        }
-        _ => {}
-    }
+        Ok(())
+    });
 }
 
 #[cfg(test)]
@@ -662,7 +409,8 @@ mod tests {
     /// disappeared, and nothing logged it.
     #[test]
     fn an_imported_twin_does_not_overwrite_the_original() {
-        use super::{Rule, RuleFileStore, Trigger};
+        use super::{Rule, RuleFileStore};
+        use hc_types::rule::Trigger;
         use uuid::Uuid;
 
         fn named(name: &str) -> Rule {
@@ -717,8 +465,9 @@ mod tests {
 
     #[test]
     fn a_device_is_repointed_in_every_rule_even_after_its_deletion() {
-        use super::{nullify_device_refs, repoint_device_refs, Rule, RuleFileStore, Trigger};
+        use super::{nullify_device_refs, repoint_device_refs, Rule, RuleFileStore};
         use hc_types::device::DeviceState;
+        use hc_types::rule::Trigger;
 
         use uuid::Uuid;
 
@@ -788,5 +537,76 @@ mod tests {
             panic!()
         };
         assert_eq!(device_id, "other_door");
+    }
+
+    /// Deleting a device turns off a rule that names it only in a field the
+    /// reference walk used to skip: a picture to send, or a step nested in a
+    /// for each alert.
+    #[test]
+    fn deleting_a_device_finds_it_in_every_field_the_resolver_knows() {
+        use super::{nullify_device_refs, Rule, RuleFileStore};
+        use hc_types::device::DeviceState;
+        use hc_types::rule::{Action, RuleAction};
+
+        let rule = |name: &str, action: serde_json::Value| -> Rule {
+            serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "name": name,
+                "enabled": true,
+                "priority": 0,
+                "tags": [],
+                "trigger": "ManualTrigger",
+                "actions": [{ "action": action }],
+            }))
+            .unwrap()
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = RuleFileStore::new(dir.path());
+        store
+            .write_rule(&rule(
+                "Picture",
+                serde_json::json!({ "Notify": {
+                    "channel": "phone", "message": "hi", "picture_from": "cam_1"
+                } }),
+            ))
+            .unwrap();
+        store
+            .write_rule(&rule(
+                "Each",
+                serde_json::json!({ "ForEachAlert": { "actions": [
+                    { "SetDeviceState": { "device_id": "cam_1", "state": { "on": true } } }
+                ] } }),
+            ))
+            .unwrap();
+        let devices = vec![DeviceState::new("cam_1", "Porch Camera", "test")];
+
+        let mut off = nullify_device_refs(dir.path(), "cam_1", &devices).unwrap();
+        off.sort();
+        assert_eq!(off, ["Each", "Picture"]);
+
+        let rules: Vec<Rule> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let path = e.unwrap().path();
+                let text = std::fs::read_to_string(&path).ok()?;
+                super::parse_rule_file(&path, &text)
+            })
+            .collect();
+        for r in &rules {
+            match &r.actions[0] {
+                RuleAction {
+                    action: Action::Notify { picture_from, .. },
+                    ..
+                } => assert_eq!(picture_from.as_deref(), Some("DELETED:cam_1")),
+                RuleAction {
+                    action: Action::ForEachAlert { actions, .. },
+                    ..
+                } => assert!(matches!(
+                    &actions[0],
+                    Action::SetDeviceState { device_id, .. } if device_id == "DELETED:cam_1"
+                )),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 }
