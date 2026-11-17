@@ -57,7 +57,7 @@ port = 8080
 [broker]
 host = "127.0.0.1"
 port = 1883
-# MQTT v5 listener (used by newer devices / Shelly Gen2/Gen3).  Set to null to disable.
+# MQTT v5 listener (used by newer devices / Shelly Gen2/Gen3). Default 1884; 0 turns it off.
 # v5_port = 1884
 # tls_port = 8883
 # cert_path = "config/broker.crt"   # relative to base_dir
@@ -218,8 +218,8 @@ token_expiry_hours = 24
 # ---------------------------------------------------------------------------
 # Web admin UI — off, because core no longer ships one
 #
-# hc-core is the API and the embedded broker. The UI is hc-web: its own
-# image, serving the app and reverse-proxying /api/v1 to core. Core stopped
+# hc-core is the API and the embedded broker. The UI is hc-web-svelte: its
+# own image, serving the app and reverse-proxying /api/v1 to core. Core stopped
 # baking a UI bundle in when the appliance model was retired, so there is
 # nothing at `dist_path` to serve and enabling this only produces 404s at `/`.
 #
@@ -233,8 +233,9 @@ enabled   = false
 # ---------------------------------------------------------------------------
 # Automation rules
 #
-# Each rule lives in its own TOML file.  The filename (minus .toml) is the
-# rule's slug; the `name` field inside the file is the human display name.
+# Each rule lives in its own RON file (legacy TOML rule files still load).
+# The filename without its extension is the rule's slug; the `name` field
+# inside the file is the human display name.
 # Changes to files are hot-reloaded automatically — no restart required.
 # Validation runs before any swap; parse errors leave the running rules intact.
 # ---------------------------------------------------------------------------
@@ -326,10 +327,12 @@ app_name  = "homecore"
 # never there, restarting each on the 2s→60s backoff and logging a failure
 # per attempt, before the operator had done anything at all.
 #
-# Plugins are installed at runtime instead: Plugins → Add in hc-web, or
-# POST /api/v1/plugins/install. Core fetches the signed artifact from the
-# registry below, verifies its ed25519 signature against `public_key`,
-# unpacks it under base_dir, and records it in config/plugins/managed.toml.
+# Plugins are installed at runtime instead: from the Catalog in the app
+# (Settings › Plugins › Catalog), or POST /api/v1/plugins/install. Core
+# fetches the registry index below, checks its ed25519 signature against
+# `public_key`, downloads the artifact and checks it against the sha256 the
+# index pins, unpacks it under base_dir, and records it in
+# config/plugins/managed.toml.
 # Adding hardware support never means editing this file.
 #
 # A [[plugins]] entry is still honoured for a plugin you build yourself and
@@ -345,9 +348,10 @@ app_name  = "homecore"
 # ---------------------------------------------------------------------------
 # Plugin registry
 #
-# Where "Add plugin" fetches from. `public_key` is the ed25519 key the index
-# is signed with — an artifact whose signature does not verify is refused, so
-# leaving this unset means no plugin can be installed from the UI at all.
+# Where the Catalog fetches from. `public_key` is the ed25519 key the index
+# is signed with. An index whose signature does not verify is refused, and
+# each artifact must match the sha256 the index lists for it, so leaving
+# this unset means no plugin can be installed from the Catalog at all.
 #
 # Point both at your own host to run a private registry; `url` also accepts a
 # local path or a file:// URL.

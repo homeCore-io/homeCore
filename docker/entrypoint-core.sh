@@ -1,5 +1,5 @@
 #!/bin/sh
-# hc-core (per-service compose) entrypoint.
+# hc-core image entrypoint.
 #
 # Single-base-dir layout: everything operator-mutable under
 # $HOMECORE_HOME (default /homecore). Container starts as root, looks
@@ -7,9 +7,10 @@
 # mkdir / write / exec. Operators just `mkdir homecore-data &&
 # docker compose up` — no env vars, no pre-chown ritual.
 #
-# In the multi-container compose shape, this image runs ONE process:
-# hc-core itself. Plugin processes run in their own containers and
-# connect over MQTT — see compose.<plugin>.yaml fragments.
+# This script execs hc-core, which then supervises the plugins installed
+# from the Catalog as its own child processes, under $HOMECORE_HOME.
+# Python plugins run in a separate plugin runtime container
+# (ghcr.io/homecore-io/hc-runtime-python) that connects to core's broker.
 
 set -e
 

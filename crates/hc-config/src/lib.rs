@@ -342,8 +342,7 @@ pub struct BrokerSection {
     pub host: String,
     #[serde(default = "default_broker_port")]
     pub port: u16,
-    /// MQTT v5 listener port. Default 1884; `0` (or `None`) turns it off.
-    /// Set to null to disable.
+    /// MQTT v5 listener port. Default 1884; `0` turns it off.
     #[serde(default = "default_broker_v5_port")]
     pub v5_port: Option<u16>,
     pub tls_port: Option<u16>,
