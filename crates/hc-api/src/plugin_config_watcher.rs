@@ -10,9 +10,11 @@
 //!
 //! Modeled on [`hc_core::rule_loader::RuleWatcher`]: a `notify` watcher feeds
 //! paths to a debounced async loop.  Two guards keep it quiet:
-//!   - **content hashing** — a change whose bytes match the last-seen content is
-//!     ignored (dedups `notify`'s multiple events per save, and skips no-op
-//!     writes).
+//!   - **content fingerprints**: a change whose settings match the last-seen
+//!     ones is ignored (dedups `notify`'s multiple events per save, and skips
+//!     no-op writes). The fingerprint leaves out `[logging] level`, which the
+//!     app sets on the running plugin directly and only keeps in the file for
+//!     the next start; see [`fingerprint`].
 //!   - **removal is ignored** — a transient unlink/rename never kills a running
 //!     plugin; only a readable, genuinely-changed file triggers a restart.
 //!
@@ -41,7 +43,7 @@ impl PluginConfigWatcher {
     /// Start watching `store.dir()`. On a genuine content change, send
     /// `PluginCommand::Restart` on that plugin's channel in `commands`.
     ///
-    /// `plugin_ids` seeds the baseline content hashes and the filename lookup;
+    /// `plugin_ids` seeds the baseline fingerprints and the filename lookup;
     /// it is **not** the limit of what gets watched. A file that matches no
     /// seeded id is resolved against the live `commands` map instead, so a
     /// plugin installed after core booted is covered too — see
@@ -65,12 +67,12 @@ impl PluginConfigWatcher {
             })
             .collect();
 
-        // Baseline hashes from current content so the first stray event (e.g. a
+        // Baseline fingerprints from current content so the first stray event (e.g. a
         // metadata touch) doesn't cause a spurious restart.
-        let mut hashes: HashMap<String, u64> = HashMap::new();
+        let mut fingerprints: HashMap<String, Fingerprint> = HashMap::new();
         for id in &plugin_ids {
             if let Ok(content) = store.read(id) {
-                hashes.insert(id.clone(), content_hash(&content));
+                fingerprints.insert(id.clone(), fingerprint(&content));
             }
         }
 
@@ -98,7 +100,7 @@ impl PluginConfigWatcher {
         info!(dir = %dir.display(), "Plugin config hot-reload watcher active");
 
         tokio::spawn(async move {
-            let mut hashes = hashes;
+            let mut fingerprints = fingerprints;
             loop {
                 let first = match rx.recv().await {
                     Some(p) => p,
@@ -125,11 +127,11 @@ impl PluginConfigWatcher {
                     };
                     match store.read(&id) {
                         Ok(content) => {
-                            let h = content_hash(&content);
-                            if hashes.get(&id) == Some(&h) {
-                                continue; // unchanged bytes — ignore
+                            let h = fingerprint(&content);
+                            if fingerprints.get(&id) == Some(&h) {
+                                continue; // unchanged settings: ignore
                             }
-                            hashes.insert(id.clone(), h);
+                            fingerprints.insert(id.clone(), h);
                             to_reload.insert(id);
                         }
                         // Unreadable (mid-rename/removed) — don't restart on a
@@ -191,6 +193,38 @@ async fn resolve_plugin_id(
         .keys()
         .find(|id| store.path_for(id).file_name() == Some(file))
         .cloned()
+}
+
+/// What the watcher compares to decide a config file genuinely changed.
+///
+/// A file that parses as TOML is compared as its parsed settings with
+/// `[logging] level` taken out. Setting a plugin's log level in the app sends
+/// the new level to the running plugin and also writes it into this file so
+/// it survives a restart; that write alone must not restart the plugin, or
+/// the change would cost a reconnect to every device it serves. Any other
+/// setting, `[logging]` ones included, still counts.
+///
+/// A file that doesn't parse (half written, or broken by hand) falls back to
+/// its raw bytes, as before.
+#[derive(Debug, Clone, PartialEq)]
+enum Fingerprint {
+    Settings(toml::Table),
+    Raw(u64),
+}
+
+fn fingerprint(content: &str) -> Fingerprint {
+    let Ok(mut table) = content.parse::<toml::Table>() else {
+        return Fingerprint::Raw(content_hash(content));
+    };
+    if let Some(toml::Value::Table(logging)) = table.get_mut("logging") {
+        logging.remove("level");
+        // Writing a level into a file with no `[logging]` adds the section;
+        // left empty, it is the same as not being there.
+        if logging.is_empty() {
+            table.remove("logging");
+        }
+    }
+    Fingerprint::Settings(table)
 }
 
 /// Non-cryptographic content hash for change detection within a single run.
@@ -302,5 +336,138 @@ mod tests {
         store.write("plugin.not_installed", "x = 1\n").unwrap();
         let none = tokio::time::timeout(Duration::from_millis(800), rx.recv()).await;
         assert!(none.is_err(), "unknown file must not restart, got {none:?}");
+    }
+
+    #[test]
+    fn fingerprint_ignores_only_the_logging_level() {
+        let base = "host = \"a\"\n\n[logging]\nlevel = \"info\"\nformat = \"json\"\n";
+        let level = "host = \"a\"\n\n[logging]\nlevel = \"debug\"\nformat = \"json\"\n";
+        assert_eq!(fingerprint(base), fingerprint(level));
+
+        // Writing a level into a file with no [logging] adds the section.
+        assert_eq!(
+            fingerprint("host = \"a\"\n"),
+            fingerprint("host = \"a\"\n\n[logging]\nlevel = \"debug\"\n")
+        );
+
+        // Any other setting, a [logging] one included, still counts.
+        let host = "host = \"b\"\n\n[logging]\nlevel = \"info\"\nformat = \"json\"\n";
+        let format = "host = \"a\"\n\n[logging]\nlevel = \"info\"\nformat = \"pretty\"\n";
+        assert_ne!(fingerprint(base), fingerprint(host));
+        assert_ne!(fingerprint(base), fingerprint(format));
+
+        // A file that doesn't parse is compared byte for byte.
+        assert_eq!(fingerprint("host = \n"), fingerprint("host = \n"));
+        assert_ne!(fingerprint("host = \n"), fingerprint("host = x\n"));
+        assert!(matches!(fingerprint("level = ["), Fingerprint::Raw(_)));
+    }
+
+    /// Start a watcher over one plugin's config and return its command
+    /// receiver, with the watch established.
+    async fn watch_one(
+        initial: &str,
+    ) -> (
+        tempfile::TempDir,
+        PluginConfigStore,
+        PluginConfigWatcher,
+        mpsc::Receiver<PluginCommand>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PluginConfigStore::new(dir.path());
+        store.write("plugin.a", initial).unwrap();
+        let (tx, rx) = mpsc::channel::<PluginCommand>(8);
+        let commands: PluginCommandChannels = Arc::new(RwLock::new(HashMap::new()));
+        commands.write().await.insert("plugin.a".to_string(), tx);
+        let watcher =
+            PluginConfigWatcher::start(store.clone(), commands, vec!["plugin.a".into()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (dir, store, watcher, rx)
+    }
+
+    #[tokio::test]
+    async fn a_log_level_change_alone_does_not_restart() {
+        // What PATCH /plugins/{id} with a log_level writes: the running plugin
+        // already has the new level, and a restart would drop its devices.
+        let (_dir, store, _watcher, mut rx) =
+            watch_one("host = \"a\"\n\n[logging]\nlevel = \"info\"\n").await;
+
+        store
+            .write("plugin.a", "host = \"a\"\n\n[logging]\nlevel = \"debug\"\n")
+            .unwrap();
+        let none = tokio::time::timeout(Duration::from_millis(800), rx.recv()).await;
+        assert!(
+            none.is_err(),
+            "a level change must not restart, got {none:?}"
+        );
+
+        // A file that had no [logging] section gains one; still no restart.
+        let (_dir, store, _watcher, mut rx) = watch_one("host = \"a\"\n").await;
+        store
+            .write("plugin.a", "host = \"a\"\n\n[logging]\nlevel = \"trace\"\n")
+            .unwrap();
+        let none = tokio::time::timeout(Duration::from_millis(800), rx.recv()).await;
+        assert!(
+            none.is_err(),
+            "adding a level must not restart, got {none:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_other_change_still_restarts() {
+        let (_dir, store, _watcher, mut rx) =
+            watch_one("host = \"a\"\n\n[logging]\nlevel = \"info\"\n").await;
+
+        // The level and another setting together: the other setting needs a
+        // restart to apply.
+        store
+            .write("plugin.a", "host = \"b\"\n\n[logging]\nlevel = \"debug\"\n")
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            matches!(got, Ok(Some(PluginCommand::Restart))),
+            "a settings change must restart, got {got:?}"
+        );
+
+        // Another [logging] setting is not the level and still counts.
+        store
+            .write(
+                "plugin.a",
+                "host = \"b\"\n\n[logging]\nlevel = \"debug\"\nformat = \"json\"\n",
+            )
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            matches!(got, Ok(Some(PluginCommand::Restart))),
+            "a [logging] change other than level must restart, got {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_file_is_still_compared_by_its_bytes() {
+        let (_dir, store, _watcher, mut rx) = watch_one("host = \"a\"\n").await;
+
+        // Broken by hand: it changed, so restart, as before.
+        store.write("plugin.a", "host = \n").unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            matches!(got, Ok(Some(PluginCommand::Restart))),
+            "a change to an unparseable file must restart, got {got:?}"
+        );
+
+        // The same broken bytes again: unchanged, no restart.
+        store.write("plugin.a", "host = \n").unwrap();
+        let none = tokio::time::timeout(Duration::from_millis(800), rx.recv()).await;
+        assert!(
+            none.is_err(),
+            "identical bytes must not restart, got {none:?}"
+        );
+
+        // Different broken bytes: changed, restart.
+        store.write("plugin.a", "host = [\n").unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            matches!(got, Ok(Some(PluginCommand::Restart))),
+            "a further change to an unparseable file must restart, got {got:?}"
+        );
     }
 }

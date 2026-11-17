@@ -36,6 +36,25 @@ host = "127.0.0.1"
 callback_host = "127.0.0.1"
 ```
 
+### HTTP API settings (`[api]`)
+
+The plugin runs one small HTTP server. The speakers deliver their events to
+it (`/sonos/callback/...`), and it also serves a control API and web
+interface in the node-sonos-http-api style (`GET /Kitchen/play`,
+`/Kitchen/volume/30`, `/zones` and so on).
+
+| Setting | Default | |
+|---|---|---|
+| `enabled` | `true` | Off, the speakers have nowhere to send events (see `events_off` below). |
+| `host` | `0.0.0.0` | The address it listens on. Speakers on the LAN must reach it, so keep it on a LAN interface. |
+| `port` | `5005` | |
+| `callback_host` | none | This machine's LAN IP, which the speakers are told to call back to. Needed when `host` is `0.0.0.0`. |
+| `allow_remote_control` | `false` | **The control API has no sign-in.** Off, the web interface and every control route answer only requests from this machine (loopback, or this machine's own address, so a homeCore rule on the same host calling `http://<its LAN IP>:5005/Kitchen/play` still works); other machines get `403 Forbidden`. On, anyone who can reach the port can control the speakers. The event callbacks are accepted from the network either way. |
+
+If you call the API from another machine (a script, another home automation
+system, a browser elsewhere), either run that caller on the homeCore host or
+set `allow_remote_control = true` and keep the port off untrusted networks.
+
 ## Speakers that go quiet, move or get renamed
 
 **A speaker is never removed because it stopped answering.** One that misses

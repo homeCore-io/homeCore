@@ -45,6 +45,11 @@ use tracing::{error, info};
 
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_DELAY_SECS: u64 = 60;
+/// Seconds between heartbeats, which are what carry notices to homeCore.
+const HEARTBEAT_SECS: u64 = 60;
+/// How long to stay up after a fatal error so one more heartbeat delivers
+/// the notice explaining it.
+const NOTICE_GRACE: Duration = Duration::from_secs(HEARTBEAT_SECS + 5);
 
 #[tokio::main]
 async fn main() {
@@ -150,7 +155,7 @@ async fn try_start(
     // Enable management protocol (heartbeat + remote config/log commands).
     let mgmt = client
         .enable_management(
-            60,
+            HEARTBEAT_SECS,
             Some(env!("CARGO_PKG_VERSION").to_string()),
             Some(config_path.to_string()),
             Some(log_level_handle),
@@ -222,7 +227,19 @@ async fn try_start(
         notices,
     };
 
-    bridge.run().await
+    if let Err(e) = bridge.run().await {
+        // Only a failure that retrying in this process cannot fix ends up
+        // here (a refused login). Exit non-zero so homeCore restarts the
+        // plugin with backoff, but first stay long enough for a heartbeat to
+        // carry the notice that says why.
+        error!(
+            error = %format!("{e:#}"),
+            "hc-isy cannot continue; exiting with an error so homeCore restarts it"
+        );
+        tokio::time::sleep(NOTICE_GRACE).await;
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn published_ids_cache_path(config_path: &str) -> PathBuf {

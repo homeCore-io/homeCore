@@ -126,9 +126,10 @@ UI. They are state rather than log lines.
 | `not_configured` | No repeater address or credentials yet. |
 | `repeater_unreachable` | The repeater is not answering on the telnet port. Clears on reconnect. |
 | `no_devices_configured` | Connected, but no `[[devices]]` entries — nothing to bridge. |
+| `devices_skipped` | One or more `[[devices]]` rows have a blank, missing or unknown `kind`. They are skipped (the notice names each row) and the rest load. Clears once every row has a kind. |
 
 ## Configuration highlights
 
-- `default_fade_secs` — global fade time (per-device override with `fade_secs`; per command, `transition_ms`)
+- `default_fade_secs`: global fade time for dimmers, also sent with fan speed changes; shades and switches never fade (per-device override with `fade_secs`; per command, `transition_ms`)
 - `hold_threshold_ms` — how long a button must be held before a "hold" event fires
-- `[[scenes]]` — phantom button mappings with `main_repeater_id` and `button_component`
+- `[[scenes]]`: phantom button mappings with `button_component` and an optional `main_repeater_id` (1 when left out)

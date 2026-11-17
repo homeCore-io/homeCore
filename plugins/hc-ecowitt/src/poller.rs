@@ -26,6 +26,10 @@ pub async fn run_poller(gateway_ip: String, interval_secs: u64, state: Arc<Share
                     let updates = parse_livedata(&data, &state.device_prefix);
                     if !updates.is_empty() {
                         let count = updates.len();
+                        // A poll that brings readings proves the gateway is
+                        // reachable, same as an upload, so the silence
+                        // watchdog counts it.
+                        state.note_report("poll", count).await;
                         let mut reg = state.registry.lock().await;
                         reg.process_updates(updates).await;
                         debug!(devices = count, "Polled Ecowitt gateway");

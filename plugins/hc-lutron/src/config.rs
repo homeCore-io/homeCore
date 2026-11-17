@@ -77,7 +77,11 @@ pub fn config_descriptor() -> serde_json::Value {
                         .unit("secs")
                         .default(1.0)
                         .min(0)
-                        .help("Dimmer/shade transition time. Override per device in the table below."),
+                        .help(
+                            "Fade time for dimmers, also sent with fan speed changes. \
+                             Shades and switches change without a fade. Override per \
+                             device in the table below.",
+                        ),
                 )
                 .field(
                     Field::duration("lutron.hold_threshold_ms")
@@ -223,7 +227,7 @@ pub fn config_descriptor() -> serde_json::Value {
                             Field::int("main_repeater_id")
                                 .label("Repeater ID")
                                 .default(1)
-                                .help("Integration ID of the Main Repeater — almost always 1."),
+                                .help("Integration ID of the Main Repeater. Almost always 1."),
                             Field::int("button_component")
                                 .label("Phantom button")
                                 .help("Component number assigned to this scene in RadioRA 2 programming."),
@@ -347,13 +351,100 @@ pub struct Config {
     pub scenes: Vec<SceneConfig>,
     #[serde(default)]
     pub time_clocks: Vec<TimeclockConfig>,
+    /// `[[devices]]` rows left out because their kind was blank or not one
+    /// this plugin knows. Filled by [`Config::parse`], never read from the
+    /// file.
+    #[serde(skip)]
+    pub skipped_devices: Vec<SkippedDevice>,
+}
+
+/// A `[[devices]]` row that was skipped rather than failing the whole load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDevice {
+    /// Position in the `devices` table, counting from 1.
+    pub row: usize,
+    pub integration_id: Option<i64>,
+    pub name: Option<String>,
+    /// The kind as written; empty when blank or missing.
+    pub kind: String,
+}
+
+impl std::fmt::Display for SkippedDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "row {}", self.row)?;
+        match (&self.name, self.integration_id) {
+            (Some(name), Some(id)) => write!(f, " (\"{name}\", integration ID {id})")?,
+            (Some(name), None) => write!(f, " (\"{name}\")")?,
+            (None, Some(id)) => write!(f, " (integration ID {id})")?,
+            (None, None) => {}
+        }
+        if self.kind.is_empty() {
+            write!(f, ": no kind")
+        } else {
+            write!(f, ": unknown kind \"{}\"", self.kind)
+        }
+    }
 }
 
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Cannot read config {path}: {e}"))?;
-        toml::from_str(&text).map_err(|e| anyhow::anyhow!("Config parse error in {path}: {e}"))
+        Self::parse(&text).map_err(|e| anyhow::anyhow!("Config parse error in {path}: {e}"))
+    }
+
+    /// Parse a config, skipping (and listing in `skipped_devices`) any
+    /// `[[devices]]` row whose kind is blank, missing or unknown, as the
+    /// descriptor promises. One such row must not stop every other device
+    /// from loading. Any other error still fails the load.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut table: toml::Table = toml::from_str(text)?;
+        let mut skipped = Vec::new();
+        if let Some(toml::Value::Array(rows)) = table.get_mut("devices") {
+            let mut kept = Vec::with_capacity(rows.len());
+            for (i, row) in std::mem::take(rows).into_iter().enumerate() {
+                match unusable_kind(&row) {
+                    Some(kind) => skipped.push(SkippedDevice {
+                        row: i + 1,
+                        integration_id: row.get("integration_id").and_then(toml::Value::as_integer),
+                        name: row
+                            .get("name")
+                            .and_then(toml::Value::as_str)
+                            .map(str::trim)
+                            .filter(|n| !n.is_empty())
+                            .map(String::from),
+                        kind,
+                    }),
+                    None => kept.push(row),
+                }
+            }
+            *rows = kept;
+        }
+        let mut cfg: Config = toml::Value::Table(table).try_into()?;
+        cfg.skipped_devices = skipped;
+        Ok(cfg)
+    }
+}
+
+/// The kind as written when a device row's kind is blank, missing or not one
+/// this plugin knows (empty for blank or missing); `None` when it is usable.
+fn unusable_kind(row: &toml::Value) -> Option<String> {
+    let Some(kind) = row.get("kind") else {
+        return Some(String::new());
+    };
+    match kind.as_str() {
+        Some(s) if s.trim().is_empty() => Some(String::new()),
+        Some(s) => {
+            if toml::Value::String(s.to_string())
+                .try_into::<DeviceKind>()
+                .is_ok()
+            {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        None => Some(kind.to_string()),
     }
 }
 
@@ -573,10 +664,16 @@ impl TimeclockConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SceneConfig {
     pub name: String,
-    /// Integration ID of the Main Repeater — almost always 1.
+    /// Integration ID of the Main Repeater, almost always 1. Optional, and 1
+    /// when left out, as the descriptor shows.
+    #[serde(default = "default_main_repeater_id")]
     pub main_repeater_id: u32,
     /// Phantom button component number assigned in RadioStar.
     pub button_component: u32,
+}
+
+fn default_main_repeater_id() -> u32 {
+    1
 }
 
 impl SceneConfig {
@@ -638,5 +735,141 @@ mod tests {
             missing.is_empty(),
             "config fields missing from the descriptor: {missing:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// The descriptor says a device without a kind is skipped. It used to
+    /// fail the whole load instead: one hand-added row left blank and no
+    /// device loaded at all.
+    #[test]
+    fn a_blank_kind_row_is_skipped_and_the_rest_load() {
+        let cfg = Config::parse(
+            r#"
+            [[devices]]
+            integration_id = 10
+            name = "Kitchen"
+            kind = "dimmer"
+
+            [[devices]]
+            integration_id = 11
+            name = "Hall"
+            kind = ""
+
+            [[devices]]
+            integration_id = 12
+            name = "Porch"
+            kind = "switch"
+            "#,
+        )
+        .expect("one blank kind must not fail the load");
+        let ids: Vec<u32> = cfg.devices.iter().map(|d| d.integration_id).collect();
+        assert_eq!(ids, vec![10, 12]);
+        assert_eq!(
+            cfg.skipped_devices,
+            vec![SkippedDevice {
+                row: 2,
+                integration_id: Some(11),
+                name: Some("Hall".into()),
+                kind: String::new(),
+            }]
+        );
+        assert_eq!(
+            cfg.skipped_devices[0].to_string(),
+            "row 2 (\"Hall\", integration ID 11): no kind"
+        );
+    }
+
+    #[test]
+    fn missing_and_unknown_kinds_are_skipped_too() {
+        let cfg = Config::parse(
+            r#"
+            [[devices]]
+            integration_id = 20
+            name = "No kind"
+
+            [[devices]]
+            integration_id = 21
+            name = "Typo"
+            kind = "dimer"
+
+            [[devices]]
+            integration_id = 22
+            name = "Blank"
+            kind = "   "
+
+            [[devices]]
+            integration_id = 23
+            name = "Shade"
+            kind = "shade"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.devices.len(), 1);
+        assert_eq!(cfg.devices[0].kind, DeviceKind::Shade);
+        let rows: Vec<(usize, &str)> = cfg
+            .skipped_devices
+            .iter()
+            .map(|s| (s.row, s.kind.as_str()))
+            .collect();
+        assert_eq!(rows, vec![(1, ""), (2, "dimer"), (3, "")]);
+        assert_eq!(
+            cfg.skipped_devices[1].to_string(),
+            "row 2 (\"Typo\", integration ID 21): unknown kind \"dimer\""
+        );
+    }
+
+    /// Only the kind is forgiven: a row broken some other way still fails,
+    /// rather than vanishing without a word.
+    #[test]
+    fn other_row_errors_still_fail_the_load() {
+        let err = Config::parse(
+            r#"
+            [[devices]]
+            name = "No ID"
+            kind = "dimmer"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("integration_id"), "{err}");
+    }
+
+    #[test]
+    fn a_config_with_every_kind_set_skips_nothing() {
+        let cfg = Config::parse(
+            r#"
+            [[devices]]
+            integration_id = 1
+            name = "Fan"
+            kind = "fan_control"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.devices.len(), 1);
+        assert!(cfg.skipped_devices.is_empty());
+    }
+
+    /// The descriptor shows 1 for the repeater ID, so a scene that leaves it
+    /// out must load with 1, not fail as a missing field.
+    #[test]
+    fn a_scene_without_main_repeater_id_gets_1() {
+        let cfg = Config::parse(
+            r#"
+            [[scenes]]
+            name = "Evening"
+            button_component = 3
+
+            [[scenes]]
+            name = "Away"
+            main_repeater_id = 2
+            button_component = 4
+            "#,
+        )
+        .expect("main_repeater_id is optional");
+        assert_eq!(cfg.scenes[0].main_repeater_id, 1);
+        assert_eq!(cfg.scenes[1].main_repeater_id, 2);
     }
 }

@@ -65,7 +65,10 @@ pub fn config_descriptor() -> serde_json::Value {
                         .unit("secs")
                         .default(1.0)
                         .min(0)
-                        .help("Dimmer/shade transition time. Override per device in the table below."),
+                        .help(
+                            "Fade time for dimmers. Shades, fans and switches change \
+                             without a fade. Override per device in the table below.",
+                        ),
                 )
                 .field(
                     Field::duration("caseta.hold_threshold_ms")

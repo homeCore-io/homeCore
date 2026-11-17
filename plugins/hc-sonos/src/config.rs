@@ -94,13 +94,37 @@ pub fn config_descriptor() -> serde_json::Value {
                 )
                 .field(
                     Field::link("Open web interface", "http://{client_host}:{api.port}/")
-                        .help("Opens the Sonos HTTP API in a new tab.")
+                        .help(
+                            "Opens the Sonos HTTP API in a new tab. From another \
+                             machine this works only with Allow control from other \
+                             machines turned on.",
+                        )
                         .visible_when(api_on()),
                 )
                 .field(
                     Field::host("api.host")
                         .label("Bind address")
                         .default("0.0.0.0")
+                        .help(
+                            "The address the API listens on. Speakers on the network \
+                             deliver their events here, so keep it reachable from the \
+                             LAN. The control routes answer only this machine unless \
+                             the setting below allows others.",
+                        )
+                        .visible_when(api_on()),
+                )
+                .field(
+                    Field::toggle("api.allow_remote_control")
+                        .label("Allow control from other machines")
+                        .default(false)
+                        .help(
+                            "Off: the web interface and the control routes (play, \
+                             pause, volume and the rest) answer only requests from \
+                             this machine, such as homeCore rules running here. On: \
+                             anyone who can reach the port can control the speakers, \
+                             because the API has no sign-in. The speakers' event \
+                             callbacks are accepted from the network either way.",
+                        )
                         .visible_when(api_on()),
                 )
                 .field(
@@ -346,6 +370,12 @@ pub struct ApiConfig {
     /// Defaults to `"127.0.0.1"` when not set (loopback only — useful for
     /// local testing; set to your LAN IP in production).
     pub callback_host: Option<String>,
+    /// Let other machines use the control API and web interface. The API has
+    /// no sign-in, so this lets anyone who can reach the port control the
+    /// speakers. Off by default: only requests from this machine are answered.
+    /// The speakers' event callbacks are always accepted from the network.
+    #[serde(default)]
+    pub allow_remote_control: bool,
 }
 
 impl Default for ApiConfig {
@@ -355,6 +385,7 @@ impl Default for ApiConfig {
             port: default_api_port(),
             enabled: default_api_enabled(),
             callback_host: None,
+            allow_remote_control: false,
         }
     }
 }
@@ -402,6 +433,17 @@ mod ssdp_tests {
                 .unwrap();
         assert!(!off.sonos.ssdp);
         assert_eq!(off.sonos.manual_hosts, ["127.0.0.1:14001"]);
+    }
+
+    #[test]
+    fn control_from_other_machines_is_off_unless_asked_for() {
+        let none: SonosConfig = toml::from_str("").unwrap();
+        assert!(!none.api.allow_remote_control);
+        // An existing file that binds every interface stays local-only.
+        let old: SonosConfig = toml::from_str("[api]\nhost = \"0.0.0.0\"\nport = 5005\n").unwrap();
+        assert!(!old.api.allow_remote_control);
+        let on: SonosConfig = toml::from_str("[api]\nallow_remote_control = true\n").unwrap();
+        assert!(on.api.allow_remote_control);
     }
 }
 

@@ -137,7 +137,7 @@ pub fn config_descriptor() -> serde_json::Value {
                         .default("ecowitt")
                         .help(
                             "Leads every device id this plugin creates \
-                             (`ecowitt_outdoor_temp`). Changing it renames every \
+                             (`ecowitt_weather`, `ecowitt_temp_1`). Changing it renames every \
                              device, which breaks rules that name the old ids. Set \
                              it once, at install.",
                         ),

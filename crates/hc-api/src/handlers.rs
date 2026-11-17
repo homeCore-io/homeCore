@@ -5957,6 +5957,8 @@ pub async fn patch_plugin(
     // A plugin reads `[logging] level` from its own config when it starts;
     // the change above reached the running plugin, and this one outlives it.
     // A plugin running elsewhere (on a runtime) keeps its file there.
+    // The config watcher leaves a change to `[logging] level` alone, so this
+    // write does not restart the plugin.
     if let Some(level) = body["log_level"].as_str() {
         if let Some(path) = new_rec.config_path.as_ref() {
             let patch = json!({ "logging": { "level": level } });
@@ -7501,123 +7503,13 @@ pub async fn stale_refs(State(s): State<AppState>, _: AutomationsRead) -> impl I
     (StatusCode::OK, Json(json!(result))).into_response()
 }
 
-/// Collect every device ID referenced by a rule (trigger, conditions, actions).
+/// Collect every device ID referenced by a rule (triggers, checks, steps),
+/// from the same list of fields the resolver uses.
 fn collect_rule_device_refs(rule: &Rule) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    for trigger in rule.all_triggers() {
-        collect_trigger_refs(trigger, &mut ids);
-    }
-    for cond in &rule.conditions {
-        collect_condition_refs(cond, &mut ids);
-    }
-    for ra in &rule.actions {
-        collect_action_refs(&ra.action, &mut ids);
-    }
+    let mut ids = hc_core::rule_resolver::device_refs(rule);
     ids.sort();
     ids.dedup();
     ids
-}
-
-fn collect_trigger_refs(trigger: &Trigger, ids: &mut Vec<String>) {
-    match trigger {
-        Trigger::DeviceStateChanged {
-            device_id,
-            device_ids,
-            ..
-        } => {
-            ids.push(device_id.clone());
-            ids.extend_from_slice(device_ids);
-        }
-        Trigger::DeviceAvailabilityChanged { device_id, .. } => ids.push(device_id.clone()),
-        Trigger::ButtonEvent { device_id, .. } => ids.push(device_id.clone()),
-        Trigger::NumericThreshold { device_id, .. } => ids.push(device_id.clone()),
-        _ => {}
-    }
-}
-
-fn collect_condition_refs(cond: &Condition, ids: &mut Vec<String>) {
-    match cond {
-        Condition::DeviceState { device_id, .. }
-        | Condition::TimeElapsed { device_id, .. }
-        | Condition::DeviceLastChange { device_id, .. } => ids.push(device_id.clone()),
-        Condition::Not { condition } => collect_condition_refs(condition, ids),
-        Condition::And { conditions }
-        | Condition::Or { conditions }
-        | Condition::Xor { conditions } => {
-            for c in conditions {
-                collect_condition_refs(c, ids);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_action_refs(action: &Action, ids: &mut Vec<String>) {
-    match action {
-        Action::SetDeviceState { device_id, .. } => ids.push(device_id.clone()),
-        Action::SetDeviceStatePerMode { device_id, .. } => ids.push(device_id.clone()),
-        Action::FadeDevice { device_id, .. } => ids.push(device_id.clone()),
-        Action::CaptureDeviceState { device_ids, .. } => ids.extend_from_slice(device_ids),
-        Action::Parallel { actions } => {
-            for a in actions {
-                collect_action_refs(a, ids);
-            }
-        }
-        Action::RepeatUntil { actions, .. } => {
-            for a in actions {
-                collect_action_refs(a, ids);
-            }
-        }
-        Action::RepeatWhile { actions, .. } => {
-            for a in actions {
-                collect_action_refs(a, ids);
-            }
-        }
-        Action::RepeatCount { actions, .. } => {
-            for a in actions {
-                collect_action_refs(a, ids);
-            }
-        }
-        Action::Conditional {
-            condition,
-            then_actions,
-            else_actions,
-            else_if,
-        } => {
-            for check in [condition]
-                .into_iter()
-                .chain(else_if.iter().map(|b| &b.condition))
-            {
-                if let hc_types::rule::IfCheck::Check(check) = check {
-                    collect_condition_refs(check, ids);
-                }
-            }
-            for a in then_actions {
-                collect_action_refs(a, ids);
-            }
-            for a in else_actions {
-                collect_action_refs(a, ids);
-            }
-            for branch in else_if {
-                for a in &branch.actions {
-                    collect_action_refs(a, ids);
-                }
-            }
-        }
-        Action::PingHost {
-            then_actions,
-            else_actions,
-            ..
-        } => {
-            for a in then_actions {
-                collect_action_refs(a, ids);
-            }
-            for a in else_actions {
-                collect_action_refs(a, ids);
-            }
-        }
-        _ => {}
-    }
 }
 
 // ---------- Rule groups ----------

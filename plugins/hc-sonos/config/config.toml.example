@@ -32,35 +32,39 @@ discovery_timeout_secs = 5
 # manual_hosts = ["192.168.1.50", "192.168.1.51"]
 
 # ---------------------------------------------------------------------------
-# HTTP control API
+# HTTP API
 #
-# The plugin exposes a standalone Axum HTTP API on this host/port for direct
-# Sonos commands (play, pause, volume, favorites, grouping, etc.).  This is
-# completely separate from the homeCore MQTT/REST API.
+# The plugin runs its own small HTTP server on this host/port. It does two
+# jobs:
 #
-# Endpoints (all relative to http://{host}:{port}):
-#   GET  /speakers                   — list all known speakers
-#   POST /speakers/{hc_id}/play      — resume playback
-#   POST /speakers/{hc_id}/pause     — pause playback
-#   POST /speakers/{hc_id}/stop      — stop playback
-#   POST /speakers/{hc_id}/volume    — body: { "volume": 40 }
-#   POST /speakers/{hc_id}/mute      — body: { "muted": true }
-#   POST /speakers/{hc_id}/next      — next track
-#   POST /speakers/{hc_id}/prev      — previous track
-#   POST /speakers/{hc_id}/favorite  — body: { "index": 0 }  (0-based favorites list)
-#   POST /speakers/{hc_id}/join      — body: { "coordinator_hc_id": "sonos_living_room" }
-#   POST /speakers/{hc_id}/unjoin    — remove from group, become standalone
+#   1. The speakers deliver their UPnP/GENA events (NOTIFY requests) to
+#      /sonos/callback/... here. This must be reachable from the speakers on
+#      the LAN, so `host` is usually "0.0.0.0".
+#   2. A control API and web interface in the node-sonos-http-api style, for
+#      example GET /Kitchen/play, /Kitchen/volume/30, /Kitchen/favorite/Jazz,
+#      /zones. See src/api/mod.rs for the full list.
+#
+# The control API has no sign-in. By default it answers only requests from
+# this machine (127.0.0.1, or this machine's own LAN address, so a homeCore
+# rule on the same host can still call http://<this machine>:5005/Kitchen/play).
+# Requests from other machines get 403 Forbidden unless
+# allow_remote_control = true. The event callbacks are always accepted.
 # ---------------------------------------------------------------------------
 [api]
-# Interface to bind.  "0.0.0.0" listens on all interfaces (recommended for LAN).
-# Use "127.0.0.1" to restrict to localhost only.
+# Interface to bind. "0.0.0.0" listens on all interfaces so speakers can
+# deliver events. Use "127.0.0.1" only when the speakers are stand-ins on
+# this machine.
 host    = "0.0.0.0"
 port    = 5005
 enabled = true
 
+# Let other machines on the network use the control API and web interface.
+# Anyone who can reach the port can then control the speakers.
+allow_remote_control = false
+
 # IP or hostname that Sonos speakers can reach to deliver UPnP/GENA event
-# callbacks (NOTIFY requests).  Required when host = "0.0.0.0" because Sonos
-# needs a specific LAN IP to subscribe to — it cannot use 0.0.0.0.
+# callbacks (NOTIFY requests). Required when host = "0.0.0.0" because Sonos
+# needs a specific LAN IP to subscribe to; it cannot use 0.0.0.0.
 # Set this to your server's LAN IP address.
 callback_host = "192.168.1.10"
 
