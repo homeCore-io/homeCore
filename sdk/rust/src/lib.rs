@@ -1,4 +1,4 @@
-//! `plugin-sdk-rs` — Rust SDK for HomeCore device plugins.
+//! `plugin-sdk-rs` — Rust SDK for homeCore device plugins.
 //!
 //! Provides:
 //! - [`PluginClient`] — connects to the broker, handles registration, typed
@@ -130,7 +130,7 @@ type SubscriptionTracker = Arc<Mutex<HashSet<String>>>;
 fn noop_state_cb(_device_id: String, _state: Value) {}
 
 /// Inner state of the device tracker. Holds the set of device_ids this
-/// plugin has registered with HomeCore plus an optional path to mirror
+/// plugin has registered with homeCore plus an optional path to mirror
 /// the set onto disk so it survives plugin restarts.
 ///
 /// Persistence is opt-in via [`PluginClient::with_device_persistence`]
@@ -235,7 +235,7 @@ impl DeviceTrackerInner {
     }
 }
 
-/// Shared tracker of device IDs this plugin has registered with HomeCore.
+/// Shared tracker of device IDs this plugin has registered with homeCore.
 /// Shared between `PluginClient` and `DevicePublisher` so registrations
 /// from spawned tasks are reflected in the heartbeat's `device_count`
 /// and in `reconcile_devices`.
@@ -408,7 +408,7 @@ impl DevicePublisher {
             .context("publish_state failed")
     }
 
-    /// Publish a full device state caused by an inbound HomeCore command.
+    /// Publish a full device state caused by an inbound homeCore command.
     pub async fn publish_state_for_command(
         &self,
         device_id: &str,
@@ -447,7 +447,7 @@ impl DevicePublisher {
             .context("publish_state_partial failed")
     }
 
-    /// Publish a partial state update caused by an inbound HomeCore command.
+    /// Publish a partial state update caused by an inbound homeCore command.
     pub async fn publish_state_partial_for_command(
         &self,
         device_id: &str,
@@ -527,7 +527,7 @@ impl DevicePublisher {
 
     // ── Schema ───────────────────────────────────────────────────────────
 
-    /// Publish a device capability schema (retained) so HomeCore stores it and
+    /// Publish a device capability schema (retained) so homeCore stores it and
     /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
     pub async fn register_device_schema(
         &self,
@@ -563,7 +563,7 @@ impl DevicePublisher {
 
     // ── Unregister ───────────────────────────────────────────────────────
 
-    /// Retire a device from HomeCore by clearing retained topics and publishing
+    /// Retire a device from homeCore by clearing retained topics and publishing
     /// a plugin-scoped unregister command.
     pub async fn unregister_device(&self, plugin_id: &str, device_id: &str) -> Result<()> {
         self.clear_retained_topic(&format!("homecore/devices/{device_id}/state"))
@@ -1359,7 +1359,7 @@ impl PluginClient {
             .with_context(|| format!("clear retained topic failed: {topic}"))
     }
 
-    /// Connect to the HomeCore broker and return a ready client.
+    /// Connect to the homeCore broker and return a ready client.
     pub async fn connect(config: PluginConfig) -> Result<Self> {
         supervised::watch(&config.plugin_id);
         let mut opts = MqttOptions::new(&config.plugin_id, &config.broker_host, config.broker_port);
@@ -1477,7 +1477,7 @@ impl PluginClient {
             .context("publish_state failed")
     }
 
-    /// Publish a full device state caused by an inbound HomeCore command.
+    /// Publish a full device state caused by an inbound homeCore command.
     pub async fn publish_state_for_command(
         &self,
         device_id: &str,
@@ -1516,7 +1516,7 @@ impl PluginClient {
             .context("publish_state_partial failed")
     }
 
-    /// Publish a partial state update caused by an inbound HomeCore command.
+    /// Publish a partial state update caused by an inbound homeCore command.
     pub async fn publish_state_partial_for_command(
         &self,
         device_id: &str,
@@ -1579,7 +1579,7 @@ impl PluginClient {
     /// Register a device by type name.
     ///
     /// Instead of providing a full capability schema, supply a `device_type` string
-    /// that HomeCore resolves against its built-in device-type catalog (loaded from
+    /// that homeCore resolves against its built-in device-type catalog (loaded from
     /// `config/profiles/examples/device-types.toml`).  This is the recommended
     /// registration path for well-known device categories.
     ///
@@ -1682,7 +1682,7 @@ impl PluginClient {
 
     // ── Schema ───────────────────────────────────────────────────────────
 
-    /// Publish a device capability schema (retained) so HomeCore stores it and
+    /// Publish a device capability schema (retained) so homeCore stores it and
     /// API clients can retrieve it via `GET /api/v1/devices/{id}/schema`.
     pub async fn register_device_schema(
         &self,
@@ -1718,7 +1718,7 @@ impl PluginClient {
 
     // ── Unregister ───────────────────────────────────────────────────────
 
-    /// Retire a device from HomeCore by clearing retained topics and publishing
+    /// Retire a device from homeCore by clearing retained topics and publishing
     /// a plugin-scoped unregister command.
     pub async fn unregister_device(&self, device_id: &str) -> Result<()> {
         self.clear_retained_topic(&format!("homecore/devices/{device_id}/state"))

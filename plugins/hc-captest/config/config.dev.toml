@@ -1,7 +1,7 @@
 # hc-captest configuration (dev).
 #
 # hc-captest reads its broker connection from env vars, not this file —
-# the file exists only because the HomeCore PluginManager passes a
+# the file exists only because the homeCore PluginManager passes a
 # `--config <path>` arg to every managed plugin binary, and it's cleaner
 # to point at a real (if inert) file than a phantom path.
 #

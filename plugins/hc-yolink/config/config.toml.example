@@ -2,7 +2,7 @@
 # Copy to config/config.toml and fill in your values.
 
 # ---------------------------------------------------------------------------
-# HomeCore broker connection
+# homeCore broker connection
 # ---------------------------------------------------------------------------
 [homecore]
 broker_host = "127.0.0.1"

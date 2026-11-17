@@ -77,7 +77,7 @@ pub struct LoggingConfig {
     /// Delete rotated log files older than this many days.  0 = never prune.
     #[serde(default)]
     pub prune_after_days: u32,
-    /// Minimum log level forwarded to the HomeCore broker over MQTT.
+    /// Minimum log level forwarded to the homeCore broker over MQTT.
     /// Logs below this level are only written to the local file / stderr.
     /// "info" (default) | "warn" | "debug" | "error" | "off"
     #[serde(default = "default_level")]

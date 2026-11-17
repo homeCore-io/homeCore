@@ -1,10 +1,10 @@
 openapi: "3.1.0"
 
 info:
-  title: HomeCore API
-  version: "0.1.114"
+  title: homeCore API
+  version: "0.1.115"
   description: |
-    HomeCore home automation platform REST + WebSocket API.
+    homeCore home automation platform REST + WebSocket API.
     All endpoints are under `/api/v1/`.
 
     **Authentication.** Most endpoints require a `Bearer` JWT in the
@@ -609,7 +609,7 @@ paths:
         Requires the `devices:write` scope (`DevicesWrite` guard).
         Selection is by explicit id list only — there is no filter form. `ids`
         is required; a body without an `ids` array is rejected with 422.
-        **Cascade into rules.** For every device actually deleted, HomeCore
+        **Cascade into rules.** For every device actually deleted, homeCore
         rewrites the rule files on disk: each direct reference to the deleted
         device in a rule's trigger, conditions, or actions is replaced with the
         placeholder `DELETED:<device_id>`, the rule's `enabled` flag is forced
@@ -711,7 +711,7 @@ paths:
         `status_icon`, and `security`. A change raises `device_metadata_changed`
         on the event stream, so other open clients see it.
 
-        `canonical_name` is the stable, rule-facing identifier used by HomeCore
+        `canonical_name` is the stable, rule-facing identifier used by homeCore
         for readable automations. It must be unique across the hub after
         normalization.
       tags: [devices]
@@ -7843,7 +7843,7 @@ paths:
               schema:
                 type: string
               example: |
-                # HELP homecore_uptime_seconds Seconds elapsed since the HomeCore process started
+                # HELP homecore_uptime_seconds Seconds elapsed since the homeCore process started
                 # TYPE homecore_uptime_seconds gauge
                 homecore_uptime_seconds 3600
         "403":
@@ -8098,7 +8098,7 @@ paths:
                 properties:
                   version:
                     type: string
-                    description: HomeCore binary version
+                    description: homeCore binary version
                   uptime_seconds:
                     type: integer
                   started_at:
@@ -9187,7 +9187,7 @@ components:
         canonical_name:
           type: string
           nullable: true
-          description: Stable, HomeCore-managed identifier intended for rule authoring and logs
+          description: Stable, homeCore-managed identifier intended for rule authoring and logs
         status_icon:
           type: string
           nullable: true
@@ -9715,7 +9715,7 @@ components:
       properties:
         name:
           type: string
-          description: Human or machine area name. HomeCore normalizes this to snake_case internally.
+          description: Human or machine area name. homeCore normalizes this to snake_case internally.
 
     # ---- Automations ----
 

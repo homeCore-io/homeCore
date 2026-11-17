@@ -72,7 +72,7 @@ pub struct PushoverChannel {
 impl PushoverChannel {
     pub fn new(cfg: PushoverConfig) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent(concat!("HomeCore/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("homeCore/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to build Pushover HTTP client");
         Self { cfg, client }

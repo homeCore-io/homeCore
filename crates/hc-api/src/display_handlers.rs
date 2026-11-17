@@ -651,6 +651,20 @@ mod tests {
             call(&h.app, "GET", "/displays", &key, json!(null)).await.0,
             StatusCode::FORBIDDEN
         );
+        // Nor see who else is connected, and from where: an API key's role is
+        // a decorative Admin, which this check once trusted.
+        assert_eq!(
+            call(&h.app, "GET", "/ws/connections", &key, json!(null))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&h.app, "GET", "/ws/connections", &h.admin, json!(null))
+                .await
+                .0,
+            StatusCode::OK
+        );
         // It may run a scene (here: one that doesn't exist), not edit one.
         let run = call(
             &h.app,

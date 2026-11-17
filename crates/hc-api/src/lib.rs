@@ -1652,7 +1652,7 @@ pub async fn serve(
     admin_uds: Option<AdminUdsConfig>,
 ) -> Result<()> {
     let addr = format!("{host}:{port}");
-    info!(%addr, "HomeCore API server starting");
+    info!(%addr, "homeCore API server starting");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let mut shutdown_timeout = shutdown.clone();
     let signal = async move {

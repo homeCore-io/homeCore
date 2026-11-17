@@ -309,7 +309,7 @@ async fn try_start(
         (memory, memory_path),
     );
 
-    // --- Register all devices and scenes with HomeCore ---------------------------
+    // --- Register all devices and scenes with homeCore ---------------------------
     let live = bridge.register_all().await;
 
     // Reconcile against the SDK-tracked set: anything from a prior

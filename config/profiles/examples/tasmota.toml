@@ -1,4 +1,4 @@
-# HomeCore Ecosystem Profile — Tasmota
+# homeCore Ecosystem Profile — Tasmota
 #
 # Covers devices running Tasmota firmware (ESP8266/ESP32 based devices).
 # Tasmota uses separate publish prefixes for telemetry (tele/), status
@@ -14,7 +14,7 @@
 #   Copy this file to config/profiles/tasmota.toml to activate it.
 #   A single profile covers all Tasmota devices simultaneously.
 #
-# Device IDs in HomeCore:
+# Device IDs in homeCore:
 #   stat/{device}/POWER → homecore device "tasmota_{device}"
 #   {device} is the Tasmota topic name, set via: Console → `Topic mydevice`
 

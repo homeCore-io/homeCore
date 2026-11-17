@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/homeCore-io/hc-caseta/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-caseta/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-caseta/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-caseta/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
-Bridges Lutron Caseta Smart Bridge Pro devices into HomeCore via the Lutron Integration Protocol (LIP) over telnet.
+Bridges Lutron Caseta Smart Bridge Pro devices into homeCore via the Lutron Integration Protocol (LIP) over telnet.
 
 Requires the **Caseta Smart Bridge Pro** (L-BDGPRO2-WH). The standard Caseta bridge does not support telnet integration.
 
 ## Supported device types
 
-| Kind | HomeCore device_type | Notes |
+| Kind | homeCore device_type | Notes |
 |---|---|---|
 | `dimmer` | `light` | Brightness 0-100, configurable fade time |
 | `switch` | `switch` | On/off relay |

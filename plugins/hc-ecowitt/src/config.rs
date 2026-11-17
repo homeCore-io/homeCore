@@ -354,7 +354,7 @@ pub struct EcowittConfig {
     /// Polling interval in seconds (only used when gateway_ip is set).
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Prefix for HomeCore device IDs (default: "ecowitt").
+    /// Prefix for homeCore device IDs (default: "ecowitt").
     #[serde(default = "default_device_prefix")]
     pub device_prefix: String,
     /// Username for the gateway's local web UI. Most Ecowitt firmware

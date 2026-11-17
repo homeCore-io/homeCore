@@ -38,7 +38,7 @@ pub struct TelegramChannel {
 impl TelegramChannel {
     pub fn new(cfg: TelegramConfig) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent(concat!("HomeCore/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("homeCore/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to build Telegram HTTP client");
         Self { cfg, client }

@@ -1,4 +1,4 @@
-//! ValueID ↔ HomeCore attribute translation.
+//! ValueID ↔ homeCore attribute translation.
 //!
 //! Maps `{commandClass}/{endpoint}/{property}[/{propertyKey}]` to the shared
 //! names in `hc_types::device_vocabulary`, converting each value from the

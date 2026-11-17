@@ -23,7 +23,7 @@ pub struct IsyNode {
     /// Insteon type code `"cat.subcat.version.gen"`, e.g. `"1.32.65.0"`.
     /// Empty for Z-Wave or unidentified devices.
     pub node_type: String,
-    /// `true` for scene groups (rendered as switch entities in HomeCore).
+    /// `true` for scene groups (rendered as switch entities in homeCore).
     pub is_group: bool,
     /// Whether the node is enabled in the ISY (disabled nodes are skipped).
     pub enabled: bool,
@@ -34,7 +34,7 @@ pub struct IsyNode {
 }
 
 impl IsyNode {
-    /// Derive the canonical HomeCore device ID from the ISY address.
+    /// Derive the canonical homeCore device ID from the ISY address.
     pub fn device_id(&self) -> String {
         addr_to_device_id(&self.address)
     }
@@ -88,7 +88,7 @@ impl IsyEvent {
 // Address helpers (public — used in bridge.rs)
 // ---------------------------------------------------------------------------
 
-/// Convert an ISY address to a HomeCore device ID.
+/// Convert an ISY address to a homeCore device ID.
 ///
 /// `"13 A6 99 1"` → `"isy_13_a6_99_1"`
 /// `"00:3C:89:AB:00:00"` → `"isy_00_3c_89_ab_00_00"`

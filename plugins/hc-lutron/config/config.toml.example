@@ -2,7 +2,7 @@
 # Copy to config/config.toml and fill in your values.
 
 # ---------------------------------------------------------------------------
-# HomeCore broker connection
+# homeCore broker connection
 # ---------------------------------------------------------------------------
 [homecore]
 broker_host = "127.0.0.1"
@@ -41,14 +41,14 @@ reconnect_delay_secs = 5
 # ---------------------------------------------------------------------------
 # Devices
 #
-# Each [[devices]] entry maps a Lutron integration ID to a HomeCore device.
+# Each [[devices]] entry maps a Lutron integration ID to a homeCore device.
 # Integration IDs are assigned in Lutron RadioStar / Inclusive programming
 # software and are visible in the XML database at http://{repeater_ip}/DbXmlInfo.xml
 #
 # Kinds:
 #   dimmer          — dimmable load (on, brightness_pct 0–100)
 #   switch          — non-dimmable load (on/off only)
-#   shade           — motorized shade (published as HomeCore `cover`) [STUB — phase 2]
+#   shade           — motorized shade (published as homeCore `cover`) [STUB — phase 2]
 #   keypad          — wall keypad or Pico remote (button events, read-only)
 #   occupancy_group — occupancy sensor group (occupied, read-only)
 # ---------------------------------------------------------------------------
@@ -98,14 +98,14 @@ area           = "office"
 # Scenes (Phantom Buttons)
 #
 # Each [[scenes]] entry maps a Lutron phantom button on the Main Repeater to
-# a HomeCore device.  Sending {"action": "activate"} to the device triggers the
+# a homeCore device.  Sending {"action": "activate"} to the device triggers the
 # phantom button press+release, activating the scene. Its LED is published
 # as `active` (true/false).
 #
 # main_repeater_id is almost always 1 — verify in RadioStar programming software.
 # button_component is the phantom button number assigned in RadioStar.
 #
-# HomeCore device ID: lutron_scene_{name_slug}
+# homeCore device ID: lutron_scene_{name_slug}
 # ---------------------------------------------------------------------------
 [[scenes]]
 name             = "Movie Mode"

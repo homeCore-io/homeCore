@@ -1,4 +1,4 @@
-# hc-wled — WLED LED-controller plugin for HomeCore
+# hc-wled — WLED LED-controller plugin for homeCore
 # Copy to config.toml and fill in your devices.
 
 [homecore]

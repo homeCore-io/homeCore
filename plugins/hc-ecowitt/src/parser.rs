@@ -1,4 +1,4 @@
-//! Parse Ecowitt `get_livedata_info` JSON response into HomeCore device state maps.
+//! Parse Ecowitt `get_livedata_info` JSON response into homeCore device state maps.
 //!
 //! Each top-level key in the response (common_list, rain, co2, ch_aisle, etc.)
 //! produces one or more (device_id, device_type, state_json) entries — with the
@@ -11,7 +11,7 @@ use crate::id_map::{common_id, rain_id, Dest, Quantity};
 use crate::units;
 use serde_json::{json, Map, Value};
 
-/// A parsed device update ready to be published to HomeCore.
+/// A parsed device update ready to be published to homeCore.
 #[derive(Debug)]
 pub struct DeviceUpdate {
     pub device_id: String,

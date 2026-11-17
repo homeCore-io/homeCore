@@ -105,7 +105,7 @@ pub fn render_template(template: &str, vars: &HashMap<String, String>) -> String
     result
 }
 
-/// Sanitize a string for use in a HomeCore device ID.
+/// Sanitize a string for use in a homeCore device ID.
 /// Replaces characters that are awkward in MQTT topics or HTTP paths.
 pub fn sanitize_id(s: &str) -> String {
     s.replace([':', ' ', '/'], "_")

@@ -1,4 +1,4 @@
-//! Parse Ecowitt form-encoded POST data into HomeCore device updates.
+//! Parse Ecowitt form-encoded POST data into homeCore device updates.
 //!
 //! The Ecowitt gateway's "custom server" feature sends flat key-value pairs
 //! as `application/x-www-form-urlencoded`.  Field names follow Ecowitt/WU

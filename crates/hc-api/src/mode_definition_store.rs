@@ -2,7 +2,7 @@
 //!
 //! Definitions live beside `config/modes.toml` as `config/mode_definitions.json`.
 //! Each definition owns a set of generated rule IDs that reconcile the mode's
-//! boolean state from native HomeCore rule conditions.
+//! boolean state from native homeCore rule conditions.
 
 use anyhow::{Context, Result};
 use hc_types::rule::Condition;

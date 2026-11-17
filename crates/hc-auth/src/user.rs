@@ -399,7 +399,7 @@ mod role_tests {
     }
 }
 
-/// A HomeCore user account.
+/// A homeCore user account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,

@@ -7,7 +7,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Claims embedded in a HomeCore JWT.
+/// Claims embedded in a homeCore JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     /// Username (subject).

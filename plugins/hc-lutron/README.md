@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/homeCore-io/hc-lutron/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-lutron/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-lutron/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-lutron/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
-Bridges Lutron RadioRA2 devices into HomeCore via the Lutron Integration Protocol (LIP) over telnet.
+Bridges Lutron RadioRA2 devices into homeCore via the Lutron Integration Protocol (LIP) over telnet.
 
 ## Supported device types
 
-| Kind | HomeCore device_type | Notes |
+| Kind | homeCore device_type | Notes |
 |---|---|---|
 | `dimmer` | `light` | Brightness 0-100, configurable fade time |
 | `switch` | `switch` | On/off relay |
@@ -93,7 +93,7 @@ release packs it as `ui/`.
 
 ## Scenes (phantom buttons)
 
-`[[scenes]]` entries map phantom buttons on the Main Repeater to HomeCore devices. Send `{"action": "activate"}` to trigger a scene. LED state is tracked automatically (+100 offset from button component) and published as `active`.
+`[[scenes]]` entries map phantom buttons on the Main Repeater to homeCore devices. Send `{"action": "activate"}` to trigger a scene. LED state is tracked automatically (+100 offset from button component) and published as `active`.
 
 ## Setup
 

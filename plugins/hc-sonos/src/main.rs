@@ -109,7 +109,7 @@ async fn try_start(
     // ── Shared Sonos speaker state (bridge + HTTP API) ─────────────────────
     let app_state = shared_state::new_state();
 
-    // ── HomeCore SDK ─────────────────────────────────────────────────────
+    // ── homeCore SDK ─────────────────────────────────────────────────────
     let sdk_config = PluginConfig {
         broker_host: cfg.homecore.broker_host.clone(),
         broker_port: cfg.homecore.broker_port,

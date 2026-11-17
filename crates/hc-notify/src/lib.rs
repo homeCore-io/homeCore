@@ -1,4 +1,4 @@
-//! `hc-notify` — pluggable notification channels for HomeCore rules.
+//! `hc-notify` — pluggable notification channels for homeCore rules.
 //!
 //! ## Built-in providers
 //!

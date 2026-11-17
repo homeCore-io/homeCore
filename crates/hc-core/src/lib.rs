@@ -321,7 +321,7 @@ impl Core {
         Option<CalendarHandle>,
         Arc<dyn Fn(&[Rule]) + Send + Sync>,
     )> {
-        info!("HomeCore kernel starting");
+        info!("homeCore kernel starting");
 
         // State bridge: internal bus MqttMessage → DeviceStateChanged on public bus.
         let bridge_bus = self.internal_bus.clone();

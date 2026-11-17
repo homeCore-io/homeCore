@@ -336,7 +336,7 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
-// HomeCore broker connection
+// homeCore broker connection
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,12 +1,12 @@
-//! `hc-isy` — HomeCore plugin for Universal Devices ISY/IoX controllers.
+//! `hc-isy` — homeCore plugin for Universal Devices ISY/IoX controllers.
 //!
 //! Connects to an ISY994i, eisy, or Polisy controller via HTTP REST and
-//! WebSocket, registers all nodes as HomeCore devices, and bridges real-time
-//! state changes bidirectionally between ISY and the HomeCore MQTT bus.
+//! WebSocket, registers all nodes as homeCore devices, and bridges real-time
+//! state changes bidirectionally between ISY and the homeCore MQTT bus.
 //!
 //! ## Supported device types
 //!
-//! | ISY category / UOM | HomeCore type |
+//! | ISY category / UOM | homeCore type |
 //! |---|---|
 //! | Insteon dimmer (UOM 51, cat 1) | `light` |
 //! | Insteon relay / Z-Wave switch (UOM 78) | `switch` |
@@ -123,7 +123,7 @@ async fn try_start(
     log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
-    // --- HomeCore MQTT (via SDK) ----------------------------------------------
+    // --- homeCore MQTT (via SDK) ----------------------------------------------
     let sdk_config = PluginConfig {
         broker_host: cfg.homecore.broker_host.clone(),
         broker_port: cfg.homecore.broker_port,

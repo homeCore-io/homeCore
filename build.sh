@@ -10,7 +10,7 @@ case "$PROFILE" in
   *)       echo "Usage: $0 [release|debug]" >&2; exit 1 ;;
 esac
 
-echo "==> Building HomeCore ($PROFILE)"
+echo "==> Building homeCore ($PROFILE)"
 # --bin homecore, not a bare build: the root is a pure [workspace] now, so an
 # unqualified `cargo build` here would build every member rather than the
 # server. Same output path either way; this just doesn't compile hc-cli twice.

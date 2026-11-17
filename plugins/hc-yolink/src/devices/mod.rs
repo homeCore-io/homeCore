@@ -19,7 +19,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
 
 // ---------------------------------------------------------------------------
-// DeviceKind — maps YoLink device types to HomeCore device types
+// DeviceKind — maps YoLink device types to homeCore device types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +74,7 @@ impl DeviceKind {
         }
     }
 
-    /// HomeCore device_type string (matched against the device-types catalog).
+    /// homeCore device_type string (matched against the device-types catalog).
     pub fn homecore_device_type(&self) -> &str {
         match self {
             Self::Outlet | Self::SmartPlug | Self::Switch | Self::MultiOutlet => "switch",
@@ -457,7 +457,7 @@ impl DeviceKind {
     }
 
     // -----------------------------------------------------------------------
-    // Commands: HomeCore cmd JSON → YoLink calls
+    // Commands: homeCore cmd JSON → YoLink calls
     // -----------------------------------------------------------------------
 
     /// The YoLink calls a command makes: `(method suffix, params)`, in order.

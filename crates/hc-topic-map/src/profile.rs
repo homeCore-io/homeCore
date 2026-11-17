@@ -28,7 +28,7 @@ pub struct EcosystemProfile {
     /// Unique name, e.g. "zigbee2mqtt".
     pub name: String,
     pub description: Option<String>,
-    /// Prefix prepended to the captured device variable to form HomeCore device IDs.
+    /// Prefix prepended to the captured device variable to form homeCore device IDs.
     /// e.g. "zigbee_" → device ID "zigbee_{friendly_name}".
     pub prefix: String,
 
@@ -48,19 +48,19 @@ pub struct EcosystemProfile {
 pub struct StateTopicConfig {
     /// MQTT topic pattern with `{var}` captures.
     pub pattern: String,
-    /// Override the HomeCore device ID template.
+    /// Override the homeCore device ID template.
     /// Defaults to `{prefix}{device}` if not set.
     /// Supports `{var}` substitution from the topic captures.
     pub device_id: Option<String>,
     /// For scalar payloads: wrap the value under this attribute name.
     /// e.g. `attribute = "on"` turns `"1"` into `{"on": "1"}` before coercion.
     pub attribute: Option<String>,
-    /// Rename ecosystem attribute keys → HomeCore canonical names.
+    /// Rename ecosystem attribute keys → homeCore canonical names.
     /// Also supports dot-notation source keys for nested JSON fields:
     /// `"aenergy.total" = "energy_kwh"`.
     #[serde(default)]
     pub field_map: HashMap<String, String>,
-    /// Coercions keyed by HomeCore attribute name (after renaming).
+    /// Coercions keyed by homeCore attribute name (after renaming).
     #[serde(default)]
     pub coerce: HashMap<String, String>,
     /// Auto-detect scalar type (string → bool/int/float).
@@ -94,7 +94,7 @@ pub struct AvailabilityTopicConfig {
     /// raw_bool  — payload bytes are literally `true` or `false`.
     /// raw_string — payload is a plain string matched against value_map.
     pub payload: Option<String>,
-    /// Map raw string/bool values to HomeCore `available: bool`.
+    /// Map raw string/bool values to homeCore `available: bool`.
     #[serde(default)]
     pub value_map: HashMap<String, bool>,
 }
@@ -105,14 +105,14 @@ pub struct AvailabilityTopicConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct CmdTopicConfig {
-    /// HomeCore cmd topic pattern to match (source side).
+    /// homeCore cmd topic pattern to match (source side).
     pub source: String,
     /// Native device command topic template (target side).
     pub target: Option<String>,
-    /// Extract only this attribute from the HomeCore JSON cmd payload,
+    /// Extract only this attribute from the homeCore JSON cmd payload,
     /// publishing just its scalar value (rather than the full JSON object).
     pub attribute: Option<String>,
-    /// Rename HomeCore canonical attribute names → ecosystem keys.
+    /// Rename homeCore canonical attribute names → ecosystem keys.
     #[serde(default)]
     pub field_map: HashMap<String, String>,
     /// Coercions applied after renaming, keyed by ecosystem key.

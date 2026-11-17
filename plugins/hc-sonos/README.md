@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/homeCore-io/hc-sonos/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-sonos/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-sonos/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-sonos/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
-`hc-sonos` bridges Sonos speakers into HomeCore as `device_type=media_player` devices.
+`hc-sonos` bridges Sonos speakers into homeCore as `device_type=media_player` devices.
 
 ## Setup
 
@@ -133,7 +133,7 @@ UI. They are state rather than log lines.
 | `events_off` | The HTTP API is off, so speakers have nowhere to send their events; state is only as fresh as the one-minute heartbeat. |
 | `callback_host_unset` | The API listens on every interface but no `callback_host` is set, so speakers are told to call back to 127.0.0.1 — themselves. |
 
-## Published HomeCore state
+## Published homeCore state
 
 Each speaker publishes the shared media-player names (homeCore's device
 vocabulary), one name per fact:

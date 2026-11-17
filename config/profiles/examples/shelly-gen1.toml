@@ -1,4 +1,4 @@
-# HomeCore Ecosystem Profile — Shelly Gen1
+# homeCore Ecosystem Profile — Shelly Gen1
 #
 # Covers ALL original Shelly firmware (Gen1) devices using the "shellies/" MQTT
 # topic prefix. One profile file handles every Gen1 model simultaneously — no
@@ -12,7 +12,7 @@
 # ─── Activation ───────────────────────────────────────────────────────────────
 #   Copy to: config/profiles/shelly-gen1.toml
 #
-# ─── HomeCore Device IDs ──────────────────────────────────────────────────────
+# ─── homeCore Device IDs ──────────────────────────────────────────────────────
 #   Relay channels (single and multi-relay):
 #     shellies/{device}/relay/N  →  shelly_{device}_relay{N}
 #   Roller/cover channels:
@@ -122,7 +122,7 @@ attribute = "overtemperature"
 
 
 # ─── Relay commands ───────────────────────────────────────────────────────────
-# HomeCore publishes {"on": true} or {"on": false} to the cmd topic.
+# homeCore publishes {"on": true} or {"on": false} to the cmd topic.
 # Router extracts the "on" attribute and publishes "ON" or "OFF" to
 # shellies/{device}/relay/{N}/command.
 # Shelly accepts "on", "off", "toggle" (all case-insensitive).
@@ -198,7 +198,7 @@ attribute = "power_w"
 
 # ─── Roller commands ──────────────────────────────────────────────────────────
 # Shelly roller/command accepts: "open" | "close" | "stop" | "to:N" (N = 0–100)
-# HomeCore sends {"state": "open"/"close"/"stop"} or {"state": "to:50"}
+# homeCore sends {"state": "open"/"close"/"stop"} or {"state": "to:50"}
 # Router extracts the "state" attribute and publishes its string value.
 
 [[ecosystem.cmd_topics]]
@@ -241,7 +241,7 @@ attribute = "power_w"
 # ─── Dimmer / bulb commands ───────────────────────────────────────────────────
 # Shelly /light/{N}/set accepts:
 #   {"turn": "on"/"off"/"toggle", "brightness": 0–100, "temp": 2700–6500}
-# HomeCore sends: {"on": true, "brightness_pct": 75}
+# homeCore sends: {"on": true, "brightness_pct": 75}
 #                 {"on": true, "brightness_pct": 75, "color_temp": 3000}
 # Router renames: on→turn, brightness_pct→brightness, color_temp→temp;
 # applies bool_to_onoff for turn.
@@ -298,7 +298,7 @@ device_id = "shelly_{device}_color{color}"
 # ─── RGBW2 color commands ─────────────────────────────────────────────────────
 # Shelly /color/{N}/set: {"ison": true, "red": 255, "green": 0, "blue": 128,
 #                          "white": 0, "gain": 100}
-# HomeCore sends: {"on": true, "red": 255, "green": 128, "blue": 0, "brightness_pct": 100}
+# homeCore sends: {"on": true, "red": 255, "green": 128, "blue": 0, "brightness_pct": 100}
 # Router renames on→ison, brightness_pct→gain.
 
 [[ecosystem.cmd_topics]]
@@ -449,7 +449,7 @@ attribute = "valve_state"
 
 # ─── Gas valve command ────────────────────────────────────────────────────────
 # Shelly valve/command accepts: "open" | "close"
-# HomeCore sends: {"valve_state": "open"} or {"valve_state": "close"}
+# homeCore sends: {"valve_state": "open"} or {"valve_state": "close"}
 # Separate device_id (_valve) avoids conflict with the sensor cmd pattern.
 
 [[ecosystem.cmd_topics]]
@@ -607,7 +607,7 @@ attribute = "window_open"
 
 # ─── TRV command ──────────────────────────────────────────────────────────────
 # Shelly TRV subscribes to thermostats/0/target_t to set the target temperature.
-# HomeCore sends: {"heat_setpoint": 21.5}
+# homeCore sends: {"heat_setpoint": 21.5}
 # Router extracts the "heat_setpoint" attribute and publishes the float value.
 # The _trv suffix in the source ensures only TRV devices match — not relay/light/cover.
 
@@ -620,7 +620,7 @@ attribute = "heat_setpoint"   # extracts scalar float → publishes to target_t 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 9 — INPUT / BUTTON STATE (read-only)
 # Models: Button1 (SHBTN-1/2), i3 (SHIX3-1), all devices with input lines
-# Each input line is a separate HomeCore device: shelly_{device}_input{input_id}
+# Each input line is a separate homeCore device: shelly_{device}_input{input_id}
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Binary input line state

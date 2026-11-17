@@ -282,7 +282,7 @@ async fn try_start(
         .chain(scenes.iter().map(|scene| scene.hc_id.clone()))
         .chain(time_clocks.iter().map(|tc| tc.hc_id.clone()))
         .collect();
-    // --- Register all devices with HomeCore and subscribe to commands --------
+    // --- Register all devices with homeCore and subscribe to commands --------
     // Registration uses DevicePublisher (not PluginClient, which is consumed).
     for dev in &devices {
         if let Err(e) = publisher
@@ -305,7 +305,7 @@ async fn try_start(
         }
     }
 
-    // --- Register scenes with HomeCore ---------------------------------------
+    // --- Register scenes with homeCore ---------------------------------------
     for scene in &scenes {
         if let Err(e) = publisher
             .register_device_full(&scene.hc_id, &scene.config.name, Some("scene"), None, None)
@@ -321,7 +321,7 @@ async fn try_start(
         }
     }
 
-    // --- Register timeclock events with HomeCore -----------------------------
+    // --- Register timeclock events with homeCore -----------------------------
     for tc in &time_clocks {
         if let Err(e) = publisher
             .register_device_full(
@@ -347,7 +347,7 @@ async fn try_start(
         devices = devices.len(),
         scenes = scenes.len(),
         time_clocks = time_clocks.len(),
-        "All devices, scenes, and timeclock events registered with HomeCore"
+        "All devices, scenes, and timeclock events registered with homeCore"
     );
 
     // Reconcile against the SDK-tracked set: anything from a prior

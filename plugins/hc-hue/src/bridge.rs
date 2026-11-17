@@ -351,7 +351,7 @@ impl Bridge {
             tokio::select! {
                 msg = hc_rx.recv() => {
                     let Some((device_id, payload)) = msg else {
-                        info!("HomeCore command channel closed; stopping hc-hue runtime");
+                        info!("homeCore command channel closed; stopping hc-hue runtime");
                         break;
                     };
                     if let Err(e) = self.handle_homecore_command(&device_id, payload).await {

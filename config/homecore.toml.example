@@ -1,8 +1,8 @@
-# HomeCore configuration file
+# homeCore configuration file
 #
 # BASE DIRECTORY
 # ==============
-# HomeCore uses a single installation directory for all files — config,
+# homeCore uses a single installation directory for all files — config,
 # data, logs, and profiles.  The intended model is:
 #
 #   cd /opt/homecore        (or wherever the package was installed)

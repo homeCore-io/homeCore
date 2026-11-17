@@ -357,7 +357,10 @@ pub async fn list_ws_connections(
     State(s): State<AppState>,
     Extension(claims): Extension<hc_auth::Claims>,
 ) -> impl IntoResponse {
-    if !matches!(claims.role, hc_auth::user::Role::Admin) {
+    // `is_admin`, never `claims.role`: an API key's role is a decorative
+    // Admin, so a role check let any key (a display's included) list every
+    // open connection with its address and user.
+    if !claims.is_admin() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "admin role required"})),
@@ -2735,7 +2738,7 @@ pub async fn merge_area(
 
 // ---------- Automations (Rules) ----------
 //
-// HomeCore keeps two in-memory rule views:
+// homeCore keeps two in-memory rule views:
 // - `source_rules_handle`: the authored rule form from disk/API payloads
 // - `rules_handle`: compiled rules with device references resolved to device IDs
 // API reads should prefer the source handle so canonical names round-trip

@@ -1,4 +1,4 @@
-//! `hc-logging` — config-driven multi-output logging for HomeCore.
+//! `hc-logging` — config-driven multi-output logging for homeCore.
 //!
 //! Initializes the global `tracing` subscriber from the `[logging]` section of
 //! `homecore.toml`.  Three simultaneous outputs are supported, each with its
@@ -17,7 +17,7 @@
 //! // Initialize — keep the handle alive for the lifetime of the process.
 //! let _logging = hc_logging::init(&config.logging)?;
 //!
-//! tracing::info!("HomeCore starting");
+//! tracing::info!("homeCore starting");
 //! ```
 
 pub mod broadcast_layer;

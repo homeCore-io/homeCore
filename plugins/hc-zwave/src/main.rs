@@ -1,8 +1,8 @@
-//! `hc-zwave` — HomeCore plugin for Z-Wave via the zwave-js-server WebSocket API.
+//! `hc-zwave` — homeCore plugin for Z-Wave via the zwave-js-server WebSocket API.
 //!
 //! Connects directly to a running `zwave-js-server` (bundled inside ZwaveJS UI or
 //! standalone), receives live Z-Wave events, and publishes canonical device state
-//! to the HomeCore MQTT broker.  Outbound commands (`homecore/devices/zwave_+/cmd`)
+//! to the homeCore MQTT broker.  Outbound commands (`homecore/devices/zwave_+/cmd`)
 //! are translated to `node.set_value` WebSocket calls.
 //!
 //! ## Usage
@@ -118,7 +118,7 @@ async fn try_start(
     log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
-    // --- HomeCore MQTT (via SDK) ----------------------------------------------
+    // --- homeCore MQTT (via SDK) ----------------------------------------------
     let sdk_config = PluginConfig {
         broker_host: cfg.homecore.broker_host.clone(),
         broker_port: cfg.homecore.broker_port,

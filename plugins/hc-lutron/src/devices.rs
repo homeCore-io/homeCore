@@ -74,7 +74,7 @@ impl DeviceEntry {
         self.last_level.unwrap_or(100.0)
     }
 
-    /// HomeCore device_type string passed to the registration payload.
+    /// homeCore device_type string passed to the registration payload.
     pub fn homecore_device_type(&self) -> &str {
         match self.config.kind {
             DeviceKind::Dimmer => "light",
@@ -144,10 +144,10 @@ impl DeviceEntry {
     }
 
     // -----------------------------------------------------------------------
-    // State translation: LIP level/state → HomeCore JSON
+    // State translation: LIP level/state → homeCore JSON
     // -----------------------------------------------------------------------
 
-    /// Translate a LIP output level (0.0–100.0) to a HomeCore state patch.
+    /// Translate a LIP output level (0.0–100.0) to a homeCore state patch.
     pub fn translate_output_state(&self, level: f64) -> Option<Value> {
         match self.config.kind {
             DeviceKind::Dimmer => Some(serde_json::json!({
@@ -189,16 +189,16 @@ impl DeviceEntry {
         }
     }
 
-    /// Translate an occupancy state to a HomeCore state patch.
+    /// Translate an occupancy state to a homeCore state patch.
     pub fn translate_occupancy_state(&self, occupied: bool) -> Value {
         serde_json::json!({ "occupied": occupied })
     }
 
     // -----------------------------------------------------------------------
-    // Command translation: HomeCore JSON → LIP wire command string
+    // Command translation: homeCore JSON → LIP wire command string
     // -----------------------------------------------------------------------
 
-    /// Translate a HomeCore command payload into one or more LIP command strings.
+    /// Translate a homeCore command payload into one or more LIP command strings.
     /// Returns an empty Vec if the command is not applicable to this device type.
     pub fn translate_command(&self, cmd: &Value, global_fade: f64) -> Vec<String> {
         let fade = command_fade_secs(cmd, self.fade_secs(global_fade));

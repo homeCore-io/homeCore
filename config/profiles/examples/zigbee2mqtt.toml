@@ -1,9 +1,9 @@
-# HomeCore Ecosystem Profile — Zigbee2MQTT
+# homeCore Ecosystem Profile — Zigbee2MQTT
 #
-# Bridges Zigbee2MQTT's MQTT topics to the HomeCore canonical schema.
+# Bridges Zigbee2MQTT's MQTT topics to the homeCore canonical schema.
 #
 # Prerequisites:
-#   - Zigbee2MQTT running and connected to the same MQTT broker as HomeCore
+#   - Zigbee2MQTT running and connected to the same MQTT broker as homeCore
 #   - Zigbee2MQTT configured to publish to the default topic prefix "zigbee2mqtt"
 #     (set via zigbee2mqtt's configuration.yaml: `mqtt.base_topic: zigbee2mqtt`)
 #
@@ -11,9 +11,9 @@
 #   Copy this file to config/profiles/zigbee2mqtt.toml to activate it.
 #   Adjust field_map entries if your devices use non-standard attribute names.
 #
-# Device IDs in HomeCore:
-#   Zigbee2MQTT friendly names become HomeCore device IDs with the prefix below.
-#   Example: Z2M device "Living Room Light" → HomeCore ID "zigbee_Living Room Light"
+# Device IDs in homeCore:
+#   Zigbee2MQTT friendly names become homeCore device IDs with the prefix below.
+#   Example: Z2M device "Living Room Light" → homeCore ID "zigbee_Living Room Light"
 #   Tip: use underscore-separated names in Z2M (e.g. "living_room_light") for
 #   cleaner device IDs.
 
@@ -30,7 +30,7 @@ prefix      = "zigbee_"
 # All attributes present in the payload are mapped through field_map and coerce,
 # then written to homecore/devices/{prefix}{device}/state.
 #
-# field_map: rename Z2M attribute keys to HomeCore canonical attribute names.
+# field_map: rename Z2M attribute keys to homeCore canonical attribute names.
 #   Format:  z2m_key = "homecore_attribute"
 #   Keys not listed here are passed through unchanged.
 #
@@ -131,9 +131,9 @@ json_field = "state"
 
 
 # ---------------------------------------------------------------------------
-# Outbound — commands from HomeCore to Zigbee2MQTT
+# Outbound — commands from homeCore to Zigbee2MQTT
 #
-# HomeCore sends {"on": true, "brightness_pct": 80} or {"action": "toggle"} to
+# homeCore sends {"on": true, "brightness_pct": 80} or {"action": "toggle"} to
 # homecore/devices/{id}/cmd. The mapper renames attributes back to Z2M keys and
 # converts them, then publishes to zigbee2mqtt/{device}/set.
 #
@@ -147,7 +147,7 @@ source = "homecore/devices/zigbee_{device}/cmd"
 target = "zigbee2mqtt/{device}/set"
 
   [ecosystem.cmd_topics.field_map]
-  # Rename HomeCore canonical names back to Z2M keys for the fields that differ
+  # Rename homeCore canonical names back to Z2M keys for the fields that differ
   on             = "state"
   action         = "state"
   brightness_pct = "brightness"
@@ -161,7 +161,7 @@ target = "zigbee2mqtt/{device}/set"
   hvac_mode      = "system_mode"
 
   [ecosystem.cmd_topics.coerce]
-  # HomeCore stores on/off as bool; Z2M set expects "ON"/"OFF"
+  # homeCore stores on/off as bool; Z2M set expects "ON"/"OFF"
   on             = "bool_to_onoff"
   # {"action": "toggle"} → {"state": "TOGGLE"}
   action         = "uppercase"

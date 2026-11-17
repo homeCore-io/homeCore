@@ -2,7 +2,7 @@
 # Copy to config/config.toml and fill in your values.
 
 # ---------------------------------------------------------------------------
-# HomeCore broker connection
+# homeCore broker connection
 # ---------------------------------------------------------------------------
 [homecore]
 broker_host = "127.0.0.1"
@@ -36,7 +36,7 @@ discovery_timeout_secs = 5
 #
 # The plugin exposes a standalone Axum HTTP API on this host/port for direct
 # Sonos commands (play, pause, volume, favorites, grouping, etc.).  This is
-# completely separate from the HomeCore MQTT/REST API.
+# completely separate from the homeCore MQTT/REST API.
 #
 # Endpoints (all relative to http://{host}:{port}):
 #   GET  /speakers                   — list all known speakers

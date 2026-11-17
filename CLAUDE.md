@@ -1,4 +1,4 @@
-# HomeCore — Project Context for Claude Code
+# homeCore — Project Context for Claude Code
 
 > Import this file at the start of a Claude Code session with:
 > `claude --context HOMECORE_PROJECT_CONTEXT.md`
@@ -8,7 +8,7 @@
 
 ## Project overview
 
-**HomeCore** is a home automation platform written in Rust. Design goals:
+**homeCore** is a home automation platform written in Rust. Design goals:
 
 - MQTT as the universal device communication fabric (not a plugin — core infrastructure)
 - Embedded MQTT broker (`rumqttd`) ships with the binary, zero external dependencies for basic installs

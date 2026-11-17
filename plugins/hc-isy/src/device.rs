@@ -1,7 +1,7 @@
 //! Device classification and state translation.
 //!
-//! Maps ISY node metadata and property values to HomeCore device types
-//! and canonical JSON state, and translates HomeCore commands back to
+//! Maps ISY node metadata and property values to homeCore device types
+//! and canonical JSON state, and translates homeCore commands back to
 //! ISY REST command codes.
 
 use crate::isy::{IsyEvent, IsyNode};
@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 // Device classification
 // ---------------------------------------------------------------------------
 
-/// HomeCore device type for an ISY node.
+/// homeCore device type for an ISY node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceKind {
     Light,
@@ -47,7 +47,7 @@ impl DeviceKind {
     }
 }
 
-/// Classify an ISY node into a HomeCore device type.
+/// Classify an ISY node into a homeCore device type.
 ///
 /// Detection priority:
 /// 1. Groups → Scene
@@ -719,7 +719,7 @@ fn fan_mode_cmd(mode: &str, ctx: &NodeContext) -> Option<IsyCmd> {
 }
 
 // ---------------------------------------------------------------------------
-// State translation: IsyNode → HomeCore JSON
+// State translation: IsyNode → homeCore JSON
 // ---------------------------------------------------------------------------
 
 fn light_state(level: f64, uom: &str) -> Value {
@@ -731,7 +731,7 @@ fn fan_state(raw: i64, uom: &str) -> Value {
     json!({ "on": on, "speed": speed, "speed_pct": level_pct(raw as f64, uom) })
 }
 
-/// Build a full HomeCore device state JSON from an [`IsyNode`] whose
+/// Build a full homeCore device state JSON from an [`IsyNode`] whose
 /// `properties` map has been populated from both `/rest/nodes` and
 /// `/rest/status`.
 pub fn node_to_state(node: &IsyNode, kind: &DeviceKind) -> Value {
@@ -838,10 +838,10 @@ pub fn node_to_state(node: &IsyNode, kind: &DeviceKind) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// State translation: IsyEvent → HomeCore JSON patch
+// State translation: IsyEvent → homeCore JSON patch
 // ---------------------------------------------------------------------------
 
-/// Translate an ISY real-time event into a HomeCore partial state JSON patch.
+/// Translate an ISY real-time event into a homeCore partial state JSON patch.
 /// Returns `None` if the event should be ignored for this device kind.
 ///
 /// Call [`NodeContext::observe`] with the event first, so the context knows
@@ -933,10 +933,10 @@ pub fn event_to_patch(event: &IsyEvent, kind: &DeviceKind, ctx: &NodeContext) ->
 }
 
 // ---------------------------------------------------------------------------
-// Command translation: HomeCore JSON → ISY REST command(s)
+// Command translation: homeCore JSON → ISY REST command(s)
 // ---------------------------------------------------------------------------
 
-/// The ISY REST command to send for a given HomeCore command payload.
+/// The ISY REST command to send for a given homeCore command payload.
 #[derive(Debug, PartialEq)]
 pub struct IsyCmd {
     pub cmd: &'static str,
@@ -956,7 +956,7 @@ fn level_cmd(level: u32) -> IsyCmd {
     }
 }
 
-/// Translate a HomeCore command JSON payload into one or more ISY commands.
+/// Translate a homeCore command JSON payload into one or more ISY commands.
 ///
 /// Most device types produce a single command. Thermostats can produce
 /// multiple (one per attribute being set).

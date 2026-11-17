@@ -79,7 +79,7 @@ pub type EffectsBuf = Arc<Mutex<Vec<ScriptSideEffect>>>;
 // ScriptRuntime
 // ---------------------------------------------------------------------------
 
-/// A configured Rhai engine ready to evaluate HomeCore scripts.
+/// A configured Rhai engine ready to evaluate homeCore scripts.
 pub struct ScriptRuntime {
     engine: Engine,
 }
@@ -165,7 +165,7 @@ impl ScriptRuntime {
                 .register_fn("notify", move |channel: &str, message: &str| {
                     b.lock().unwrap().push(ScriptSideEffect::Notify {
                         channel: channel.to_string(),
-                        title: "HomeCore Alert".to_string(),
+                        title: "homeCore Alert".to_string(),
                         message: message.to_string(),
                     });
                 });

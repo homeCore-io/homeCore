@@ -1,4 +1,4 @@
-//! `hc-broker` — embedded MQTT broker for HomeCore.
+//! `hc-broker` — embedded MQTT broker for homeCore.
 //!
 //! Wraps [`rumqttd`] to provide an in-process MQTT broker.  Handles lifecycle,
 //! optional TLS, and per-client credential enforcement.

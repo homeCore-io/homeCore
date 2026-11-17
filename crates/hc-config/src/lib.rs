@@ -144,7 +144,7 @@ impl AppConfig {
     }
 }
 
-/// A single `[[plugins]]` entry — a plugin binary HomeCore will spawn and
+/// A single `[[plugins]]` entry — a plugin binary homeCore will spawn and
 /// supervise.
 #[derive(Deserialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -527,9 +527,9 @@ impl Default for ShutdownConfig {
 #[derive(Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WebAdminSection {
-    /// Enable the built-in admin UI served by HomeCore.
+    /// Enable the built-in admin UI served by homeCore.
     ///
-    /// When enabled, HomeCore serves the pre-built Leptos/WASM admin UI
+    /// When enabled, homeCore serves the pre-built Leptos/WASM admin UI
     /// as static files and preserves the API under `/api/v1`.
     /// Requires `dist_path` to point to a valid `trunk build` output directory.
     #[serde(default)]

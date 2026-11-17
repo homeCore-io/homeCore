@@ -95,7 +95,7 @@ const LANDING_PAGE: &str = r#"<!doctype html>
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>HomeCore Sonos API</title>
+    <title>homeCore Sonos API</title>
     <style>
         :root {
             --bg: #0f1419;
@@ -199,7 +199,7 @@ const LANDING_PAGE: &str = r#"<!doctype html>
 <body>
     <div class="wrap">
         <section class="hero">
-            <h1>HomeCore Sonos Control API</h1>
+            <h1>homeCore Sonos Control API</h1>
             <p>Direct HTTP controls for Sonos speakers discovered by this plugin.</p>
             <span class="chip">Route style: node-sonos-http-api compatible</span>
             <span class="chip">JSON responses</span>

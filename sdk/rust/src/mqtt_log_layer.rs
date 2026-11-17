@@ -1,4 +1,4 @@
-//! A `tracing_subscriber::Layer` that forwards log events to the HomeCore
+//! A `tracing_subscriber::Layer` that forwards log events to the homeCore
 //! broker over MQTT so they appear in the admin UI's activity stream.
 //!
 //! Topic: `homecore/plugins/{plugin_id}/logs`

@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  HomeCore launchd service definition.
+  homeCore launchd service definition.
   Install to:
     System daemon (starts before login, requires root):
       /Library/LaunchDaemons/com.homecore.homecore.plist

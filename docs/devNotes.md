@@ -1,4 +1,4 @@
-# HomeCore — Developer Notes
+# homeCore — Developer Notes
 
 Practical reference for building, testing, and iterating on the codebase.
 Also covers rule engine design analysis, complex rule patterns, action type guides,
@@ -14,7 +14,7 @@ This is the standard workflow for spinning up the full system and interacting wi
 
 ### Terminal 1 — the server
 
-**Don't run plain `cargo run -p homecore` from this repo's root.** HomeCore uses
+**Don't run plain `cargo run -p homecore` from this repo's root.** homeCore uses
 the current working directory as its base, so from `core/` it loads
 `config/homecore.toml`, which declares real plugins (`[[plugins]]` for YoLink,
 Lutron, Sonos and Z-Wave) whose configs, when present under `plugins/*/config/`,
@@ -41,7 +41,7 @@ On first run it creates any missing subdirectories and prints a temporary admin
 password.  Watch for two things:
 
 1. The startup banner with the generated admin password — copy it
-2. `INFO HomeCore API server starting addr="0.0.0.0:8080"` — server is ready
+2. `INFO homeCore API server starting addr="0.0.0.0:8080"` — server is ready
 
 Leave this running. Server logs appear here as you interact with the API.
 
@@ -307,7 +307,7 @@ cargo watch -x "test -p hc-api"
 
 ## Logging
 
-HomeCore uses `tracing` for structured logging throughout every crate. The logging system is config-driven — all settings live in `[logging]` sections of `homecore.toml`. Three independent outputs can run simultaneously, each with its own format and level filter.
+homeCore uses `tracing` for structured logging throughout every crate. The logging system is config-driven — all settings live in `[logging]` sections of `homecore.toml`. Three independent outputs can run simultaneously, each with its own format and level filter.
 
 ### Outputs at a glance
 
@@ -873,7 +873,7 @@ Both are opt-in and configured entirely in `config/homecore.toml`.
 
 When one or more `[[broker.clients]]` entries are present the broker switches
 from open-access to credential-required mode.  Every MQTT client — including
-the internal HomeCore core process and every plugin — must authenticate with
+the internal homeCore core process and every plugin — must authenticate with
 `username = client_id` and the matching password.
 
 #### Minimal authenticated setup
@@ -1032,7 +1032,7 @@ The `allow_pub` / `allow_sub` fields serve two purposes:
    enforce topic ACL when strict isolation is required
 
 For strict topic ACL in a production deployment, generate a Mosquitto
-configuration from your `homecore.toml` and run HomeCore against it:
+configuration from your `homecore.toml` and run homeCore against it:
 ```bash
 hc-cli broker generate-mosquitto-config \
   --config /etc/homecore/homecore.toml \
@@ -1054,7 +1054,7 @@ Full design and rollout plan: <https://homecore.io/docs/administration/broker>.
 
 ### Broken rule files
 
-HomeCore never fails to start because of a broken rule file.  If a `.toml` file
+homeCore never fails to start because of a broken rule file.  If a `.toml` file
 in `rules/` fails to parse, the loader creates a disabled **stub rule** in its
 place:
 
@@ -1079,7 +1079,7 @@ curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKE
 
 ### Device deletion cascading
 
-When you delete a device (`DELETE /api/v1/devices/{id}`), HomeCore automatically
+When you delete a device (`DELETE /api/v1/devices/{id}`), homeCore automatically
 scans all rule files and patches any rules that reference that device:
 
 1. Every `device_id` occurrence in triggers, conditions, and actions is replaced
@@ -1111,7 +1111,7 @@ curl -s http://localhost:8080/api/v1/automations -H "Authorization: Bearer $TOKE
 
 ## Orphaned devices (`GET /devices/orphaned`)
 
-An **orphaned** device is one HomeCore still holds a registration and retained
+An **orphaned** device is one homeCore still holds a registration and retained
 state for, but whose owning plugin no longer manages it — a Hue grouped light
 after `publish_grouped_lights` is turned off, say, or an Ecowitt sensor the
 plugin stopped publishing.
@@ -1187,7 +1187,7 @@ an empty list means no automation referenced the orphan.
 
 ## Working with rules during development
 
-Rules are the core of HomeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
+Rules are the core of homeCore — they define what happens when a device changes state, a webhook fires, or a time trigger fires. Rules are pure JSON data: you create, inspect, and modify them through the API while the server is running. No code changes or restarts needed.
 
 ---
 
@@ -1782,7 +1782,7 @@ curl -s "http://localhost:8080/api/v1/events?type=rule_fired" \
 
 ### Worked example — webhook trigger
 
-Use this pattern when an external service (cloud automation, script, button device, CI pipeline, etc.) needs to fire a HomeCore rule. The webhook URL is **public** — no JWT required. The `path` segment acts as the shared secret between the caller and HomeCore.
+Use this pattern when an external service (cloud automation, script, button device, CI pipeline, etc.) needs to fire a homeCore rule. The webhook URL is **public** — no JWT required. The `path` segment acts as the shared secret between the caller and homeCore.
 
 **Goal:** when a POST arrives at `/api/v1/webhooks/front-door-bell`, flash the living room light twice.
 
@@ -1834,7 +1834,7 @@ Expected response:
 { "status": "accepted", "path": "front-door-bell-a3f9c2" }
 ```
 
-The `202 accepted` response is immediate — HomeCore fires the rule asynchronously. The body you send is available in the event payload as `body`.
+The `202 accepted` response is immediate — homeCore fires the rule asynchronously. The body you send is available in the event payload as `body`.
 
 **Step 4 — watch it fire:**
 
@@ -2130,7 +2130,7 @@ Every action supports an optional `enabled` field (default `true`). Set `enabled
 | `CallService` | `url`, `method`, `body`, `timeout_ms?`, `retries?`, `response_event?` | Outbound HTTP request. Methods: `GET POST PUT PATCH DELETE`. `timeout_ms` defaults to 10 000. `retries` retries on network errors and 5xx only (4xx fails immediately); backoff: 500 ms → 1 000 ms → 2 000 ms → 4 000 ms. If `response_event` is set, the response body (JSON) is published to `homecore/events/{response_event}` so downstream rules can react to it. |
 | `FireEvent` | `event_type`, `payload` | Publishes to `homecore/events/{event_type}` on MQTT **and** emits directly to the internal EventBus. Any rule with `Trigger::CustomEvent { event_type }` reacts instantly (same process, no broker round-trip). Visible in the WS event stream and event log. |
 | `RunScript` | `script` | Sandboxed Rhai script. |
-| `Notify` | `channel`, `message`, `title?`, `picture_from?` | Delivers via the named channel in `[notify]` config. `title` defaults to `"HomeCore Alert"`. `picture_from` names a device with a `snapshot` attribute and a `take_snapshot` action (a camera): a fresh picture is asked for, waited for up to 8 s (else its newest is sent), and attached — a Telegram photo, a Pushover attachment (up to 5 MB), an email attachment; a channel that can't send pictures sends the words. Returns a warning (not an error) if the channel is missing or delivery fails, so the rule sequence continues. |
+| `Notify` | `channel`, `message`, `title?`, `picture_from?` | Delivers via the named channel in `[notify]` config. `title` defaults to `"homeCore Alert"`. `picture_from` names a device with a `snapshot` attribute and a `take_snapshot` action (a camera): a fresh picture is asked for, waited for up to 8 s (else its newest is sent), and attached — a Telegram photo, a Pushover attachment (up to 5 MB), an email attachment; a channel that can't send pictures sends the words. Returns a warning (not an error) if the channel is missing or delivery fails, so the rule sequence continues. |
 | `Delay` | `duration_secs` | Non-blocking pause. Use between actions in a sequence. |
 | `Parallel` | `actions` | Runs all listed actions concurrently, waits for all to finish. |
 | `RepeatUntil` | `condition`, `actions`, `max_iterations?`, `interval_ms?` | Loops until a Rhai condition is true. Default max 100 iterations. |
@@ -2171,7 +2171,7 @@ The `Skipped` trace entry appears alongside `Ok` / `Error` in `GET /api/v1/autom
 
 ### Scheduler catch-up on restart
 
-**Problem:** The scheduler polls every minute. If HomeCore restarts after a `SunEvent` or `TimeOfDay` trigger has already fired for the day, that trigger is silently lost — the rule won't run until the next occurrence (next day for most solar rules).
+**Problem:** The scheduler polls every minute. If homeCore restarts after a `SunEvent` or `TimeOfDay` trigger has already fired for the day, that trigger is silently lost — the rule won't run until the next occurrence (next day for most solar rules).
 
 **Solution:** On startup, the scheduler walks all enabled rules and fires any `SunEvent` or `TimeOfDay` trigger whose computed time falls within a configurable catch-up window ending at `now`.
 
@@ -2194,7 +2194,7 @@ catchup_window_minutes = 15   # default; set 0 to disable
 - `Cron` triggers **are** caught up — any firing within the window fires immediately.
 - For state that may have changed while homeCore was offline, use `Trigger::SystemStarted` instead — see startup gap pattern below.
 
-**Example:** sunrise is at 06:42. HomeCore restarts at 06:50. With `catchup_window_minutes = 15`, the window is `[06:35, 06:50]`. Sunrise (06:42) falls inside → the deck-off rule fires immediately on startup rather than being skipped until tomorrow.
+**Example:** sunrise is at 06:42. homeCore restarts at 06:50. With `catchup_window_minutes = 15`, the window is `[06:35, 06:50]`. Sunrise (06:42) falls inside → the deck-off rule fires immediately on startup rather than being skipped until tomorrow.
 
 ---
 
@@ -3261,7 +3261,7 @@ Rules send notifications via the `Notify` action.  Each channel is configured on
 |---|---|---|---|
 | `channel` | yes | — | Name of the configured channel to use |
 | `message` | yes | — | Body text of the notification |
-| `title` | no | `"HomeCore Alert"` | Subject line / push title |
+| `title` | no | `"homeCore Alert"` | Subject line / push title |
 
 ```json
 {
@@ -3296,7 +3296,7 @@ Uses SMTP with STARTTLS (port 587, default) or implicit TLS (port 465).  Multipl
 | `smtp_port` | no | `587` | SMTP port |
 | `username` | yes | — | SMTP auth username (usually your email address) |
 | `password` | yes | — | SMTP auth password |
-| `from` | yes | — | Envelope From address (e.g. `"HomeCore <hc@example.com>"`) |
+| `from` | yes | — | Envelope From address (e.g. `"homeCore <hc@example.com>"`) |
 | `to` | yes | — | Array of recipient addresses |
 | `starttls` | no | `true` | `true` = STARTTLS (port 587); `false` = implicit TLS (port 465) |
 
@@ -3306,7 +3306,7 @@ Gmail requires an **App Password** — your regular login password will be rejec
 
 1. Enable 2-Step Verification on your Google account.
 2. Go to **Google Account → Security → App Passwords**.
-3. Create a new app password (name it "HomeCore").
+3. Create a new app password (name it "homeCore").
 4. Use that 16-character password in the config.
 
 ```toml
@@ -3317,7 +3317,7 @@ smtp_host = "smtp.gmail.com"
 smtp_port = 587
 username  = "you@gmail.com"
 password  = "abcd efgh ijkl mnop"   # 16-char app password, spaces optional
-from      = "HomeCore <you@gmail.com>"
+from      = "homeCore <you@gmail.com>"
 to        = ["you@gmail.com"]
 starttls  = true
 ```
@@ -3332,7 +3332,7 @@ smtp_host = "smtp.office365.com"
 smtp_port = 587
 username  = "you@outlook.com"
 password  = "your-password"
-from      = "HomeCore <you@outlook.com>"
+from      = "homeCore <you@outlook.com>"
 to        = ["you@outlook.com"]
 starttls  = true
 ```
@@ -3347,7 +3347,7 @@ smtp_host = "smtp.mailgun.org"
 smtp_port = 587
 username  = "postmaster@mg.yourdomain.com"
 password  = "your-mailgun-smtp-password"
-from      = "HomeCore <homecore@mg.yourdomain.com>"
+from      = "homeCore <homecore@mg.yourdomain.com>"
 to        = ["ops@yourdomain.com"]
 starttls  = true
 ```
@@ -3364,7 +3364,7 @@ smtp_host = "mail.yourdomain.com"
 smtp_port = 465
 username  = "homecore@yourdomain.com"
 password  = "password"
-from      = "HomeCore <homecore@yourdomain.com>"
+from      = "homeCore <homecore@yourdomain.com>"
 to        = ["admin@yourdomain.com"]
 starttls  = false
 ```
@@ -3487,7 +3487,7 @@ smtp_host = "smtp.gmail.com"
 smtp_port = 587
 username  = "homecore@gmail.com"
 password  = "app-password-here"
-from      = "HomeCore <homecore@gmail.com>"
+from      = "homeCore <homecore@gmail.com>"
 to        = ["you@gmail.com"]
 starttls  = true
 ```
@@ -3870,7 +3870,7 @@ Integration tests live in `homecore/tests/`. The existing `integration_test.rs` 
 | `expected struct Claims, found ()` | `jwt.validate()` returns `Result<Claims>` — missing `?` or `.unwrap()` | Propagate the error with `?` |
 | `RecvError::Lagged` in a loop | Broadcast channel consumer fell behind | Add `Err(RecvError::Lagged(_)) => continue` arm to the match |
 | Port already in use (integration test) | Stale test DB or previous run still alive | `rm -f /tmp/hc-test-*.redb /tmp/hc-test-*.db` then retry |
-| Server starts but data is gone | Wrong `HOMECORE_HOME` set | Check the "HomeCore base directory:" line printed at startup |
+| Server starts but data is gone | Wrong `HOMECORE_HOME` set | Check the "homeCore base directory:" line printed at startup |
 
 ---
 
@@ -3998,7 +3998,7 @@ The server sets `Content-Disposition: attachment; filename="homecore-backup-{tim
 
 ### Restore from backup
 
-1. Stop HomeCore.
+1. Stop homeCore.
 2. Unzip the archive.
 3. Copy files to their configured paths:
    ```sh
@@ -4008,7 +4008,7 @@ The server sets `Content-Disposition: attachment; filename="homecore-backup-{tim
    cp config/modes.toml     /path/to/config/modes.toml
    cp rules/*.toml          /path/to/rules/
    ```
-4. Start HomeCore.
+4. Start homeCore.
 
 ### Safety notes
 
@@ -4032,9 +4032,9 @@ The server sets `Content-Disposition: attachment; filename="homecore-backup-{tim
 
 ## Prometheus metrics (`GET /metrics`)
 
-HomeCore exposes a Prometheus-compatible text endpoint at `/api/v1/metrics`.
+homeCore exposes a Prometheus-compatible text endpoint at `/api/v1/metrics`.
 No authentication is required — Prometheus scrapers cannot set `Authorization`
-headers easily.  If you need access control, put HomeCore behind a reverse proxy
+headers easily.  If you need access control, put homeCore behind a reverse proxy
 (Caddy, nginx) and restrict the `/metrics` path there.
 
 ### Quick check
@@ -4084,7 +4084,7 @@ scrape_configs:
     scrape_interval: 30s
 ```
 
-Replace `YOUR_HOMECORE_HOST` with the machine running HomeCore (e.g. `192.168.1.10`).
+Replace `YOUR_HOMECORE_HOST` with the machine running homeCore (e.g. `192.168.1.10`).
 
 ### Grafana dashboard suggestions
 
@@ -4138,7 +4138,7 @@ the `/api/v1/metrics` path.
 
 ## Graceful shutdown
 
-HomeCore handles **SIGTERM** and **SIGINT** (Ctrl-C) gracefully.  When a signal is received:
+homeCore handles **SIGTERM** and **SIGINT** (Ctrl-C) gracefully.  When a signal is received:
 
 1. The rule engine stops accepting new events.
 2. Any rule action tasks that are currently executing are allowed to finish (up to 10 seconds).
@@ -4181,12 +4181,12 @@ kill -TERM $(pgrep homecore)
 
 ### systemd service integration
 
-A proper systemd unit sends SIGTERM and waits for the process to exit.  HomeCore handles this natively — no `KillSignal` override needed.
+A proper systemd unit sends SIGTERM and waits for the process to exit.  homeCore handles this natively — no `KillSignal` override needed.
 
 ```ini
 # /etc/systemd/system/homecore.service
 [Unit]
-Description=HomeCore Home Automation Server
+Description=homeCore Home Automation Server
 After=network.target
 Wants=network-online.target
 
@@ -4198,7 +4198,7 @@ ExecStart=/opt/homecore/bin/homecore
 Restart=on-failure
 RestartSec=5s
 
-# Give HomeCore up to 15 seconds to finish in-flight work.
+# Give homeCore up to 15 seconds to finish in-flight work.
 # The 10-second engine drain + a few seconds buffer.
 TimeoutStopSec=15
 
@@ -4224,7 +4224,7 @@ sudo journalctl -fu homecore
 
 ### Docker container integration
 
-`docker stop` sends SIGTERM to PID 1 and waits for the container to exit (default 10 seconds, configurable with `--time`).  To ensure HomeCore's drain window fits within Docker's timeout, use `--stop-timeout 15`:
+`docker stop` sends SIGTERM to PID 1 and waits for the container to exit (default 10 seconds, configurable with `--time`).  To ensure homeCore's drain window fits within Docker's timeout, use `--stop-timeout 15`:
 
 ```sh
 # Start
@@ -4348,7 +4348,7 @@ and follow `docs/plugin-development.md`.
 
 ## Z-Wave (`hc-zwave` plugin)
 
-HomeCore integrates Z-Wave via the **`hc-zwave`** plugin, a standalone Rust binary that connects directly to **zwave-js-server** over its native WebSocket API. This gives lower latency and more reliable state than the MQTT bridge approach — events arrive as typed values from the Z-Wave driver rather than passing through an intermediate MQTT layer.
+homeCore integrates Z-Wave via the **`hc-zwave`** plugin, a standalone Rust binary that connects directly to **zwave-js-server** over its native WebSocket API. This gives lower latency and more reliable state than the MQTT bridge approach — events arrive as typed values from the Z-Wave driver rather than passing through an intermediate MQTT layer.
 
 Source: `../hc-zwave/` (separate git repo)
 
@@ -4421,7 +4421,7 @@ For every node in the initial state, `hc-zwave` publishes:
 
 **Live events**
 
-| zwave-js-server event | HomeCore action |
+| zwave-js-server event | homeCore action |
 |---|---|
 | `value updated` | `state/partial` publish with translated attribute |
 | `node status changed` | `availability` publish (`Alive`/`Awake` → online, `Dead` → offline) |
@@ -4450,7 +4450,7 @@ If the WebSocket connection drops, `hc-zwave` reconnects with exponential backof
 
 ### Supported CommandClasses
 
-| CC | Number | HomeCore attributes |
+| CC | Number | homeCore attributes |
 |----|--------|---------------------|
 | Binary Sensor | 48 | `motion`, `open`, `water_detected`, `smoke`, `co`, `vibration`, `tampered` |
 | Binary Switch | 37 | `on` |
@@ -4533,7 +4533,7 @@ This gives device `zwave_5` a state like `{"on": true, "ep1_on": false, "ep2_on"
 
 ## Roku (`hc-roku` plugin)
 
-HomeCore controls Roku streaming players and Roku TVs through the **`hc-roku`** plugin, which speaks Roku's [External Control Protocol](https://developer.roku.com/dev/docs/external-control-api) — a plain-HTTP API every Roku serves on port 8060. Each device registers as one `media_player`.
+homeCore controls Roku streaming players and Roku TVs through the **`hc-roku`** plugin, which speaks Roku's [External Control Protocol](https://developer.roku.com/dev/docs/external-control-api) — a plain-HTTP API every Roku serves on port 8060. Each device registers as one `media_player`.
 
 Source: `../hc-roku/` (separate git repo)
 
@@ -4727,7 +4727,7 @@ Device cleanup is deliberately manual. A Roku that is unplugged, or a TV that is
 
 ## WLED (`hc-wled` plugin)
 
-HomeCore integrates [WLED](https://kno.wled.ge) LED controllers via the **`hc-wled`** plugin, a standalone Rust binary that talks to WLED's JSON HTTP API and WebSocket interface. Each configured WLED device registers as a single `wled_light` device in homeCore.
+homeCore integrates [WLED](https://kno.wled.ge) LED controllers via the **`hc-wled`** plugin, a standalone Rust binary that talks to WLED's JSON HTTP API and WebSocket interface. Each configured WLED device registers as a single `wled_light` device in homeCore.
 
 Source: `../hc-wled/` (separate git repo)
 
@@ -4780,8 +4780,8 @@ cd ../hc-wled && cargo run -- config/config.toml
 
 Successful startup prints:
 ```
-INFO hc_wled: HomeCore MQTT client created host="127.0.0.1" port=1883
-INFO hc_wled: Connected to HomeCore broker
+INFO hc_wled: homeCore MQTT client created host="127.0.0.1" port=1883
+INFO hc_wled: Connected to homeCore broker
 INFO hc_wled: WLED device online hc_id="wled_deck" ver="0.14.1" leds=144 effects=186 palettes=71 ws=0
 INFO hc_wled: Connecting WebSocket url="ws://192.168.1.200/ws"
 ```
@@ -5251,7 +5251,7 @@ set_device_state("light_kitchen", #{ on: true, brightness_pct: 70 });
 
 #### `notify(channel, message)`
 
-Sends a notification with the default title `"HomeCore Alert"`.
+Sends a notification with the default title `"homeCore Alert"`.
 
 ```rhai
 notify("pushover", "Motion detected in the back yard.");
@@ -5480,7 +5480,7 @@ Apply a different device state depending on which **mode** is currently active, 
 
 The executor checks the `modes` list in order. The first entry whose mode device reports `on == true` wins and its `state` is applied. If no mode matches, `default_state` is applied (when present). If neither matches, the action is a no-op.
 
-Modes are standard HomeCore mode devices — solar modes (`mode_night`, `mode_day`) and any custom boolean modes you define in `config/modes.toml`.
+Modes are standard homeCore mode devices — solar modes (`mode_night`, `mode_day`) and any custom boolean modes you define in `config/modes.toml`.
 
 ### TOML syntax
 
@@ -5892,7 +5892,7 @@ on = false
 
 ## Native Device Types
 
-HomeCore has two categories of native (core-managed) device types in addition to plugin-managed
+homeCore has two categories of native (core-managed) device types in addition to plugin-managed
 devices. Both appear as first-class devices in the state store and are fully visible via
 `GET /api/v1/devices`. They accept commands on the standard
 `homecore/devices/{id}/cmd` MQTT topic and emit `DeviceStateChanged` events so the rule engine
@@ -6123,7 +6123,7 @@ This matches the existing `RepeatUntil` pattern in the same file.
 
 ### Device ID types
 
-The Hue bridge registers **multiple HomeCore devices per physical light bulb**.
+The Hue bridge registers **multiple homeCore devices per physical light bulb**.
 Each physical device produces at minimum:
 
 | Type | device_id pattern | Controllable? |
@@ -6151,7 +6151,7 @@ calls (`/clip/v2/resource/light`, `/clip/v2/resource/grouped_light`, etc.).
 
 If the app_key is not configured, `fetch_lights()` / `fetch_grouped_lights()` /
 `fetch_scenes()` all return empty, which means:
-- No lights, groups, or scenes are registered with HomeCore
+- No lights, groups, or scenes are registered with homeCore
 - No MQTT cmd topics are subscribed
 - Commands sent to those devices are silently dropped
 - The heartbeat log will show `lights_total=0 groups_total=0 scenes_total=0`
@@ -6167,7 +6167,7 @@ To pair (first time or after a config wipe):
 ### Grouped lights vs individual lights
 
 Hue "rooms" and "zones" map to `grouped_light` resources in the Hue v2 API.
-These appear in HomeCore as `hue_{bridge}_group_{grouped_light_rid}` devices.
+These appear in homeCore as `hue_{bridge}_group_{grouped_light_rid}` devices.
 
 Commands to group devices support: `on` (bool), `brightness_pct` (0–100).
 Advanced fields (color, color temp, effect, gradient) are **not** supported by
@@ -6259,7 +6259,7 @@ The `StateStore` parameter was completely removed from `executor.rs` — the exe
 
 `detect_name_changes()` in `bridge.rs` runs on every poll tick (default 3600s).
 It fetches fresh names from the YoLink API and re-registers changed devices with
-HomeCore.
+homeCore.
 
 **Bug fixed (commit d68d632):** In-memory device name was previously updated via
 `mem::replace` _before_ calling `register_device`. If the MQTT publish failed,
@@ -7172,7 +7172,7 @@ Web icon variants also updated: `web/favicon.png` (32×32), `web/icons/Icon-192.
 
 ## Docker / Containerization (2026-03-28)
 
-HomeCore ships with a complete Docker setup for production deployment. All files
+homeCore ships with a complete Docker setup for production deployment. All files
 live at the `homeCore/` workspace root (not inside the `core/` repo).
 
 ### Monolith container
@@ -7281,7 +7281,7 @@ install, upgrade or supervise a plugin it did not launch.
 
 ## ISY/IoX (`hc-isy` plugin)
 
-HomeCore integrates Universal Devices ISY994i, eisy, and Polisy controllers via the **`hc-isy`** plugin. The ISY is a local home automation hub that manages Insteon, Z-Wave, Zigbee, and X10 devices; `hc-isy` bridges its full device inventory into HomeCore.
+homeCore integrates Universal Devices ISY994i, eisy, and Polisy controllers via the **`hc-isy`** plugin. The ISY is a local home automation hub that manages Insteon, Z-Wave, Zigbee, and X10 devices; `hc-isy` bridges its full device inventory into homeCore.
 
 Source: `../hc-isy/` (separate git repo)
 
@@ -7312,7 +7312,7 @@ tls      = false            # true = HTTPS/WSS (self-signed certs accepted)
 
 Auto-detected from ISY node `type` code (Insteon category) and `ST` property UOM:
 
-| ISY node | HomeCore `device_type` |
+| ISY node | homeCore `device_type` |
 |---|---|
 | Dimmable light, keypad dimmer (UOM 51, cat 1) | `light` |
 | Relay/switch, outlet module (UOM 78, cat 2) | `switch` |

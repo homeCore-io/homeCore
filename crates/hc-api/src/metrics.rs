@@ -30,7 +30,7 @@ use crate::AppState;
 
 // ── Collector ────────────────────────────────────────────────────────────────
 
-/// All Prometheus metrics tracked by HomeCore.
+/// All Prometheus metrics tracked by homeCore.
 ///
 /// Stored as `Arc<MetricsCollector>` in [`AppState`] and shared between the
 /// `/metrics` handler and the background event-bus listener.
@@ -69,7 +69,7 @@ pub struct MetricsCollector {
     pub rules_enabled_total: IntGauge,
     /// Current number of registered plugins.
     pub plugins_total: IntGauge,
-    /// Seconds elapsed since the HomeCore process started.
+    /// Seconds elapsed since the homeCore process started.
     pub uptime_seconds: IntGauge,
 
     /// Wall-clock instant captured at construction, used to compute uptime.
@@ -154,7 +154,7 @@ impl MetricsCollector {
         );
         let uptime_seconds = reg_gauge!(
             "homecore_uptime_seconds",
-            "Seconds elapsed since the HomeCore process started"
+            "Seconds elapsed since the homeCore process started"
         );
 
         Ok(Self {

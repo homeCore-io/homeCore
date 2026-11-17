@@ -17,7 +17,7 @@ rotation           = "daily"      # daily | hourly | weekly | never
 max_size_mb        = 100          # rotate when active log exceeds N MB (0 = time-only)
 compress           = true         # gzip rotated files
 prune_after_days   = 5            # delete rotated files older than N days (0 = never)
-log_forward_level  = "info"       # minimum level forwarded to HomeCore via MQTT
+log_forward_level  = "info"       # minimum level forwarded to homeCore via MQTT
 
 # ── Thermostats ────────────────────────────────────────────────────────────
 #

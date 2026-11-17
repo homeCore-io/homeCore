@@ -4,7 +4,7 @@
 /// - Command parsing with advanced lighting fields
 /// - Capability-aware validation against discovered light support
 /// - Deterministic error codes for rejection cases
-/// - State/partial payload schema correctness for HomeCore contract
+/// - State/partial payload schema correctness for homeCore contract
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -111,7 +111,7 @@ mod tests {
             Some(1)
         );
 
-        // Verify capability flags (for HomeCore conditional presentation)
+        // Verify capability flags (for homeCore conditional presentation)
         assert_eq!(
             light_state
                 .get("supports_gradient")
