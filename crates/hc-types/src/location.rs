@@ -42,8 +42,8 @@ mod tests {
     #[test]
     fn a_position_round_trips() {
         let here = HouseLocation {
-            latitude: 35.96,
-            longitude: -83.92,
+            latitude: 38.9072,
+            longitude: -77.0369,
         };
         assert_eq!(HouseLocation::from_payload(&here.to_payload()), Some(here));
     }

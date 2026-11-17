@@ -289,7 +289,7 @@ Makes an HTTP request.
 ```toml
 [[actions]]
 type   = "call_service"
-url    = "http://10.0.10.200:5005/LivingRoom/play"
+url    = "http://192.168.1.200:5005/LivingRoom/play"
 method = "GET"
 
 # For POST/PUT/PATCH — include a body:
@@ -398,7 +398,7 @@ before continuing.
 type = "parallel"
 actions = [
   { type = "set_device_state", device_id = "lutron_21", state = { on = true } },
-  { type = "call_service", url = "http://10.0.10.200:5005/Bathroom/play", method = "GET" },
+  { type = "call_service", url = "http://192.168.1.200:5005/Bathroom/play", method = "GET" },
 ]
 ```
 
@@ -503,7 +503,7 @@ notify("pushover", "message text");
 notify_titled("pushover", "Alert Title", "message text");
 
 // HTTP requests
-http_get("http://10.0.10.200:5005/Bathroom/stop");
+http_get("http://192.168.1.200:5005/Bathroom/stop");
 http_post("http://api.example.com/hook", `{"key": "value"}`);
 
 // Publish MQTT
@@ -611,7 +611,7 @@ value     = true
 
 [[actions]]
 type   = "call_service"
-url    = "http://10.0.10.200:5005/Bathroom/stop"
+url    = "http://192.168.1.200:5005/Bathroom/stop"
 method = "GET"
 
 [[actions]]

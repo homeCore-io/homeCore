@@ -299,6 +299,56 @@ mgmt = mgmt.with_async_handler(move |cmd| {
 `request_id`), `None` passes it on to the custom handler. The SDK's own actions
 (`ping`, `get_config`, …) never reach it. hc-roku's are all answered this way.
 
+## Who called
+
+homeCore puts the verified `caller` on every action it passes to a plugin:
+`uid`, `username`, `role`, `scopes` and `kind`. An immediate action reads it
+from the command its handler is given with `Caller::from_cmd(cmd)`; a
+streaming action reads `ctx.caller()`, and the SDK leaves it out of the
+action's params. An action declared `requires_role: RequiresRole::SignedIn`
+(or `device_actions::Role::SignedIn` on a device action) may be called by
+anyone signed in, read-only accounts included, so its handler must limit what
+it does to `caller.scopes` (`caller.has_scope("devices:read")`).
+
+A streaming action can send `data` for its own screen with
+`ctx.progress_with_data(..)` and `ctx.awaiting_user_with_data(..)` (and
+`warning`, which already took it). Every event's `ts` is later than the one
+before it, to the microsecond, so a reader that drops repeated times loses
+nothing.
+
+## Your own REST access
+
+A plugin that needs homeCore's REST API lists the scopes it wants in its
+manifest (`Capabilities { api_scopes: vec!["devices:read".into()], .. }`).
+After every start homeCore mints a key holding those scopes (or fewer),
+revokes the previous one, and sends it with the `api_access` management
+action. The SDK answers that action itself and keeps the grant as an
+`ApiAccess` (`url`, `key`, `scopes`; its `Debug` output hides the key):
+
+```rust
+let mgmt = client.enable_management(60, version, config_path, None).await?
+    .with_capabilities(caps)
+    .with_api_access_handler(|a| tracing::info!(url = %a.url, "REST access"));
+let access = mgmt.clone(); // every clone sees the same grant
+tokio::spawn(async move {
+    if let Some(a) = access.wait_for_api_access(Duration::from_secs(30)).await {
+        // GET {a.url}/devices with `Authorization: Bearer {a.key}`
+    }
+});
+client.run_managed(on_command, mgmt).await?;
+```
+
+`api_access()` returns the latest grant or `None`, `wait_for_api_access`
+waits for one (await it on its own task once `run_managed` is running), and
+`api_access_updates()` gives a `watch::Receiver` for a task that rebuilds its
+client on every new key. The hook runs on the management task: keep it quick.
+
+A plugin written before 0.6.5 that answers `api_access` from
+`with_custom_handler` or `with_async_handler` keeps working. The SDK keeps the
+grant and calls the hook first, then offers the command to those handlers,
+and their reply is what core gets. When neither answers, the SDK replies `ok`,
+or `api_access needs a url and a key` when either is missing.
+
 ## Files sent to an action
 
 `POST /plugins/{id}/upload/{action}` sends a file to one of your manifest

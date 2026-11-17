@@ -2,7 +2,7 @@
 #
 # Used when running HomeCore from the development workspace.
 # Launch with run-dev.sh (repo root) or:
-#   homecore --home /home/john/RustroverProjects/homeCore/homeCore \
+#   homecore --home <workspace>/core \
 #            --config config/homecore.dev.toml
 #
 # Plugin binary paths are relative to HOMECORE_HOME, which in development is
@@ -50,7 +50,7 @@ recover_band_pct = 5.0
 [metrics]
 whitelist = [
     "127.0.0.1",
-    "10.0.10.200",
+    "192.168.1.200",
 ]
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ token_expiry_hours = 24
 
 whitelist = [
     "127.0.0.1",
-    "10.0.10.200",
+    "192.168.1.200",
 ]
 
 # ---------------------------------------------------------------------------

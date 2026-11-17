@@ -4,7 +4,7 @@ version     = "0.1.23"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Z-Wave locks, dimmers, switches and sensors, through a zwave-js server"
-repository  = "https://github.com/homeCore-io/hc-zwave"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
 # The name people see in the Catalog (the registry index).

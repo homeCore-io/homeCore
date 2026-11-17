@@ -40,7 +40,7 @@ listen_port = 8888
 # `allowed_source_ips` is what buys that protection back.
 #
 # bind_addr = "0.0.0.0"                    # or a specific NIC IP
-# allowed_source_ips = ["10.0.10.50"]      # your gateway's IP
+# allowed_source_ips = ["192.168.1.50"]      # your gateway's IP
 
 # Source-IP allowlist. Empty (default) accepts any source — fine while
 # `bind_addr` is loopback, and NOT fine once it isn't. When binding to a
@@ -55,7 +55,7 @@ listen_port = 8888
 # Uncomment to enable polling as a supplement or alternative to POST mode.
 # Also used as the default target for the manifest's cgi-bin actions
 # (refresh_sensors, get_gateway_info, set_custom_server, etc.).
-# gateway_ip = "10.0.10.50"
+# gateway_ip = "192.168.1.50"
 # poll_interval_secs = 60
 
 # Optional: explicit list of console IPs the manifest's

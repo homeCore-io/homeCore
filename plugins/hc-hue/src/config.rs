@@ -652,8 +652,8 @@ mod tests {
     #[test]
     fn a_fully_specified_config_needs_no_discovery() {
         let c = cfg_with(vec![
-            bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C"),
-            bridge("downstairs", "10.0.10.22", "001788FFFE4D5E6F"),
+            bridge("upstairs", "192.168.1.21", "001788FFFE1A2B3C"),
+            bridge("downstairs", "192.168.1.22", "001788FFFE4D5E6F"),
         ]);
         assert!(c.discovery_would_be_discarded());
     }
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn a_bridge_given_by_host_alone_still_needs_discovery() {
         // to_target() consults the discovered list to learn the bridge id.
-        let c = cfg_with(vec![bridge("upstairs", "10.0.10.21", "")]);
+        let c = cfg_with(vec![bridge("upstairs", "192.168.1.21", "")]);
         assert!(!c.discovery_would_be_discarded());
     }
 
@@ -676,8 +676,8 @@ mod tests {
         // All-or-nothing on purpose: skipping for the complete entries would
         // resolve those and silently drop the incomplete one.
         let c = cfg_with(vec![
-            bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C"),
-            bridge("downstairs", "10.0.10.22", ""),
+            bridge("upstairs", "192.168.1.21", "001788FFFE1A2B3C"),
+            bridge("downstairs", "192.168.1.22", ""),
         ]);
         assert!(!c.discovery_would_be_discarded());
     }
@@ -693,11 +693,11 @@ mod tests {
     /// one.
     #[test]
     fn skipping_discovery_resolves_the_same_bridges() {
-        let c = cfg_with(vec![bridge("upstairs", "10.0.10.21", "001788FFFE1A2B3C")]);
+        let c = cfg_with(vec![bridge("upstairs", "192.168.1.21", "001788FFFE1A2B3C")]);
         let discovered = vec![DiscoveredBridge {
             name: "upstairs".into(),
             bridge_id: "001788FFFE1A2B3C".into(),
-            host: "10.0.10.21".into(),
+            host: "192.168.1.21".into(),
         }];
 
         let with = c.effective_bridges(&discovered);
@@ -810,19 +810,19 @@ mod tests {
         // Re-pair: same physical bridge, id differs only in case.
         assert!(same_bridge(
             "001788FFFE6841B3",
-            "10.0.10.23",
+            "192.168.1.23",
             "001788fffe6841b3",
-            "10.0.10.23"
+            "192.168.1.23"
         ));
         // Same host, empty/unknown id on one side.
-        assert!(same_bridge("", "10.0.10.23", "abc", "10.0.10.23"));
+        assert!(same_bridge("", "192.168.1.23", "abc", "192.168.1.23"));
         // Distinct bridges (different id AND host) must NOT collapse —
         // multi-bridge support depends on this.
         assert!(!same_bridge(
             "bridge-a",
-            "10.0.10.23",
+            "192.168.1.23",
             "bridge-b",
-            "10.0.10.99"
+            "192.168.1.99"
         ));
         // Empty on both sides for a field never matches on that field alone.
         assert!(!same_bridge("", "", "x", "y"));

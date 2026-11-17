@@ -99,7 +99,7 @@
 						if (address.trim()) void start({ host: address.trim() });
 					}}
 				>
-					<input class="addr" bind:value={address} placeholder="10.0.10.31" aria-label="The bridge's address" />
+					<input class="addr" bind:value={address} placeholder="192.168.1.31" aria-label="The bridge's address" />
 					<button class="hc-pill go" type="submit">Add</button>
 				</form>
 			</details>

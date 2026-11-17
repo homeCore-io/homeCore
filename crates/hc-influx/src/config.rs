@@ -9,7 +9,7 @@ pub struct InfluxConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// InfluxDB v2 base URL, e.g. `http://10.0.10.200:8086`.
+    /// InfluxDB v2 base URL, e.g. `http://192.168.1.200:8086`.
     #[serde(default)]
     pub url: String,
 

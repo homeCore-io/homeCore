@@ -4,7 +4,7 @@ version     = "0.1.26"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "WLED LED controllers, discovered on the network over mDNS"
-repository  = "https://github.com/homeCore-io/hc-wled"
+repository  = "https://github.com/homeCore-io/homeCore"
 
 [package.metadata.homecore]
 # The name people see in the Catalog (the registry index).

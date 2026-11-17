@@ -14,7 +14,7 @@ name: Release
 
 # A `:dev` image is built **when someone asks for one**, not on every push.
 #
-# John, 2026-08-12: *"dev should not be building images on every push."* An
+# The maintainer, 2026-08-12: *"dev should not be building images on every push."* An
 # image per commit is a container build and two registry pushes for work usually
 # superseded ten minutes later — and enough pushes in an afternoon hits GHCR's
 # secondary rate limit, which fails a run for reasons unrelated to the code in

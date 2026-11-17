@@ -28,6 +28,7 @@
 /// plugin source changes.
 pub use hc_types::config_descriptor;
 
+pub mod api_access;
 pub mod conformance;
 pub mod device_actions;
 pub mod mqtt_log_layer;
@@ -115,6 +116,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+pub use api_access::{ApiAccess, Caller};
 pub use stopping::{StopFuture, StopHandler};
 pub use streaming::{StreamContext, StreamingAction};
 pub use supervised::SUPERVISED_ENV;
@@ -877,7 +879,8 @@ pub type AsyncActionFuture = std::pin::Pin<Box<dyn std::future::Future<Output = 
 type AsyncActionHandler = Arc<dyn Fn(&Value) -> Option<AsyncActionFuture> + Send + Sync>;
 
 /// Management actions the SDK answers itself; neither kind of custom handler
-/// sees them.
+/// sees them. `api_access` is answered by the SDK too, but a custom handler
+/// still sees it (see [`ManagementHandle::with_api_access_handler`]).
 const BUILT_IN_ACTIONS: &[&str] = &[
     "ping",
     "ui_file",
@@ -945,9 +948,67 @@ pub struct ManagementHandle {
     /// Run when the plugin is asked to stop, before its devices go offline.
     /// Set via [`ManagementHandle::with_stop_handler`].
     stop_handler: Option<StopHandler>,
+    /// The REST access core sent with `api_access`, shared by every clone.
+    api_access: api_access::ApiAccessCell,
+    /// Called with each `api_access` as it arrives. Set via
+    /// [`ManagementHandle::with_api_access_handler`].
+    api_access_handler: Option<api_access::ApiAccessHandler>,
 }
 
 impl ManagementHandle {
+    /// Call `f` with each [`ApiAccess`] homeCore sends: after every start,
+    /// since the key is minted fresh each time and the old one revoked, so
+    /// replace whatever client you built from the last one.
+    ///
+    /// Only a plugin whose manifest lists `api_scopes` is sent access. The SDK
+    /// answers the `api_access` action itself and keeps what it carried
+    /// either way ([`api_access`](Self::api_access),
+    /// [`wait_for_api_access`](Self::wait_for_api_access)); this hook is for a
+    /// plugin that wants to act the moment it arrives. It runs on the
+    /// management task: keep it quick, and hand anything slow to a task of
+    /// its own. A panic in it is caught and logged.
+    ///
+    /// **A custom handler that answers `api_access`.** Plugins written before
+    /// the SDK did this answered it from
+    /// [`with_custom_handler`](Self::with_custom_handler) or
+    /// [`with_async_handler`](Self::with_async_handler). They keep working:
+    /// the SDK keeps the access and calls this hook first, then offers the
+    /// command to those handlers, and a reply from one of them is what core
+    /// gets. When neither answers, the SDK replies `ok`, or
+    /// `api_access needs a url and a key`.
+    pub fn with_api_access_handler<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ApiAccess) + Send + Sync + 'static,
+    {
+        self.api_access_handler = Some(Arc::new(f));
+        self
+    }
+
+    /// The REST access homeCore granted, or `None` until it arrives.
+    ///
+    /// Clone the handle before passing it to
+    /// [`PluginClient::run_managed`]: every clone sees the same access.
+    pub fn api_access(&self) -> Option<ApiAccess> {
+        self.api_access.borrow().clone()
+    }
+
+    /// Wait until homeCore has sent REST access, or `timeout` passes.
+    /// Returns the access, or `None` on timeout.
+    ///
+    /// The access arrives on the management loop that
+    /// [`PluginClient::run_managed`] drives, so await this on a task of its
+    /// own, never before `run_managed` has started.
+    pub async fn wait_for_api_access(&self, timeout: Duration) -> Option<ApiAccess> {
+        api_access::wait(&self.api_access, timeout).await
+    }
+
+    /// A receiver that sees every access homeCore sends from now on, for a
+    /// task that rebuilds its REST client each time
+    /// (`rx.changed().await`).
+    pub fn api_access_updates(&self) -> tokio::sync::watch::Receiver<Option<ApiAccess>> {
+        self.api_access.subscribe()
+    }
+
     /// Install a plugin-specific handler for actions not recognised by the
     /// built-in dispatcher (`ping`, `get_config`, `set_config`, `set_log_level`).
     ///
@@ -1821,6 +1882,8 @@ impl PluginClient {
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
             stop_handler: None,
+            api_access: api_access::new_cell(),
+            api_access_handler: None,
         })
     }
 
@@ -2450,6 +2513,12 @@ async fn dispatch_action(mgmt: &ManagementHandle, client: &AsyncClient, cmd: &Va
         return dispatch_streaming_action(mgmt, client, streaming_action, cmd).await;
     }
 
+    // REST access for the plugin: the SDK keeps it, then lets a plugin's own
+    // handler answer as it did before the SDK knew the action.
+    if action == "api_access" {
+        return dispatch_api_access(mgmt, cmd).await;
+    }
+
     // An action answered later, on this task.
     if !BUILT_IN_ACTIONS.contains(&action.as_str()) {
         if let Some(fut) = mgmt.async_handler.as_ref().and_then(|h| h(cmd)) {
@@ -2465,6 +2534,46 @@ async fn dispatch_action(mgmt: &ManagementHandle, client: &AsyncClient, cmd: &Va
 
     // Fall through to synchronous built-ins + custom handler.
     handle_management_cmd(mgmt, cmd)
+}
+
+/// Keep the REST access core sent, tell the plugin, and answer.
+///
+/// Precedence: the SDK always keeps a valid grant and calls the
+/// `api_access` hook; a plugin's async or custom handler that answers the
+/// command supplies the reply; otherwise the SDK replies itself.
+async fn dispatch_api_access(mgmt: &ManagementHandle, cmd: &Value) -> Value {
+    let request_id = cmd["request_id"].as_str().unwrap_or("").to_string();
+    let parsed = ApiAccess::from_cmd(cmd);
+    if let Ok(access) = &parsed {
+        mgmt.api_access.send_replace(Some(access.clone()));
+        info!(
+            url = %access.url,
+            scopes = access.scopes.len(),
+            "homeCore granted REST access"
+        );
+        if let Some(h) = &mgmt.api_access_handler {
+            let run = std::panic::AssertUnwindSafe(|| h(access));
+            if std::panic::catch_unwind(run).is_err() {
+                error!("the api_access handler panicked");
+            }
+        }
+    }
+    if let Some(fut) = mgmt.async_handler.as_ref().and_then(|h| h(cmd)) {
+        let mut resp = fut.await;
+        if !resp.is_object() {
+            resp = json!({ "status": "ok", "result": resp });
+        }
+        resp["request_id"] = Value::String(request_id);
+        return resp;
+    }
+    if let Some(mut resp) = mgmt.custom_handler.as_ref().and_then(|h| h(cmd)) {
+        resp["request_id"] = Value::String(request_id);
+        return resp;
+    }
+    match parsed {
+        Ok(_) => json!({ "request_id": request_id, "status": "ok" }),
+        Err(e) => json!({ "request_id": request_id, "status": "error", "error": e }),
+    }
 }
 
 /// Dispatch a streaming action: register state, spawn the closure, and
@@ -2490,9 +2599,12 @@ async fn dispatch_streaming_action(
             obj.remove("action");
             obj.remove("request_id");
             obj.remove("target_request_id");
+            // The caller is on the context, not among the action's params.
+            obj.remove("caller");
         }
         p
     };
+    let caller = Caller::from_cmd(cmd);
 
     let stream_topic = format!(
         "homecore/plugins/{}/commands/{}/events",
@@ -2521,7 +2633,9 @@ async fn dispatch_streaming_action(
         Arc::clone(&cancel),
         Arc::clone(&terminal),
         respond_rx,
-    );
+    )
+    .with_caller(caller);
+    let clock = ctx.clock();
 
     let handler = Arc::clone(&action.handler);
     let registry = Arc::clone(&mgmt.active_streams);
@@ -2537,6 +2651,7 @@ async fn dispatch_streaming_action(
             &topic_clone,
             &rid_clone,
             &terminal_clone,
+            &clock,
             result,
         )
         .await;
@@ -2882,10 +2997,15 @@ mod notice_tests {
 }
 
 #[cfg(test)]
+fn async_and_files_tests_bare() -> ManagementHandle {
+    async_and_files_tests::bare()
+}
+
+#[cfg(test)]
 mod async_and_files_tests {
     use super::*;
 
-    fn bare() -> ManagementHandle {
+    pub(super) fn bare() -> ManagementHandle {
         ManagementHandle {
             plugin_id: "plugin.test".into(),
             config_path: None,
@@ -2905,6 +3025,8 @@ mod async_and_files_tests {
             streaming_actions: Arc::new(HashMap::new()),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
             stop_handler: None,
+            api_access: api_access::new_cell(),
+            api_access_handler: None,
         }
     }
 
@@ -3005,14 +3127,155 @@ mod async_and_files_tests {
 }
 
 #[cfg(test)]
+mod api_access_and_caller_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn bare() -> ManagementHandle {
+        async_and_files_tests_bare()
+    }
+
+    fn client() -> AsyncClient {
+        let (c, _el) = AsyncClient::new(MqttOptions::new("t", "127.0.0.1", 1), 8);
+        c
+    }
+
+    fn grant(rid: &str) -> Value {
+        json!({
+            "action": "api_access", "request_id": rid,
+            "url": "http://127.0.0.1:8080/api/v1/", "key": "hc_sk_k",
+            "scopes": ["devices:read"],
+        })
+    }
+
+    /// The SDK answers `api_access` itself, keeps it on every clone of the
+    /// handle, and calls the hook.
+    #[tokio::test]
+    async fn the_sdk_answers_api_access_and_keeps_it() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let s2 = Arc::clone(&seen);
+        let mgmt = bare().with_api_access_handler(move |a| {
+            assert_eq!(a.key, "hc_sk_k");
+            s2.fetch_add(1, Ordering::SeqCst);
+        });
+        let watcher = mgmt.clone();
+        assert_eq!(watcher.api_access(), None);
+        let r = dispatch_management_cmd(&mgmt, &client(), &grant("g1")).await;
+        assert_eq!(
+            (r["status"].as_str(), r["request_id"].as_str()),
+            (Some("ok"), Some("g1"))
+        );
+        let a = watcher
+            .wait_for_api_access(Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(a.url, "http://127.0.0.1:8080/api/v1");
+        assert_eq!(a.scopes, vec!["devices:read"]);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn api_access_without_a_key_is_refused_and_not_kept() {
+        let mgmt = bare();
+        let r = dispatch_management_cmd(
+            &mgmt,
+            &client(),
+            &json!({ "action": "api_access", "request_id": "g", "url": "http://h" }),
+        )
+        .await;
+        assert_eq!(r["status"], "error");
+        assert_eq!(r["error"], "api_access needs a url and a key");
+        assert_eq!(mgmt.api_access(), None);
+    }
+
+    /// A plugin that answered `api_access` itself before the SDK did keeps
+    /// its reply, and the SDK still keeps the access.
+    #[tokio::test]
+    async fn a_custom_handler_that_answers_api_access_still_works() {
+        let mgmt = bare().with_custom_handler(|cmd| {
+            (cmd["action"] == "api_access").then(|| json!({ "status": "ok", "mine": true }))
+        });
+        let r = dispatch_management_cmd(&mgmt, &client(), &grant("g2")).await;
+        assert_eq!(
+            (r["mine"].as_bool(), r["request_id"].as_str()),
+            (Some(true), Some("g2"))
+        );
+        assert!(mgmt.api_access().is_some());
+
+        let mgmt = bare().with_async_handler(|cmd| {
+            (cmd["action"] == "api_access").then(|| {
+                Box::pin(async { json!({ "status": "ok", "later": 1 }) }) as AsyncActionFuture
+            })
+        });
+        let r = dispatch_management_cmd(&mgmt, &client(), &grant("g3")).await;
+        assert_eq!(r["later"], 1);
+        assert!(mgmt.api_access().is_some());
+    }
+
+    /// A hook that panics does not take the reply down with it.
+    #[tokio::test]
+    async fn a_panicking_hook_is_contained() {
+        let mgmt = bare().with_api_access_handler(|_| panic!("plugin bug"));
+        let r = dispatch_management_cmd(&mgmt, &client(), &grant("g4")).await;
+        assert_eq!(r["status"], "ok");
+    }
+
+    /// A streaming action reads the caller from its context, and the caller
+    /// is not among its params.
+    #[tokio::test]
+    async fn a_stream_gets_the_caller_on_its_context() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<(Option<Caller>, Value)>();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        let action = StreamingAction::new("ask", move |ctx, params| {
+            let tx = Arc::clone(&tx);
+            async move {
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    let _ = tx.send((ctx.caller().cloned(), params));
+                }
+                ctx.complete(json!({})).await
+            }
+        });
+        let mgmt = bare().with_streaming_action(action);
+        let r = dispatch_management_cmd(
+            &mgmt,
+            &client(),
+            &json!({
+                "action": "ask", "request_id": "s1", "text": "hi",
+                "caller": { "uid": "u1", "username": "ann", "role": "user",
+                            "scopes": ["devices:read"], "kind": "user" },
+            }),
+        )
+        .await;
+        assert_eq!(r["status"], "accepted");
+        let (caller, params) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let caller = caller.unwrap();
+        assert_eq!(caller.username.as_deref(), Some("ann"));
+        assert_eq!(params, json!({ "text": "hi" }));
+    }
+
+    /// Immediate actions read the caller from the command they are given.
+    #[test]
+    fn an_immediate_action_reads_the_caller_from_its_command() {
+        let cmd = json!({ "action": "x", "caller": { "role": "admin", "kind": "local_admin" } });
+        assert_eq!(
+            Caller::from_cmd(&cmd).unwrap().role.as_deref(),
+            Some("admin")
+        );
+    }
+}
+
+#[cfg(test)]
 mod house_location_tests {
     use super::*;
 
     #[tokio::test]
     async fn the_house_is_known_once_core_has_said() {
         let here = HouseLocation {
-            latitude: 35.96,
-            longitude: -83.92,
+            latitude: 38.9072,
+            longitude: -77.0369,
         };
         set_house_location(here);
         assert_eq!(house_location(), Some(here));

@@ -1800,8 +1800,8 @@ mod tests {
     #[test]
     fn device_id_prefers_the_serial() {
         assert_eq!(
-            mint_device_id(Some("YL0001073725"), "10.0.10.69"),
-            "roku_yl0001073725"
+            mint_device_id(Some("YN00AB123456"), "192.168.1.69"),
+            "roku_yn00ab123456"
         );
     }
 
@@ -1809,8 +1809,11 @@ mod tests {
     /// sanitised — dots are not valid in a homeCore device id.
     #[test]
     fn device_id_falls_back_to_the_host() {
-        assert_eq!(mint_device_id(None, "10.0.10.40"), "roku_10_0_10_40");
-        assert_eq!(mint_device_id(Some(""), "10.0.10.40"), "roku_10_0_10_40");
+        assert_eq!(mint_device_id(None, "192.168.1.40"), "roku_192_168_1_40");
+        assert_eq!(
+            mint_device_id(Some(""), "192.168.1.40"),
+            "roku_192_168_1_40"
+        );
     }
 
     /// M10: published again only when it jumps — not every poll it plays.
@@ -1864,12 +1867,12 @@ mod tests {
     #[test]
     fn learned_entries_old_and_new_both_read() {
         let old: Known =
-            serde_json::from_value(json!({ "hc_id": "roku_x1", "host": "10.0.10.40" })).unwrap();
+            serde_json::from_value(json!({ "hc_id": "roku_x1", "host": "192.168.1.40" })).unwrap();
         assert_eq!(old.hc_id, "roku_x1");
         assert!(old.apps.is_empty() && old.macs.is_empty());
         let new = Known {
             hc_id: "roku_x1".into(),
-            host: "10.0.10.40".into(),
+            host: "192.168.1.40".into(),
             port: None,
             macs: vec!["02:00:00:00:00:01".into()],
             name: Some("Office TV".into()),
@@ -2121,19 +2124,19 @@ mod worker_tests {
     /// the alert with the fix; a command that goes through clears both.
     #[tokio::test]
     async fn a_refusal_is_said_and_raises_the_alert() {
-        let (r, host, port, _log) = roku("YL0001073725", "PowerOn").await;
-        let b = bridge(&[("roku_yl0001073725", &host, port)]);
+        let (r, host, port, _log) = roku("YN00AB123456", "PowerOn").await;
+        let b = bridge(&[("roku_yn00ab123456", &host, port)]);
         start(&b).await;
-        until("first poll", || online(&b, "roku_yl0001073725")).await;
+        until("first poll", || online(&b, "roku_yn00ab123456")).await;
         r.refuse_keys.store(true, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        b.enqueue("roku_yl0001073725", json!({ "action": "home" }), Some(tx))
+        b.enqueue("roku_yn00ab123456", json!({ "action": "home" }), Some(tx))
             .await;
         let said = rx.await.unwrap().unwrap_err();
         assert!(said.contains("Control by mobile apps"), "{said}");
         {
             let devs = b.devices.read().await;
-            let d = &devs["roku_yl0001073725"];
+            let d = &devs["roku_yn00ab123456"];
             assert!(d
                 .last_error
                 .as_deref()
@@ -2146,13 +2149,13 @@ mod worker_tests {
         }
         r.refuse_keys.store(false, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        b.enqueue("roku_yl0001073725", json!({ "action": "home" }), Some(tx))
+        b.enqueue("roku_yn00ab123456", json!({ "action": "home" }), Some(tx))
             .await;
         rx.await.unwrap().unwrap();
         let devs = b.devices.read().await;
-        assert_eq!(devs["roku_yl0001073725"].last_error, None);
+        assert_eq!(devs["roku_yn00ab123456"].last_error, None);
         assert_eq!(
-            devs["roku_yl0001073725"].alerts_sent.as_deref(),
+            devs["roku_yn00ab123456"].alerts_sent.as_deref(),
             Some(&[][..])
         );
     }
@@ -2188,26 +2191,26 @@ mod worker_tests {
     #[tokio::test]
     async fn an_address_swap_is_followed_by_serial() {
         let (a, host_a, port_a, _) = roku("YK00XF435811", "PowerOn").await;
-        let (c, host_c, port_c, _) = roku("YL0001073725", "PowerOn").await;
+        let (c, host_c, port_c, _) = roku("YN00AB123456", "PowerOn").await;
         let b = bridge(&[
             ("roku_yk00xf435811", &host_a, port_a),
-            ("roku_yl0001073725", &host_c, port_c),
+            ("roku_yn00ab123456", &host_c, port_c),
         ]);
         start(&b).await;
         until("first polls", || async {
-            online(&b, "roku_yk00xf435811").await && online(&b, "roku_yl0001073725").await
+            online(&b, "roku_yk00xf435811").await && online(&b, "roku_yn00ab123456").await
         })
         .await;
-        *a.serial.lock().unwrap() = "YL0001073725".into();
+        *a.serial.lock().unwrap() = "YN00AB123456".into();
         *c.serial.lock().unwrap() = "YK00XF435811".into();
-        for id in ["roku_yk00xf435811", "roku_yl0001073725"] {
+        for id in ["roku_yk00xf435811", "roku_yn00ab123456"] {
             let tx = b.devices.read().await[id].tx.clone();
             tx.send(Job::PollNow).await.unwrap();
         }
         until("re-homed", || async {
             let devs = b.devices.read().await;
             let office = &devs["roku_yk00xf435811"];
-            let bar = &devs["roku_yl0001073725"];
+            let bar = &devs["roku_yn00ab123456"];
             office.port == port_c
                 && bar.port == port_a
                 && office.online == Some(true)

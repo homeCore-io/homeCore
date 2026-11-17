@@ -308,7 +308,7 @@ Crates that will NOT compile to WASM (already SSR-only in the plan):
 
 Prerequisites: `rustup target add wasm32-unknown-unknown` + `cargo install cargo-leptos@0.3.5`
 
-All `cargo leptos` commands run from `/home/john/RustroverProjects/homeCore/core/`.
+All `cargo leptos` commands run from `<workspace>/core/`.
 
 ---
 

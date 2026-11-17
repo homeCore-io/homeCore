@@ -275,7 +275,7 @@ mod tests {
 
         // The operator enters the repeater address and saves.
         store
-            .write("plugin.lutron", "host = \"10.0.10.24\"\n")
+            .write("plugin.lutron", "host = \"192.168.1.24\"\n")
             .unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(

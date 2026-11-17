@@ -222,11 +222,11 @@ fn default_admin_password_path(base_dir: &std::path::Path) -> std::path::PathBuf
 
 /// Parse `[auth] whitelist` into single-address entries.
 ///
-/// Accepts a bare IP (`10.0.10.200`) or an explicit single-host prefix
-/// (`10.0.10.200/32`, `::1/128`). **Ranges are refused.**
+/// Accepts a bare IP (`192.168.1.200`) or an explicit single-host prefix
+/// (`192.168.1.200/32`, `::1/128`). **Ranges are refused.**
 ///
 /// A whitelisted source gets synthetic Admin claims with no token at all, so a
-/// range hands unauthenticated admin to every host inside it. `10.0.10.0/24`
+/// range hands unauthenticated admin to every host inside it. `192.168.1.0/24`
 /// reads like "my LAN" and means "254 devices may administer this house" — on a
 /// home-automation VLAN that population is mostly IoT gear, the least
 /// trustworthy set of hosts on the network.
@@ -262,7 +262,7 @@ fn parse_auth_whitelist(entries: &[String]) -> Vec<IpNet> {
                     "[auth] whitelist entry covers a range — skipping. A whitelisted \
                      source gets Admin with no token, so this would grant \
                      unauthenticated admin to every host in it. List the addresses \
-                     explicitly instead (e.g. \"10.0.10.200\")."
+                     explicitly instead (e.g. \"192.168.1.200\")."
                 );
                 return None;
             }
@@ -1568,24 +1568,29 @@ mod tests {
     #[test]
     fn auth_whitelist_accepts_single_addresses_in_either_notation() {
         let got = parse_auth_whitelist(&[
-            "10.0.10.200".into(),
-            "10.0.10.201/32".into(),
+            "192.168.1.200".into(),
+            "192.168.1.201/32".into(),
             "::1".into(),
             "fe80::1/128".into(),
         ]);
         let rendered: Vec<String> = got.iter().map(|n| n.to_string()).collect();
         assert_eq!(
             rendered,
-            vec!["10.0.10.200/32", "10.0.10.201/32", "::1/128", "fe80::1/128"]
+            vec![
+                "192.168.1.200/32",
+                "192.168.1.201/32",
+                "::1/128",
+                "fe80::1/128"
+            ]
         );
     }
 
     #[test]
     fn auth_whitelist_refuses_ranges() {
-        // The live deployment briefly carried 10.0.10.0/24, which granted
-        // tokenless admin to every host on the VLAN. That must not parse.
+        // A range like 192.168.1.0/24 would grant tokenless admin to every
+        // host on the network. That must not parse.
         let got = parse_auth_whitelist(&[
-            "10.0.10.0/24".into(),
+            "192.168.1.0/24".into(),
             "10.0.0.0/8".into(),
             "0.0.0.0/0".into(),
             "2001:db8::/32".into(),
@@ -1598,13 +1603,13 @@ mod tests {
         // One typo should not cost the operator the entries either side of it,
         // and should not take startup down.
         let got = parse_auth_whitelist(&[
-            "10.0.10.200".into(),
+            "192.168.1.200".into(),
             "not-an-ip".into(),
-            "10.0.10.0/24".into(),
-            "10.0.10.201".into(),
+            "192.168.1.0/24".into(),
+            "192.168.1.201".into(),
         ]);
         let rendered: Vec<String> = got.iter().map(|n| n.to_string()).collect();
-        assert_eq!(rendered, vec!["10.0.10.200/32", "10.0.10.201/32"]);
+        assert_eq!(rendered, vec!["192.168.1.200/32", "192.168.1.201/32"]);
     }
 
     #[test]

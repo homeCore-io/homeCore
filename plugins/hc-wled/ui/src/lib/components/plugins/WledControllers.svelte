@@ -390,7 +390,7 @@
 		<form class="inline" onsubmit={(e) => (e.preventDefault(), add(newHost.trim()))}>
 			<input
 				bind:value={newHost}
-				placeholder="10.0.10.80 or wled-garage.local"
+				placeholder="192.168.1.80 or wled-garage.local"
 				aria-label="A controller's address"
 			/>
 			<button class="pill" disabled={busy || !newHost.trim()}>Add one by address</button>

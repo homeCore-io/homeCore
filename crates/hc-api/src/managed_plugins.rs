@@ -246,7 +246,7 @@ mod tests {
     fn a_plugin_configured_by_hand_has_no_installed_version() {
         let store = ManagedPluginStore::load(tmp_dir());
         for binary in [
-            "/home/john/Github/homeCore/core/target/debug/hc-hue",
+            "/home/dev/homeCore/core/target/debug/hc-hue",
             "plugins/hc-hue/bin/hc-hue",
             // Another plugin's install folder is not this one's.
             "/home/hc/plugins/plugin.lutron/0.1.24/hc-hue",

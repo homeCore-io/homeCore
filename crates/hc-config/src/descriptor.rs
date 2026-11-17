@@ -429,7 +429,7 @@ fn influx() -> Section {
         .field(
             Field::url("influx.url")
                 .label("URL")
-                .help("InfluxDB v2 base URL, e.g. http://10.0.10.20:8086")
+                .help("InfluxDB v2 base URL, e.g. http://192.168.1.20:8086")
                 .visible_when(Cond::truthy("influx.enabled")),
         )
         .field(

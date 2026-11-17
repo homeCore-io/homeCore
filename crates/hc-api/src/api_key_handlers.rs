@@ -163,7 +163,7 @@ pub async fn create_api_key(
     if let Some(bad) = unreadable_cidr(&body.allowed_cidrs) {
         return err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("`{bad}` is not an address or a network (like 10.0.10.0/24)"),
+            &format!("`{bad}` is not an address or a network (like 192.168.1.0/24)"),
         );
     }
 
@@ -377,7 +377,7 @@ pub async fn update_api_key(
         if let Some(bad) = unreadable_cidr(&cidrs) {
             return err(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                &format!("`{bad}` is not an address or a network (like 10.0.10.0/24)"),
+                &format!("`{bad}` is not an address or a network (like 192.168.1.0/24)"),
             );
         }
         rec.allowed_cidrs = tidy_cidrs(&cidrs);

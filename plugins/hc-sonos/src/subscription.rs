@@ -78,7 +78,7 @@ impl Subscriptions {
 
 /// Subscribe to every service in [`SERVICES`] for a speaker.
 ///
-/// `speaker_host_port` — e.g. `"10.0.10.40:1400"`
+/// `speaker_host_port` — e.g. `"192.168.1.40:1400"`
 /// `uuid`              — Sonos speaker UUID (embedded in the callback URL path)
 /// `callback_base`     — e.g. `"http://192.168.1.10:5005"` (reachable by Sonos)
 pub fn subscribe_speaker(

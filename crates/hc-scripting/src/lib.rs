@@ -27,7 +27,7 @@
 //! set_device_state("device_id", #{ on: true, brightness: 200 });
 //! notify("pushover", "Motion detected!");
 //! notify_titled("pushover", "Alert", "Motion in the back yard");
-//! http_get("http://10.0.10.200:5005/Bathroom/stop");
+//! http_get("http://192.168.1.200:5005/Bathroom/stop");
 //! http_post("http://api.example.com/hook", `{"key":"value"}`);
 //! publish_mqtt("homecore/events/my_event", "payload");
 //! ```

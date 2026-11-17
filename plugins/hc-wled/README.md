@@ -1,6 +1,6 @@
 # hc-wled
 
-[![CI](https://github.com/homeCore-io/hc-wled/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/hc-wled/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/hc-wled/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/hc-wled/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
+[![CI](https://github.com/homeCore-io/homeCore/actions/workflows/ci.yml/badge.svg)](https://github.com/homeCore-io/homeCore/actions/workflows/ci.yml) [![Release](https://github.com/homeCore-io/homeCore/actions/workflows/release.yml/badge.svg)](https://github.com/homeCore-io/homeCore/actions/workflows/release.yml) [![Dashboard](https://img.shields.io/badge/builds-dashboard-blue?style=flat-square)](https://homecore-io.github.io/ci-glance/)
 
 Bridges WLED LED controllers into homeCore — all of WLED's JSON API: every
 segment and its look, presets and playlists, nightlight, sync, live data,

@@ -52,7 +52,7 @@ type_delay_ms = 50   # gap between characters when sending text; Roku's
 # last-known addresses (no multicast).
 #
 #[[devices]]
-#host  = "10.0.10.40"
+#host  = "192.168.1.40"
 #hc_id = "roku_living_room"
 #name  = "Living Room Roku"
 #area  = "living_room"

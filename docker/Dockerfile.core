@@ -9,12 +9,14 @@
 # in the release ordering. See ../Dockerfile for the local-dev build, which is a
 # different recipe with a different layout and is NOT what ships.
 #
-# The web UI is NOT in this image. It is hc-web — its own image, built from
-# clients/hc-web — which serves the Flutter app and reverse-proxies /api/v1
-# (including the WebSocket and SSE streams) here. Core used to carry a Leptos
+# The web UI is NOT in this image. It is hc-web-svelte, its own image
+# (ghcr.io/homecore-io/hc-web-svelte, built from clients/hc-web-svelte), whose
+# Node UI server serves the app and reverse-proxies /api/v1 (including the
+# WebSocket and SSE streams) here. Core used to carry a Leptos
 # WASM bundle at /opt/homecore/ui; that is gone, and [web_admin] is off in the
 # shipped default config to match. Plugins are not baked in either: they install
-# at runtime from the signed registry and run as child processes of core.
+# at runtime from the registry. Rust plugins run as child processes of core;
+# Python plugins run in a plugin runtime container (Dockerfile.runtime-python).
 #
 # Designed to be built by homeCore-io/homeCore's release.yml AFTER the
 # per-arch musl binaries have been produced. The build context is expected
@@ -67,7 +69,7 @@ COPY entrypoint-core.sh      /entrypoint.sh
 RUN chmod +x /usr/local/bin/homecore /entrypoint.sh
 
 # Embedded broker on 1883, REST + WebSocket API on 8080. Nothing serves a UI
-# from this image — hc-web does that and proxies /api/v1 to 8080.
+# from this image. hc-web-svelte does that and proxies /api/v1 to 8080.
 EXPOSE 1883 8080
 
 # Asks the API's own health route. 8080 is homecore.toml's default port, and

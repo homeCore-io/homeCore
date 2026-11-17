@@ -138,7 +138,7 @@ curl -X PATCH localhost:8080/api/v1/devices/roku_yk00xf435811/state \
   -d '{"action": "select_source", "source": "HDMI 1"}'
 
 # Type into a search box and submit
-curl -X PATCH localhost:8080/api/v1/devices/roku_yl0001073725/state \
+curl -X PATCH localhost:8080/api/v1/devices/roku_yn00ab123456/state \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"action": "text", "text": "the expanse", "submit": true}'
 ```

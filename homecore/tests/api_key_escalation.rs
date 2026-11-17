@@ -36,7 +36,7 @@ async fn a_key_cannot_make_or_widen_keys() -> Result<()> {
                 label: "tablet".into(),
                 scopes: vec!["devices:read".into()],
                 expires_in_days: None,
-                allowed_cidrs: vec!["127.0.0.0/8".into(), "10.0.10.0/24".into()],
+                allowed_cidrs: vec!["127.0.0.0/8".into(), "192.168.1.0/24".into()],
                 owner_uid: None,
             },
         )

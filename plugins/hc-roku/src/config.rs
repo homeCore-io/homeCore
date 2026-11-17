@@ -485,7 +485,7 @@ mod tests {
             [homecore]
 
             [[devices]]
-            host  = "10.0.10.40"
+            host  = "192.168.1.40"
             hc_id = "roku_living_room"
             name  = "Living Room Roku"
             "#,
