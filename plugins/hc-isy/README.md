@@ -98,5 +98,5 @@ UI. They are state rather than log lines.
 | Code | Means |
 |---|---|
 | `not_configured` | No controller address or credentials yet. |
-| `controller_unreachable` | The ISY is not answering REST or the event WebSocket. Its devices are marked unavailable and the plugin reconnects on its own, waiting 2 s, then doubling up to 60 s. Clears on reconnect, which resyncs every device. |
+| `controller_unreachable` | The ISY is not answering REST or the event WebSocket, or the WebSocket has gone silent (nothing for three heartbeat intervals, or 5 minutes before the interval is known). Its devices are marked unavailable and the plugin reconnects on its own, waiting 2 s, then doubling up to 60 s. Clears on reconnect, which resyncs every device. |
 | `auth_refused` | The ISY refused the username and password. The plugin exits with an error and homeCore restarts it with backoff. Clears once a login succeeds. |

@@ -50,6 +50,70 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// fresh problem and the wait starts over at [`BASE_BACKOFF`].
 pub const STABLE_AFTER: Duration = Duration::from_secs(60);
 
+/// How long a WebSocket may stay silent before it is treated as dropped,
+/// when the controller has not yet said how often it sends heartbeats.
+pub const DEFAULT_SILENCE: Duration = Duration::from_secs(300);
+/// Heartbeats that may go missing in a row before the connection is
+/// treated as dropped, once the interval is known.
+pub const MISSED_HEARTBEATS: u32 = 3;
+/// Bounds on the silence window, whatever interval the controller reports.
+pub const MIN_SILENCE: Duration = Duration::from_secs(60);
+pub const MAX_SILENCE: Duration = Duration::from_secs(900);
+
+// ---------------------------------------------------------------------------
+// Liveness: a WebSocket can stay open while nothing comes over it
+// ---------------------------------------------------------------------------
+
+/// When the subscription last said anything, and how long it may stay quiet.
+///
+/// The ISY sends a heartbeat (`_0`) whose action is the seconds until the
+/// next one. A socket that stays open but goes quiet would otherwise leave
+/// every device showing stale state with nothing said about it.
+#[derive(Debug, Clone)]
+pub struct Liveness {
+    last_heard: Instant,
+    heartbeat: Option<Duration>,
+}
+
+impl Liveness {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            last_heard: now,
+            heartbeat: None,
+        }
+    }
+
+    /// Anything arrived (an event, a heartbeat, a ping).
+    pub fn heard(&mut self, now: Instant) {
+        self.last_heard = now;
+    }
+
+    /// The controller said how long until its next heartbeat.
+    pub fn heartbeat_every(&mut self, interval: Duration) {
+        self.heartbeat = Some(interval);
+    }
+
+    /// How long the socket may stay silent: [`MISSED_HEARTBEATS`] heartbeat
+    /// intervals within [`MIN_SILENCE`] and [`MAX_SILENCE`], or
+    /// [`DEFAULT_SILENCE`] while the interval is unknown.
+    pub fn window(&self) -> Duration {
+        match self.heartbeat {
+            Some(every) => (every * MISSED_HEARTBEATS).clamp(MIN_SILENCE, MAX_SILENCE),
+            None => DEFAULT_SILENCE,
+        }
+    }
+
+    /// When the socket counts as dropped if nothing arrives first.
+    pub fn deadline(&self) -> Instant {
+        self.last_heard + self.window()
+    }
+
+    /// True once the socket has been silent for longer than the window.
+    pub fn is_silent(&self, now: Instant) -> bool {
+        now >= self.deadline()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reconnect backoff
 // ---------------------------------------------------------------------------
@@ -403,12 +467,31 @@ async fn run_once(
 
     // ── Event loop: WS events + homeCore commands ─────────────────────
     use tokio_tungstenite::tungstenite::Message;
+    let mut live = Liveness::new(Instant::now());
+    info!(
+        silence_secs = live.window().as_secs(),
+        "Watching the ISY WebSocket for silence; a socket quiet this long is treated as dropped \
+         (narrowed to {MISSED_HEARTBEATS} heartbeats once the controller reports its interval)"
+    );
     loop {
         tokio::select! {
             ws_msg = ws_rx.next() => {
+                if matches!(ws_msg, Some(Ok(_))) {
+                    live.heard(Instant::now());
+                }
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_event(&text, publisher, &mut registry).await;
+                        if let Some(every) = handle_ws_event(&text, publisher, &mut registry).await {
+                            let before = live.window();
+                            live.heartbeat_every(every);
+                            if live.window() != before {
+                                info!(
+                                    heartbeat_secs = every.as_secs(),
+                                    silence_secs = live.window().as_secs(),
+                                    "ISY heartbeat interval known; silence window set"
+                                );
+                            }
+                        }
                     }
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) => {
@@ -421,6 +504,18 @@ async fn run_once(
                     None => {
                         return Ok(SessionEnd::Dropped("the WebSocket stream ended".into()));
                     }
+                }
+            }
+            _ = tokio::time::sleep_until(live.deadline().into()) => {
+                if live.is_silent(Instant::now()) {
+                    let secs = live.window().as_secs();
+                    warn!(
+                        silence_secs = secs,
+                        "Nothing from the ISY WebSocket, not even a heartbeat; treating it as dropped"
+                    );
+                    return Ok(SessionEnd::Dropped(format!(
+                        "nothing arrived on the WebSocket for {secs} s, not even a heartbeat"
+                    )));
                 }
             }
             cmd = cmd_rx.recv() => match cmd {
@@ -468,7 +563,14 @@ async fn handle_command(device_id: &str, payload: &Value, isy: &IsyClient, regis
 // WebSocket event handler
 // ---------------------------------------------------------------------------
 
-async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &mut Registry) {
+/// Apply a frame's events. Returns the heartbeat interval if the frame
+/// carried a heartbeat that reported one.
+async fn handle_ws_event(
+    text: &str,
+    publisher: &DevicePublisher,
+    reg: &mut Registry,
+) -> Option<Duration> {
+    let mut heartbeat = None;
     // The ISY may batch multiple XML events in one frame; split on </Event>
     for part in text.split("</Event>") {
         if part.trim().is_empty() {
@@ -480,6 +582,9 @@ async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &mut Regi
             continue;
         };
 
+        if let Some(every) = event.heartbeat_interval() {
+            heartbeat = Some(every);
+        }
         if event.is_system() {
             debug!(control = %event.control, "ISY system/heartbeat event");
             continue;
@@ -502,6 +607,7 @@ async fn handle_ws_event(text: &str, publisher: &DevicePublisher, reg: &mut Regi
             }
         }
     }
+    heartbeat
 }
 
 #[cfg(test)]
@@ -540,6 +646,40 @@ mod tests {
         assert_eq!(b.after_session(Some(STABLE_AFTER)), BASE_BACKOFF);
         assert_eq!(b.after_session(None), secs(4));
         assert_eq!(b.after_session(Some(secs(3600))), BASE_BACKOFF);
+    }
+
+    #[test]
+    fn silence_without_a_known_heartbeat_uses_the_default_window() {
+        let t0 = Instant::now();
+        let live = Liveness::new(t0);
+        assert_eq!(live.window(), DEFAULT_SILENCE);
+        assert!(!live.is_silent(t0 + DEFAULT_SILENCE - secs(1)));
+        assert!(live.is_silent(t0 + DEFAULT_SILENCE));
+    }
+
+    #[test]
+    fn anything_heard_pushes_the_deadline_out() {
+        let t0 = Instant::now();
+        let mut live = Liveness::new(t0);
+        live.heard(t0 + secs(200));
+        assert!(!live.is_silent(t0 + secs(400)));
+        assert!(live.is_silent(t0 + secs(200) + DEFAULT_SILENCE));
+    }
+
+    #[test]
+    fn a_known_heartbeat_allows_three_missed_within_bounds() {
+        let t0 = Instant::now();
+        let mut live = Liveness::new(t0);
+        live.heartbeat_every(secs(120));
+        assert_eq!(live.window(), secs(360));
+        assert!(!live.is_silent(t0 + secs(359)));
+        assert!(live.is_silent(t0 + secs(360)));
+
+        // A very short or very long interval is held to the bounds.
+        live.heartbeat_every(secs(5));
+        assert_eq!(live.window(), MIN_SILENCE);
+        live.heartbeat_every(secs(3600));
+        assert_eq!(live.window(), MAX_SILENCE);
     }
 
     #[test]

@@ -108,6 +108,14 @@ impl IsyEvent {
         self.control.starts_with('_') || self.node_addr.is_empty()
     }
 
+    /// For a heartbeat (`_0`), how long until the next one: the ISY puts
+    /// that many seconds in the event's action. `None` for any other event,
+    /// or a heartbeat without a usable interval.
+    pub fn heartbeat_interval(&self) -> Option<std::time::Duration> {
+        (self.control == "_0" && self.value > 0)
+            .then(|| std::time::Duration::from_secs(self.value as u64))
+    }
+
     /// Return the real numeric value with precision applied.
     pub fn real_value(&self) -> f64 {
         let divisor = 10_i64.pow(self.prec as u32) as f64;
@@ -602,6 +610,28 @@ fn read_property_elem(e: &quick_xml::events::BytesStart<'_>) -> Option<(String, 
 #[cfg(test)]
 mod xml_tests {
     use super::*;
+
+    #[test]
+    fn a_heartbeat_carries_the_seconds_until_the_next() {
+        let hb = parse_event_xml(
+            "<?xml version=\"1.0\"?><Event seqnum=\"5\" sid=\"uuid:1\">\
+             <control>_0</control><action>120</action><node></node>\
+             <eventInfo></eventInfo></Event>",
+        )
+        .expect("a heartbeat parses");
+        assert!(hb.is_system());
+        assert_eq!(
+            hb.heartbeat_interval(),
+            Some(std::time::Duration::from_secs(120))
+        );
+
+        let st = parse_event_xml(
+            "<Event><control>ST</control><action>255</action>\
+             <node>13 A6 99 1</node></Event>",
+        )
+        .unwrap();
+        assert_eq!(st.heartbeat_interval(), None);
+    }
 
     #[test]
     fn refused_credentials_are_recognized_through_context() {
