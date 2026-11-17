@@ -4931,6 +4931,7 @@ pub async fn deregister_plugin(
             Ok(gone) => {
                 if gone {
                     tracing::info!(plugin_id = %id, runtime_id = %p.runtime_id, "withdrew a placement");
+                    crate::plugin_runtime_handlers::nudge_runtime(&s, &p.runtime_id);
                 }
                 gone
             }

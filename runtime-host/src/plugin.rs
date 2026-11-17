@@ -14,6 +14,8 @@ use hc_api_types::plugin_runtimes::{ConnectionKey, RuntimeCapabilities};
 use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, PluginNotice, RequiresRole};
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Heartbeat cadence. Core marks a plugin offline after 90s without one, so 30
 /// leaves room for two to be lost before anyone is told a lie.
@@ -29,6 +31,7 @@ pub async fn connect_and_register(
     broker_host: &str,
     caps: &RuntimeCapabilities,
     host_version: &str,
+    check_in: Arc<Notify>,
 ) -> Result<plugin_sdk_rs::PluginNotices> {
     let client = PluginClient::connect(PluginConfig {
         broker_host: broker_host.to_string(),
@@ -59,7 +62,16 @@ pub async fn connect_and_register(
         )
         .await
         .context("enabling the management protocol")?
-        .with_capabilities(capabilities(caps));
+        .with_capabilities(capabilities(caps))
+        // homeCore asks for this right after it places, updates or withdraws a
+        // plugin here, so the change lands now instead of on the next poll.
+        .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
+            "check_in" => {
+                check_in.notify_one();
+                Some(json!({ "status": "ok" }))
+            }
+            _ => None,
+        });
 
     // Start the loop, then publish. Reversing these is the bug that looks like a
     // hang: publishes queue, the queue holds 64, and nothing drains it until the
@@ -100,6 +112,25 @@ fn capabilities(caps: &RuntimeCapabilities) -> Capabilities {
         // Filled in by the SDK from the id we connected with.
         plugin_id: String::new(),
         actions: vec![
+            Action {
+                id: "check_in".into(),
+                label: "Check in now".into(),
+                description: Some(
+                    "Ask homeCore now which plugins this runtime should run, and install, \
+                     update or remove what changed."
+                        .into(),
+                ),
+                params: None,
+                result: None,
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::User,
+                timeout_ms: None,
+                danger: false,
+            },
             Action {
                 id: "list_plugins".into(),
                 label: "List hosted plugins".into(),

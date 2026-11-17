@@ -269,11 +269,13 @@ async fn run(
         wait = (wait * 2).min(std::time::Duration::from_secs(60));
     };
 
+    let check_in = Arc::new(tokio::sync::Notify::new());
     let notices = plugin::connect_and_register(
         &key,
         &broker_host,
         &shared.hello.capabilities,
         env!("CARGO_PKG_VERSION"),
+        check_in.clone(),
     )
     .await?;
     tracing::info!(plugin_id = %key.username, %name, "connected to homeCore");
@@ -396,6 +398,8 @@ async fn run(
 
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
+            // homeCore changed what this runtime should run and said so.
+            _ = check_in.notified() => tracing::info!("homeCore asked for a check-in"),
             _ = new_key.changed() => {
                 tracing::info!("a new key was saved; stopping hosted plugins to reconnect with it");
                 reconciler.stop_all().await;

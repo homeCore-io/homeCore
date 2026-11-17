@@ -531,7 +531,35 @@ pub fn place_on_runtime(
         config: config_store.read(plugin_id)?,
         placed_at: Utc::now(),
     })?;
+    nudge_runtime(state, runtime_id);
     Ok(())
+}
+
+/// Ask a runtime to check in now, so a placement it has just been given (or
+/// lost) is installed, updated or removed in seconds instead of on its next
+/// poll.
+///
+/// Best effort, and nothing waits on it. A runtime older than host 0.2.2
+/// answers "unknown action" and picks the change up on its next poll as
+/// before; one that is offline picks it up when it is back.
+pub fn nudge_runtime(state: &AppState, runtime_id: &str) {
+    let Some(rpc) = state.management_rpc.clone() else {
+        return;
+    };
+    let Ok(Some(runtime)) = store(state).get(runtime_id) else {
+        return;
+    };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        if let Err(e) = rpc.request(&runtime.plugin_id, "check_in", None).await {
+            tracing::debug!(
+                runtime = %runtime.runtime_id, error = %e,
+                "the runtime did not take check_in; it will see the change on its next poll"
+            );
+        }
+    });
 }
 
 // ── GET /plugin-runtimes/placements (admin) ──────────────────────────────────
