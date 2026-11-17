@@ -13,6 +13,37 @@ use std::collections::HashMap;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// The controller answered but refused the username and password (HTTP 401
+/// or 403). Retrying with the same credentials cannot help, so the bridge
+/// treats this as the end rather than as a dropped connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthRefused {
+    /// The HTTP status the controller answered with, e.g. `401 Unauthorized`.
+    pub status: String,
+}
+
+impl std::fmt::Display for AuthRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the controller refused the username and password ({})",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for AuthRefused {}
+
+/// True for the statuses that mean the credentials were refused.
+pub fn is_auth_status(code: u16) -> bool {
+    matches!(code, 401 | 403)
+}
+
+/// True when `e`, or anything it wraps, is an [`AuthRefused`].
+pub fn is_auth_refused(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<AuthRefused>().is_some())
+}
+
 /// A node (physical device) or group (scene) registered on the ISY.
 #[derive(Debug, Clone, Default)]
 pub struct IsyNode {
@@ -148,6 +179,12 @@ impl IsyClient {
             .with_context(|| format!("GET {url}"))?;
 
         let status = resp.status();
+        if is_auth_status(status.as_u16()) {
+            return Err(AuthRefused {
+                status: status.to_string(),
+            }
+            .into());
+        }
         if !status.is_success() {
             bail!("ISY returned {status} for {path}");
         }
@@ -565,6 +602,18 @@ fn read_property_elem(e: &quick_xml::events::BytesStart<'_>) -> Option<(String, 
 #[cfg(test)]
 mod xml_tests {
     use super::*;
+
+    #[test]
+    fn refused_credentials_are_recognized_through_context() {
+        let e = anyhow::Error::new(AuthRefused {
+            status: "401 Unauthorized".into(),
+        })
+        .context("GET /rest/nodes");
+        assert!(is_auth_refused(&e));
+        assert!(!is_auth_refused(&anyhow::anyhow!("connection refused")));
+        assert!(is_auth_status(401) && is_auth_status(403));
+        assert!(!is_auth_status(404) && !is_auth_status(503));
+    }
 
     /// Device names come from whatever the operator typed into the ISY Admin
     /// Console, so ampersands and angle brackets arrive XML-escaped. quick-xml
